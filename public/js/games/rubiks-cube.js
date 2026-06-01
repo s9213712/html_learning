@@ -675,6 +675,8 @@
         solverSeq: 0,
         solverHintsUsed: 0,
         solverHintLimit: MAX_SOLVER_HINTS_PER_SCRAMBLE,
+        autoSolving: false,
+        autoSolveSeq: 0,
         viewX: -27,
         viewY: -34,
         viewScale: 1,
@@ -916,6 +918,10 @@
       };
       const scramble = () => {
         const moves = ["U", "D", "F", "B", "R", "L"];
+        state.autoSolving = false;
+        state.autoSolveSeq += 1;
+        window.clearTimeout(state.turnTimer);
+        state.turnAnimation = null;
         state.cube = createSolvedCube();
         state.solutionStack = [];
         state.moves = 0;
@@ -944,6 +950,10 @@
         void refreshSolver();
       };
       const resetSolved = () => {
+        state.autoSolving = false;
+        state.autoSolveSeq += 1;
+        window.clearTimeout(state.turnTimer);
+        state.turnAnimation = null;
         state.cube = createSolvedCube();
         state.solutionStack = [];
         state.moves = 0;
@@ -960,25 +970,73 @@
         hintEl.textContent = "已重置為完成狀態。";
         render();
       };
+      const wait = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
+      const animationForAutoMove = (move) => {
+        const spec = moveSpec(move);
+        return hintAnimationForMove(move) || layerCubeAnimation({
+          face: spec?.face || "",
+          angle: spec?.sign > 0 ? "90deg" : "-90deg",
+          orientation: "layer",
+          row: 1,
+          col: 1,
+        }, move);
+      };
       const autoSolve = async () => {
+        if (state.turnAnimation || state.autoSolving) return;
         let stack = Array.isArray(state.solverSolution) ? state.solverSolution.slice() : null;
         if (!stack?.length) stack = await refreshSolver();
         if (!stack?.length) {
           hintEl.textContent = state.solverError || "沒有可用 solver 解題步驟。";
           return;
         }
-        stack.forEach((move) => moveCube(state.cube, move));
-        state.moves += stack.length;
-        state.active = false;
-        state.solved = true;
-        state.score = Math.max(50, scoreFor(state) - 500);
-        state.solverSolution = [];
-        state.solverRawSolution = [];
-        state.solverHalfTurnLength = 0;
-        state.solverQuarterTurnLength = 0;
-        hintEl.textContent = `Solver 自動還原完成，實際轉動 ${stack.length} 次。`;
+        const seq = state.autoSolveSeq + 1;
+        state.autoSolveSeq = seq;
+        state.autoSolving = true;
+        state.active = true;
+        state.solved = false;
+        state.solverSolution = stack.slice();
+        hintEl.textContent = `Solver 開始自動還原，共 ${stack.length} 次轉動。`;
         render();
-        void refreshSolver();
+        try {
+          for (let i = 0; i < stack.length; i += 1) {
+            if (!state.autoSolving || state.autoSolveSeq !== seq) return;
+            const move = stack[i];
+            if (Array.isArray(state.solverSolution) && state.solverSolution[0] === move) {
+              state.solverSolution = state.solverSolution.slice(1);
+              if (Number.isFinite(state.solverQuarterTurnLength)) {
+                state.solverQuarterTurnLength = Math.max(0, state.solverQuarterTurnLength - 1);
+              }
+            }
+            window.clearTimeout(state.turnTimer);
+            state.turnAnimation = animationForAutoMove(move);
+            hintEl.textContent = `Solver 自動還原 ${i + 1}/${stack.length}：${moveLabel(move)}。`;
+            render();
+            await wait(TURN_ANIMATION_MS);
+            if (!state.autoSolving || state.autoSolveSeq !== seq) return;
+            moveCube(state.cube, move);
+            state.turnAnimation = null;
+            state.moves += 1;
+            render();
+            await wait(90);
+          }
+          state.autoSolving = false;
+          state.solverSolution = [];
+          state.solverRawSolution = [];
+          state.solverHalfTurnLength = 0;
+          state.solverQuarterTurnLength = 0;
+          if (isSolved(state.cube)) {
+            state.active = false;
+            state.solved = true;
+            state.score = Math.max(50, scoreFor(state) - 500);
+            hintEl.textContent = `Solver 自動還原完成，實際轉動 ${stack.length} 次。`;
+          } else {
+            hintEl.textContent = "Solver 自動還原停止，但方塊尚未完成。請重新計算或再按一次自動還原。";
+          }
+          render();
+          void refreshSolver();
+        } finally {
+          if (state.autoSolveSeq === seq) state.autoSolving = false;
+        }
       };
       const showHint = async () => {
         if (state.turnAnimation) return;
