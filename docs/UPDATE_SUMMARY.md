@@ -1,6 +1,18 @@
 # Update Summary
 
-Release ID: `2026.06.01-002`
+Release ID: `2026.06.01-003`
+
+## 2026.06.01-003
+
+- Hardened the 3D Rubik's Cube mobile layout: the cube, solver notes, hints, and
+  compact controls now stack cleanly on phone-width screens without horizontal
+  overflow or text overlap.
+- Added touch-specific Rubik interaction CSS so finger drags on stickers stay
+  inside the cube gesture handler instead of fighting page scroll, while empty
+  stage drags continue to rotate the view.
+- Limited solver hints to three assisted moves per scramble. The hint button
+  still performs the move for the user, but it can no longer be repeated to
+  solve the whole cube without choosing the explicit auto-solve action.
 
 ## 2026.06.01-002
 

@@ -358,12 +358,72 @@
       .rubiks-stage {
         touch-action: none;
         user-select: none;
+        -webkit-user-select: none;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-height: clamp(20rem, 54vh, 34rem);
+        overflow: hidden;
       }
       .rubiks-cube-3d {
         --rubiks-cubie-size: 3.42rem;
         --rubiks-cubie-half: calc(var(--rubiks-cubie-size) / 2);
         --rubiks-cubie-step: 3.86rem;
         transform-style: preserve-3d;
+        flex: 0 0 auto;
+      }
+      .rubiks-game-shell {
+        display: grid;
+        grid-template-columns: minmax(18rem, 1fr) minmax(14rem, .82fr);
+        gap: .95rem;
+        align-items: stretch;
+        min-width: 0;
+      }
+      .rubiks-side-panel {
+        display: grid;
+        gap: .55rem;
+        align-content: start;
+        min-width: 0;
+      }
+      .rubiks-chip,
+      .rubiks-next-hint {
+        min-width: 0;
+        max-width: 100%;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+        line-height: 1.35;
+      }
+      .rubiks-chip {
+        display: flex;
+        flex-direction: column;
+        gap: .18rem;
+      }
+      .rubiks-chip strong,
+      .rubiks-chip span,
+      #rubiks-min-moves {
+        display: block;
+        min-width: 0;
+        max-width: 100%;
+        white-space: normal;
+      }
+      .rubiks-control-grid,
+      .rubiks-view-controls {
+        display: grid;
+        gap: .4rem;
+        min-width: 0;
+      }
+      .rubiks-control-grid {
+        grid-template-columns: repeat(6, minmax(2.15rem, 1fr));
+      }
+      .rubiks-view-controls {
+        grid-template-columns: repeat(4, minmax(3.1rem, 1fr));
+        margin-top: .45rem;
+      }
+      .rubiks-control-grid .game-mini-btn,
+      .rubiks-view-controls .game-mini-btn {
+        min-width: 0;
+        touch-action: manipulation;
+        white-space: nowrap;
       }
       .rubiks-stage.is-face-drag {
         cursor: grab;
@@ -408,6 +468,9 @@
         cursor: grab;
         transform: var(--rubiks-sticker-transform);
         backface-visibility: hidden;
+        touch-action: none;
+        user-select: none;
+        -webkit-user-select: none;
       }
       .rubiks-cubie-sticker:active {
         cursor: grabbing;
@@ -418,9 +481,81 @@
         top: 50%;
         transform: translate(-50%, -50%);
         color: rgba(15,23,42,.28);
-        font-size: 1.45rem;
+        font-size: clamp(.5rem, 1.8vw, 1.15rem);
         font-weight: 900;
+        line-height: 1;
+        white-space: nowrap;
         pointer-events: none;
+      }
+      @media (max-width: 760px) {
+        .rubiks-game-shell {
+          display: flex;
+          flex-direction: column;
+          gap: .65rem;
+        }
+        .rubiks-stage {
+          min-height: clamp(17.5rem, 72vw, 24rem);
+          padding: .35rem;
+          border-radius: 1rem;
+        }
+        .rubiks-cube-3d {
+          --rubiks-cubie-size: clamp(1.92rem, 7.8vw, 2.72rem);
+          --rubiks-cubie-half: calc(var(--rubiks-cubie-size) / 2);
+          --rubiks-cubie-step: calc(var(--rubiks-cubie-size) * 1.13);
+        }
+        .rubiks-side-panel {
+          gap: .45rem;
+        }
+        .rubiks-chip {
+          gap: .1rem;
+        }
+        .rubiks-chip strong {
+          font-size: .76rem;
+          letter-spacing: .02em;
+        }
+        .rubiks-chip span,
+        #rubiks-min-moves,
+        .rubiks-next-hint {
+          font-size: .82rem;
+        }
+        .rubiks-control-grid {
+          grid-template-columns: repeat(6, minmax(0, 1fr));
+          gap: .32rem;
+        }
+        .rubiks-view-controls {
+          grid-template-columns: repeat(4, minmax(0, 1fr));
+          gap: .32rem;
+          margin-top: .35rem;
+        }
+        .rubiks-control-grid .game-mini-btn,
+        .rubiks-view-controls .game-mini-btn {
+          min-height: 2.1rem;
+          padding: .38rem .18rem;
+          font-size: .76rem;
+          border-radius: .65rem;
+        }
+      }
+      @media (max-width: 420px) {
+        .rubiks-stage {
+          min-height: clamp(16rem, 76vw, 20rem);
+        }
+        .rubiks-cube-3d {
+          --rubiks-cubie-size: clamp(1.64rem, 7.35vw, 2.18rem);
+          --rubiks-cubie-half: calc(var(--rubiks-cubie-size) / 2);
+          --rubiks-cubie-step: calc(var(--rubiks-cubie-size) * 1.13);
+        }
+        .rubiks-cubie-sticker {
+          border-width: .18rem;
+          border-radius: .48rem;
+        }
+        .rubiks-center-label {
+          font-size: .52rem;
+        }
+        .rubiks-chip span,
+        #rubiks-min-moves,
+        .rubiks-next-hint {
+          font-size: .78rem;
+        }
       }
       .rubiks-face-inner {
         grid-column: 1 / -1;
@@ -551,7 +686,7 @@
           </div>
           <div class="rubiks-side-panel">
             <div class="rubiks-chip"><strong>目標</strong><span>用六面轉動把每面恢復同色。</span></div>
-            <div class="rubiks-chip"><strong>操作</strong><span>按住某一排向左/右拖曳，或按住某一欄向上/下拖曳；空白處拖曳旋轉視角。</span></div>
+            <div class="rubiks-chip"><strong>操作</strong><span>手機用手指按住色塊往想轉的方向滑；空白處滑動可轉視角。</span></div>
             <div class="rubiks-chip"><strong>Solver</strong><span id="rubiks-min-moves">Solver：尚未計算。</span></div>
             <div class="rubiks-next-hint" id="rubiks-next-hint">按「打亂」開始。</div>
           </div>

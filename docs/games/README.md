@@ -40,8 +40,22 @@
 - `reversi`
 - `go`
 - `gomoku`
+- `rubiks_cube`
 
 若本機遊戲模組 JS 沒有載入或沒有註冊成功，前端 catalog 會把該遊戲過濾掉，不會影響其他已載入遊戲。
+
+#### 3D 魔術方塊
+
+`rubiks_cube` 是同頁本機 3D cubie renderer，前端檔案是
+`public/js/games/rubiks-cube.js`。手機版必須維持單欄 layout：方塊舞台、
+Solver 狀態、提示文案與控制按鈕不可水平溢出或互相覆蓋。色塊與舞台使用
+`touch-action: none`，讓手指拖曳色塊時由 Rubik gesture handler 接管；空白
+舞台拖曳則旋轉視角。
+
+Solver 由 `POST /api/games/rubiks_cube/solve` 呼叫後端 Kociemba wrapper。
+「提示」每局最多輔助三步，且會直接替使用者轉動下一步；若使用者要放棄手解，
+必須明確按「自動還原」。不要把下一步解法長期顯示在 UI 上，避免提示一路按到
+解完整顆方塊。
 
 ### 非西洋棋 AI 遊戲
 
