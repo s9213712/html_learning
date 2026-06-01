@@ -182,7 +182,7 @@ function showSudokuCandidates(index) {
 function renderSudokuCandidatePanel(message = "") {
   const panel = $("sudoku-candidate-panel");
   if (!panel) return;
-  if (!sudokuState || sudokuState.assistMode === false || sudokuState.selectedIndex === null || sudokuState.completedAt || sudokuState.failed) {
+  if (!sudokuState || sudokuState.selectedIndex === null || sudokuState.completedAt || sudokuState.failed) {
     panel.hidden = true;
     panel.innerHTML = "";
     return;
@@ -195,10 +195,11 @@ function renderSudokuCandidatePanel(message = "") {
   }
   const row = Math.floor(index / 9) + 1;
   const col = (index % 9) + 1;
-  const candidates = sudokuCandidateNumbers(index);
+  const assistEnabled = sudokuState.assistMode !== false;
+  const candidates = assistEnabled ? sudokuCandidateNumbers(index) : "123456789".split("");
   panel.hidden = false;
   panel.innerHTML = `
-    <div class="sudoku-candidate-title">第 ${row} 列第 ${col} 欄可填數字</div>
+    <div class="sudoku-candidate-title">${assistEnabled ? `第 ${row} 列第 ${col} 欄可填數字` : `第 ${row} 列第 ${col} 欄數字鍵盤`}</div>
     <div class="sudoku-candidate-list">
       ${candidates.length
         ? candidates.map((digit) => `<button class="btn game-mini-btn" type="button" data-sudoku-candidate="${digit}">${digit}</button>`).join("")
@@ -279,7 +280,7 @@ function toggleSudokuAssist() {
 function chooseSudokuCandidate(value) {
   if (!sudokuState || sudokuState.selectedIndex === null) return;
   const index = Number(sudokuState.selectedIndex);
-  if (!sudokuCandidateNumbers(index).includes(String(value || ""))) {
+  if (sudokuState.assistMode !== false && !sudokuCandidateNumbers(index).includes(String(value || ""))) {
     renderSudokuCandidatePanel("這個數字目前不符合列、欄、宮格限制。");
     return;
   }

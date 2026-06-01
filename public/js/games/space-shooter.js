@@ -260,6 +260,7 @@ function startSpaceShooterGame() {
     nextBossScore: 450,
     keys: {},
     lastShotTick: -20,
+    autoFire: true,
     enemyDodgeEnabled: spaceShooterEnemyDodgeEnabled(),
   };
   renderSpaceShooterBoard();
@@ -301,7 +302,7 @@ function tickSpaceShooterGame() {
   const movingRight = state.keys.ArrowRight || state.keys.d || state.keys.D;
   if (movingLeft) state.playerX = Math.max(18, state.playerX - 7);
   if (movingRight) state.playerX = Math.min(342, state.playerX + 7);
-  if ((state.keys[" "] || state.keys.Spacebar) && state.tick - state.lastShotTick >= 5) {
+  if ((state.autoFire !== false || state.keys[" "] || state.keys.Spacebar) && state.tick - state.lastShotTick >= 5) {
     fireSpaceShooterShots(state);
     playSpaceShooterSound("uiTick", { volume: 0.04, throttleMs: 120 });
     state.lastShotTick = state.tick;
@@ -434,6 +435,20 @@ function setSpaceShooterTouchAction(action, pressed) {
   if (action === "shooter-fire") state.keys[" "] = Boolean(pressed);
 }
 
+function spaceShooterCanvasX(event, canvas) {
+  const rect = canvas.getBoundingClientRect();
+  if (!rect.width) return 180;
+  return Math.max(18, Math.min(342, ((event.clientX - rect.left) / rect.width) * canvas.width));
+}
+
+function moveSpaceShooterToEvent(event) {
+  const state = spaceShooterState;
+  const canvas = $("space-shooter-board");
+  if (!state || state.status !== "active" || !canvas) return;
+  state.playerX = spaceShooterCanvasX(event, canvas);
+  renderSpaceShooterBoard();
+}
+
 function releaseSpaceShooterTouch(pointerId) {
   const action = spaceShooterTouchPointers.get(pointerId);
   if (!action) return;
@@ -441,7 +456,29 @@ function releaseSpaceShooterTouch(pointerId) {
   setSpaceShooterTouchAction(action, false);
 }
 
+function bindSpaceShooterCanvasTouch() {
+  const canvas = $("space-shooter-board");
+  if (!canvas || canvas.dataset.touchBound === "1") return;
+  canvas.dataset.touchBound = "1";
+  canvas.style.touchAction = "none";
+  canvas.addEventListener("pointerdown", (event) => {
+    if (!spaceShooterState || spaceShooterState.status !== "active") return;
+    event.preventDefault();
+    spaceShooterSuppressClickUntil = Date.now() + 260;
+    try {
+      canvas.setPointerCapture?.(event.pointerId);
+    } catch (_) {}
+    moveSpaceShooterToEvent(event);
+  }, { passive: false });
+  canvas.addEventListener("pointermove", (event) => {
+    if (!spaceShooterState || spaceShooterState.status !== "active") return;
+    event.preventDefault();
+    moveSpaceShooterToEvent(event);
+  }, { passive: false });
+}
+
 function bindSpaceShooterTouchHold() {
+  bindSpaceShooterCanvasTouch();
   if (bindSpaceShooterTouchHold.bound) return;
   bindSpaceShooterTouchHold.bound = true;
   document.addEventListener("pointerdown", (event) => {
@@ -770,6 +807,7 @@ function updateSpaceShooterStatus(prefix = "") {
       }
     },
     updateStatus() {
+      bindSpaceShooterTouchHold();
       updateSpaceShooterStatus();
     },
     isActive() {
@@ -784,6 +822,7 @@ function updateSpaceShooterStatus(prefix = "") {
     dispatch(type, event) {
       if (type === "click" && event.target?.closest?.("#space-shooter-new-btn")) {
         startSpaceShooterGame();
+        bindSpaceShooterTouchHold();
         return true;
       }
       if (type === "change" && event.target?.closest?.("#space-shooter-enemy-dodge")) {

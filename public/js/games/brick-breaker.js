@@ -191,6 +191,18 @@
       api.root.innerHTML = `<canvas class="arcade-canvas tall" width="360" height="480" aria-label="打磚塊"></canvas>`;
       api.setControls(`<button class="btn game-mini-btn" data-hold="left">左</button><button class="btn game-mini-btn btn-primary" data-action="new">重開</button><button class="btn game-mini-btn" data-hold="right">右</button>`);
       const canvas = api.root.querySelector("canvas"), ctx = canvas.getContext("2d");
+      canvas.style.touchAction = "none";
+      const paddleXFromEvent = (event) => {
+        const rect = canvas.getBoundingClientRect();
+        if (!rect.width) return state.x;
+        return clamp(((event.clientX - rect.left) / rect.width) * canvas.width, 44, 316);
+      };
+      const movePaddleToEvent = (event) => {
+        state.x = paddleXFromEvent(event);
+        state.left = false;
+        state.right = false;
+        draw();
+      };
       const resetBricks = () => {
         state.bricks = [];
         for (let y = 0; y < 5; y += 1) for (let x = 0; x < 8; x += 1) {
@@ -273,6 +285,20 @@
         draw();
       };
       const start = () => { clearInterval(state.timer); Object.assign(state, { startedAt: Date.now(), score: 0, lives: 3, x: 180, balls: [[180, 280, 3, -4]], particles: [], left: false, right: false, over: false, multiball: 0, boss: 0, tick: 0, dailyChallenge: api.dailyChallenge?.() || null }); resetBricks(); state.timer = setInterval(tick, 16); };
+      canvas.addEventListener("pointerdown", (event) => {
+        event.preventDefault();
+        try {
+          canvas.setPointerCapture?.(event.pointerId);
+        } catch (_) {
+          /* ignore unsupported capture */
+        }
+        movePaddleToEvent(event);
+      }, { passive: false });
+      canvas.addEventListener("pointermove", (event) => {
+        if (state.over) return;
+        event.preventDefault();
+        movePaddleToEvent(event);
+      }, { passive: false });
       api.onAction = (action) => { if (action === "new") start(); };
       api.onControl = (target, pressed) => { if (target.dataset.hold === "left") state.left = pressed; if (target.dataset.hold === "right") state.right = pressed; };
       api.onKey = (event, pressed) => { if (event.key === "ArrowLeft") state.left = pressed; if (event.key === "ArrowRight") state.right = pressed; };

@@ -357,8 +357,10 @@
     style.textContent = `
       .rubiks-stage {
         touch-action: none;
+        overscroll-behavior: contain;
         user-select: none;
         -webkit-user-select: none;
+        cursor: grab;
         display: flex;
         align-items: center;
         justify-content: center;
@@ -366,9 +368,11 @@
         overflow: hidden;
       }
       .rubiks-cube-3d {
-        --rubiks-cubie-size: 3.42rem;
+        --rubiks-user-scale: 1;
+        --rubiks-cubie-size-base: 3.42rem;
+        --rubiks-cubie-size: calc(var(--rubiks-cubie-size-base) * var(--rubiks-user-scale));
         --rubiks-cubie-half: calc(var(--rubiks-cubie-size) / 2);
-        --rubiks-cubie-step: 3.86rem;
+        --rubiks-cubie-step: calc(var(--rubiks-cubie-size) * 1.13);
         transform-style: preserve-3d;
         flex: 0 0 auto;
       }
@@ -499,7 +503,7 @@
           border-radius: 1rem;
         }
         .rubiks-cube-3d {
-          --rubiks-cubie-size: clamp(1.92rem, 7.8vw, 2.72rem);
+          --rubiks-cubie-size-base: clamp(1.92rem, 7.8vw, 2.72rem);
           --rubiks-cubie-half: calc(var(--rubiks-cubie-size) / 2);
           --rubiks-cubie-step: calc(var(--rubiks-cubie-size) * 1.13);
         }
@@ -540,7 +544,7 @@
           min-height: clamp(16rem, 76vw, 20rem);
         }
         .rubiks-cube-3d {
-          --rubiks-cubie-size: clamp(1.64rem, 7.35vw, 2.18rem);
+          --rubiks-cubie-size-base: clamp(1.64rem, 7.35vw, 2.18rem);
           --rubiks-cubie-half: calc(var(--rubiks-cubie-size) / 2);
           --rubiks-cubie-step: calc(var(--rubiks-cubie-size) * 1.13);
         }
@@ -673,7 +677,10 @@
         solverHintLimit: MAX_SOLVER_HINTS_PER_SCRAMBLE,
         viewX: -27,
         viewY: -34,
+        viewScale: 1,
         pointer: null,
+        activePointers: new Map(),
+        pinch: null,
         turnAnimation: null,
         turnTimer: null,
         dailyChallenge: null,
@@ -795,6 +802,7 @@
       const updateView = () => {
         const viewTransform = `rotateX(${state.viewX}deg) rotateY(${state.viewY}deg)`;
         const turn = state.turnAnimation;
+        cubeEl.style.setProperty("--rubiks-user-scale", String(state.viewScale || 1));
         cubeEl.style.setProperty("--rubiks-view-transform", viewTransform);
         cubeEl.style.setProperty("--rubiks-layer-axis-x", String(turn?.cubeAxisX ?? 0));
         cubeEl.style.setProperty("--rubiks-layer-axis-y", String(turn?.cubeAxisY ?? 1));
@@ -1008,8 +1016,47 @@
         state.viewX = Math.max(-75, Math.min(55, state.viewX));
         updateView();
       };
+      const rememberPointer = (event) => {
+        state.activePointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      };
+      const forgetPointer = (event) => {
+        state.activePointers.delete(event.pointerId);
+      };
+      const pointerPair = () => Array.from(state.activePointers.values()).slice(0, 2);
+      const pointerDistance = (points) => {
+        if (points.length < 2) return 0;
+        return Math.hypot(points[0].x - points[1].x, points[0].y - points[1].y);
+      };
+      const startPinchZoom = () => {
+        const distance = pointerDistance(pointerPair());
+        if (distance > 0) state.pinch = { distance, scale: state.viewScale || 1 };
+      };
+      const updatePinchZoom = (event) => {
+        rememberPointer(event);
+        if (!state.pinch || state.activePointers.size < 2) return false;
+        const distance = pointerDistance(pointerPair());
+        if (!distance) return false;
+        state.viewScale = Math.max(0.72, Math.min(1.55, state.pinch.scale * distance / state.pinch.distance));
+        updateView();
+        return true;
+      };
 
+      stage.addEventListener("wheel", (event) => {
+        event.preventDefault();
+        const direction = event.deltaY > 0 ? -1 : 1;
+        state.viewScale = Math.max(0.72, Math.min(1.55, (state.viewScale || 1) + direction * 0.08));
+        updateView();
+      }, { passive: false });
       stage.addEventListener("pointerdown", (event) => {
+        rememberPointer(event);
+        if (state.activePointers.size >= 2) {
+          state.pointer = null;
+          startPinchZoom();
+          stage.classList.remove("is-face-drag");
+          stage.setPointerCapture?.(event.pointerId);
+          event.preventDefault?.();
+          return;
+        }
         const hit = pointerHitFromEvent(event);
         state.pointer = {
           x: event.clientX,
@@ -1031,6 +1078,11 @@
         event.preventDefault?.();
       });
       stage.addEventListener("pointermove", (event) => {
+        if (state.activePointers.has(event.pointerId)) rememberPointer(event);
+        if (state.pinch && updatePinchZoom(event)) {
+          event.preventDefault?.();
+          return;
+        }
         if (!state.pointer) return;
         const dx = event.clientX - state.pointer.x;
         const dy = event.clientY - state.pointer.y;
@@ -1076,7 +1128,9 @@
         }
         event.preventDefault?.();
       });
-      stage.addEventListener("pointerup", () => {
+      stage.addEventListener("pointerup", (event) => {
+        forgetPointer(event);
+        if (state.activePointers.size < 2) state.pinch = null;
         if (state.pointer?.face && state.pointer.mode === "pending") {
           hintEl.textContent = "請按住某一排或某一欄並拖曳，才會轉動對應 layer。";
         }
@@ -1084,6 +1138,8 @@
         stage.classList.remove("is-face-drag");
       });
       stage.addEventListener("pointercancel", () => {
+        state.activePointers.clear();
+        state.pinch = null;
         state.pointer = null;
         stage.classList.remove("is-face-drag");
       });

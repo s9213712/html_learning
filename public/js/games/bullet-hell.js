@@ -715,9 +715,11 @@
     });
 
     const flicker = state.tick < state.invulnerableUntil && state.tick % 10 < 5;
+    const playerOpacity = Math.max(0.18, Math.min(1, Number(state.playerOpacity ?? 0.55)));
     if (!flicker) {
-      if (!drawBulletHellImage(ctx, "player", state.player.x, state.player.y, 42, 52)) {
+      if (!drawBulletHellImage(ctx, "player", state.player.x, state.player.y, 42, 52, { alpha: playerOpacity })) {
         ctx.save();
+        ctx.globalAlpha = playerOpacity;
         ctx.translate(state.player.x, state.player.y);
         ctx.fillStyle = "#38bdf8";
         ctx.beginPath();
@@ -780,6 +782,7 @@
       shotLevel: 1,
       homingLevel: 0,
       optionLevel: 0,
+      playerOpacity: 0.55,
       tick: 0,
       invulnerableUntil: 120,
       player: { x: WIDTH / 2, y: PLAYER_Y },
@@ -860,6 +863,7 @@
       api.setActions(`
         <button class="btn game-mini-btn btn-primary" type="button" data-action="new">開始</button>
         <button class="btn game-mini-btn" type="button" data-action="pause">暫停</button>
+        <button class="btn game-mini-btn" type="button" data-action="opacity">戰機透明</button>
         <button class="btn game-mini-btn" type="button" data-action="finish">結算</button>
       `);
       api.setControls(`
@@ -876,6 +880,14 @@
         if (action === "pause" && api._bulletHellState?.status === "active") {
           api._bulletHellState.paused = !api._bulletHellState.paused;
           api.status(api._bulletHellState.paused ? "暫停中。" : "繼續。");
+        }
+        if (action === "opacity" && api._bulletHellState) {
+          const levels = [1, 0.65, 0.4, 0.22];
+          const current = Number(api._bulletHellState.playerOpacity ?? 0.55);
+          const index = levels.findIndex((value) => Math.abs(value - current) < 0.03);
+          api._bulletHellState.playerOpacity = levels[(index + 1 + levels.length) % levels.length];
+          drawBulletHell(api._bulletHellState);
+          api.status(`戰機透明度 ${Math.round(api._bulletHellState.playerOpacity * 100)}%。黃點判定核心保持清楚顯示。`);
         }
         if (action === "finish") finishBulletHell(api);
       };
