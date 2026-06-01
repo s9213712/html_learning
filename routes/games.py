@@ -69,6 +69,10 @@ from services.games.chess_promotion import (
     stage_candidate_model,
 )
 from services.games.chess_replay_buffer import collect_match_replay
+from services.games.rubiks_solver import (
+    RubiksSolverUnavailable,
+    solve_facelets as solve_rubiks_facelets,
+)
 from services.points_chain import DISPLAY_CURRENCY
 
 GAME_KEY = "chess"
@@ -1501,6 +1505,27 @@ def register_games_routes(app, deps):
                 ],
             }],
         })
+
+    @app.route("/api/games/rubiks_cube/solve", methods=["POST"])
+    @require_csrf
+    def rubiks_cube_solve():
+        actor, err, status = actor_or_401()
+        if err:
+            return err, status
+        data, err, status = parse_json_body()
+        if err:
+            return err, status
+        try:
+            max_depth = int(data.get("max_depth") or 24)
+        except (TypeError, ValueError):
+            max_depth = 24
+        try:
+            result = solve_rubiks_facelets(str(data.get("facelets") or ""), max_depth=max_depth)
+        except RubiksSolverUnavailable as exc:
+            return json_resp({"ok": False, "msg": str(exc)}), 503
+        except ValueError as exc:
+            return json_resp({"ok": False, "msg": str(exc)}), 400
+        return json_resp({"ok": True, **result})
 
     @app.route("/api/games/users", methods=["GET"])
     @require_csrf_safe

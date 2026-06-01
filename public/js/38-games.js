@@ -67,7 +67,7 @@ const GAME_RUNTIME_SCRIPT_SRCS = Object.freeze([
   "/js/games/snake.js?v=20260513-game-modules",
   "/js/games/game-2048.js?v=20260513-game-modules",
   "/js/games/brick-breaker.js?v=20260513-game-modules",
-  "/js/games/rubiks-cube.js?v=20260601-rubiks-cube",
+  "/js/games/rubiks-cube.js?v=20260601-rubiks-kociemba-solver",
   "/js/games/bullet-hell.js?v=20260518-game-ux",
   "/js/games/stickman-shooter.js?v=20260517-level-layouts",
   "/js/games/open-world.js?v=20260518-game-ux",
@@ -487,6 +487,7 @@ async function gameRequest(path, { method = "GET", body = null } = {}) {
   }
   return json;
 }
+window.hackmeGameRequest = gameRequest;
 
 function cleanupLocalGameModule() {
   if (localGameModuleCleanup) localGameModuleCleanup();

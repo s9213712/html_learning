@@ -1,6 +1,15 @@
 # Update Summary
 
-Release ID: `2026.06.01-001`
+Release ID: `2026.06.01-002`
+
+## 2026.06.01-002
+
+- Exposed the 3D Rubik's Cube game through the backend game catalog, solo-score
+  allowlists, and frontend cache keys so it appears in the game selector.
+- Reworked the Rubik's Cube renderer from six flat face panels into 26 visible
+  3D cubies with 54 stickers. Dragging a row or column now rotates the affected
+  visible cubies around the correct axis before committing the cube state,
+  while the hint button directly performs the next move with the same motion.
 
 ## 2026.06.01-001
 

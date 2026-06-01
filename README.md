@@ -7,7 +7,7 @@
 ![database](https://img.shields.io/badge/database-SQLite-0f6ab4)
 ![security](https://img.shields.io/badge/focus-auth%20%2B%20RBAC%20%2B%20audit-b31d28)
 
-**Current Release ID: `2026.06.01-001`**
+**Current Release ID: `2026.06.01-002`**
 
 `hackme_web` 是一個部署者優先的 Flask 單機站點，整合了帳號與權限、
 Cloud Drive、ComfyUI、PointsChain、交易實驗、Snapshot/Restore 與
@@ -31,7 +31,7 @@ QoS 分類、app-level edge burst guard、抗 DoS 最後防線與 reverse-proxy 
 [docs/For_developer.md](docs/For_developer.md#server-qos-and-edge-guard)。
 任務中心 list API 的 maintenance sweep 已節流並可觀測；帳號、會員治理、
 註冊禮補發與 auth hot-state 索引的近期調整見
-[docs/UPDATE_SUMMARY.md](docs/UPDATE_SUMMARY.md) 的 `2026.06.01-001`。
+[docs/UPDATE_SUMMARY.md](docs/UPDATE_SUMMARY.md) 的 `2026.06.01-002`。
 影音直接串流、即時轉封裝、預處理 HLS 三種客戶服務層與費率差異、X-Accel
 送檔 offload、Standard 即時轉封裝的同機併發控制，以及 Premium HLS worker sizing / profile matrix 見
 [docs/video/VIDEO_STREAMING_SERVICE_TIERS.md](docs/video/VIDEO_STREAMING_SERVICE_TIERS.md)。
@@ -52,7 +52,9 @@ ComfyUI GGUF 只能走官方建檔 profile；新增 profile、遠端實測、已
 
 - `python3 -m pip install -r requirements-minimal.txt`
   只安裝最小啟動伺服器所需套件。開發測試請再加
-  `requirements-dev.txt`。連線到外部 ComfyUI API 不需要額外 heavyweight
+  `requirements-dev.txt`。遊戲 / puzzle 相關套件已拆到
+  `requirements-games.txt`，但因目前遊戲 routes 會在啟動期載入，所以 minimal
+  仍會引用它。連線到外部 ComfyUI API 不需要額外 heavyweight
   AI runtime；只有啟用本機 Hugging Face / Diffusers 後端時才加
   `requirements-hf.txt`。
   舊流程仍可用 `requirements.txt` 一次安裝主站與開發測試相容依賴。

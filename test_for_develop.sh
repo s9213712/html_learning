@@ -36,6 +36,7 @@ DEV_TOKEN_PASSWORD="${HACKME_DEV_TOKEN_PASSWORD:-}"
 DEV_TOKEN_ROLE="${HACKME_DEV_TOKEN_ROLE:-user}"
 FEATURE_MODE_SET=0
 SECURITY_SETTINGS_ENABLED="${HACKME_DEV_SECURITY_ENABLED:-0}"
+SESSION_IDLE_TIMEOUT_MINUTES="${HACKME_DEV_SESSION_IDLE_TIMEOUT_MINUTES:-}"
 SERVER_MODE="${HACKME_DEV_SERVER_MODE:-dev_ready}"
 EXTRA_ACCOUNTS="${HACKME_DEV_EXTRA_ACCOUNTS:-}"
 PORT_CONFLICT_ACTION="${HACKME_DEV_PORT_CONFLICT_ACTION:-}"
@@ -194,6 +195,13 @@ Options:
   --token-role ROLE        Role for a newly created/updated token account.
                            user, manager, or super_admin. Default: user
   --security VALUE         on/off. Default: off for dev-friendly runtime
+  --session-idle-timeout-minutes N,
+  --idle-timeout-minutes N,
+  --logout-countdown-minutes N
+                           Override the frontend idle logout countdown in
+                           minutes for this dev runtime. 0 disables it; blank
+                           keeps the selected security profile default
+                           (dev-friendly: 1440, security-enabled: 60).
   --server-mode MODE       dev_ready, internal_test, test, preprod, production,
                            superweak, maintenance, or incident_lockdown
   --add-account SPEC       Add dev account as username:password[:role]; repeatable
@@ -260,7 +268,8 @@ Options:
   --skip-install           Reuse runtime/venv or current Python environment
   --requirements-file PATH  Install this requirements file from the copied runtime.
                            Choices: requirements-minimal.txt, requirements-dev.txt,
-                           requirements-comfyui.txt, requirements-hf.txt, requirements.txt.
+                           requirements-games.txt, requirements-comfyui.txt,
+                           requirements-hf.txt, requirements.txt.
   --foreground             Run in the foreground instead of nohup background mode
   --root-password VALUE    Default: root
   --manager-password VALUE Default: admin
@@ -483,6 +492,14 @@ normalize_max_content_option() {
   (( MAX_CONTENT_MB >= 128 )) || die "max content MB must be at least 128"
 }
 
+normalize_session_idle_timeout_option() {
+  if [[ -z "$SESSION_IDLE_TIMEOUT_MINUTES" ]]; then
+    return 0
+  fi
+  [[ "$SESSION_IDLE_TIMEOUT_MINUTES" =~ ^[0-9]+$ ]] || die "session idle timeout minutes must be an integer from 0 to 1440"
+  (( SESSION_IDLE_TIMEOUT_MINUTES <= 1440 )) || die "session idle timeout minutes must be 0-1440"
+}
+
 maybe_run_capacity_probe_for_gunicorn_defaults() {
   if [[ "$SERVER_RUNNER" != "gunicorn" ]]; then
     return 0
@@ -612,6 +629,7 @@ normalize_runtime_options() {
   normalize_server_runner
   normalize_cloud_drive_options
   normalize_max_content_option
+  normalize_session_idle_timeout_option
   maybe_run_capacity_probe_for_gunicorn_defaults
   resolve_auto_gunicorn_settings
   normalize_port_conflict_action
@@ -750,9 +768,10 @@ print_resolved_config() {
   if [[ -n "$DEV_TOKEN_PASSWORD" ]]; then
     say "  token_password:      <configured>"
   else
-    say "  token_password:      <keep existing / auto-generate for new user>"
+  say "  token_password:      <keep existing / auto-generate for new user>"
   fi
   say "  security_enabled:    $SECURITY_SETTINGS_ENABLED"
+  say "  idle_logout_minutes: ${SESSION_IDLE_TIMEOUT_MINUTES:-<profile default>}"
   say "  server_mode:         $SERVER_MODE"
   say "  cloud_drive_root:    ${CLOUD_DRIVE_STORAGE_ROOT:-<runtime/storage>}"
   say "  cloud_drive_max_mb:  ${CLOUD_DRIVE_GLOBAL_CAPACITY_LIMIT_MB:-<default disk 95%>}"
@@ -799,6 +818,7 @@ prompt_value() {
 requirements_file_description() {
   case "${1:-}" in
     requirements-minimal.txt) echo "minimal Flask/runtime only; safest for low-resource smoke" ;;
+    requirements-games.txt) echo "game/puzzle runtime dependencies only; combine with minimal for app startup" ;;
     requirements-dev.txt) echo "developer/browser-test tooling only; combine manually when needed" ;;
     requirements-comfyui.txt) echo "external ComfyUI API integration notes/no-op layer" ;;
     requirements-hf.txt) echo "heavy local Hugging Face/Diffusers backend" ;;
@@ -815,6 +835,7 @@ prompt_requirements_file() {
   say "  3) requirements-dev.txt     $(requirements_file_description requirements-dev.txt)"
   say "  4) requirements-comfyui.txt $(requirements_file_description requirements-comfyui.txt)"
   say "  5) requirements-hf.txt      $(requirements_file_description requirements-hf.txt)"
+  say "  6) requirements-games.txt   $(requirements_file_description requirements-games.txt)"
   while true; do
     printf 'Choose requirements file [%s]: ' "$REQUIREMENTS_FILE"
     if ! read -r answer; then
@@ -827,6 +848,7 @@ prompt_requirements_file() {
       3|dev|requirements-dev.txt) REQUIREMENTS_FILE="requirements-dev.txt"; return 0 ;;
       4|comfyui|requirements-comfyui.txt) REQUIREMENTS_FILE="requirements-comfyui.txt"; return 0 ;;
       5|hf|huggingface|requirements-hf.txt) REQUIREMENTS_FILE="requirements-hf.txt"; return 0 ;;
+      6|games|game|requirements-games.txt) REQUIREMENTS_FILE="requirements-games.txt"; return 0 ;;
       requirements*.txt) REQUIREMENTS_FILE="$answer"; return 0 ;;
       *) say "Please choose 1-5 or a requirements*.txt file." ;;
     esac
@@ -841,6 +863,7 @@ print_requirements_feature_guidance() {
   say "Feature selection dependency baseline: $REQUIREMENTS_FILE - $(requirements_file_description "$REQUIREMENTS_FILE")"
   case "$REQUIREMENTS_FILE" in
     requirements-minimal.txt) say "  Heavy optional features such as local HF/Diffusers should stay disabled unless installed separately." ;;
+    requirements-games.txt) say "  Games-only dependencies are not a complete runtime install; use this only with an existing minimal environment." ;;
     requirements-hf.txt) say "  HF/Diffusers features are available; external ComfyUI still uses its own server endpoint." ;;
     requirements-dev.txt) say "  Dev tooling only is not a complete runtime install; enable feature bundles only if runtime deps already exist." ;;
   esac
@@ -2002,6 +2025,7 @@ prompt_runtime_config() {
   print_requirements_feature_guidance
   prompt_feature_settings
   prompt_yes_no "Enable security settings" "$SECURITY_SETTINGS_ENABLED" SECURITY_SETTINGS_ENABLED
+  prompt_value "Idle logout countdown minutes (blank = selected security profile default, 0 = disabled)" "$SESSION_IDLE_TIMEOUT_MINUTES" SESSION_IDLE_TIMEOUT_MINUTES
   prompt_server_mode
   if [[ "$SERVER_MODE" == "test" || "$SERVER_MODE" == "internal_test" ]]; then
     prompt_value "Generated dev token TTL minutes" "$DEV_TOKEN_TTL_MINUTES" DEV_TOKEN_TTL_MINUTES
@@ -2043,6 +2067,7 @@ copy_repo() {
     "requirements.txt"
     "requirements-dev.txt"
     "requirements-comfyui.txt"
+    "requirements-games.txt"
     "requirements-hf.txt"
     "requirements-minimal.txt"
     "test_for_develop.sh"
@@ -2791,6 +2816,10 @@ while [[ $# -gt 0 ]]; do
       SECURITY_SETTINGS_ENABLED=0
       shift
       ;;
+    --session-idle-timeout-minutes|--idle-timeout-minutes|--logout-countdown-minutes)
+      SESSION_IDLE_TIMEOUT_MINUTES="${2:?missing session idle timeout minutes}"
+      shift 2
+      ;;
     --server-mode)
       SERVER_MODE="${2:?missing server mode}"
       shift 2
@@ -3074,6 +3103,7 @@ export HACKME_DEV_TOKEN_ROLE="$DEV_TOKEN_ROLE"
 export HACKME_DEV_INTERNAL_TEST_TOKEN_FEATURES="$DEV_TOKEN_FEATURES"
 export HACKME_DEV_TOKENS_FILE="$RUNTIME_ROOT/dev_tokens.json"
 export HACKME_DEV_SECURITY_ENABLED="$SECURITY_SETTINGS_ENABLED"
+export HACKME_DEV_SESSION_IDLE_TIMEOUT_MINUTES="$SESSION_IDLE_TIMEOUT_MINUTES"
 export HACKME_DEV_SERVER_MODE="$SERVER_MODE"
 export HACKME_DEV_EXTRA_ACCOUNTS="$EXTRA_ACCOUNTS"
 export HACKME_DEV_BTC_TRADE_AUTOSTART="$BTC_TRADE_AUTOSTART"
@@ -3294,6 +3324,9 @@ enabled_security_settings = {
     "session_ttl_hours": 24,
 }
 feature_updates.update(enabled_security_settings if security_enabled else relaxed_security_settings)
+session_idle_timeout_override = str(os.environ.get("HACKME_DEV_SESSION_IDLE_TIMEOUT_MINUTES", "") or "").strip()
+if session_idle_timeout_override:
+    feature_updates["session_idle_timeout_minutes"] = int(session_idle_timeout_override)
 feature_updates.update({
     "server_timezone": os.environ.get("HACKME_DEV_SERVER_TIMEZONE") or os.environ.get("TZ") or "Asia/Taipei",
     # Dev default: assume root has the Windows-portable ComfyUI bundle

@@ -2,6 +2,8 @@
 
 Use this folder for ComfyUI operator-only material. The main admin route still
 starts from [03_ADMIN_GUIDE.md](../03_ADMIN_GUIDE.md) and [WEB.md](../WEB.md).
+Cross-feature external integration boundaries are summarized in
+[EXTERNAL_INTEGRATION_PLAYBOOK.md](../EXTERNAL_INTEGRATION_PLAYBOOK.md).
 
 - [COMFYUI_ADMIN.md](COMFYUI_ADMIN.md): root/admin-only ComfyUI and Civitai operations
 - [COMFYUI_PERFORMANCE_HARDENING.md](COMFYUI_PERFORMANCE_HARDENING.md): async generation, bounded backend timeouts, stale job handling, and small-VRAM deployment guidance

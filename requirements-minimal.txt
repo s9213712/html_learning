@@ -11,9 +11,13 @@ argon2-cffi>=23.1
 gunicorn>=22.0
 numpy
 
-# Imported by the game and trading route bundles during server startup.
-python-chess>=1.999
+# Imported by route bundles during server startup.
 websocket-client>=1.8
+
+# Game route startup dependencies are split out for ownership clarity, but are
+# still required by the minimal startup layer until game route imports become
+# fully lazy/optional.
+-r requirements-games.txt
 
 # Cloud Drive / upload security: image metadata normalization and inspection.
 Pillow>=10.0

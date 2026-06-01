@@ -5,7 +5,7 @@
 
 ## 1. Python Dependencies
 
-依賴已拆成三層，部署時請先依用途選擇，不要在小主機上無差別安裝整套開發與 AI 套件。
+依賴已拆成多層，部署時請先依用途選擇，不要在小主機上無差別安裝整套開發與 AI 套件。
 
 ### 1.1 最小啟動伺服器
 
@@ -22,13 +22,31 @@ python3 -m pip install -r requirements-minimal.txt
 - `flask-talisman`
 - `argon2-cffi`
 - `gunicorn`
-- `python-chess`
+- `numpy`
 - `websocket-client`
 
-`python-chess` 與 `websocket-client` 雖屬於遊戲 / 交易功能，但目前 route bundle
-會在 server startup 階段匯入相關模組，所以仍列在最小啟動層，避免站點還沒進功能頁就啟動失敗。
+`websocket-client` 目前仍在 minimal runtime 內，因為 ComfyUI API client 會被 route
+bundle 在 server startup 階段匯入。
 
-### 1.2 開發 / QA
+### 1.2 遊戲 / puzzle runtime
+
+遊戲相關依賴集中在：
+
+```bash
+python3 -m pip install -r requirements-games.txt
+```
+
+內容：
+
+- `python-chess`
+- `kociemba`
+
+`requirements-minimal.txt` 今天仍會引用 `requirements-games.txt`，因為
+`routes/games.py` 會在 server startup 階段匯入西洋棋與魔術方塊 solver wrapper。
+若未來 game routes 改為完全 lazy import，才可把 games layer 從 minimal
+啟動鏈移除。
+
+### 1.3 開發 / QA
 
 本機開發、pytest、Playwright browser QA 使用：
 
@@ -43,7 +61,7 @@ python3 -m playwright install chromium
 - `playwright`
 - `pytest-playwright`
 
-### 1.3 特定功能
+### 1.4 特定功能
 
 只有在部署者啟用對應功能時才需要：
 
@@ -62,7 +80,7 @@ python3 -m pip install -r requirements-minimal.txt -r requirements-hf.txt
 
 缺少這些 feature 套件時，基本站點仍應可啟動；對應功能需明確降級或拒絕工作，不應拖垮主 server。
 
-### 1.4 相容舊流程
+### 1.5 相容舊流程
 
 既有 CI / 開發腳本仍可使用聚合檔；此聚合檔不包含本機 HF / Diffusers
 模型 runtime：
@@ -76,6 +94,8 @@ python3 -m pip install -r requirements.txt
 - `requirements-minimal.txt`
 - `requirements-dev.txt`
 - `requirements-comfyui.txt`
+
+`requirements-games.txt` 由 `requirements-minimal.txt` 間接安裝。
 
 若要讓 hackme_web 主程序自行載入 local Hugging Face / Diffusers 模型，請另外安裝
 `requirements-hf.txt`。

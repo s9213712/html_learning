@@ -1,0 +1,8 @@
+# Game and puzzle runtime dependencies.
+#
+# Keep this layer separate from the core Flask runtime so game-specific
+# dependencies are visible.  requirements-minimal.txt still includes this file
+# today because routes/games.py is imported during server startup.
+
+python-chess>=1.999
+kociemba>=1.2.1

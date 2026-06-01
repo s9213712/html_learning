@@ -6,6 +6,7 @@
 #
 # Prefer the smaller files below when you only need one layer:
 # - requirements-minimal.txt: enough to start the Flask app / bounded WSGI server.
+# - requirements-games.txt: game/puzzle dependencies; included by minimal today.
 # - requirements-dev.txt: developer and browser-test tooling.
 # - requirements-comfyui.txt: external ComfyUI API integration notes/no-op layer.
 # - requirements-hf.txt: heavyweight local Hugging Face / Diffusers backend.

@@ -28,7 +28,7 @@ operator guidance.
 |---|---|---|
 | Deploy | [01_DEPLOY_QUICKSTART.md](01_DEPLOY_QUICKSTART.md), [02_DEPLOY_PRODUCTION.md](02_DEPLOY_PRODUCTION.md), [SYSTEM_DEPENDENCIES.md](SYSTEM_DEPENDENCIES.md) | [DEPLOYMENT.md](DEPLOYMENT.md), [../deploy/README.md](../deploy/README.md), [RELEASE_LAYOUT.md](RELEASE_LAYOUT.md), [REPOSITORY_STRUCTURE.md](REPOSITORY_STRUCTURE.md) |
 | Admin | [03_ADMIN_GUIDE.md](03_ADMIN_GUIDE.md), [06_SECURITY_MODEL.md](06_SECURITY_MODEL.md), [09_SNAPSHOT_RESET_RESTORE.md](09_SNAPSHOT_RESET_RESTORE.md) | [CLI_ADMIN_PLAYBOOK.md](CLI_ADMIN_PLAYBOOK.md), [security/PRE_RELEASE_CHECKLIST.md](security/PRE_RELEASE_CHECKLIST.md), [security/PRODUCTION_SIGNOFF_CHECKLIST.md](security/PRODUCTION_SIGNOFF_CHECKLIST.md) |
-| Developer | [For_developer.md](For_developer.md), [API_REFERENCE.md](API_REFERENCE.md), [WEB.md](WEB.md) | [architecture/DATABASE_LAYOUT.md](architecture/DATABASE_LAYOUT.md), [architecture/ASYNC_JOB_QUEUE_FEASIBILITY.md](architecture/ASYNC_JOB_QUEUE_FEASIBILITY.md), [EXTERNAL_API_COMMAND_MATRIX.md](EXTERNAL_API_COMMAND_MATRIX.md) |
+| Developer | [For_developer.md](For_developer.md), [API_REFERENCE.md](API_REFERENCE.md), [WEB.md](WEB.md) | [architecture/DATABASE_LAYOUT.md](architecture/DATABASE_LAYOUT.md), [architecture/ASYNC_JOB_QUEUE_FEASIBILITY.md](architecture/ASYNC_JOB_QUEUE_FEASIBILITY.md), [EXTERNAL_INTEGRATION_PLAYBOOK.md](EXTERNAL_INTEGRATION_PLAYBOOK.md), [EXTERNAL_API_COMMAND_MATRIX.md](EXTERNAL_API_COMMAND_MATRIX.md) |
 | Security / QA | [11_QA_TESTING.md](11_QA_TESTING.md), [security/QA_ARCHITECTURE.md](security/QA_ARCHITECTURE.md), [SECURITY.md](SECURITY.md) | [security/FUNCTIONAL_SMOKE.md](security/FUNCTIONAL_SMOKE.md), [security/FUNCTIONAL_PERMISSION_PENTEST.md](security/FUNCTIONAL_PERMISSION_PENTEST.md), [security/PENTEST.md](security/PENTEST.md), [security/TRADING_STRESS_PENTEST.md](security/TRADING_STRESS_PENTEST.md), [security/secrets_scanning.md](security/secrets_scanning.md) |
 | Release | [UPDATE_SUMMARY.md](UPDATE_SUMMARY.md), [BRANCHING_AND_RELEASE.md](BRANCHING_AND_RELEASE.md) | [ARCHIVE_INDEX.md](ARCHIVE_INDEX.md), [archive/README.md](archive/README.md) |
 
@@ -73,6 +73,7 @@ operator guidance.
 - PointsChain v2 research: [AGENTS/research/BLOCKCHAIN/README.md](AGENTS/research/BLOCKCHAIN/README.md)
 - Blockchain walletization prework: [10_BLOCKCHAIN_WALLETIZATION_PREWORK_PLAN.md](10_BLOCKCHAIN_WALLETIZATION_PREWORK_PLAN.md)
 - Branching and release: [BRANCHING_AND_RELEASE.md](BRANCHING_AND_RELEASE.md)
+- External repo / executable integration: [EXTERNAL_INTEGRATION_PLAYBOOK.md](EXTERNAL_INTEGRATION_PLAYBOOK.md)
 - Update summary: [UPDATE_SUMMARY.md](UPDATE_SUMMARY.md)
 - Pre-release checklist: [security/PRE_RELEASE_CHECKLIST.md](security/PRE_RELEASE_CHECKLIST.md)
 - Functional smoke checklist: [security/FUNCTIONAL_SMOKE.md](security/FUNCTIONAL_SMOKE.md)

@@ -13,6 +13,11 @@ Scope:
 This is not an exhaustive vendor manual for every upstream product. It is the
 project's current integration matrix.
 
+External repositories, local executables, and separately running services are
+documented in [EXTERNAL_INTEGRATION_PLAYBOOK.md](EXTERNAL_INTEGRATION_PLAYBOOK.md).
+Use that playbook for Blockfish/Stockfish, Kociemba/Rubik solver, BTC_trade,
+ComfyUI process setup, Civitai model import, and KataGo runtime boundaries.
+
 ## Trading Price Providers
 
 The trading engine currently integrates public market-data endpoints only. It

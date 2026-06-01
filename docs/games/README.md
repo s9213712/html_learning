@@ -11,6 +11,7 @@
 | 西洋棋訓練與 replay pipeline | [references/chess_training_pipeline.md](references/chess_training_pipeline.md) | 要跑 replay prepare、seed train、self-play、promotion pipeline |
 | 西洋棋實驗任務與 queue 架構 | [../architecture/ASYNC_JOB_QUEUE_FEASIBILITY.md](../architecture/ASYNC_JOB_QUEUE_FEASIBILITY.md) | 要評估 Redis、RQ/Celery、RabbitMQ 或 Java service 是否適合 Exp5 長任務 |
 | Exp5 暫停交接與重啟 | [reports/2026-05-15_exp5_v28_pause_and_restart_handoff.md](reports/2026-05-15_exp5_v28_pause_and_restart_handoff.md), [references/exp5_restart_playbook.md](references/exp5_restart_playbook.md) | 要從目前最強 V28e baseline 安全重啟實驗、跑快篩、避免洩題 |
+| 外部棋類 / solver 工具邊界 | [../EXTERNAL_INTEGRATION_PLAYBOOK.md](../EXTERNAL_INTEGRATION_PLAYBOOK.md) | 要接 Blockfish/Stockfish、Kociemba/Rubik solver、KataGo，或確認哪些外部工具不可 commit |
 | Exp5 最新補充參考 | [references/2026-05-13_exp5_nnue_fix.md](references/2026-05-13_exp5_nnue_fix.md), [references/2026-05-13_exp5_conversion_fix.md](references/2026-05-13_exp5_conversion_fix.md), [references/2026-05-13_exp5_phase1_engine_upgrade.md](references/2026-05-13_exp5_phase1_engine_upgrade.md), [references/2026-05-13_exp5_model_snapshot_and_high_engine_plan.md](references/2026-05-13_exp5_model_snapshot_and_high_engine_plan.md) | 要追 Exp5 模型修補、轉換、phase 1 engine upgrade 與 high-engine plan |
 | 西洋棋 debug / engine roadmap | [archive/chess_debug/README.md](archive/chess_debug/README.md) | 要追 exp3/exp4/exp5 歷史與目前治理結論 |
 | 2026-05-13 評測與優化歸檔 | [ARCHIVE_INDEX.md](ARCHIVE_INDEX.md) | 要找報告、JSON/JSONL 證據、實驗資料夾、模型快照 |
