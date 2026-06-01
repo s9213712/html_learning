@@ -32,6 +32,7 @@
   };
   const AXIS_INDEX = { x: 0, y: 1, z: 2 };
   const TURN_ANIMATION_MS = 280;
+  const MAX_SOLVER_HINTS_PER_SCRAMBLE = 3;
   const inverseMove = (move) => {
     const layer = parseLayerMove(move);
     if (layer) return `${layer.axis}:${layer.layer}:${layer.sign > 0 ? "-" : "+"}`;
@@ -533,6 +534,8 @@
         solverHalfTurnLength: null,
         solverQuarterTurnLength: null,
         solverSeq: 0,
+        solverHintsUsed: 0,
+        solverHintLimit: MAX_SOLVER_HINTS_PER_SCRAMBLE,
         viewX: -27,
         viewY: -34,
         pointer: null,
@@ -583,9 +586,10 @@
         if (state.solved && state.score > 0) return `完成 · ${state.moves} 步 · 分數 ${state.score}`;
         if (state.active) {
           let solverText = "Solver 尚未計算";
+          const hintsLeft = Math.max(0, state.solverHintLimit - state.solverHintsUsed);
           if (state.solverPending) solverText = "Solver 計算中";
           else if (state.solverError) solverText = `Solver：${state.solverError}`;
-          else if (Array.isArray(state.solverSolution)) solverText = `Solver 提示 ${state.solverSolution.length}`;
+          else if (Array.isArray(state.solverSolution)) solverText = `Solver 剩 ${state.solverSolution.length} 步 · 提示 ${hintsLeft}/${state.solverHintLimit}`;
           else if (state.solutionStack.length) solverText = `備援提示 ${state.solutionStack.length}`;
           return `解題中 · ${state.moves} 步 · ${solverText}`;
         }
@@ -611,8 +615,8 @@
         if (Array.isArray(state.solverSolution)) {
           const htm = Number.isFinite(state.solverHalfTurnLength) ? state.solverHalfTurnLength : state.solverSolution.length;
           const qtm = Number.isFinite(state.solverQuarterTurnLength) ? state.solverQuarterTurnLength : state.solverSolution.length;
-          const next = state.solverSolution[0] ? `；下一步：${moveLabel(state.solverSolution[0])}` : "";
-          return `Kociemba solver：${htm} 步；實際轉動 ${qtm} 次${next}。`;
+          const hintsLeft = Math.max(0, state.solverHintLimit - state.solverHintsUsed);
+          return `Kociemba solver：${htm} 步；實際轉動 ${qtm} 次；本局提示剩 ${hintsLeft}/${state.solverHintLimit}。`;
         }
         return "Solver：尚未計算。";
       };
@@ -778,6 +782,7 @@
         state.solverHalfTurnLength = null;
         state.solverQuarterTurnLength = null;
         state.solverError = "";
+        state.solverHintsUsed = 0;
         state.active = true;
         state.solved = false;
         state.startedAt = Date.now();
@@ -805,6 +810,7 @@
         state.solverHalfTurnLength = 0;
         state.solverQuarterTurnLength = 0;
         state.solverError = "";
+        state.solverHintsUsed = 0;
         state.active = false;
         state.solved = true;
         state.startedAt = 0;
@@ -833,6 +839,15 @@
       };
       const showHint = async () => {
         if (state.turnAnimation) return;
+        if (state.solved) {
+          hintEl.textContent = "已經完成，不需要提示。";
+          return;
+        }
+        if (state.solverHintsUsed >= state.solverHintLimit) {
+          hintEl.textContent = `本局 ${state.solverHintLimit} 次提示已用完，請自己完成或使用「自動還原」。`;
+          render();
+          return;
+        }
         let solverMoves = Array.isArray(state.solverSolution) ? state.solverSolution : null;
         if (!solverMoves?.length) solverMoves = await refreshSolver();
         const move = solverMoves?.[0] || state.solutionStack[state.solutionStack.length - 1] || "";
@@ -846,7 +861,8 @@
             state.solverQuarterTurnLength = Math.max(0, state.solverQuarterTurnLength - 1);
           }
         }
-        hintEl.textContent = `Solver 直接幫你把${moveLabel(move)}。`;
+        state.solverHintsUsed += 1;
+        hintEl.textContent = `Solver 直接幫你把${moveLabel(move)}。本局提示剩 ${Math.max(0, state.solverHintLimit - state.solverHintsUsed)} 次。`;
         applyMove(move, { animation: hintAnimationForMove(move) });
       };
       const rotateView = (dir) => {

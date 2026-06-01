@@ -562,41 +562,121 @@ def rebuild_solo_score_table(conn):
         return
     score_expr = "score" if "score" in cols else "0"
     guess_expr = "guess_count" if "guess_count" in cols else "0"
-    conn.execute("ALTER TABLE game_solo_scores RENAME TO game_solo_scores_old")
-    conn.execute(
-        """
-        CREATE TABLE game_solo_scores (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            game_key TEXT NOT NULL,
-            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            week_key TEXT NOT NULL,
-            difficulty TEXT NOT NULL DEFAULT 'standard',
-            puzzle_id TEXT,
-            score INTEGER NOT NULL DEFAULT 0,
-            guess_count INTEGER NOT NULL DEFAULT 0,
-            raw_elapsed_ms INTEGER NOT NULL,
-            penalty_seconds INTEGER NOT NULL DEFAULT 0,
-            elapsed_ms INTEGER NOT NULL,
-            created_at TEXT NOT NULL,
-            CHECK (game_key IN ({SOLO_GAME_CHECK_SQL})),
-            CHECK (elapsed_ms > 0),
-            CHECK (raw_elapsed_ms > 0),
-            CHECK (penalty_seconds >= 0)
+    original_foreign_keys = int(conn.execute("PRAGMA foreign_keys").fetchone()[0] or 0)
+    original_legacy_alter_table = int(conn.execute("PRAGMA legacy_alter_table").fetchone()[0] or 0)
+    if original_foreign_keys:
+        conn.execute("PRAGMA foreign_keys=OFF")
+    if not original_legacy_alter_table:
+        conn.execute("PRAGMA legacy_alter_table=ON")
+    try:
+        conn.execute("ALTER TABLE game_solo_scores RENAME TO game_solo_scores_old")
+        conn.execute(
+            """
+            CREATE TABLE game_solo_scores (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                game_key TEXT NOT NULL,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                week_key TEXT NOT NULL,
+                difficulty TEXT NOT NULL DEFAULT 'standard',
+                puzzle_id TEXT,
+                score INTEGER NOT NULL DEFAULT 0,
+                guess_count INTEGER NOT NULL DEFAULT 0,
+                raw_elapsed_ms INTEGER NOT NULL,
+                penalty_seconds INTEGER NOT NULL DEFAULT 0,
+                elapsed_ms INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                CHECK (game_key IN ({SOLO_GAME_CHECK_SQL})),
+                CHECK (elapsed_ms > 0),
+                CHECK (raw_elapsed_ms > 0),
+                CHECK (penalty_seconds >= 0)
+            )
+            """.format(SOLO_GAME_CHECK_SQL=SOLO_GAME_CHECK_SQL)
         )
-        """.format(SOLO_GAME_CHECK_SQL=SOLO_GAME_CHECK_SQL)
-    )
-    conn.execute(
-        f"""
-        INSERT INTO game_solo_scores (
-            id, game_key, user_id, week_key, difficulty, puzzle_id,
-            score, guess_count, raw_elapsed_ms, penalty_seconds, elapsed_ms, created_at
+        conn.execute(
+            f"""
+            INSERT INTO game_solo_scores (
+                id, game_key, user_id, week_key, difficulty, puzzle_id,
+                score, guess_count, raw_elapsed_ms, penalty_seconds, elapsed_ms, created_at
+            )
+            SELECT id, game_key, user_id, week_key, difficulty, puzzle_id,
+                   {score_expr}, {guess_expr}, raw_elapsed_ms, penalty_seconds, elapsed_ms, created_at
+            FROM game_solo_scores_old
+            """
         )
-        SELECT id, game_key, user_id, week_key, difficulty, puzzle_id,
-               {score_expr}, {guess_expr}, raw_elapsed_ms, penalty_seconds, elapsed_ms, created_at
-        FROM game_solo_scores_old
-        """
+        conn.execute("DROP TABLE game_solo_scores_old")
+    finally:
+        if not original_legacy_alter_table:
+            conn.execute("PRAGMA legacy_alter_table=OFF")
+        if original_foreign_keys:
+            conn.execute("PRAGMA foreign_keys=ON")
+
+
+def rebuild_game_daily_challenge_rewards_table(conn):
+    original_foreign_keys = int(conn.execute("PRAGMA foreign_keys").fetchone()[0] or 0)
+    original_legacy_alter_table = int(conn.execute("PRAGMA legacy_alter_table").fetchone()[0] or 0)
+    if original_foreign_keys:
+        conn.execute("PRAGMA foreign_keys=OFF")
+    if not original_legacy_alter_table:
+        conn.execute("PRAGMA legacy_alter_table=ON")
+    try:
+        conn.execute("ALTER TABLE game_daily_challenge_rewards RENAME TO game_daily_challenge_rewards_old")
+        conn.execute(
+            """
+            CREATE TABLE game_daily_challenge_rewards (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                game_key TEXT NOT NULL,
+                challenge_key TEXT NOT NULL,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                score_id INTEGER REFERENCES game_solo_scores(id) ON DELETE SET NULL,
+                reward_points INTEGER NOT NULL,
+                ledger_uuid TEXT,
+                created_at TEXT NOT NULL,
+                UNIQUE(game_key, challenge_key, user_id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO game_daily_challenge_rewards (
+                id, game_key, challenge_key, user_id, score_id, reward_points, ledger_uuid, created_at
+            )
+            SELECT
+                old.id,
+                old.game_key,
+                old.challenge_key,
+                old.user_id,
+                CASE
+                    WHEN old.score_id IS NOT NULL
+                     AND EXISTS (SELECT 1 FROM game_solo_scores scores WHERE scores.id = old.score_id)
+                    THEN old.score_id
+                    ELSE NULL
+                END,
+                old.reward_points,
+                old.ledger_uuid,
+                old.created_at
+            FROM game_daily_challenge_rewards_old old
+            """
+        )
+        conn.execute("DROP TABLE game_daily_challenge_rewards_old")
+    finally:
+        if not original_legacy_alter_table:
+            conn.execute("PRAGMA legacy_alter_table=OFF")
+        if original_foreign_keys:
+            conn.execute("PRAGMA foreign_keys=ON")
+
+
+def repair_game_daily_reward_score_fk(conn):
+    schema = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='game_daily_challenge_rewards'"
+    ).fetchone()
+    rewards_sql = str(schema["sql"] or "") if schema else ""
+    if "game_solo_scores_old" not in rewards_sql:
+        return False
+    rebuild_game_daily_challenge_rewards_table(conn)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_game_daily_rewards_user ON game_daily_challenge_rewards(user_id, challenge_key)"
     )
-    conn.execute("DROP TABLE game_solo_scores_old")
+    return True
 
 
 def rebuild_game_matches_table(conn):
@@ -702,6 +782,7 @@ def ensure_game_schema(conn):
         conn.execute("ALTER TABLE game_solo_scores ADD COLUMN score INTEGER NOT NULL DEFAULT 0")
     if "guess_count" not in solo_cols:
         conn.execute("ALTER TABLE game_solo_scores ADD COLUMN guess_count INTEGER NOT NULL DEFAULT 0")
+    repair_game_daily_reward_score_fk(conn)
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_game_solo_scores_rank ON game_solo_scores(game_key, week_key, difficulty, elapsed_ms)"
     )
