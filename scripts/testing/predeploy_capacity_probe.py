@@ -2392,6 +2392,58 @@ def build_limit_report(results: list[dict[str, Any]], args: argparse.Namespace) 
     }
 
 
+def recommend_hls_capacity_policy(profile: dict[str, Any], probe: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+    workers = int(profile.get("workers") or 0)
+    threads = int(profile.get("threads") or 0)
+    lanes = workers * threads
+    tier = str(getattr(args, "capacity_tier", "auto") or "auto").strip().lower()
+    latency = probe.get("latency_ms") or {}
+    cpu = probe.get("cpu") or {}
+    try:
+        p95 = float(latency.get("p95") or 0)
+    except Exception:
+        p95 = 0.0
+    try:
+        target_p95 = float(getattr(args, "target_p95_ms", 0) or 0)
+    except Exception:
+        target_p95 = 0.0
+    try:
+        cpu_peak = float(cpu.get("total_worker_cpu_peak_percent") or 0)
+    except Exception:
+        cpu_peak = 0.0
+    latency_ratio = (p95 / target_p95) if target_p95 > 0 and p95 > 0 else 1.0
+
+    reasons: list[str] = []
+    max_concurrent = 1
+    if tier in {"sbc", "legacy", "laptop"}:
+        reasons.append(f"{tier}_tier_conservative")
+    elif tier == "highend" and lanes >= 18 and latency_ratio <= 0.60 and (cpu_peak <= 300 or cpu_peak == 0):
+        max_concurrent = 3
+        reasons.append("highend_capacity_headroom")
+    elif tier in {"midrange", "highend", "auto"} and lanes >= 12 and latency_ratio <= 0.65 and (cpu_peak <= 260 or cpu_peak == 0):
+        max_concurrent = 2
+        reasons.append("moderate_capacity_headroom")
+    else:
+        reasons.append("limited_latency_or_cpu_headroom")
+
+    if max_concurrent == 1:
+        reasons.append("protect_request_p95_p99_during_hls")
+    return {
+        "hls_max_concurrent": max_concurrent,
+        "hls_serialize_all": 1,
+        "basis": {
+            "capacity_tier": tier,
+            "worker_thread_lanes": lanes,
+            "selected_round_p95_ms": p95,
+            "target_p95_ms": target_p95,
+            "p95_to_target_ratio": round(latency_ratio, 3),
+            "worker_cpu_peak_percent": cpu_peak,
+        },
+        "reasons": reasons,
+        "note": "Derived from request-capacity headroom; use scripts/testing/hls_premium_sizing_probe.py before raising this for production HLS workloads.",
+    }
+
+
 def choose_recommendation(results: list[dict[str, Any]], args: argparse.Namespace) -> dict[str, Any]:
     candidates: list[dict[str, Any]] = []
     fallback: list[dict[str, Any]] = []
@@ -2421,6 +2473,7 @@ def choose_recommendation(results: list[dict[str, Any]], args: argparse.Namespac
     )
     profile = best["profile"]
     probe = best["round"]["probe"]
+    hls_capacity = recommend_hls_capacity_policy(profile, probe, args)
     return {
         "ok": True,
         "workers": profile["workers"],
@@ -2436,7 +2489,10 @@ def choose_recommendation(results: list[dict[str, Any]], args: argparse.Namespac
             "HACKME_DEV_GUNICORN_MAX_REQUESTS": str(max(0, int(args.gunicorn_max_requests))),
             "HACKME_DEV_GUNICORN_MAX_REQUESTS_JITTER": str(max(0, int(args.gunicorn_max_requests_jitter))),
             "HTML_LEARNING_BACKPRESSURE_THREAD_CAPACITY": str(max(4, int(profile["threads"]))),
+            "HACKME_MEDIA_HLS_MAX_CONCURRENT": str(hls_capacity["hls_max_concurrent"]),
+            "HACKME_MEDIA_HLS_SERIALIZE_ALL": str(hls_capacity["hls_serialize_all"]),
         },
+        "hls_capacity_policy": hls_capacity,
         "suggested_test_for_develop_args": [
             "--server-runner",
             "gunicorn",
@@ -2531,6 +2587,8 @@ def sync_capacity_defaults(
         "HACKME_DEV_GUNICORN_MAX_REQUESTS",
         "HACKME_DEV_GUNICORN_MAX_REQUESTS_JITTER",
         "HTML_LEARNING_BACKPRESSURE_THREAD_CAPACITY",
+        "HACKME_MEDIA_HLS_MAX_CONCURRENT",
+        "HACKME_MEDIA_HLS_SERIALIZE_ALL",
     ]
     path = Path(args.capacity_defaults_file).expanduser().resolve()
     path.parent.mkdir(parents=True, exist_ok=True)

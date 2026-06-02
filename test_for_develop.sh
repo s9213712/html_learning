@@ -63,6 +63,9 @@ CAPACITY_PROBE_RAN=0
 CAPACITY_PROBE_REPORT_FILE=""
 CAPACITY_REPORT_DEFAULTS_LOADED=0
 CAPACITY_SETTINGS_FINALIZED=0
+HLS_SLOT_PROBE_MODE="${HACKME_DEV_HLS_SLOT_PROBE:-ask}"
+HLS_SLOT_PROBE_RAN=0
+HLS_SLOT_PROBE_REPORT_FILE=""
 DRY_RUN=0
 
 is_auto_capacity_value() {
@@ -122,6 +125,16 @@ load_local_capacity_defaults() {
           export HTML_LEARNING_BACKPRESSURE_THREAD_CAPACITY="$value"
         fi
         ;;
+      HACKME_MEDIA_HLS_MAX_CONCURRENT)
+        if [[ "$mode" == "force" || -z "${HACKME_MEDIA_HLS_MAX_CONCURRENT+x}" || "$(printf '%s' "${HACKME_MEDIA_HLS_MAX_CONCURRENT:-}" | tr '[:upper:]' '[:lower:]')" == "auto" ]]; then
+          export HACKME_MEDIA_HLS_MAX_CONCURRENT="$value"
+        fi
+        ;;
+      HACKME_MEDIA_HLS_SERIALIZE_ALL)
+        if [[ "$mode" == "force" || -z "${HACKME_MEDIA_HLS_SERIALIZE_ALL+x}" || "$(printf '%s' "${HACKME_MEDIA_HLS_SERIALIZE_ALL:-}" | tr '[:upper:]' '[:lower:]')" == "auto" ]]; then
+          export HACKME_MEDIA_HLS_SERIALIZE_ALL="$value"
+        fi
+        ;;
     esac
   done < "$CAPACITY_DEFAULTS_FILE"
 }
@@ -144,6 +157,8 @@ load_capacity_env_defaults_preview() {
   CAPACITY_ENV_MAX_REQUESTS=""
   CAPACITY_ENV_MAX_REQUESTS_JITTER=""
   CAPACITY_ENV_BACKPRESSURE=""
+  CAPACITY_ENV_HLS_MAX_CONCURRENT=""
+  CAPACITY_ENV_HLS_SERIALIZE_ALL=""
   [[ -f "$CAPACITY_DEFAULTS_FILE" ]] || return 1
   local line key value
   while IFS= read -r line || [[ -n "$line" ]]; do
@@ -167,9 +182,11 @@ load_capacity_env_defaults_preview() {
       HACKME_DEV_GUNICORN_MAX_REQUESTS) CAPACITY_ENV_MAX_REQUESTS="$value" ;;
       HACKME_DEV_GUNICORN_MAX_REQUESTS_JITTER) CAPACITY_ENV_MAX_REQUESTS_JITTER="$value" ;;
       HTML_LEARNING_BACKPRESSURE_THREAD_CAPACITY) CAPACITY_ENV_BACKPRESSURE="$value" ;;
+      HACKME_MEDIA_HLS_MAX_CONCURRENT) CAPACITY_ENV_HLS_MAX_CONCURRENT="$value" ;;
+      HACKME_MEDIA_HLS_SERIALIZE_ALL) CAPACITY_ENV_HLS_SERIALIZE_ALL="$value" ;;
     esac
   done < "$CAPACITY_DEFAULTS_FILE"
-  [[ -n "$CAPACITY_ENV_WORKERS" || -n "$CAPACITY_ENV_THREADS" || -n "$CAPACITY_ENV_BACKPRESSURE" ]]
+  [[ -n "$CAPACITY_ENV_WORKERS" || -n "$CAPACITY_ENV_THREADS" || -n "$CAPACITY_ENV_BACKPRESSURE" || -n "$CAPACITY_ENV_HLS_MAX_CONCURRENT" ]]
 }
 
 load_capacity_report_defaults_preview() {
@@ -179,6 +196,8 @@ load_capacity_report_defaults_preview() {
   CAPACITY_JSON_MAX_REQUESTS=""
   CAPACITY_JSON_MAX_REQUESTS_JITTER=""
   CAPACITY_JSON_BACKPRESSURE=""
+  CAPACITY_JSON_HLS_MAX_CONCURRENT=""
+  CAPACITY_JSON_HLS_SERIALIZE_ALL=""
   CAPACITY_JSON_PROFILE=""
   CAPACITY_JSON_ACCOUNTS=""
   CAPACITY_JSON_TARGET_P95=""
@@ -218,6 +237,8 @@ emit("CAPACITY_JSON_THREADS", threads or "")
 emit("CAPACITY_JSON_MAX_REQUESTS", suggested_env.get("HACKME_DEV_GUNICORN_MAX_REQUESTS") or "")
 emit("CAPACITY_JSON_MAX_REQUESTS_JITTER", suggested_env.get("HACKME_DEV_GUNICORN_MAX_REQUESTS_JITTER") or "")
 emit("CAPACITY_JSON_BACKPRESSURE", suggested_env.get("HTML_LEARNING_BACKPRESSURE_THREAD_CAPACITY") or (max(4, int(threads or 0)) if threads else ""))
+emit("CAPACITY_JSON_HLS_MAX_CONCURRENT", suggested_env.get("HACKME_MEDIA_HLS_MAX_CONCURRENT") or "")
+emit("CAPACITY_JSON_HLS_SERIALIZE_ALL", suggested_env.get("HACKME_MEDIA_HLS_SERIALIZE_ALL") or "")
 emit("CAPACITY_JSON_PROFILE", f"{workers}x{threads}" if workers and threads else "")
 emit("CAPACITY_JSON_ACCOUNTS", recommendation.get("max_passing_accounts") or "")
 emit("CAPACITY_JSON_TARGET_P95", recommendation.get("target_p95_ms") or "")
@@ -241,11 +262,14 @@ print_capacity_defaults_candidate() {
   local backpressure="$5"
   local max_requests="$6"
   local jitter="$7"
-  local extra="$8"
+  local hls_max="$8"
+  local hls_serialize="$9"
+  local extra="${10}"
   say "  $label"
   say "     file:        $source_path"
   say "     gunicorn:    workers=${workers:-?} threads=${threads:-?} max_requests=${max_requests:-?} jitter=${jitter:-?}"
   say "     backpressure:${backpressure:-?}"
+  say "     hls:         max_concurrent=${hls_max:-?} serialize_all=${hls_serialize:-?}"
   if [[ -n "$extra" ]]; then
     say "     observed:    $extra"
   fi
@@ -453,6 +477,8 @@ Options:
   --capacity-report-file PATH
                            JSON capacity report to read before the env defaults.
                            Default: .hackme_capacity_report.json in repo root
+  --hls-slot-probe         Run a quick Premium HLS slot sizing probe before launch
+  --no-hls-slot-probe      Skip the HLS slot sizing startup test
   --cloud-drive-root PATH,
   --cloud-drive-storage-root PATH
                            Use PATH as the actual cloud-drive file storage
@@ -640,6 +666,22 @@ PY
     die "cloud drive storage root is unsafe or invalid: $CLOUD_DRIVE_STORAGE_ROOT"
   fi
   CLOUD_DRIVE_STORAGE_ROOT="$normalized"
+}
+
+normalize_hls_slot_probe_mode() {
+  HLS_SLOT_PROBE_MODE="${HLS_SLOT_PROBE_MODE,,}"
+  case "$HLS_SLOT_PROBE_MODE" in
+    ask|auto|prompt|force|on|yes|true|1|never|off|no|false|0)
+      ;;
+    *)
+      die "HLS slot probe mode must be ask, force, or never: $HLS_SLOT_PROBE_MODE"
+      ;;
+  esac
+  case "$HLS_SLOT_PROBE_MODE" in
+    auto|prompt) HLS_SLOT_PROBE_MODE="ask" ;;
+    on|yes|true|1) HLS_SLOT_PROBE_MODE="force" ;;
+    off|no|false|0) HLS_SLOT_PROBE_MODE="never" ;;
+  esac
 }
 
 normalize_cloud_drive_capacity_limit() {
@@ -1059,6 +1101,10 @@ print_resolved_config() {
   say "  server_runner:       $SERVER_RUNNER"
   if [[ "$SERVER_RUNNER" == "gunicorn" ]]; then
     say "  gunicorn:            workers=$GUNICORN_WORKERS threads=$GUNICORN_THREADS timeout=$GUNICORN_TIMEOUT backlog=$GUNICORN_BACKLOG max_requests=$GUNICORN_MAX_REQUESTS jitter=$GUNICORN_MAX_REQUESTS_JITTER"
+    say "  hls_slots:           max_concurrent=${HACKME_MEDIA_HLS_MAX_CONCURRENT:-<worker default 1>} serialize_all=${HACKME_MEDIA_HLS_SERIALIZE_ALL:-<worker default>} probe=$HLS_SLOT_PROBE_MODE"
+    if [[ -n "$HLS_SLOT_PROBE_REPORT_FILE" ]]; then
+      say "  hls_slot_report:     $HLS_SLOT_PROBE_REPORT_FILE"
+    fi
     say "  capacity_defaults:   $CAPACITY_DEFAULTS_FILE"
     say "  capacity_report:     $CAPACITY_REPORT_DEFAULTS_FILE"
     say "  capacity_probe:      $CAPACITY_PROBE_MODE"
@@ -1402,6 +1448,9 @@ emit("CAPACITY_REPORT_MAX_REQUESTS_JITTER", suggested_env.get("HACKME_DEV_GUNICO
 emit("CAPACITY_REPORT_PROFILE", f"{workers}x{threads}" if workers and threads else "")
 emit("CAPACITY_REPORT_TOTAL_LANES", workers * threads if workers and threads else "")
 emit("CAPACITY_REPORT_BACKPRESSURE", suggested_env.get("HTML_LEARNING_BACKPRESSURE_THREAD_CAPACITY") or (max(4, threads) if threads else ""))
+emit("CAPACITY_REPORT_HLS_MAX_CONCURRENT", suggested_env.get("HACKME_MEDIA_HLS_MAX_CONCURRENT") or "")
+emit("CAPACITY_REPORT_HLS_SERIALIZE_ALL", suggested_env.get("HACKME_MEDIA_HLS_SERIALIZE_ALL") or "")
+emit("CAPACITY_REPORT_HLS_POLICY", json.dumps(recommendation.get("hls_capacity_policy") or {}, sort_keys=True, separators=(",", ":")))
 emit("CAPACITY_REPORT_MAX_SAFE_ACCOUNTS", accounts or "")
 emit("CAPACITY_REPORT_TARGET_P95_MS", recommendation.get("target_p95_ms") or thresholds.get("target_p95_ms") or "")
 emit("CAPACITY_REPORT_MAX_DURATION_SECONDS", thresholds.get("max_duration_seconds") or "")
@@ -1454,12 +1503,20 @@ REPORTPY
     if [[ -n "${CAPACITY_REPORT_BACKPRESSURE:-}" ]]; then
       export HTML_LEARNING_BACKPRESSURE_THREAD_CAPACITY="$CAPACITY_REPORT_BACKPRESSURE"
     fi
+    if [[ -n "${CAPACITY_REPORT_HLS_MAX_CONCURRENT:-}" ]]; then
+      export HACKME_MEDIA_HLS_MAX_CONCURRENT="$CAPACITY_REPORT_HLS_MAX_CONCURRENT"
+    fi
+    if [[ -n "${CAPACITY_REPORT_HLS_SERIALIZE_ALL:-}" ]]; then
+      export HACKME_MEDIA_HLS_SERIALIZE_ALL="$CAPACITY_REPORT_HLS_SERIALIZE_ALL"
+    fi
   fi
   return 0
 }
 
 print_capacity_probe_conclusion() {
   local backpressure_capacity="${HTML_LEARNING_BACKPRESSURE_THREAD_CAPACITY:-auto}"
+  local hls_max_concurrent="${HACKME_MEDIA_HLS_MAX_CONCURRENT:-auto}"
+  local hls_serialize_all="${HACKME_MEDIA_HLS_SERIALIZE_ALL:-auto}"
   say "[dev-tmp] capacity probe conclusion:"
   if [[ "${CAPACITY_REPORT_OK:-}" == "1" ]]; then
     say "  recommendation:                 ${CAPACITY_REPORT_PROFILE} (${CAPACITY_REPORT_TOTAL_LANES} worker-thread lanes)"
@@ -1474,6 +1531,9 @@ print_capacity_probe_conclusion() {
     say "  selected_round_statuses:        ${CAPACITY_REPORT_STATUS_COUNTS}"
     say "  selected_round_failures:        hard=${CAPACITY_REPORT_HARD_FAILURES:-0} server=${CAPACITY_REPORT_SERVER_FAILURES:-0} app_limit=${CAPACITY_REPORT_APP_LIMITS:-0}"
     say "  selected_round_cpu:             active_workers=${CAPACITY_REPORT_CPU_ACTIVE_WORKERS:-?} worker_cpu_peak=${CAPACITY_REPORT_CPU_PEAK:-?}%"
+    if [[ -n "${CAPACITY_REPORT_HLS_POLICY:-}" ]]; then
+      say "  hls_capacity_policy:            ${CAPACITY_REPORT_HLS_POLICY}"
+    fi
     say "  tested_profiles:                ${CAPACITY_REPORT_TESTED_PROFILES}"
     say "  tested_load:                    ${CAPACITY_REPORT_LOAD_PROFILE} (${CAPACITY_REPORT_LOAD_KINDS})"
     say "  tested_operations:              ${CAPACITY_REPORT_LOAD_DESCRIPTION}"
@@ -1514,8 +1574,79 @@ print_capacity_probe_conclusion() {
   say "  gunicorn_workers:               $GUNICORN_WORKERS"
   say "  gunicorn_threads_per_worker:    $GUNICORN_THREADS"
   say "  backpressure_thread_capacity:   $backpressure_capacity"
+  say "  hls_max_concurrent:             $hls_max_concurrent"
+  say "  hls_serialize_all:              $hls_serialize_all"
   say "  gunicorn_max_requests:          $GUNICORN_MAX_REQUESTS"
   say "  gunicorn_max_requests_jitter:   $GUNICORN_MAX_REQUESTS_JITTER"
+}
+
+run_hls_slot_probe_for_startup() {
+  [[ "$HLS_SLOT_PROBE_RAN" == "1" ]] && return 0
+  HLS_SLOT_PROBE_RAN=1
+  local report runtime_root suggested serialize_all
+  runtime_root="${TMPDIR:-/tmp}/hackme_hls_slot_probe_${RUN_ID}_$$"
+  report="${TMPDIR:-/tmp}/hackme_hls_slot_probe_${RUN_ID}_$$.json"
+  HLS_SLOT_PROBE_REPORT_FILE="$report"
+  say "[dev-tmp] HLS slot probe: starting quick Premium HLS sizing check"
+  say "[dev-tmp] HLS slot probe: report file $report"
+  if "$PYTHON_BIN" "$SOURCE_ROOT/scripts/testing/hls_premium_sizing_probe.py"       --runtime-root "$runtime_root"       --json-out "$report"       --jobs 2       --max-concurrent 2       --duration 8       --fixture-size 640x360       --fixture-rate 24       --video-bitrate 700k       --hls-profile mobile_saver       --hls-original-variant-mode never       --worker-timeout 180 >/dev/null; then
+    suggested="$($PYTHON_BIN - "$report" <<'HLSPROBEJSON'
+import json
+import sys
+from pathlib import Path
+try:
+    report = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+    rec = report.get("sizing_recommendation") or {}
+    print(int(rec.get("suggested_hls_max_concurrent") or 1))
+except Exception:
+    print(1)
+HLSPROBEJSON
+)"
+    serialize_all="1"
+    [[ "$suggested" =~ ^[0-9]+$ ]] || suggested="1"
+    if (( suggested < 1 )); then suggested="1"; fi
+    if (( suggested > 4 )); then suggested="4"; fi
+    local quality_cap final_suggested
+    quality_cap="${HACKME_MEDIA_HLS_MAX_CONCURRENT:-1}"
+    [[ "$quality_cap" =~ ^[0-9]+$ ]] || quality_cap="1"
+    if (( quality_cap < 1 )); then quality_cap="1"; fi
+    final_suggested="$suggested"
+    if (( final_suggested > quality_cap )); then
+      final_suggested="$quality_cap"
+    fi
+    export HACKME_MEDIA_HLS_MAX_CONCURRENT="$final_suggested"
+    export HACKME_MEDIA_HLS_SERIALIZE_ALL="$serialize_all"
+    say "[dev-tmp] HLS slot probe: raw_suggested=$suggested quality_cap=$quality_cap final_max_concurrent=$final_suggested serialize_all=$serialize_all"
+    say "[dev-tmp] HLS slot probe: applied quality-capped result to this launch"
+    return 0
+  fi
+  say "[dev-tmp] HLS slot probe: failed; keeping existing HLS slot setting (${HACKME_MEDIA_HLS_MAX_CONCURRENT:-worker default 1})"
+  return 1
+}
+
+prompt_hls_slot_probe() {
+  [[ "$SERVER_RUNNER" == "gunicorn" ]] || return 0
+  normalize_hls_slot_probe_mode
+  if [[ "$HLS_SLOT_PROBE_MODE" == "never" ]]; then
+    return 0
+  fi
+  if [[ "$DRY_RUN" == "1" ]]; then
+    say "[dev-tmp] HLS slot probe: dry-run, not running HLS sizing test"
+    return 0
+  fi
+  if [[ "$HLS_SLOT_PROBE_MODE" == "force" ]]; then
+    run_hls_slot_probe_for_startup || true
+    return 0
+  fi
+  [[ "$CLI_MODE" == "1" ]] && return 0
+  say "Startup test items:"
+  say "  HLS slot sizing checks whether Premium HLS can safely use more than one ffmpeg worker."
+  say "  It uses a short mobile_saver fixture; skip it for the fastest startup."
+  local answer=0
+  prompt_yes_no "Run quick HLS slot sizing before launch" 0 answer
+  if [[ "$answer" == "1" ]]; then
+    run_hls_slot_probe_for_startup || true
+  fi
 }
 
 prompt_capacity_integer() {
@@ -2469,6 +2600,7 @@ prompt_server_runner() {
     prompt_value "Gunicorn backlog" "$GUNICORN_BACKLOG" GUNICORN_BACKLOG
     CAPACITY_SETTINGS_FINALIZED=1
   fi
+  prompt_hls_slot_probe
 }
 
 prompt_runtime_config() {
@@ -3452,6 +3584,14 @@ while [[ $# -gt 0 ]]; do
       CAPACITY_PROBE_MODE=never
       shift
       ;;
+    --hls-slot-probe|--hls-capacity-probe)
+      HLS_SLOT_PROBE_MODE=force
+      shift
+      ;;
+    --no-hls-slot-probe)
+      HLS_SLOT_PROBE_MODE=never
+      shift
+      ;;
     --capacity-defaults-file)
       CAPACITY_DEFAULTS_FILE="${2:?missing capacity defaults file}"
       shift 2
@@ -3550,6 +3690,7 @@ fi
 
 normalize_capacity_probe_mode
 normalize_capacity_probe_tier
+normalize_hls_slot_probe_mode
 if [[ "$CLI_MODE" == "1" || "$SHUTDOWN" == "1" ]]; then
   load_local_capacity_report_defaults || load_local_capacity_defaults
 fi
