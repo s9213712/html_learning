@@ -179,6 +179,11 @@ def test_filemanager_and_albummanager_ui_are_wired():
     assert 'data-drive-action="cancel-resumable-upload"' in drive_js
     assert 'data-drive-action="resume-resumable-upload"' in drive_js
     assert "function chooseResumableResumeFile" in drive_js
+    assert "function findDriveResumableUploadSessionForBlob" in drive_js
+    assert "driveResumableUploadCanResumeSession" in drive_js
+    assert "retry_wait" in drive_js
+    assert "driveUploadShouldRetryResult" in drive_js
+    assert 'input.value = "";' in drive_js
     assert "function resumeResumableUploadSession" in drive_js
     assert "請選擇同一個檔案" in drive_js
     assert "resumeSession: session" in drive_js

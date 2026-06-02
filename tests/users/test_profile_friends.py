@@ -207,6 +207,7 @@ def test_profile_api_returns_random_friend_code_only_to_owner(tmp_path):
         "profile_template": "creator",
         "profile_accent": "ocean",
         "profile_density": "compact",
+        "profile_style": {"avatar_size": "220", "avatar_frame": "neon"},
     })
 
     actor_box["actor"] = {"id": 4, "username": "bob", "role": "user"}
@@ -221,7 +222,10 @@ def test_profile_api_returns_random_friend_code_only_to_owner(tmp_path):
     assert updated.get_json()["profile"]["profile_template"] == "creator"
     assert updated.get_json()["profile"]["profile_accent"] == "ocean"
     assert updated.get_json()["profile"]["profile_density"] == "compact"
+    assert updated.get_json()["profile"]["profile_style"]["avatar_size"] == "220"
+    assert updated.get_json()["profile"]["profile_style"]["avatar_frame"] == "neon"
     assert public.get_json()["profile"]["profile_template"] == "creator"
+    assert public.get_json()["profile"]["profile_style"]["avatar_size"] == "220"
     assert "friend_code" not in public.get_json()["profile"]
     assert "display_timezone" not in public.get_json()["profile"]
 

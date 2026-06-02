@@ -112,7 +112,6 @@ UPLOAD_EDGE_GUARD_PATHS = {
 }
 
 UPLOAD_EDGE_GUARD_PREFIXES = (
-    "/api/cloud-drive/resumable-upload",
     "/api/cloud-drive/remote-download",
 )
 

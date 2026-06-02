@@ -275,6 +275,27 @@ function rememberedDriveResumableUpload(key) {
   }
 }
 
+function driveResumableUploadCanResumeSession(session = {}, { filename = "", totalBytes = 0, target = "cloud_drive", privacyMode = "standard_plain" } = {}) {
+  if (!session || !session.session_id) return false;
+  const status = String(session.status || "");
+  if (["completed", "aborted", "cancelled"].includes(status)) return false;
+  return String(session.filename || "") === String(filename || "")
+    && Number(session.total_bytes || 0) === Number(totalBytes || 0)
+    && String(session.target || "cloud_drive") === String(target || "cloud_drive")
+    && String(session.privacy_mode || "standard_plain") === String(privacyMode || "standard_plain");
+}
+
+async function findDriveResumableUploadSessionForBlob({ filename = "", totalBytes = 0, target = "cloud_drive", privacyMode = "standard_plain", csrf = "" } = {}) {
+  try {
+    const sessions = await loadDriveResumableUploadSessions({ csrf });
+    return sessions
+      .filter((session) => driveResumableUploadCanResumeSession(session, { filename, totalBytes, target, privacyMode }))
+      .sort((a, b) => Number(b.received_bytes || 0) - Number(a.received_bytes || 0))[0] || null;
+  } catch (_) {
+    return null;
+  }
+}
+
 function driveEncryptedUploadFields(encrypted = {}) {
   return {
     encrypted_metadata: encrypted.encrypted_metadata || "",
@@ -1193,7 +1214,7 @@ function driveResumableUploadSourceRef(sessionId) {
 function driveResumableSessionTransferStatus(session = {}) {
   const status = String(session.status || "");
   if (status === "completed") return "completed";
-  if (status === "failed") return "failed";
+  if (status === "failed") return "waiting_resume";
   if (status === "aborted") return "cancelled";
   if (status === "completing") return "running";
   return "waiting_resume";
@@ -1203,7 +1224,7 @@ function driveResumableSessionStatusMessage(session = {}, transferStatus = "") {
   const received = formatDriveBytes(session.received_bytes || 0);
   const total = formatDriveBytes(session.total_bytes || 0);
   if (session.status === "completing") return "伺服器正在合併、掃描與保存";
-  if (session.status === "failed") return session.error_message || "分段上傳失敗";
+  if (session.status === "failed" && transferStatus !== "waiting_resume") return session.error_message || "分段上傳失敗";
   if (session.status === "aborted") return "分段上傳已中止";
   if (session.status === "completed") return "分段上傳已完成";
   if (transferStatus === "waiting_resume") return `等待瀏覽器續傳，重新選擇同一檔案可接續上傳（${received} / ${total}）`;
@@ -2120,7 +2141,19 @@ async function uploadDriveFile() {
     setTimeout(() => removeDriveTransferRow(transferId), DRIVE_TRANSFER_COMPLETED_VISIBLE_MS);
   } catch (err) {
     const detail = err.message || "雲端硬碟上傳失敗";
-    updateDriveTransferRow(transferId, { status: "failed", phase: "failed", msg: detail, progress_percent: 100 });
+    const row = driveTransferRows.find((item) => item.id === transferId) || {};
+    if (row.kind === "resumable_upload" && row.session_id) {
+      updateDriveTransferRow(transferId, {
+        status: "waiting_resume",
+        phase: "waiting_resume",
+        msg: `${detail}；請按「選同檔續傳」接續已上傳分段`,
+        progress_percent: row.progress_percent,
+      });
+      try { await restoreResumableUploadSessions(); } catch (_) {}
+    } else {
+      updateDriveTransferRow(transferId, { status: "failed", phase: "failed", msg: detail, progress_percent: 100 });
+    }
+    input.value = "";
     alert(detail);
   }
 }
@@ -2136,6 +2169,21 @@ function syncDriveCsrfFromCookie() {
 async function currentDriveCsrfToken({ force = false } = {}) {
   const token = await fetchCsrfToken({ force });
   return token || syncDriveCsrfFromCookie() || "";
+}
+
+function driveUploadSleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms || 0))));
+}
+
+function driveUploadRetryDelayMs(result, attempt) {
+  const retryAfter = Number(result?.retry_after || result?.json?.retry_after_seconds || 0);
+  if (retryAfter > 0) return Math.min(15000, retryAfter * 1000);
+  return Math.min(8000, 750 * Math.max(1, attempt));
+}
+
+function driveUploadShouldRetryResult(result) {
+  const status = Number(result?.status || 0);
+  return status === 429 || status === 503 || result?.json?.error === "server_busy" || result?.json?.code === "server_busy";
 }
 
 async function xhrUploadWithProgress(url, form, csrf, onProgress, { retryOnCsrf = true } = {}) {
@@ -2155,7 +2203,12 @@ async function xhrUploadWithProgress(url, form, csrf, onProgress, { retryOnCsrf 
         json = {};
       }
       syncDriveCsrfFromCookie();
-      resolve({ status: xhr.status, json });
+      resolve({
+        status: xhr.status,
+        json,
+        retry_after: xhr.getResponseHeader("Retry-After") || "",
+        backpressure: xhr.getResponseHeader("X-Hackme-Backpressure") || "",
+      });
     };
     xhr.onerror = () => reject(new Error("上傳連線失敗"));
     xhr.ontimeout = () => reject(new Error("上傳逾時"));
@@ -2335,17 +2388,14 @@ async function uploadDriveBlobResumable({
   const remembered = session ? "" : rememberedDriveResumableUpload(storageKey);
   if (remembered) {
     const existing = await getDriveResumableUploadStatus(remembered, csrf);
-    if (
-      existing
-      && existing.status !== "completed"
-      && existing.filename === filename
-      && Number(existing.total_bytes || 0) === totalBytes
-      && existing.target === target
-    ) {
+    if (driveResumableUploadCanResumeSession(existing, { filename, totalBytes, target, privacyMode })) {
       session = existing;
     } else {
       forgetDriveResumableUpload(storageKey);
     }
+  }
+  if (!session) {
+    session = await findDriveResumableUploadSessionForBlob({ filename, totalBytes, target, privacyMode, csrf });
   }
   if (!session) {
     session = await startDriveResumableUploadSession({
@@ -2388,22 +2438,35 @@ async function uploadDriveBlobResumable({
     const form = new FormData();
     form.append("chunk", chunk, `${filename}.part${index}`);
     const uploadedBeforeChunk = uploadedBytes;
-    const { status, json } = await xhrUploadWithProgress(
-      API + `/cloud-drive/resumable-upload/${encodeURIComponent(session.session_id)}/chunks/${index}`,
-      form,
-      csrf,
-      (event) => {
-        const chunkLoaded = event.lengthComputable ? Math.min(chunk.size, event.loaded || 0) : 0;
-        const loaded = aggregateBaseBytes + uploadedBeforeChunk + chunkLoaded;
-        updateDriveTransferRow(transferId, {
-          phase: "resumable_uploading",
-          loaded_bytes: loaded,
-          total_bytes: totalForDisplay,
-          progress_percent: totalForDisplay > 0 ? (loaded / totalForDisplay) * 100 : null,
-          msg: `${label || filename} 分段 ${index + 1}/${totalChunks} 上傳中`,
-        });
-      }
-    );
+    let uploadResult = null;
+    for (let attempt = 1; attempt <= 5; attempt += 1) {
+      uploadResult = await xhrUploadWithProgress(
+        API + `/cloud-drive/resumable-upload/${encodeURIComponent(session.session_id)}/chunks/${index}`,
+        form,
+        csrf,
+        (event) => {
+          const chunkLoaded = event.lengthComputable ? Math.min(chunk.size, event.loaded || 0) : 0;
+          const loaded = aggregateBaseBytes + uploadedBeforeChunk + chunkLoaded;
+          updateDriveTransferRow(transferId, {
+            phase: "resumable_uploading",
+            loaded_bytes: loaded,
+            total_bytes: totalForDisplay,
+            progress_percent: totalForDisplay > 0 ? (loaded / totalForDisplay) * 100 : null,
+            msg: `${label || filename} 分段 ${index + 1}/${totalChunks} 上傳中`,
+          });
+        }
+      );
+      if (!driveUploadShouldRetryResult(uploadResult)) break;
+      const delayMs = driveUploadRetryDelayMs(uploadResult, attempt);
+      updateDriveTransferRow(transferId, {
+        status: "running",
+        phase: "retry_wait",
+        msg: `${label || filename} 分段 ${index + 1}/${totalChunks} 暫時被限流，${Math.ceil(delayMs / 1000)} 秒後重試`,
+      });
+      await driveUploadSleep(delayMs);
+    }
+    const status = Number(uploadResult?.status || 0);
+    const json = uploadResult?.json || {};
     if (status < 200 || status >= 300 || !json.ok) {
       throw new Error(json.msg || `分段 ${index + 1} 上傳失敗（HTTP ${status}）`);
     }

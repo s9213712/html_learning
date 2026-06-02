@@ -75,6 +75,9 @@ def test_profile_friends_panel_is_wired_as_user_module():
     assert "profile_density" in profile_js
     assert "profile_style: collectProfileStyleFromForm()" in profile_js
     assert 'avatar_size: "140"' in profile_js
+    profiles_py = (ROOT / "services" / "users" / "profiles.py").read_text(encoding="utf-8")
+    assert "range(100, 225, 5)" in profiles_py
+    assert '"avatar_size": "140"' in profiles_py
     assert 'const MAX_PROFILE_AVATAR_SIZE = 220' in profile_js
     assert 'numeric <= 90' in profile_js
     assert "function previewProfileAppearanceFromForm()" in profile_js

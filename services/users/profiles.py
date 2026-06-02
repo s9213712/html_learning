@@ -27,7 +27,7 @@ PROFILE_ACCENTS = {"default", "ocean", "sunrise", "forest", "mono", "violet", "r
 PROFILE_DENSITIES = {"comfortable", "compact"}
 PROFILE_BANNERS = {"none", "aurora", "neon_grid", "paper", "night_sky", "terminal"}
 PROFILE_AVATAR_FRAMES = {"none", "soft_ring", "neon", "pixel", "botanical", "crown"}
-PROFILE_AVATAR_SIZE_STEPS = {str(value) for value in range(30, 95, 5)}
+PROFILE_AVATAR_SIZE_STEPS = {str(value) for value in range(100, 225, 5)}
 PROFILE_AVATAR_SIZES = {"large", "xl", "hero", *PROFILE_AVATAR_SIZE_STEPS}
 PROFILE_NAME_FONTS = {"system", "rounded", "serif", "mono", "display"}
 PROFILE_NAME_SIZES = {"normal", "large", "hero"}
@@ -37,7 +37,7 @@ PROFILE_BACKGROUND_TONES = {"soft", "standard", "bold"}
 PROFILE_STYLE_DEFAULTS = {
     "banner": "none",
     "avatar_frame": "soft_ring",
-    "avatar_size": "55",
+    "avatar_size": "140",
     "name_font": "system",
     "name_size": "large",
     "sticker": "none",
