@@ -129,7 +129,8 @@
     const preferred = String(policy.default_mode || policy.recommended_mode || "").trim();
     if (preferred) return preferred;
     if (playback?.mode === "hls") return "prepared_hls";
-    return "direct";
+    if (playback?.mode === "realtime_proxy") return "realtime_proxy";
+    return "prepared_hls";
   }
   function selectedSharedServiceMode(playback={}) {
     const options = sharedStreamingOptions(playback);
@@ -145,8 +146,7 @@
     if (availableModes.has(preferred)) return preferred;
     if (availableModes.has("prepared_hls")) return "prepared_hls";
     if (availableModes.has("realtime_proxy")) return "realtime_proxy";
-    if (availableModes.has("direct")) return "direct";
-    return preferred || "direct";
+    return preferred || "realtime_proxy";
   }
   function saveSharedServiceMode(mode) {
     try {
@@ -1142,19 +1142,8 @@
       return;
     }
     clearSharedPlaybackAction();
-    const directFallbackAllowed = playback.direct_fallback_allowed !== false;
     renderSharedQualityControl(playback);
     const selectedService = selectedSharedServiceMode(playback);
-    if (selectedService === "direct") {
-      if (!directFallbackAllowed) {
-        player.removeAttribute("src");
-        setMsg(playback.stream_warning || "此影音不允許直接串流，請改用其他方案。", true);
-        return;
-      }
-      player.src = playback.fallback_url || playback.stream_url || "";
-      setMsg("目前使用 Basic 直接串流。");
-      return;
-    }
     if (selectedService === "realtime_proxy") {
       const url = sharedRealtimeProxyUrl(playback, 0);
       if (!url) {
@@ -1169,7 +1158,7 @@
     const preferred = preferredSharedQuality(playback);
     const preferredUrl = preferred?.playlistUrl || playback.master_url || "";
     if (playback.mode === "hls" && browserSupportsNativeHls(video.media_type)) {
-      player.src = preferredUrl || (directFallbackAllowed ? (playback.fallback_url || "") : "");
+      player.src = preferredUrl || "";
       player.addEventListener("stalled", () => fallbackSharedPlaybackToLowerQuality(playback, "原生 HLS 偵測到載入停滯"));
       player.addEventListener("waiting", () => fallbackSharedPlaybackToLowerQuality(playback, "原生 HLS 偵測到等待資料"));
       player.addEventListener("error", () => {
@@ -1177,10 +1166,7 @@
           setMsg("正在跳轉到指定時間，暫不因播放錯誤切換來源。");
           return;
         }
-        if (!fallbackSharedPlaybackToLowerQuality(playback, "原生 HLS 播放錯誤") && directFallbackAllowed) {
-          player.src = playback.fallback_url || playback.stream_url || "";
-          setMsg("HLS 播放失敗，已改用直接串流。", true);
-        }
+        fallbackSharedPlaybackToLowerQuality(playback, "原生 HLS 播放錯誤");
       }, { once: true });
       setMsg(preferred ? `Safari / 原生 HLS 已啟用，預設 ${preferred.label}。` : "Safari / 原生 HLS 已啟用。");
       return;
@@ -1218,31 +1204,39 @@
           }
           if (!data?.fatal) return;
           destroySharedPlaybackArtifacts();
-          if (directFallbackAllowed) {
-            player.src = playback.fallback_url || playback.stream_url || "";
-            setMsg(`HLS.js 播放失敗，已改用直接串流。${data?.details ? ` (${data.details})` : ""}`, true);
+          const proxyUrl = sharedRealtimeProxyUrl(playback, 0);
+          if (proxyUrl && playback?.realtime_proxy?.available !== false) {
+            player.src = proxyUrl;
+            setMsg(`HLS.js 播放失敗，已改用即時轉封裝。${data?.details ? ` (${data.details})` : ""}`, true);
             return;
           }
           player.removeAttribute("src");
-          setMsg(`HLS.js 播放失敗，且此影音不允許主程序直接解密串流。${data?.details ? ` (${data.details})` : ""}`, true);
+          setMsg(`HLS.js 播放失敗，且即時轉封裝目前不可用。${data?.details ? ` (${data.details})` : ""}`, true);
         });
         sharedHls.loadSource(playback.master_url);
         sharedHls.attachMedia(player);
         setMsg("已使用 HLS.js 播放；桌機 Chrome / Firefox / Edge 可穩定播放 HLS。");
         return;
       } catch (err) {
-        if (directFallbackAllowed) {
-          player.src = playback.fallback_url || playback.stream_url || "";
-          setMsg(`HLS.js 初始化失敗，已改用直接串流。${err?.message ? ` (${err.message})` : ""}`, true);
+        const proxyUrl = sharedRealtimeProxyUrl(playback, 0);
+        if (proxyUrl && playback?.realtime_proxy?.available !== false) {
+          player.src = proxyUrl;
+          setMsg(`HLS.js 初始化失敗，已改用即時轉封裝。${err?.message ? ` (${err.message})` : ""}`, true);
           return;
         }
         player.removeAttribute("src");
-        setMsg(`HLS.js 初始化失敗，且此影音不允許主程序直接解密串流。${err?.message ? ` (${err.message})` : ""}`, true);
+        setMsg(`HLS.js 初始化失敗，且即時轉封裝目前不可用。${err?.message ? ` (${err.message})` : ""}`, true);
         return;
       }
     }
-    player.src = directFallbackAllowed ? (playback.fallback_url || playback.stream_url || "") : "";
-    setMsg(playback.stream_warning || (playback.high_performance_streaming ? "目前使用高效串流。" : "目前使用直接串流。"));
+    const proxyUrl = sharedRealtimeProxyUrl(playback, 0);
+    if (proxyUrl && playback?.realtime_proxy?.available !== false) {
+      player.src = proxyUrl;
+      setMsg(playback.stream_warning || "目前使用即時轉封裝。");
+    } else {
+      player.removeAttribute("src");
+      setMsg(playback.stream_warning || "HLS 尚未就緒，且即時轉封裝目前不可用。", true);
+    }
   }
   $("share-password-form").addEventListener("submit", async (event) => {
     event.preventDefault();

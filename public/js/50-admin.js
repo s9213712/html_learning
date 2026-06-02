@@ -2614,6 +2614,17 @@ async function loadSettings() {
   if ($("s-video-e2ee-derivative-heights")) $("s-video-e2ee-derivative-heights").value = s.video_e2ee_derivative_heights || "720,480";
   if ($("s-video-e2ee-derivative-reject-larger-than-original")) $("s-video-e2ee-derivative-reject-larger-than-original").checked = s.video_e2ee_derivative_reject_larger_than_original !== false;
   if ($("s-video-e2ee-derivative-quota-exempt")) $("s-video-e2ee-derivative-quota-exempt").checked = s.video_e2ee_derivative_quota_exempt !== false;
+  if ($("s-video-hls-cold-cleanup-enabled")) $("s-video-hls-cold-cleanup-enabled").checked = s.video_hls_cold_cleanup_enabled !== false;
+  if ($("s-video-hls-protect-days-after-upload")) $("s-video-hls-protect-days-after-upload").value = s.video_hls_protect_days_after_upload ?? 7;
+  if ($("s-video-hls-warm-plays-30d-below")) $("s-video-hls-warm-plays-30d-below").value = s.video_hls_warm_plays_30d_below ?? 20;
+  if ($("s-video-hls-cold-plays-30d-below")) $("s-video-hls-cold-plays-30d-below").value = s.video_hls_cold_plays_30d_below ?? 5;
+  if ($("s-video-hls-cold-no-play-days")) $("s-video-hls-cold-no-play-days").value = s.video_hls_cold_no_play_days ?? 14;
+  if ($("s-video-hls-very-cold-no-play-days")) $("s-video-hls-very-cold-no-play-days").value = s.video_hls_very_cold_no_play_days ?? 90;
+  if ($("s-video-hls-rebuild-plays-24h")) $("s-video-hls-rebuild-plays-24h").value = s.video_hls_rebuild_plays_24h ?? 3;
+  if ($("s-video-hls-rebuild-plays-7d")) $("s-video-hls-rebuild-plays-7d").value = s.video_hls_rebuild_plays_7d ?? 5;
+  if ($("s-video-hls-warm-keep-variants")) $("s-video-hls-warm-keep-variants").value = s.video_hls_warm_keep_variants || "original,480p";
+  if ($("s-video-hls-mobile-floor-keep-variants")) $("s-video-hls-mobile-floor-keep-variants").value = s.video_hls_mobile_floor_keep_variants || "480p";
+  if ($("s-video-hls-cold-cleanup-max-assets-per-run")) $("s-video-hls-cold-cleanup-max-assets-per-run").value = s.video_hls_cold_cleanup_max_assets_per_run ?? 25;
   if ($("s-site-bg")) $("s-site-bg").value = s.site_bg || "#11131d";
   if ($("s-site-theme-mode")) $("s-site-theme-mode").value = s.site_theme_mode || "dark";
   if ($("s-site-surface")) $("s-site-surface").value = s.site_surface || "#1b2030";
@@ -4845,6 +4856,17 @@ async function saveSettings() {
     video_e2ee_derivative_heights: ($("s-video-e2ee-derivative-heights")?.value || "720,480").trim(),
     video_e2ee_derivative_reject_larger_than_original: $("s-video-e2ee-derivative-reject-larger-than-original") ? !!$("s-video-e2ee-derivative-reject-larger-than-original").checked : true,
     video_e2ee_derivative_quota_exempt: $("s-video-e2ee-derivative-quota-exempt") ? !!$("s-video-e2ee-derivative-quota-exempt").checked : true,
+    video_hls_cold_cleanup_enabled: $("s-video-hls-cold-cleanup-enabled") ? !!$("s-video-hls-cold-cleanup-enabled").checked : true,
+    video_hls_protect_days_after_upload: parseInt($("s-video-hls-protect-days-after-upload")?.value || "7", 10) || 0,
+    video_hls_warm_plays_30d_below: parseInt($("s-video-hls-warm-plays-30d-below")?.value || "20", 10) || 20,
+    video_hls_cold_plays_30d_below: parseInt($("s-video-hls-cold-plays-30d-below")?.value || "5", 10) || 0,
+    video_hls_cold_no_play_days: parseInt($("s-video-hls-cold-no-play-days")?.value || "14", 10) || 14,
+    video_hls_very_cold_no_play_days: parseInt($("s-video-hls-very-cold-no-play-days")?.value || "90", 10) || 90,
+    video_hls_rebuild_plays_24h: parseInt($("s-video-hls-rebuild-plays-24h")?.value || "3", 10) || 3,
+    video_hls_rebuild_plays_7d: parseInt($("s-video-hls-rebuild-plays-7d")?.value || "5", 10) || 5,
+    video_hls_warm_keep_variants: ($("s-video-hls-warm-keep-variants")?.value || "original,480p").trim(),
+    video_hls_mobile_floor_keep_variants: ($("s-video-hls-mobile-floor-keep-variants")?.value || "480p").trim(),
+    video_hls_cold_cleanup_max_assets_per_run: parseInt($("s-video-hls-cold-cleanup-max-assets-per-run")?.value || "25", 10) || 25,
     site_theme_mode: $("s-site-theme-mode")?.value || "dark",
     site_bg: $("s-site-bg")?.value || "#11131d",
     site_surface: $("s-site-surface")?.value || "#1b2030",

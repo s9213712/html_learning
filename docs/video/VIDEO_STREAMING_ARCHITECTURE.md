@@ -68,8 +68,8 @@ Current status:
 The current platform can already stream plain media with HTTP range support, but
 large files still show noticeable startup delay in one important path:
 
-- `standard_plain`: direct file streaming is acceptable for small and medium
-  media.
+- `standard_plain`: direct file streaming is acceptable for compatible Cloud
+  Drive preview and downloads, but not as a published-video playback mode.
 - `server_encrypted`: the current implementation decrypts the entire file into
   memory before range slicing, which creates large startup latency and memory
   pressure for big video and audio files.
@@ -173,9 +173,9 @@ customer explanation lives in
 
 | Tier | Playback route | Cost driver | Operational note |
 | --- | --- | --- | --- |
-| Basic | direct streaming | file I/O and bandwidth only | fastest to start, but browser codec/container support determines whether MKV, E-AC-3, multi-audio, or embedded subtitles work well |
-| Standard | realtime proxy / transwrap | per-viewer ffmpeg CPU | useful for quick MKV/audio compatibility without derivative storage; protected by feature flag, strict concurrency limits, timeout cleanup, and normal video/share ACL |
-| Premium | prepared HLS | preprocessing CPU, derivative storage, cache invalidation, cleanup | preferred for public/shared large media, multi-audio, multi-subtitle, stable seek, and future CDN/cache acceleration |
+| Cloud Drive Basic | direct browser preview | file I/O and bandwidth only | only for browser-compatible personal-file preview/download; not a Video Platform publish mode |
+| Video Standard | realtime proxy / transwrap | per-viewer ffmpeg CPU | fallback while HLS is unavailable; protected by feature flag, strict concurrency limits, timeout cleanup, and normal video/share ACL |
+| Video Premium | prepared HLS | preprocessing CPU, derivative storage, cache invalidation, cleanup | default for public/shared published media, multi-audio, multi-subtitle, stable seek, mobile playback, and future CDN/cache acceleration |
 
 `lcd_OS` is a useful reference for the Standard route: it keeps CPU low by
 copying video when possible and only transcoding the selected audio track to a
@@ -444,8 +444,8 @@ both video renditions and alternate audio renditions.
 
 1. User uploads or publishes a media file.
 2. Server inspects metadata with `ffprobe`.
-3. Policy decides whether the media should remain direct-only or get a stream
-   derivative.
+3. Policy decides whether Cloud Drive preview may direct-play the original, or
+   whether published video needs a stream derivative.
 4. If needed, a background job creates HLS output.
 
 Suggested initial thresholds:
@@ -478,12 +478,12 @@ When a client opens a video page:
 
 1. server resolves ACL
 2. server chooses playback mode:
-   - `direct`
    - `hls`
-   - `unavailable`
+   - `realtime_proxy`
+   - `waiting_stream` / `unavailable`
 3. frontend uses:
-   - native `<video>` for direct mode
    - `hls.js` or native HLS support for HLS mode
+   - native `<video>` only for Cloud Drive direct preview, not Video Platform
 
 ## API Shape
 
@@ -509,36 +509,28 @@ Current baseline response:
   "ok": true,
   "mode": "hls",
   "master_url": "/api/videos/123/hls/master.m3u8",
-  "fallback_url": "/api/videos/123/stream",
+  "stream_url": "",
+  "fallback_url": "",
+  "direct_fallback_allowed": false,
   "source_mode": "server_encrypted",
   "variants": [{"name": "q720", "label": "720p"}],
   "audio_tracks": [{"name": "audio_01_jpn", "label": "音軌 1 (jpn)"}],
   "subtitles": [{"name": "sub01_zh", "label": "中文"}],
   "service_policy": {
-    "customer_selectable_modes": ["direct", "realtime_proxy", "prepared_hls"],
+    "customer_selectable_modes": ["realtime_proxy", "prepared_hls"],
     "default_mode": "prepared_hls",
     "recommended_mode": "prepared_hls",
     "multi_track_recommended_mode": "prepared_hls",
-    "fee_model": "basic_standard_premium",
-    "fee_difference_reason": "服務費差異來自檔案流量、每位觀看者即時 CPU、預處理 worker CPU、衍生檔儲存與快取清理成本。"
+    "fee_model": "standard_premium",
+    "fee_difference_reason": "服務費差異來自每位觀看者即時 CPU、預處理 worker CPU、衍生檔儲存與快取清理成本。Direct 僅保留給 Cloud Drive 相容檔案預覽。"
   },
   "streaming_options": [
-    {
-      "mode": "direct",
-      "service_tier": "basic",
-      "fee_level": "lowest",
-      "billing_basis": "bandwidth_only",
-      "available": true,
-      "cost_drivers": ["file_io", "bandwidth"],
-      "media_support": {"multi_audio": "browser_dependent", "multi_subtitle": "browser_dependent"}
-    },
     {
       "mode": "realtime_proxy",
       "service_tier": "standard",
       "fee_level": "middle",
       "billing_basis": "per_viewer_cpu",
-      "available": false,
-      "implementation_status": "planned",
+      "available": true,
       "cost_drivers": ["ffmpeg_process_per_viewer", "audio_transcode_cpu", "process_cleanup"],
       "media_support": {"multi_audio": "selected_track_only", "multi_subtitle": "external_or_browser_dependent"}
     },
@@ -610,13 +602,15 @@ This preserves the E2EE behavior boundary.
 
 ### Cloud Drive
 
-- keep direct preview for small audio/video
-- allow large video preview to switch to stream mode when a derivative exists
+- use direct preview only when backend metadata marks the file browser-native
+- use realtime proxy or existing prepared HLS for browser-hostile media
+- do not automatically transcode a customer's personal files unless the operator enables it
 
 ### Video Platform
 
-- prefer HLS for large or prepared videos
-- fall back to direct `/stream` only when no derivative exists
+- prefer HLS for published videos
+- fall back to realtime proxy while HLS is unavailable or rebuilding
+- do not expose direct `/stream` as a selectable published-video mode
 
 Suggested player behavior:
 

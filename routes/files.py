@@ -63,6 +63,7 @@ from services.storage.remote_downloads import (
 from services.media.e2ee_streaming import cleanup_e2ee_stream_v2_assets
 from services.media.streaming import (
     cleanup_stream_asset,
+    direct_browser_playback_status,
     get_stream_status,
     mark_stream_asset_processing,
     open_realtime_proxy_stream,
@@ -196,7 +197,13 @@ def register_file_routes(app, deps):
                 return text
         return ""
 
+    def _cloud_drive_auto_copy_only_hls_enabled():
+        raw = str(os.environ.get("HACKME_CLOUD_DRIVE_AUTO_COPY_HLS", "") or "").strip().lower()
+        return raw in {"1", "true", "yes", "on"}
+
     def _cloud_drive_needs_copy_only_hls(file_row):
+        if not _cloud_drive_auto_copy_only_hls_enabled():
+            return False
         if not file_row or is_e2ee_file(file_row):
             return False
         try:
@@ -4293,6 +4300,7 @@ def register_file_routes(app, deps):
                 stream_asset = get_stream_status(conn, file_row=row, include_segments=False)
                 if preview.get("category") in {"audio", "video"} or stream_asset:
                     proxy_state = realtime_proxy_availability(row)
+                    direct_status = direct_browser_playback_status(row, storage_root=storage_root, ffprobe_bin=ffprobe_bin)
                     stream_asset = stream_asset or {}
                     stream_payload = {
                         "status": stream_asset.get("status") or "",
@@ -4306,6 +4314,8 @@ def register_file_routes(app, deps):
                             "selected_audio_query_param": "audio",
                             "start_seconds_query_param": "start",
                         },
+                        "direct_browser_playback": direct_status,
+                        "direct_url": f"/api/cloud-drive/files/{file_id}/preview/content" if direct_status.get("available") else "",
                         "error_message": stream_asset.get("error_message") or "",
                         "updated_at": stream_asset.get("updated_at") or "",
                         "premium_hls_profile_policy": stream_asset.get("premium_hls_profile_policy") or {},
@@ -4785,6 +4795,15 @@ def register_file_routes(app, deps):
             category, mime_type = preview_category(preview_row)
             if category not in {"audio", "video", "image", "pdf"}:
                 return json_resp({"ok": False, "msg": "此檔案類型不支援 inline content preview"}), 415
+            if category in {"audio", "video"}:
+                direct_status = direct_browser_playback_status(row, storage_root=storage_root, ffprobe_bin=ffprobe_bin)
+                if not direct_status.get("available"):
+                    return json_resp({
+                        "ok": False,
+                        "msg": direct_status.get("detail") or "此媒體不適合直接由瀏覽器播放，請使用即時轉封裝或 HLS。",
+                        "reason": direct_status.get("reason") or "direct_not_browser_native",
+                        "direct_browser_playback": direct_status,
+                    }), 415
             log_file_access(conn, file_id=file_id, actor_user_id=actor["id"], action="preview_content", result="allowed", reason=category, ip=get_client_ip(), user_agent=get_ua())
             conn.commit()
             try:

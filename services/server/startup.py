@@ -231,7 +231,7 @@ def start_daily_snapshot_worker(*, snapshot_service, get_system_settings, save_s
     return worker
 
 
-def start_storage_maintenance_worker(*, get_db, run_storage_maintenance_if_due, get_system_settings, save_settings, audit, shutdown_event=None):
+def start_storage_maintenance_worker(*, get_db, run_storage_maintenance_if_due, get_system_settings, save_settings, audit, storage_root=None, shutdown_event=None):
     interval = _int_env("HTML_LEARNING_STORAGE_MAINTENANCE_CHECK_INTERVAL_SECONDS", 3600, minimum=60)
 
     def loop():
@@ -246,6 +246,7 @@ def start_storage_maintenance_worker(*, get_db, run_storage_maintenance_if_due, 
                     settings=get_system_settings(),
                     save_settings=save_settings,
                     actor_user_id=0,
+                    storage_root=storage_root,
                 )
                 if result.get("ran"):
                     conn.commit()

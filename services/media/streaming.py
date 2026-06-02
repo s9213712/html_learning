@@ -9,7 +9,7 @@ import tempfile
 import threading
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 try:
@@ -431,6 +431,117 @@ def _file_media_type(file_row):
     if mime.startswith("audio/") or any(filename.endswith(ext) for ext in (".mp3", ".m4a", ".aac", ".flac", ".wav", ".weba", ".opus", ".oga", ".ogg")):
         return "audio"
     return "video"
+
+
+def _source_filename_ext(file_row):
+    filename = str(_row_value(file_row, "original_filename_plain_for_public", "") or "").strip().lower()
+    return Path(filename).suffix.lower()
+
+
+def _declared_or_guessed_mime(file_row):
+    filename = str(_row_value(file_row, "original_filename_plain_for_public", "") or "")
+    stored = str(_row_value(file_row, "mime_type_plain_for_public", "") or "").strip().lower()
+    guessed = str(mimetypes.guess_type(filename)[0] or "").strip().lower()
+    generic = {"", "application/octet-stream", "binary/octet-stream", "application/binary"}
+    if stored in generic:
+        return guessed or stored or "application/octet-stream"
+    if guessed.startswith(("video/", "audio/")) and not stored.startswith(("video/", "audio/")):
+        return guessed
+    return stored or guessed or "application/octet-stream"
+
+
+def _audio_stream_browser_direct_friendly(stream):
+    codec = str((stream or {}).get("codec") or "").lower()
+    codec_tag = str((stream or {}).get("codec_tag") or "").lower()
+    channels = _safe_int((stream or {}).get("channels"), 0)
+    if channels > 2:
+        return False
+    return codec in {"aac", "mp3", "opus", "vorbis", "flac", "pcm_s16le", "pcm_s24le"} or codec_tag in {"mp4a", "mp3"}
+
+
+def _metadata_browser_direct_friendly(metadata, *, ext="", mime=""):
+    media_type = str((metadata or {}).get("media_type") or "")
+    ext = str(ext or "").lower()
+    mime = str(mime or "").lower()
+    codec = str((metadata or {}).get("codec") or "").lower()
+    codec_tag = str((metadata or {}).get("codec_tag") or "").lower()
+    audio_streams = list((metadata or {}).get("audio_streams") or [])
+    if media_type == "audio":
+        if ext in {".mp3", ".wav", ".weba", ".opus", ".oga", ".ogg", ".m4a", ".aac", ".flac"}:
+            return _audio_stream_browser_direct_friendly({
+                "codec": codec,
+                "codec_tag": codec_tag,
+                "channels": _safe_int((audio_streams[0] if audio_streams else {}).get("channels"), 0),
+            })
+        return mime.startswith("audio/") and _audio_stream_browser_direct_friendly({
+            "codec": codec,
+            "codec_tag": codec_tag,
+            "channels": _safe_int((audio_streams[0] if audio_streams else {}).get("channels"), 0),
+        })
+    if ext not in {".mp4", ".m4v", ".webm"}:
+        return False
+    if ext in {".mp4", ".m4v"}:
+        video_ok = codec in {"h264", "avc1"} or codec_tag == "avc1"
+        audio_ok = not audio_streams or (len(audio_streams) == 1 and _audio_stream_browser_direct_friendly(audio_streams[0]))
+        return bool(video_ok and audio_ok)
+    if ext == ".webm":
+        video_ok = codec in {"vp8", "vp9", "av1", "av01"} or codec_tag == "av01"
+        audio_ok = not audio_streams or (len(audio_streams) == 1 and _audio_stream_browser_direct_friendly(audio_streams[0]))
+        return bool(video_ok and audio_ok)
+    return False
+
+
+def direct_browser_playback_status(file_row, *, storage_root=None, ffprobe_bin="ffprobe"):
+    ext = _source_filename_ext(file_row)
+    mime = _declared_or_guessed_mime(file_row)
+    media_type = _file_media_type(file_row)
+    incompatible_exts = {".mkv", ".avi", ".ts", ".m2ts", ".mts", ".flv", ".wmv", ".ogv"}
+    if ext in incompatible_exts:
+        return {
+            "available": False,
+            "reason": f"container_{ext[1:] or 'unknown'}_not_browser_native",
+            "detail": "原始容器不是瀏覽器穩定支援的直接播放格式，請使用 HLS 或即時轉封裝。",
+            "mime_type": mime,
+            "extension": ext,
+        }
+    direct_exts = {".mp4", ".m4v", ".webm", ".mp3", ".wav", ".weba", ".opus", ".oga", ".ogg", ".m4a", ".aac", ".flac"}
+    if ext not in direct_exts and not mime.startswith(("video/mp4", "video/webm", "audio/")):
+        return {
+            "available": False,
+            "reason": "unknown_direct_browser_support",
+            "detail": "原始格式無法判定為瀏覽器原生可播放，請使用 HLS 或即時轉封裝。",
+            "mime_type": mime,
+            "extension": ext,
+        }
+    metadata = None
+    if storage_root and not is_server_encrypted_file(file_row):
+        try:
+            source_path = resolve_file_storage_path(storage_root, file_row)
+            if source_path.exists():
+                metadata = _parse_probe_metadata(_run_probe(source_path, ffprobe_bin=ffprobe_bin))
+        except Exception:
+            metadata = None
+    if metadata is not None:
+        ok = _metadata_browser_direct_friendly(metadata, ext=ext, mime=mime)
+        if not ok:
+            return {
+                "available": False,
+                "reason": "codec_or_track_not_browser_native",
+                "detail": "原始 codec、音軌數或聲道配置不適合直接交給瀏覽器播放。",
+                "mime_type": mime,
+                "extension": ext,
+                "codec": str(metadata.get("codec") or ""),
+                "audio_codec": str(metadata.get("audio_codec") or ""),
+                "audio_tracks": len(metadata.get("audio_streams") or []),
+            }
+    return {
+        "available": True,
+        "reason": "browser_native_likely",
+        "detail": "原始格式屬於瀏覽器原生播放的常見組合。",
+        "mime_type": mime,
+        "extension": ext,
+        "media_type": media_type,
+    }
 
 
 def should_auto_prepare_stream(file_row, *, visibility="public"):
@@ -1323,6 +1434,21 @@ def _hls_audio_streams(metadata):
     return rows
 
 
+def _hls_embedded_audio_needs_stereo_transcode(metadata):
+    if _ffmpeg_force_stream_copy_enabled():
+        return False
+    if str((metadata or {}).get("media_type") or "") != "video":
+        return False
+    audio_streams = _hls_audio_streams(metadata)
+    if len(audio_streams) != 1:
+        return False
+    stream = audio_streams[0]
+    channels = _safe_int(stream.get("channels"), 0)
+    if channels > 2:
+        return True
+    return not _audio_codec_browser_hls_friendly(stream)
+
+
 def _realtime_proxy_audio_track_rows(metadata):
     rows = []
     for audio_index, stream in enumerate(_hls_audio_streams(metadata), start=1):
@@ -1855,6 +1981,11 @@ def _hls_variant_specs(metadata, *, external_audio=False):
             "copy_codecs": _metadata_supports_stream_copy(metadata),
             "target_height": 0,
         }]
+    original_audio_stereo_transcode = bool(
+        not external_audio
+        and _metadata_supports_video_stream_copy(metadata)
+        and _hls_embedded_audio_needs_stereo_transcode(metadata)
+    )
     original_spec = {
         "name": "original",
         "label": f"原畫質 {source_height}p" if source_height else "原畫質",
@@ -1862,7 +1993,12 @@ def _hls_variant_specs(metadata, *, external_audio=False):
         "height": source_height,
         "bitrate": source_bitrate,
         "codec": metadata.get("codec_tag") or metadata.get("codec") or "",
-        "copy_codecs": _metadata_supports_video_stream_copy(metadata) if external_audio else _metadata_supports_stream_copy(metadata),
+        "copy_codecs": (
+            _metadata_supports_video_stream_copy(metadata)
+            if external_audio
+            else (_metadata_supports_stream_copy(metadata) and not original_audio_stereo_transcode)
+        ),
+        "copy_video_transcode_audio": original_audio_stereo_transcode,
         "target_height": 0,
     }
     quality_specs = []
@@ -1903,6 +2039,7 @@ def _run_ffmpeg_hls(
     target_height=0,
     target_bitrate=0,
     copy_codecs=False,
+    copy_video_transcode_audio=False,
     video_only=False,
     audio_stream_index=None,
     progress_callback=None,
@@ -1934,6 +2071,17 @@ def _run_ffmpeg_hls(
         cmd.extend(["-map", "0:v:0?", "-map", "0:a:0?", "-sn", "-dn"])
     if copy_codecs:
         cmd.extend(["-c", "copy"])
+    elif copy_video_transcode_audio and media_type == "video" and not video_only:
+        cmd.extend([
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-b:a",
+            _hls_audio_bitrate(),
+            "-ac",
+            "2",
+        ])
     elif media_type == "audio":
         cmd.extend(["-c:a", "aac", "-b:a", _hls_audio_bitrate(), "-ac", "2"])
     else:
@@ -1969,6 +2117,8 @@ def _run_ffmpeg_hls(
                 "aac",
                 "-b:a",
                 _hls_audio_bitrate(),
+                "-ac",
+                "2",
             ])
     cmd.extend([
         "-f",
@@ -2054,6 +2204,7 @@ def _run_ffmpeg_hls(
                 target_height=target_height,
                 target_bitrate=target_bitrate,
                 copy_codecs=False,
+                copy_video_transcode_audio=copy_video_transcode_audio,
                 video_only=video_only,
                 audio_stream_index=audio_stream_index,
                 progress_callback=progress_callback,
@@ -2306,6 +2457,7 @@ def prepare_stream_asset(
                         target_height=spec.get("target_height") or 0,
                         target_bitrate=spec.get("bitrate") or 0,
                         copy_codecs=bool(spec.get("copy_codecs")),
+                        copy_video_transcode_audio=bool(spec.get("copy_video_transcode_audio")),
                         video_only=bool(external_audio),
                         progress_callback=(
                             (lambda ratio, low=start_percent, high=end_percent, label=spec.get("label"), copied=bool(spec.get("copy_codecs")): progress_callback(
@@ -2576,6 +2728,313 @@ def cleanup_stream_asset(conn, *, uploaded_file_id, storage_root):
     }
 
 
+
+def _as_bool(value, default=False):
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on", "y"}
+
+
+def _policy_int(settings, key, default, minimum=0, maximum=36500):
+    try:
+        value = int((settings or {}).get(key, default))
+    except Exception:
+        value = int(default)
+    return max(int(minimum), min(int(maximum), value))
+
+
+def cold_hls_policy(settings=None):
+    settings = settings or {}
+    raw_keep = str(settings.get("video_hls_warm_keep_variants") or "original,480p")
+    keep_variants = [part.strip().lower() for part in raw_keep.split(",") if part.strip()]
+    raw_mobile_keep = str(settings.get("video_hls_mobile_floor_keep_variants") or "480p")
+    mobile_keep_variants = [part.strip().lower() for part in raw_mobile_keep.split(",") if part.strip()]
+    return {
+        "enabled": _as_bool(settings.get("video_hls_cold_cleanup_enabled"), True),
+        "protect_days_after_upload": _policy_int(settings, "video_hls_protect_days_after_upload", 7, 0, 3650),
+        "warm_plays_30d_below": _policy_int(settings, "video_hls_warm_plays_30d_below", 20, 1, 1000000),
+        "cold_plays_30d_below": _policy_int(settings, "video_hls_cold_plays_30d_below", 5, 0, 1000000),
+        "cold_no_play_days": _policy_int(settings, "video_hls_cold_no_play_days", 14, 1, 3650),
+        "very_cold_no_play_days": _policy_int(settings, "video_hls_very_cold_no_play_days", 90, 1, 36500),
+        "rebuild_plays_24h": _policy_int(settings, "video_hls_rebuild_plays_24h", 3, 1, 1000000),
+        "rebuild_plays_7d": _policy_int(settings, "video_hls_rebuild_plays_7d", 5, 1, 1000000),
+        "warm_keep_variants": keep_variants or ["original", "480p"],
+        "mobile_floor_keep_variants": mobile_keep_variants or ["480p"],
+        "max_assets_per_run": _policy_int(settings, "video_hls_cold_cleanup_max_assets_per_run", 25, 1, 10000),
+    }
+
+
+def _iso(dt):
+    return dt.isoformat(timespec="seconds")
+
+
+def _variant_keep_token_matches(variant, token):
+    token = str(token or "").strip().lower()
+    name = str(variant.get("name") if isinstance(variant, dict) else variant["name"] or "").strip().lower()
+    height = _safe_int(variant.get("height") if isinstance(variant, dict) else variant["height"], 0)
+    media_kind = str(variant.get("media_kind") if isinstance(variant, dict) else variant["media_kind"] or "variant").strip().lower()
+    if media_kind != "variant":
+        return True
+    if token == "original" and name == "original":
+        return True
+    if token.endswith("p") and token[:-1].isdigit():
+        return height == int(token[:-1])
+    if token.isdigit():
+        return height == int(token)
+    return name == token
+
+
+def _variant_rel_dir(row):
+    playlist_path = str(row["playlist_path"] or "")
+    if not playlist_path:
+        return ""
+    return str(Path(playlist_path).parent)
+
+
+def _remove_variant_rows(conn, *, storage_root, variants):
+    removed = {"variants_removed": 0, "segments_removed": 0, "bytes_removed": 0, "dirs_removed": []}
+    for row in variants or []:
+        variant_id = int(row["id"])
+        for segment in conn.execute("SELECT path, byte_size FROM media_stream_segments WHERE variant_id=?", (variant_id,)).fetchall():
+            removed["segments_removed"] += 1
+            removed["bytes_removed"] += _safe_int(segment["byte_size"], 0)
+        rel_dir = _variant_rel_dir(row)
+        if rel_dir:
+            try:
+                target = resolve_storage_path(storage_root, rel_dir)
+                if target.exists():
+                    removed["bytes_removed"] += _directory_total_bytes(target)
+                    shutil.rmtree(target, ignore_errors=True)
+                    removed["dirs_removed"].append(rel_dir)
+            except Exception:
+                pass
+        conn.execute("DELETE FROM media_stream_segments WHERE variant_id=?", (variant_id,))
+        conn.execute("DELETE FROM media_stream_variants WHERE id=?", (variant_id,))
+        removed["variants_removed"] += 1
+    return removed
+
+
+def _rewrite_master_manifest_from_db(conn, *, asset_id, storage_root):
+    asset = conn.execute("SELECT * FROM media_stream_assets WHERE id=?", (int(asset_id),)).fetchone()
+    if not asset or not asset["master_manifest_path"]:
+        return False
+    variants = conn.execute(
+        "SELECT * FROM media_stream_variants WHERE asset_id=? AND media_kind='variant' ORDER BY id ASC",
+        (int(asset_id),),
+    ).fetchall()
+    audio_tracks = conn.execute(
+        "SELECT * FROM media_stream_variants WHERE asset_id=? AND media_kind='audio' ORDER BY is_default DESC, id ASC",
+        (int(asset_id),),
+    ).fetchall()
+    if not variants:
+        return False
+    manifest_rows = []
+    for row in variants:
+        manifest_rows.append({
+            "name": str(row["name"] or ""),
+            "playlist_name": Path(str(row["playlist_path"] or "playlist.m3u8")).name or "playlist.m3u8",
+            "bitrate": _safe_int(row["bitrate"], 0),
+            "width": _safe_int(row["width"], 0),
+            "height": _safe_int(row["height"], 0),
+            "codec": str(row["codec"] or ""),
+        })
+    audio_rows = []
+    for row in audio_tracks:
+        audio_rows.append({
+            "name": str(row["name"] or ""),
+            "playlist_name": Path(str(row["playlist_path"] or "playlist.m3u8")).name or "playlist.m3u8",
+            "bitrate": _safe_int(row["bitrate"], 0),
+            "codec": str(row["codec"] or "aac"),
+            "label": str(row["label"] or row["language"] or row["name"] or "音軌"),
+            "language": str(row["language"] or "und"),
+            "is_default": bool(row["is_default"]),
+        })
+    target = resolve_storage_path(storage_root, str(asset["master_manifest_path"] or ""))
+    target.parent.mkdir(parents=True, exist_ok=True)
+    _write_master_manifest_variants(target, manifest_rows, audio_tracks=audio_rows)
+    conn.execute("UPDATE media_stream_assets SET updated_at=? WHERE id=?", (_now(), int(asset_id)))
+    return True
+
+
+def prune_stream_asset_variants(conn, *, uploaded_file_id, storage_root, keep_variants=None, dry_run=False):
+    ensure_media_stream_schema(conn)
+    file_id = str(uploaded_file_id or "").strip()
+    asset = _asset_row(conn, file_id)
+    if not asset or str(asset["status"] or "") != "ready":
+        return {"file_id": file_id, "changed": False, "reason": "asset_not_ready"}
+    keep_variants = list(keep_variants or ["original", "480p"])
+    variants = conn.execute(
+        "SELECT * FROM media_stream_variants WHERE asset_id=? AND media_kind='variant' ORDER BY id ASC",
+        (int(asset["id"]),),
+    ).fetchall()
+    remove_rows = []
+    keep_rows = []
+    for row in variants:
+        if any(_variant_keep_token_matches(row, token) for token in keep_variants):
+            keep_rows.append(row)
+        else:
+            remove_rows.append(row)
+    if not remove_rows:
+        return {"file_id": file_id, "changed": False, "reason": "already_pruned", "kept": [str(row["name"] or "") for row in keep_rows]}
+    if not keep_rows:
+        return {"file_id": file_id, "changed": False, "reason": "no_safe_variant_to_keep"}
+    result = {
+        "file_id": file_id,
+        "changed": True,
+        "action": "prune_variants",
+        "kept": [str(row["name"] or "") for row in keep_rows],
+        "removed": [str(row["name"] or "") for row in remove_rows],
+        "dry_run": bool(dry_run),
+    }
+    if dry_run:
+        return result
+    removed = _remove_variant_rows(conn, storage_root=storage_root, variants=remove_rows)
+    _rewrite_master_manifest_from_db(conn, asset_id=int(asset["id"]), storage_root=storage_root)
+    result.update(removed)
+    return result
+
+
+def _video_hls_usage_row(conn, *, now, video_id):
+    cut24 = _iso(now - timedelta(days=1))
+    cut7 = _iso(now - timedelta(days=7))
+    cut30 = _iso(now - timedelta(days=30))
+    row = conn.execute(
+        """
+        SELECT
+            COALESCE(SUM(CASE WHEN counted=1 AND created_at>=? THEN 1 ELSE 0 END), 0) AS plays_24h,
+            COALESCE(SUM(CASE WHEN counted=1 AND created_at>=? THEN 1 ELSE 0 END), 0) AS plays_7d,
+            COALESCE(SUM(CASE WHEN counted=1 AND created_at>=? THEN 1 ELSE 0 END), 0) AS plays_30d,
+            MAX(CASE WHEN counted=1 THEN created_at ELSE NULL END) AS last_played_at
+        FROM video_views
+        WHERE video_id=?
+        """,
+        (cut24, cut7, cut30, int(video_id)),
+    ).fetchone()
+    return {
+        "plays_24h": _safe_int(row["plays_24h"] if row else 0, 0),
+        "plays_7d": _safe_int(row["plays_7d"] if row else 0, 0),
+        "plays_30d": _safe_int(row["plays_30d"] if row else 0, 0),
+        "last_played_at": str(row["last_played_at"] or "") if row else "",
+    }
+
+
+def _days_since(value, now):
+    if not value:
+        return 999999
+    try:
+        return max(0, (now - datetime.fromisoformat(str(value))).days)
+    except Exception:
+        return 999999
+
+
+def _video_hls_policy_action(video_row, usage, policy, *, now):
+    age_days = _days_since(video_row["created_at"], now)
+    last_played_days = _days_since(usage.get("last_played_at"), now)
+    plays_30d = _safe_int(usage.get("plays_30d"), 0)
+    visibility = str(video_row["visibility"] or "public")
+    active_share_count = _safe_int(video_row["active_share_count"], 0) if "active_share_count" in video_row.keys() else 0
+    if age_days < policy["protect_days_after_upload"]:
+        return "keep", "protected_new_upload"
+    if last_played_days >= policy["very_cold_no_play_days"]:
+        if visibility == "private" and active_share_count <= 0:
+            return "delete_all", "very_cold_private_no_share"
+        return "prune_mobile_floor", "very_cold_keep_mobile_floor"
+    if plays_30d < policy["cold_plays_30d_below"] and last_played_days >= policy["cold_no_play_days"]:
+        return "prune_mobile_floor", "cold_keep_mobile_floor"
+    if plays_30d < policy["warm_plays_30d_below"]:
+        return "prune", "warm_storage_saver"
+    return "keep", "active_or_hot"
+
+
+def run_video_hls_cold_cleanup(conn, *, storage_root, settings=None, now=None, dry_run=False):
+    ensure_media_stream_schema(conn)
+    now = now or datetime.now()
+    policy = cold_hls_policy(settings)
+    result = {
+        "enabled": bool(policy["enabled"]),
+        "dry_run": bool(dry_run),
+        "policy": policy,
+        "checked": 0,
+        "kept": 0,
+        "pruned": 0,
+        "deleted": 0,
+        "skipped": 0,
+        "items": [],
+    }
+    if not policy["enabled"]:
+        return result
+    rows = conn.execute(
+        """
+        SELECT v.id AS video_id, v.cloud_file_id, v.created_at, v.visibility, v.status AS video_status,
+               a.id AS asset_id, a.status AS asset_status, a.updated_at AS asset_updated_at,
+               (
+                   SELECT COUNT(*)
+                   FROM video_share_links sl
+                   WHERE sl.video_id = v.id
+                     AND sl.revoked_at IS NULL
+                     AND (sl.expires_at IS NULL OR sl.expires_at='' OR sl.expires_at>?)
+               ) AS active_share_count
+        FROM videos v
+        JOIN media_stream_assets a ON a.uploaded_file_id = v.cloud_file_id
+        WHERE v.deleted_at IS NULL AND v.status='ready' AND a.status='ready'
+        ORDER BY a.updated_at ASC
+        LIMIT ?
+        """,
+        (_iso(now), int(policy["max_assets_per_run"]),),
+    ).fetchall()
+    for row in rows:
+        result["checked"] += 1
+        usage = _video_hls_usage_row(conn, now=now, video_id=int(row["video_id"]))
+        action, reason = _video_hls_policy_action(row, usage, policy, now=now)
+        item = {
+            "video_id": int(row["video_id"]),
+            "file_id": str(row["cloud_file_id"] or ""),
+            "action": action,
+            "reason": reason,
+            "active_share_count": _safe_int(row["active_share_count"], 0),
+            **usage,
+        }
+        if action == "keep":
+            result["kept"] += 1
+        elif action == "prune":
+            prune = prune_stream_asset_variants(
+                conn,
+                uploaded_file_id=row["cloud_file_id"],
+                storage_root=storage_root,
+                keep_variants=policy["warm_keep_variants"],
+                dry_run=dry_run,
+            )
+            item["prune"] = prune
+            if prune.get("changed"):
+                result["pruned"] += 1
+            else:
+                result["skipped"] += 1
+        elif action == "prune_mobile_floor":
+            prune = prune_stream_asset_variants(
+                conn,
+                uploaded_file_id=row["cloud_file_id"],
+                storage_root=storage_root,
+                keep_variants=policy["mobile_floor_keep_variants"],
+                dry_run=dry_run,
+            )
+            item["prune"] = prune
+            if prune.get("changed"):
+                result["pruned"] += 1
+            else:
+                result["skipped"] += 1
+        elif action == "delete_all":
+            if dry_run:
+                item["cleanup"] = {"removed": True, "dry_run": True}
+            else:
+                item["cleanup"] = cleanup_stream_asset(conn, uploaded_file_id=row["cloud_file_id"], storage_root=storage_root)
+            result["deleted"] += 1
+        else:
+            result["skipped"] += 1
+        result["items"].append(item)
+    return result
+
 def _premium_hls_profile_policy(status=None):
     variants = (status or {}).get("variants") if isinstance(status, dict) else []
     audio_tracks = (status or {}).get("audio_tracks") if isinstance(status, dict) else []
@@ -2737,48 +3196,8 @@ def _streaming_service_options(
     if prepared_reason == "not_prepared":
         prepared_reason = "hls_not_prepared"
     premium_summary_suffix = " 目前資產與現行 Premium profile 不一致，建議排程重建 HLS。" if premium_profile_policy.get("profile_drift") else ""
-    direct_reason = direct_reason or ("available" if direct_available else "server_encrypted_requires_prepared_hls")
     proxy_reason = "available" if realtime_proxy_available else (realtime_proxy_reason or "realtime_proxy_not_enabled")
     return [
-        {
-            "mode": "direct",
-            "label": "直接串流",
-            "service_tier": "basic",
-            "service_tier_label": "Basic",
-            "fee_level": "lowest",
-            "fee_label": "最低",
-            "billing_basis": "bandwidth_only",
-            "available": bool(direct_available),
-            "availability_reason": direct_reason,
-            "implementation_status": "ready",
-            "requires_preparation": False,
-            "requires_background_job": False,
-            "derivative_storage": False,
-            "seek_quality": "browser_native",
-            "server_cost": "low",
-            "cost_drivers": ["file_io", "bandwidth"],
-            "advantages": [
-                "上傳後可立即嘗試播放",
-                "不需要預處理或額外衍生檔",
-                "服務成本最低",
-            ],
-            "tradeoffs": [
-                "播放能力取決於瀏覽器原生 codec/container 支援",
-                "MKV、E-AC-3、多音軌、多字幕的相容性不保證",
-                "大量觀看時較難做分段快取與畫質調度",
-            ],
-            "best_for": ["小檔案", "標準 MP4", "單音軌", "少量觀看"],
-            "media_support": {
-                "media_type": media_type,
-                "multi_quality": False,
-                "multi_audio": "browser_dependent",
-                "multi_subtitle": "browser_dependent",
-                "share_ready": True,
-                "cache_friendly": False,
-            },
-            "customer_summary": "最低費率；直接送原始檔，適合格式標準且觀看量不大的影片。",
-            "notes": "最低服務成本；不預先轉檔，但受瀏覽器與原始 codec 支援限制。",
-        },
         {
             "mode": "realtime_proxy",
             "label": "即時轉封裝",
@@ -2799,7 +3218,7 @@ def _streaming_service_options(
             "advantages": [
                 "不必等待完整 HLS 預處理",
                 "可針對選定音軌即時輸出瀏覽器較好播放的格式",
-                "比直接串流更能處理 MKV 或特殊音訊來源",
+                "比原始檔直出更能處理 MKV 或特殊音訊來源",
             ],
             "tradeoffs": [
                 "每位觀看者都會消耗即時 CPU",
@@ -2919,7 +3338,14 @@ def stream_playback_payload(conn, *, file_row, video_id, storage_root=None, ffpr
     media_type = _file_media_type(file_row)
     direct_url = f"/api/videos/{int(video_id)}/stream"
     source_file_available = _source_file_available(file_row, storage_root=storage_root)
-    direct_fallback_allowed = bool(source_file_available)
+    direct_browser_status = direct_browser_playback_status(file_row, storage_root=storage_root, ffprobe_bin=ffprobe_bin) if source_file_available else {
+        "available": False,
+        "reason": "source_file_missing",
+        "detail": "原始影音實體檔案不存在。",
+    }
+    # Published video playback deliberately avoids Direct. Direct is reserved for
+    # cloud-drive preview of browser-native files; videos use HLS or realtime proxy.
+    direct_fallback_allowed = False
     realtime_proxy_state = realtime_proxy_availability(file_row)
     if not source_file_available:
         realtime_proxy_state = {
@@ -2949,29 +3375,36 @@ def stream_playback_payload(conn, *, file_row, video_id, storage_root=None, ffpr
         subtitle for subtitle in (status.get("subtitles") if status else []) or []
         if subtitle.get("name") and subtitle.get("path") and _storage_relative_file_available(storage_root, subtitle.get("path"))
     ]
-    prepared_hls_available = bool(master_manifest_available and available_variants)
+    prepared_hls_available = bool(
+        master_manifest_available
+        and (
+            available_variants
+            or (media_type == "audio" and available_audio_tracks)
+        )
+    )
     payload = {
-        "mode": "direct",
+        "mode": "realtime_proxy" if realtime_proxy_available else "waiting_stream",
         "media_type": media_type,
         "source_mode": str(file_row["privacy_mode"] or "standard_plain"),
-        "fallback_url": direct_url if direct_fallback_allowed else "",
-        "stream_url": direct_url if direct_fallback_allowed else "",
+        "fallback_url": "",
+        "stream_url": "",
         "realtime_proxy_url": realtime_proxy_url,
         "master_url": "",
         "hls_js_url": HLS_JS_URL,
-        "player_strategy": "direct_only",
-            "stream_warning": "目前使用直接串流。" if direct_fallback_allowed else "原始影音實體檔案不存在，無法直接串流或即時轉封裝。",
+        "player_strategy": "realtime_proxy" if realtime_proxy_available else "hls_required",
+            "stream_warning": "目前使用即時轉封裝。" if realtime_proxy_available else "影音播放不使用 Direct；HLS 尚未就緒且即時轉封裝不可用。",
         "status": status,
         "variants": [],
         "audio_tracks": [],
         "subtitles": [],
         "streaming_ready": False,
         "direct_fallback_allowed": direct_fallback_allowed,
+        "direct_browser_playback": direct_browser_status,
         "service_policy": {
             "version": "2026.05.28-002",
-            "customer_selectable_modes": ["direct", "realtime_proxy", "prepared_hls"],
-            "default_mode": "direct",
-            "recommended_mode": "direct",
+            "customer_selectable_modes": ["realtime_proxy", "prepared_hls"],
+            "default_mode": "prepared_hls",
+            "recommended_mode": "prepared_hls",
             "multi_track_recommended_mode": "prepared_hls",
             "fee_model": "basic_standard_premium",
             "fee_difference_reason": "服務費差異來自檔案流量、每位觀看者即時 CPU、預處理 worker CPU、衍生檔儲存與快取清理成本。",
@@ -2991,8 +3424,8 @@ def stream_playback_payload(conn, *, file_row, video_id, storage_root=None, ffpr
             "audio_strategy": "selected_track_to_aac_stereo",
         },
         "streaming_options": _streaming_service_options(
-            direct_available=direct_fallback_allowed,
-            direct_reason="available" if direct_fallback_allowed else "source_file_missing",
+            direct_available=False,
+            direct_reason="video_direct_disabled",
             realtime_proxy_available=realtime_proxy_available,
             realtime_proxy_reason=str(realtime_proxy_state.get("reason") or ""),
             realtime_proxy_status=str(realtime_proxy_state.get("implementation_status") or ""),

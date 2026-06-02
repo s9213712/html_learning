@@ -398,6 +398,8 @@ def register_file_admin_storage_routes(app, ctx):
                 conn,
                 actor_user_id=actor["id"],
                 retention_days=settings.get("storage_trash_retention_days", 30),
+                storage_root=storage_root,
+                settings=settings,
             )
             conn.commit()
             audit("STORAGE_MAINTENANCE_RUN", get_client_ip(), user=actor["username"], success=True, ua=get_ua(), detail=str(result))

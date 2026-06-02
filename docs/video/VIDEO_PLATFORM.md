@@ -84,7 +84,8 @@ Current playback behavior:
   uploaded text subtitles; the same audio/subtitle URLs are authorized in
   shared-video and shared-file preview routes
 - if `hls.js` fails to initialize or hits a fatal playback error, the player
-  falls back to direct `/stream` with a user-visible warning
+  falls back to realtime proxy when available; otherwise it shows a user-visible
+  waiting/error state instead of silently switching to direct `/stream`
 - strict `e2ee` media stay on browser-side decryption and do not use
   server-side HLS; when the owner publishes an unlisted E2EE video, the
   browser re-wraps the file key into a share envelope and stores the fragment
@@ -134,9 +135,9 @@ Rules:
 - Private videos require owner or manager/root access.
 - Unlisted videos are not listed publicly but can be opened by direct link.
 - Multi-audio / multi-subtitle videos should be offered to customers as a
-  higher-service prepared-HLS path when reliability matters; direct streaming is
-  still available for simple browser-native files, and realtime proxy remains a
-  Standard service route to enable with explicit concurrency controls.
+  prepared-HLS publishing path when reliability matters; realtime proxy remains
+  the Standard fallback with explicit concurrency controls. Direct is reserved
+  for compatible Cloud Drive preview, not published video playback.
 
 ## PointsChain Tips
 
@@ -275,8 +276,8 @@ Do not release a streaming build if any of the following are still broken:
 - Safari native HLS playback regresses for prepared HLS media.
 - Desktop Chrome / Firefox / Edge cannot initialize the local `hls.js`
   fallback for prepared HLS media.
-- `hls.js` failure states do not fall back to direct `/stream` with a
-  user-visible error.
+- `hls.js` failure states do not fall back to realtime proxy with a
+  user-visible error/waiting state.
 - Strict `e2ee` playback accidentally tries to send `vk`, raw file keys, or
   original E2EE passwords to the server.
 - The E2EE share-management panel fails to show share state, remaining views,
@@ -300,7 +301,7 @@ Current note:
 
 - HLS-based large-media streaming is no longer only a paper design. Phase C-1
   provides prepare/status/playback/HLS routes and derivative packaging for
-  plain or `server_encrypted` video, but direct `/stream` remains the fallback.
+  plain or `server_encrypted` video; realtime proxy is the playback fallback.
   Strict `e2ee` still stays non-streamable on the server side; it uses
   browser-side encrypted Streaming v2 plus optional browser-generated encrypted
   720p / 480p derivatives when the publisher's device supports the required

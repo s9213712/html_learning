@@ -2,6 +2,7 @@ from datetime import datetime, time, timedelta
 
 from services.storage.storage_albums import ensure_storage_album_schema, sync_user_storage_summary
 from services.storage.quota_enforcement import purge_expired_quota_reduction_files
+from services.media.streaming import run_video_hls_cold_cleanup
 
 
 def _parse_daily_time(value):
@@ -32,7 +33,7 @@ def storage_maintenance_status(settings, now=None):
     }
 
 
-def run_storage_maintenance(conn, *, actor_user_id=None, retention_days=30, now=None):
+def run_storage_maintenance(conn, *, actor_user_id=None, retention_days=30, now=None, storage_root=None, settings=None):
     now = now or datetime.now()
     ensure_storage_album_schema(conn)
     try:
@@ -67,6 +68,14 @@ def run_storage_maintenance(conn, *, actor_user_id=None, retention_days=30, now=
         actor_user_id=actor_user_id,
         now=now,
     )
+    video_hls_cleanup = {"enabled": False, "reason": "storage_root_missing"}
+    if storage_root:
+        video_hls_cleanup = run_video_hls_cold_cleanup(
+            conn,
+            storage_root=storage_root,
+            settings=settings or {},
+            now=now,
+        )
     for item in quota_enforcement.get("results") or []:
         try:
             affected_user_ids.add(int(item.get("user_id") or 0))
@@ -85,13 +94,14 @@ def run_storage_maintenance(conn, *, actor_user_id=None, retention_days=30, now=
     return {
         "purged_trash_entries": int(purged or 0),
         "quota_enforcement": quota_enforcement,
+        "video_hls_cleanup": video_hls_cleanup,
         "synced_users": len(synced),
         "retention_days": retention_days,
         "cutoff": cutoff,
     }
 
 
-def run_storage_maintenance_if_due(conn, *, settings, save_settings=None, actor_user_id=None, now=None, force=False):
+def run_storage_maintenance_if_due(conn, *, settings, save_settings=None, actor_user_id=None, now=None, force=False, storage_root=None):
     now = now or datetime.now()
     status = storage_maintenance_status(settings, now=now)
     if not force and not status["due"]:
@@ -101,6 +111,8 @@ def run_storage_maintenance_if_due(conn, *, settings, save_settings=None, actor_
         actor_user_id=actor_user_id,
         retention_days=settings.get("storage_trash_retention_days", 30),
         now=now,
+        storage_root=storage_root or settings.get("storage_root") or settings.get("STORAGE_DIR") or None,
+        settings=settings,
     )
     if save_settings:
         save_settings({"storage_maintenance_last_date": status["today"]})

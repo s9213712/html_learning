@@ -646,7 +646,7 @@ def register_video_routes(app, deps):
         availability = realtime_proxy_availability(file_row)
         if not availability.get("available"):
             return _realtime_proxy_error(
-                "即時轉封裝目前不可用，請改用直接串流或預處理 HLS。",
+                "即時轉封裝目前不可用，請使用已準備的 HLS 串流。",
                 error=str(availability.get("reason") or "realtime_proxy_unavailable"),
                 status=409,
                 extra={"availability": availability},
@@ -1360,7 +1360,7 @@ def register_video_routes(app, deps):
         if not _settings_bool("video_stream_auto_prepare_enabled", True):
             return True
         try:
-            if "prepared_hls" not in set(video.get("streaming_modes") or ["direct"]):
+            if "prepared_hls" not in set(video.get("streaming_modes") or ["prepared_hls", "realtime_proxy"]):
                 return True
             file_row = _load_stream_file(conn, file_id=video["cloud_file_id"])
             decision = should_auto_prepare_stream(file_row, visibility=video.get("visibility") or "public")
@@ -1482,11 +1482,11 @@ def register_video_routes(app, deps):
         stem = Path(filename).stem.strip()
         return stem or "未命名影音"
 
-    VIDEO_STREAMING_MODE_CHOICES = {"direct", "prepared_hls", "realtime_proxy"}
+    VIDEO_STREAMING_MODE_CHOICES = {"prepared_hls", "realtime_proxy"}
 
     def _parse_streaming_modes(raw, *, default_auto=True):
         if raw in (None, ""):
-            return {"direct", "prepared_hls"} if default_auto else {"direct"}
+            return {"prepared_hls", "realtime_proxy"} if default_auto else {"realtime_proxy"}
         if isinstance(raw, str):
             try:
                 parsed = json.loads(raw)
@@ -1498,14 +1498,14 @@ def register_video_routes(app, deps):
             parsed = [parsed]
         modes = {str(item or "").strip() for item in (parsed or [])}
         modes = {item for item in modes if item in VIDEO_STREAMING_MODE_CHOICES}
-        return modes or {"direct"}
+        return modes or {"realtime_proxy"}
 
     def _streaming_modes_payload(modes):
-        ordered = [mode for mode in ("direct", "prepared_hls", "realtime_proxy") if mode in set(modes or [])]
-        return ordered or ["direct"]
+        ordered = [mode for mode in ("prepared_hls", "realtime_proxy") if mode in set(modes or [])]
+        return ordered or ["realtime_proxy"]
 
     def _default_streaming_modes_for_privacy(privacy_mode):
-        return {"direct", "realtime_proxy", "prepared_hls"}
+        return {"prepared_hls", "realtime_proxy"}
 
     def _stored_video_streaming_modes(conn, video_id):
         try:
@@ -1535,11 +1535,11 @@ def register_video_routes(app, deps):
         payload["published_streaming_modes"] = mode_payload
         service_policy = payload.setdefault("service_policy", {})
         service_policy["customer_selectable_modes"] = mode_payload
-        preferred = "prepared_hls" if "prepared_hls" in modes else ("realtime_proxy" if "realtime_proxy" in modes else "direct")
+        preferred = "prepared_hls" if "prepared_hls" in modes else "realtime_proxy"
         service_policy["default_mode"] = preferred
         service_policy["recommended_mode"] = preferred
         service_policy["mode_policy"] = "recommend_only"
-        service_policy["mode_policy_note"] = "Published streaming modes guide the default recommendation; direct/realtime/HLS fallbacks remain exposed when technically available."
+        service_policy["mode_policy_note"] = "影音發布不使用 Direct；Prepared HLS 是預設播放資產，冷門或 HLS 尚未就緒時回落到 Realtime Proxy。"
         if "prepared_hls" not in modes:
             payload["high_performance_streaming"] = False
         return payload
@@ -2688,7 +2688,7 @@ def register_video_routes(app, deps):
             modes = _stored_video_streaming_modes(conn, row["id"])
             if "direct" not in modes:
                 conn.commit()
-                return json_resp({"ok": False, "msg": "直接串流未啟用，請使用已準備的 HLS 串流。", "error": "direct_stream_disabled"}), 403
+                return json_resp({"ok": False, "msg": "影音播放不使用直接串流，請使用已準備的 HLS 或即時轉封裝。", "error": "direct_stream_disabled"}), 403
             file_row = _load_stream_file(conn, file_id=row["cloud_file_id"])
             path = resolve_file_storage_path(storage_root, file_row)
             if not path.exists():
@@ -3317,7 +3317,7 @@ def register_video_routes(app, deps):
             raw_modes = data.get("modes")
         modes = _parse_streaming_modes(raw_modes, default_auto=False)
         if not modes:
-            modes = {"direct"}
+            modes = {"realtime_proxy"}
         conn = get_db()
         try:
             ensure_media_stream_schema(conn)
@@ -3919,7 +3919,7 @@ def register_video_routes(app, deps):
                 return json_resp({"ok": False, "msg": "找不到影片", "error": "not_found"}), 404
             modes = _stored_video_streaming_modes(conn, video_id)
             if "direct" not in modes:
-                return json_resp({"ok": False, "msg": "直接串流未啟用，請使用已準備的 HLS 串流。", "error": "direct_stream_disabled"}), 403
+                return json_resp({"ok": False, "msg": "影音播放不使用直接串流，請使用已準備的 HLS 或即時轉封裝。", "error": "direct_stream_disabled"}), 403
             row = conn.execute(
                 "SELECT * FROM uploaded_files WHERE id=? AND deleted_at IS NULL",
                 (video["cloud_file_id"],),

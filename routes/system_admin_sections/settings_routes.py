@@ -155,6 +155,55 @@ def register_system_admin_settings_routes(app, ctx):
             raise ValueError(f"未知的功能範圍：{', '.join(unknown)}")
         return normalized
 
+    def normalize_hls_variant_tokens(value, *, allow_empty=False):
+        tokens = []
+        for part in str(value or "").replace(";", ",").split(","):
+            token = str(part or "").strip().lower()
+            if not token:
+                continue
+            if token == "original":
+                normalized = "original"
+            else:
+                match = re.fullmatch(r"q?(\d{3,4})p?", token)
+                if not match:
+                    raise ValueError("HLS 保留畫質只能是 original 或 360p/480p/720p/1080p 這類高度")
+                height = int(match.group(1))
+                if height < 144 or height > 4320:
+                    raise ValueError("HLS 保留畫質高度必須介於 144p-4320p")
+                normalized = f"{height}p"
+            if normalized not in tokens:
+                tokens.append(normalized)
+        if not tokens and not allow_empty:
+            raise ValueError("HLS 保留畫質不可為空")
+        return ",".join(tokens)
+
+    def normalize_video_hls_cold_cleanup_updates(data):
+        int_ranges = {
+            "video_hls_protect_days_after_upload": (0, 3650),
+            "video_hls_warm_plays_30d_below": (1, 1_000_000),
+            "video_hls_cold_plays_30d_below": (0, 1_000_000),
+            "video_hls_cold_no_play_days": (1, 3650),
+            "video_hls_very_cold_no_play_days": (1, 36500),
+            "video_hls_rebuild_plays_24h": (1, 1_000_000),
+            "video_hls_rebuild_plays_7d": (1, 1_000_000),
+            "video_hls_cold_cleanup_max_assets_per_run": (1, 10000),
+        }
+        for key, (minimum, maximum) in int_ranges.items():
+            if key not in data:
+                continue
+            value = parse_int_in_range(data.get(key), minimum, maximum)
+            if value is None:
+                return f"{key} 必須是 {minimum}-{maximum} 的整數"
+            data[key] = value
+        for key in ("video_hls_warm_keep_variants", "video_hls_mobile_floor_keep_variants"):
+            if key not in data:
+                continue
+            try:
+                data[key] = normalize_hls_variant_tokens(data.get(key))
+            except ValueError as exc:
+                return f"{key}: {exc}"
+        return ""
+
     def normalize_backpressure_updates(data):
         if "server_backpressure_mode" in data:
             mode = str(data.get("server_backpressure_mode") or "auto").strip().lower()
@@ -575,6 +624,9 @@ def register_system_admin_settings_routes(app, ctx):
             if not allowed:
                 return json_resp({"ok":False,"msg":"video_e2ee_derivative_heights 至少要包含 360、480、720 或 1080 其中一種"}), 400
             data["video_e2ee_derivative_heights"] = ",".join(str(item) for item in allowed)
+        hls_cold_error = normalize_video_hls_cold_cleanup_updates(data)
+        if hls_cold_error:
+            return json_resp({"ok":False,"msg":hls_cold_error}), 400
         if "security_log_tail_lines" in data:
             tail_lines = parse_int_in_range(data.get("security_log_tail_lines"), 1, 10_000)
             if tail_lines is None:

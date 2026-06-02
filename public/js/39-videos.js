@@ -2271,18 +2271,16 @@ function browserSupportsNativeHls(mediaType = "video") {
 
 function selectedVideoPublishStreamingModes() {
   const select = $("video-streaming-modes");
-  const mode = String(select?.value || "direct").trim();
-  if (["direct", "prepared_hls", "realtime_proxy"].includes(mode)) return [mode];
-  return ["direct"];
+  const mode = String(select?.value || "prepared_hls").trim();
+  if (["prepared_hls", "realtime_proxy"].includes(mode)) return [mode];
+  return ["prepared_hls", "realtime_proxy"];
 }
 
 function syncVideoPublishStreamingModeForPrivacy() {
   const privacyMode = String($("video-upload-privacy-mode")?.value || "standard_plain").trim();
   const select = $("video-streaming-modes");
   if (!select) return;
-  if (privacyMode === "server_encrypted" && select.value === "direct") {
-    select.value = "prepared_hls";
-  }
+  if (select.value === "direct") select.value = "prepared_hls";
 }
 
 async function applyVideoPublishStreamingChoices(video, json, modes) {
@@ -2319,7 +2317,8 @@ function videoDefaultServiceMode(playback = {}) {
   const preferred = String(policy.default_mode || policy.recommended_mode || "").trim();
   if (preferred) return preferred;
   if (playback?.mode === "hls") return "prepared_hls";
-  return "direct";
+  if (playback?.mode === "realtime_proxy") return "realtime_proxy";
+  return "prepared_hls";
 }
 
 function videoSelectedServiceMode(video, playback = {}) {
@@ -2336,8 +2335,7 @@ function videoSelectedServiceMode(video, playback = {}) {
   if (availableModes.has(preferred)) return preferred;
   if (availableModes.has("prepared_hls")) return "prepared_hls";
   if (availableModes.has("realtime_proxy")) return "realtime_proxy";
-  if (availableModes.has("direct")) return "direct";
-  return preferred || "direct";
+  return preferred || "realtime_proxy";
 }
 
 function saveVideoSelectedServiceMode(video, mode) {
@@ -2447,7 +2445,6 @@ function renderVideoStreamingModeSettings(video, playback = {}) {
   if (!video?.can_edit) return "";
   const selected = new Set(videoPublishedStreamingModes(video, playback));
   const rows = [
-    ["direct", "Basic 直接串流", "不預處理、不產生額外檔案；瀏覽器可直接播放時成本最低。"],
     ["realtime_proxy", "Standard 即時轉封裝", "播放時即時輸出 fragmented MP4；適合原檔音訊或容器不友善但不想先轉 HLS。"],
     ["prepared_hls", "HLS 預處理", "會產生額外串流檔案；只在你明確開啟時排程，適合高相容性播放。"],
   ];
@@ -2503,7 +2500,7 @@ async function updateVideoStreamingModes(videoId) {
     if (!res.ok || !json.ok) throw new Error(json.msg || `HTTP ${res.status}`);
     const currentMode = videoSelectedServiceMode(videoState.current || { id }, json.playback || {});
     if (!modes.includes(currentMode)) {
-      saveVideoSelectedServiceMode(videoState.current || { id }, modes.includes("direct") ? "direct" : modes[0]);
+      saveVideoSelectedServiceMode(videoState.current || { id }, modes[0] || "realtime_proxy");
     }
     videoMsg(json.stream_queued ? "串流方式已更新，HLS 已排程處理。" : "串流方式已更新。", true);
     await openVideoDetail(id);
@@ -2530,20 +2527,6 @@ function playbackSourceForVideo(video, playback, selectedMode = "") {
     };
   }
   const requestedMode = selectedMode || videoSelectedServiceMode(video, playback || {});
-  if (requestedMode === "direct") {
-    if (playback && playback.direct_fallback_allowed === false) {
-      return {
-        mode: "waiting_stream",
-        src: "",
-        statusText: playback.stream_warning || "此影片不允許直接串流，請改用其他方案。",
-      };
-    }
-    return {
-      mode: "direct",
-      src: playback?.fallback_url || playback?.stream_url || videoStreamUrl(video),
-      statusText: "目前使用 Basic 直接串流。",
-    };
-  }
   if (requestedMode === "realtime_proxy") {
     const proxy = playback?.realtime_proxy || {};
     const url = proxy.available === false ? "" : videoRealtimeProxyUrl(playback, 0);
@@ -2561,26 +2544,18 @@ function playbackSourceForVideo(video, playback, selectedMode = "") {
     };
   }
   if (!playback || playback.mode !== "hls") {
-    if (playback && playback.direct_fallback_allowed === false) {
-      return {
-        mode: "waiting_stream",
-        src: "",
-        statusText: playback.stream_warning || "影音正在後台處理，完成後才會開放播放。",
-      };
-    }
     return {
-      mode: "direct",
-      src: videoStreamUrl(video),
-      statusText: "",
+      mode: "waiting_stream",
+      src: "",
+      statusText: playback?.stream_warning || "HLS 尚未就緒，且即時轉封裝目前不可用。",
     };
   }
-  const directFallbackAllowed = playback.direct_fallback_allowed !== false;
   const preferredVariant = preferredVideoQualityVariant(playback);
   const preferredHlsUrl = preferredVariant?.playlistUrl || playback.master_url || "";
   if (browserSupportsNativeHls(video.media_type)) {
     return {
       mode: "hls_native",
-      src: preferredHlsUrl || (directFallbackAllowed ? (playback.fallback_url || videoStreamUrl(video)) : ""),
+      src: preferredHlsUrl || "",
       statusText: preferredVariant
         ? `Safari / 原生 HLS 已啟用，預設 ${preferredVariant.label}。`
         : "Safari / 原生 HLS 已啟用。",
@@ -2591,21 +2566,14 @@ function playbackSourceForVideo(video, playback, selectedMode = "") {
       mode: "hls_js",
       src: "",
       masterUrl: playback.master_url,
-      fallbackUrl: directFallbackAllowed ? (playback.fallback_url || videoStreamUrl(video)) : "",
-      statusText: "桌機瀏覽器將使用內建 HLS.js 播放；若初始化失敗會自動退回直接串流。",
-    };
-  }
-  if (!directFallbackAllowed) {
-    return {
-      mode: "waiting_stream",
-      src: "",
-      statusText: playback.stream_warning || "影音正在後台處理，完成後才會開放播放。",
+      fallbackUrl: "",
+      statusText: "桌機瀏覽器將使用內建 HLS.js 播放。",
     };
   }
   return {
-    mode: "direct",
-    src: playback.fallback_url || videoStreamUrl(video),
-    statusText: "目前瀏覽器不支援 HLS，已改用直接串流。",
+    mode: "waiting_stream",
+    src: "",
+    statusText: playback.stream_warning || "HLS 尚未就緒，且即時轉封裝目前不可用。",
   };
 }
 
@@ -2617,7 +2585,7 @@ function humanVideoStreamStatus(playback) {
   if (streamStatus === "processing") return "HLS 串流準備中";
   if (streamStatus === "failed") return `HLS 串流失敗：${status.error_message || "請稍後重試"}`;
   if (streamStatus === "unavailable") return status.error_message || "目前檔案無法建立伺服器端串流衍生檔";
-  if (streamStatus === "pending") return "目前尚未建立 HLS 串流，可先用直接串流播放";
+  if (streamStatus === "pending") return "目前尚未建立 HLS 串流，可先用即時轉封裝播放";
   return "";
 }
 
@@ -3108,12 +3076,17 @@ async function attachVideoE2eeStreamV2Player(video, playback, sessionId) {
 
 function fallbackVideoPlayerToDirect(player, playback, message, bad = false) {
   destroyCurrentVideoPlaybackArtifacts();
-  const fallbackSrc = playback?.fallback_url || playback?.stream_url || "";
+  const proxy = playback?.realtime_proxy || {};
+  const fallbackSrc = proxy.available === false ? "" : videoRealtimeProxyUrl(playback, 0);
   if (fallbackSrc) {
     player.src = fallbackSrc;
     if (typeof player.load === "function") player.load();
+    setVideoPlaybackStatus(message || "HLS 初始化失敗，已改用即時轉封裝。", bad);
+    return;
   }
-  setVideoPlaybackStatus(message || "HLS 初始化失敗，已改用直接串流。", bad);
+  player.removeAttribute("src");
+  if (typeof player.load === "function") player.load();
+  setVideoPlaybackStatus(message || "HLS 初始化失敗，且即時轉封裝目前不可用。", true);
 }
 
 function realtimeProxyMseContentType(playback = {}) {
@@ -4178,7 +4151,7 @@ function setVideoPlaybackActionButton(label, onClick, helperText = "") {
 }
 
 async function attachVideoHlsJsPlayer(player, playback, sessionId) {
-  const statusText = "已使用 HLS.js 播放，桌機 Chrome / Firefox / Edge 可穩定播放 HLS；若網路或格式異常會自動退回直接串流。";
+  const statusText = "已使用 HLS.js 播放，桌機 Chrome / Firefox / Edge 可穩定播放 HLS；若網路或格式異常會嘗試改用即時轉封裝。";
   let HlsCtor = null;
   try {
     HlsCtor = await loadVideoHlsLibrary();
@@ -4188,7 +4161,7 @@ async function attachVideoHlsJsPlayer(player, playback, sessionId) {
     if (sessionId !== videoState.playbackSessionId) return;
   } catch (err) {
     if (sessionId !== videoState.playbackSessionId) return;
-    fallbackVideoPlayerToDirect(player, playback, `HLS.js 載入失敗，已改用直接串流。${err?.message ? ` (${err.message})` : ""}`, true);
+    fallbackVideoPlayerToDirect(player, playback, `HLS.js 載入失敗，已改用即時轉封裝。${err?.message ? ` (${err.message})` : ""}`, true);
     return;
   }
   destroyCurrentVideoPlaybackArtifacts();
@@ -4249,7 +4222,7 @@ async function attachVideoHlsJsPlayer(player, playback, sessionId) {
     }
     if (!data?.fatal) return;
     const detailText = detail ? ` (${detail})` : "";
-    fallbackVideoPlayerToDirect(player, playback, `HLS.js 播放失敗，已改用直接串流。${detailText}`, true);
+    fallbackVideoPlayerToDirect(player, playback, `HLS.js 播放失敗，已改用即時轉封裝。${detailText}`, true);
   });
   hls.loadSource(playback.master_url || "");
   hls.attachMedia(player);
@@ -4307,8 +4280,8 @@ async function activateVideoPlaybackMode(video, playback, playbackSource, sessio
         setVideoPlaybackStatus("正在跳轉到指定時間，暫不因播放錯誤切換來源。", false);
         return;
       }
-      if (!fallbackVideoPlaybackToLowerQuality(playback, "原生 HLS 播放錯誤") && playback?.fallback_url) {
-        fallbackVideoPlayerToDirect(player, playback, "HLS 播放失敗，已改用直接串流。", true);
+      if (!fallbackVideoPlaybackToLowerQuality(playback, "原生 HLS 播放錯誤")) {
+        fallbackVideoPlayerToDirect(player, playback, "HLS 播放失敗，已改用即時轉封裝。", true);
       }
     }, { once: true });
   }
@@ -4335,7 +4308,7 @@ async function activateVideoPlaybackMode(video, playback, playbackSource, sessio
     player.addEventListener("error", () => {
       if (sessionId !== videoState.playbackSessionId) return;
       const code = Number(player.error?.code || 0);
-      const modeLabel = playbackSource.mode === "realtime_proxy" ? "Standard 即時轉封裝" : "Basic 直接串流";
+      const modeLabel = playbackSource.mode === "realtime_proxy" ? "Standard 即時轉封裝" : "Standard 即時轉封裝";
       renderVideoStreamDebugPanel({
         direct_state: "error",
         direct_mode: playbackSource?.mode || "",
@@ -4802,7 +4775,7 @@ function renderVideoDetail(video, comments = [], playback = null) {
             </div>
             <div class="field-help">資料截斷或 fragment 遺失不會讓伺服器幫你復原分享金鑰；如果遺失，只能重新產生分享。</div>
           ` : `
-            <div class="field-help">非 E2EE 分享可使用 HLS 或直接串流；若有設定分享密碼，觀看者需要先解鎖。</div>
+            <div class="field-help">非 E2EE 分享可使用 HLS 或即時轉封裝；若有設定分享密碼，觀看者需要先解鎖。</div>
           `}
           <div class="drive-card-sub">${video.share_password_required ? "已設定第二層分享密碼" : "未設定第二層分享密碼"}</div>
           <div class="drive-card-sub">${video.share_expires_at ? `到期時間：${sanitize(video.share_expires_at)}` : "到期時間：未限制"}</div>

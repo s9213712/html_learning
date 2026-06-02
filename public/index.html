@@ -5838,6 +5838,55 @@
                 <label><input type="checkbox" id="s-video-e2ee-derivative-quota-exempt" /> E2EE 衍生畫質不計入用戶雲端硬碟容量</label>
               </div>
             </div>
+            <div class="settings-option-grid billing-editor-grid" style="margin: .85rem 0;">
+              <div class="field">
+                <label><input type="checkbox" id="s-video-hls-cold-cleanup-enabled" /> 啟用冷門 HLS 自動清理</label>
+                <div class="field-hint">依播放量與上傳時間裁切衍生檔；手機保底至少保留 480p，私人且無有效分享的非常冷門影片才會清掉全部 HLS。</div>
+              </div>
+              <div class="field">
+                <label>新上傳保護天數</label>
+                <input type="number" id="s-video-hls-protect-days-after-upload" min="0" max="3650" step="1" value="7" />
+              </div>
+              <div class="field">
+                <label>溫影片 30 天播放低於</label>
+                <input type="number" id="s-video-hls-warm-plays-30d-below" min="1" max="1000000" step="1" value="20" />
+                <div class="field-hint">低於此值且仍在冷門天數內，保留指定溫影片畫質。</div>
+              </div>
+              <div class="field">
+                <label>冷門 30 天播放低於</label>
+                <input type="number" id="s-video-hls-cold-plays-30d-below" min="0" max="1000000" step="1" value="5" />
+              </div>
+              <div class="field">
+                <label>冷門無播放天數</label>
+                <input type="number" id="s-video-hls-cold-no-play-days" min="1" max="3650" step="1" value="14" />
+              </div>
+              <div class="field">
+                <label>非常冷門無播放天數</label>
+                <input type="number" id="s-video-hls-very-cold-no-play-days" min="1" max="36500" step="1" value="90" />
+              </div>
+              <div class="field">
+                <label>溫影片保留畫質</label>
+                <input type="text" id="s-video-hls-warm-keep-variants" value="original,480p" />
+                <div class="field-hint">逗號分隔，例如 original,480p；音軌與字幕會保留。</div>
+              </div>
+              <div class="field">
+                <label>手機保底保留畫質</label>
+                <input type="text" id="s-video-hls-mobile-floor-keep-variants" value="480p" />
+                <div class="field-hint">冷門影片至少保留這些畫質，避免手機只能走即時轉封裝。</div>
+              </div>
+              <div class="field">
+                <label>重新 HLS：24 小時播放達到</label>
+                <input type="number" id="s-video-hls-rebuild-plays-24h" min="1" max="1000000" step="1" value="3" />
+              </div>
+              <div class="field">
+                <label>重新 HLS：7 天播放達到</label>
+                <input type="number" id="s-video-hls-rebuild-plays-7d" min="1" max="1000000" step="1" value="5" />
+              </div>
+              <div class="field">
+                <label>每次最多處理影片數</label>
+                <input type="number" id="s-video-hls-cold-cleanup-max-assets-per-run" min="1" max="10000" step="1" value="25" />
+              </div>
+            </div>
             <div class="settings-option-grid billing-editor-grid">
               <div class="field">
                 <label>項目 key</label>

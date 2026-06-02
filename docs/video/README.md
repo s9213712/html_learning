@@ -6,15 +6,15 @@ and [docs/README.md](../README.md).
 
 - [VIDEO_PLATFORM.md](VIDEO_PLATFORM.md): detailed video module reference
 - [VIDEO_STREAMING_ARCHITECTURE.md](VIDEO_STREAMING_ARCHITECTURE.md): HLS / encrypted-media streaming design
-- [VIDEO_STREAMING_SERVICE_TIERS.md](VIDEO_STREAMING_SERVICE_TIERS.md): customer-facing direct / realtime proxy / prepared HLS service-tier explanation
+- [VIDEO_STREAMING_SERVICE_TIERS.md](VIDEO_STREAMING_SERVICE_TIERS.md): customer-facing Cloud Drive direct / video realtime proxy / prepared HLS service-tier explanation
+- [VIDEO_STREAMING_LIFECYCLE.md](VIDEO_STREAMING_LIFECYCLE.md): default playback, cold HLS pruning, and root-tunable retention thresholds
 
 Current operator notes:
 
 - Video publish controls are button-opened, not a permanently visible card.
-- Customer-facing streaming choices are three tiers: direct streaming, realtime
-  proxy/transwrap, and prepared HLS. Fee differences should be explained by
-  server work: bandwidth-only, per-viewer CPU, or preprocessing plus derivative
-  storage.
+- Cloud Drive preview may use direct browser playback for compatible files,
+  but published videos use prepared HLS first and realtime proxy as fallback.
+  Direct is not a selectable Video Platform playback mode.
 - Multi-audio and multi-subtitle videos need the prepared HLS path for the most
   reliable customer experience. Share video and shared-file preview routes must
   keep applying authorization to HLS variants, audio playlists, and subtitles.

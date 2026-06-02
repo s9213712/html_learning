@@ -3309,14 +3309,33 @@ function drivePreviewNativeDirectSupport(preview) {
   return true;
 }
 
+function drivePreviewDirectStatus(preview) {
+  const stream = drivePreviewStreamAsset(preview);
+  const status = stream?.direct_browser_playback || preview?.direct_browser_playback || null;
+  if (status && typeof status === "object") return status;
+  return {
+    available: drivePreviewNativeDirectSupport(preview),
+    reason: drivePreviewNativeDirectSupport(preview) ? "browser_native_likely" : "unknown_direct_browser_support",
+    detail: drivePreviewNativeDirectSupport(preview)
+      ? "原始格式屬於瀏覽器原生播放的常見組合。"
+      : "原始格式無法判定為瀏覽器原生可播放，請使用即時轉封裝或 HLS。",
+  };
+}
+
+function drivePreviewDirectAvailable(preview) {
+  return !!drivePreviewDirectStatus(preview).available;
+}
+
 function drivePreviewDirectCompatibilitySummary(preview) {
-  if (drivePreviewNativeDirectSupport(preview)) return "最低費率；直接送原始檔，適合 MP4/WebM/Ogg 等瀏覽器原生格式。";
-  return "最低費率；此檔案格式多半不是瀏覽器原生可播，建議改用即時轉封裝或 HLS。";
+  const status = drivePreviewDirectStatus(preview);
+  if (status.available) return "最低費率；直接送原始檔，適合瀏覽器原生支援的 MP4/WebM/音訊格式。";
+  return status.detail || "原始格式不是瀏覽器穩定支援的直接播放格式，請使用即時轉封裝或 HLS。";
 }
 
 function drivePreviewDirectWarningMarkup(preview) {
-  if (drivePreviewNativeDirectSupport(preview)) return "";
-  return '<div class="drive-card-sub drive-preview-stream-warning">此檔案格式可能無法由瀏覽器直接播放；若一直轉圈，請改用 Standard 即時轉封裝或 Premium HLS。</div>';
+  const status = drivePreviewDirectStatus(preview);
+  if (status.available) return "";
+  return `<div class="drive-card-sub drive-preview-stream-warning">${sanitize(status.detail || "此檔案格式無法由瀏覽器直接播放；請改用 Standard 即時轉封裝或 Premium HLS。")}</div>`;
 }
 
 function drivePreviewIsAppleNativeMediaClient() {
@@ -3333,7 +3352,7 @@ function drivePreviewRealtimeProxyUsable(preview, realtimeAvailable) {
 
 function drivePreviewNoPlayableModeMarkup(preview) {
   if (preview?.category !== "video" && preview?.category !== "audio") return "";
-  return '<div class="drive-empty">此裝置無法直接播放這個檔案格式；請先建立 Premium HLS 預處理串流後再播放。</div>';
+  return '<div class="drive-empty">此檔案目前沒有符合標準的預覽串流：Direct 僅限瀏覽器原生格式，Realtime Proxy 目前不可用，Prepared HLS 尚未就緒。</div>';
 }
 
 function drivePreviewServiceOptions(preview) {
@@ -3344,8 +3363,7 @@ function drivePreviewServiceOptions(preview) {
   const rawRealtimeAvailable = !!(stream?.realtime_proxy_url || proxy.url) && proxy.available !== false;
   const realtimeAvailable = drivePreviewRealtimeProxyUsable(preview, rawRealtimeAvailable);
   const hlsAvailable = drivePreviewHasReadyHls(preview);
-  const directNative = drivePreviewNativeDirectSupport(preview);
-  const directAvailable = directNative || !drivePreviewIsAppleNativeMediaClient();
+  const directAvailable = drivePreviewDirectAvailable(preview);
   const profilePolicy = stream?.premium_hls_profile_policy || {};
   const profileDriftSuffix = profilePolicy.profile_drift ? " 目前 HLS 資產與現行 Premium profile 不一致，建議排程重建。" : "";
   return [
@@ -3386,9 +3404,9 @@ function selectedDrivePreviewServiceMode(fileId, preview) {
     saved = "";
   }
   if (saved && availableModes.has(saved)) return saved;
-  if (availableModes.has("prepared_hls")) return "prepared_hls";
-  if (availableModes.has("realtime_proxy")) return "realtime_proxy";
   if (availableModes.has("direct")) return "direct";
+  if (availableModes.has("realtime_proxy")) return "realtime_proxy";
+  if (availableModes.has("prepared_hls")) return "prepared_hls";
   return "";
 }
 
@@ -3596,7 +3614,7 @@ function attachDrivePlainMediaPreview(fileId, preview, { fullscreen = false } = 
   const stream = drivePreviewStreamAsset(preview);
   const proxy = stream?.realtime_proxy || {};
   const canUseProxy = !!(stream?.realtime_proxy_url || proxy.url) && proxy.available !== false;
-  if (!drivePreviewIsAppleNativeMediaClient() || selectedDrivePreviewServiceMode(fileId, preview) !== "direct" || !canUseProxy || drivePreviewNativeDirectSupport(preview)) return;
+  if (selectedDrivePreviewServiceMode(fileId, preview) !== "direct" || !canUseProxy || drivePreviewDirectAvailable(preview)) return;
   let switched = false;
   const switchToProxy = () => {
     if (switched) return;
@@ -3628,7 +3646,14 @@ async function attachDriveHlsPreview(fileId, preview, { fullscreen = false } = {
   }
   const HlsCtor = await loadDriveHlsLibrary();
   if (!HlsCtor || typeof HlsCtor.isSupported !== "function" || !HlsCtor.isSupported()) {
-    player.src = drivePreviewContentUrl(fileId);
+    const stream = drivePreviewStreamAsset(preview);
+    const proxy = stream?.realtime_proxy || {};
+    if (drivePreviewRealtimeProxyUsable(preview, !!(stream?.realtime_proxy_url || proxy.url) && proxy.available !== false)) {
+      player.src = drivePreviewRealtimeProxyUrl(fileId, preview, 0, { fullscreen });
+      return;
+    }
+    player.removeAttribute("src");
+    player.load();
     return;
   }
   if (currentDrivePreviewHls && typeof currentDrivePreviewHls.destroy === "function") {
