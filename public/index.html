@@ -1138,8 +1138,43 @@
               <input type="number" id="s-server-max-content-mb" min="128" step="1" placeholder="8192" />
               <div class="field-help" id="server-max-content-status">啟動腳本可用 --max-content-mb 或 HTML_LEARNING_MAX_CONTENT_MB 設定；前台儲存會立即套用目前 worker。</div>
             </div>
+            <div class="settings-option-grid" style="margin-top:.75rem;">
+              <div class="field">
+                <label>遠端下載全站併發</label>
+                <input type="number" id="s-remote-download-max-concurrent-global" min="1" max="64" step="1" value="1" />
+                <div class="field-hint">控制 Direct link / BT / magnet 外部下載 worker 的全站同時任務數；老硬體建議 1，最多先測 2。</div>
+              </div>
+              <div class="field">
+                <label>遠端下載單用戶併發</label>
+                <input type="number" id="s-remote-download-max-concurrent-per-user" min="1" max="16" step="1" value="1" />
+                <div class="field-hint">同一帳號同時跑的遠端下載任務數，避免單一用戶用 BT/aria2 佔滿 IO 與網路。</div>
+              </div>
+              <div class="field">
+                <label>BT/magnet 下載後端</label>
+                <select id="s-bt-download-backend">
+                  <option value="auto">Auto：Transmission 優先，失敗改 aria2</option>
+                  <option value="transmission">Transmission RPC</option>
+                  <option value="aria2">aria2c</option>
+                </select>
+                <div class="field-hint">Direct link 仍用內建 HTTP/aria2 路徑；BT/magnet 建議 Transmission 管理長任務。</div>
+              </div>
+              <div class="field">
+                <label>Transmission RPC URL</label>
+                <input type="text" id="s-transmission-rpc-url" placeholder="http://127.0.0.1:9091/transmission/rpc" />
+              </div>
+              <div class="field">
+                <label>Transmission RPC 帳號</label>
+                <input type="text" id="s-transmission-rpc-username" autocomplete="off" />
+              </div>
+              <div class="field">
+                <label>Transmission RPC 密碼</label>
+                <input type="password" id="s-transmission-rpc-password" autocomplete="new-password" placeholder="留空代表不變更" />
+                <div class="field-hint" id="transmission-rpc-password-state">目前未儲存 Transmission RPC 密碼。</div>
+              </div>
+            </div>
             <div class="admin-toolbar" style="margin-top:.55rem;">
               <button class="btn btn-primary" type="button" id="drive-root-storage-settings-save-btn">儲存儲存設定</button>
+              <button class="btn" type="button" id="transmission-rpc-test-btn">測試 Transmission 連線</button>
             </div>
             <div id="cloud-drive-storage-status" style="font-size:.78rem;color:var(--muted);margin:.55rem 0 0;"></div>
           </div>
@@ -5837,38 +5872,7 @@
               <div class="field">
                 <label><input type="checkbox" id="s-video-e2ee-derivative-quota-exempt" /> E2EE 衍生畫質不計入用戶雲端硬碟容量</label>
               </div>
-              <div class="field">
-                <label>遠端下載全站併發</label>
-                <input type="number" id="s-remote-download-max-concurrent-global" min="1" max="64" step="1" value="1" />
-                <div class="field-hint">控制 Direct link / BT / magnet 外部下載 worker 的全站同時任務數；老硬體建議 1，最多先測 2。</div>
               </div>
-              <div class="field">
-                <label>遠端下載單用戶併發</label>
-                <input type="number" id="s-remote-download-max-concurrent-per-user" min="1" max="16" step="1" value="1" />
-                <div class="field-hint">同一帳號同時跑的遠端下載任務數，避免單一用戶用 BT/aria2 佔滿 IO 與網路。</div>
-              </div>
-              <div class="field">
-                <label>BT/magnet 下載後端</label>
-                <select id="s-bt-download-backend">
-                  <option value="auto">Auto：Transmission 優先，失敗改 aria2</option>
-                  <option value="transmission">Transmission RPC</option>
-                  <option value="aria2">aria2c</option>
-                </select>
-                <div class="field-hint">Direct link 仍用內建 HTTP/aria2 路徑；BT/magnet 建議 Transmission 管理長任務。</div>
-              </div>
-              <div class="field">
-                <label>Transmission RPC URL</label>
-                <input type="text" id="s-transmission-rpc-url" placeholder="http://127.0.0.1:9091/transmission/rpc" />
-              </div>
-              <div class="field">
-                <label>Transmission RPC 帳號</label>
-                <input type="text" id="s-transmission-rpc-username" autocomplete="off" />
-              </div>
-              <div class="field">
-                <label>Transmission RPC 密碼</label>
-                <input type="password" id="s-transmission-rpc-password" autocomplete="new-password" />
-              </div>
-            </div>
             <div class="settings-option-grid billing-editor-grid" style="margin: .85rem 0;">
               <div class="field">
                 <label><input type="checkbox" id="s-video-hls-cold-cleanup-enabled" /> 啟用冷門 HLS 自動清理</label>
@@ -7331,7 +7335,7 @@
 <script src="/js/30-appeals.js?v=20260428-forum-pages" defer></script>
 <script src="/js/32-notifications.js?v=20260523-dispute-reply-action" defer></script>
 <script src="/js/34-markdown-editor.js?v=20260518-inline-media" defer></script>
-<script src="/js/35-drive.js?v=20260602-native-download" defer></script>
+<script src="/js/35-drive.js?v=20260603-audio-track-native" defer></script>
   <script src="/js/35-drive-preview-share.js?v=20260507-drive-preview-share-split" defer></script>
 <!-- cache marker retained for template-import regression: /js/36-comfyui.js?v=20260509-comfyui-template-embeddings -->
 <script src="/js/36-comfyui.js?v=20260529-comfyui-gguf-disabled-cleanup" defer></script>
@@ -7342,18 +7346,18 @@
 <script src="/js/games/chess.js?v=20260525-move-history-ply" defer></script>
 <script src="/js/38-games.js?v=20260602-rubiks-autosolve" defer></script>
 <script src="/js/42-experiments.js?v=20260528-experiments-bounded-motion" defer></script>
-  <script src="/js/39-videos.js?v=20260602-publish-stream-select" defer></script>
+  <script src="/js/39-videos.js?v=20260603-video-audio-native" defer></script>
 <script src="/js/40-auth-users.js?v=20260531-profile-settings-split" defer></script>
 <script src="/js/50-admin.js?v=20260531-feature-settings-live-sync" defer></script>
 <script src="/js/51-admin-server-mode-launch-check.js?v=20260526-server-mode-prelaunch" defer></script>
 <script src="/js/52-admin-trading.js?v=20260601-admin-trading-module" defer></script>
-<script src="/js/53-admin-storage-economy.js?v=20260601-admin-storage-economy-module" defer></script>
+<script src="/js/53-admin-storage-economy.js?v=20260602-transmission-test-status" defer></script>
 <script src="/js/55-economy.js?v=20260526-financial-settlement-network-invariant-refresh" defer></script>
 <script src="/js/55-economy-explorer.js?v=20260601-economy-explorer-module" defer></script>
 <script src="/js/56-trading.js?v=20260525-usdt-market-labels" defer></script>
 <script src="/js/56-trading-bots.js?v=20260601-trading-bot-module" defer></script>
 <script src="/js/57-platform-centers.js?v=20260524-trading-status-split" defer></script>
 <script src="/js/58-profile-friends.js?v=20260531-avatar-visible" defer></script>
-<script src="/js/90-bootstrap.js?v=20260528-comfyui-force-refresh" defer></script>
+<script src="/js/90-bootstrap.js?v=20260602-transmission-test" defer></script>
 </body>
 </html>

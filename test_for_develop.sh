@@ -71,6 +71,11 @@ TRANSMISSION_RPC_URL="${HACKME_TRANSMISSION_RPC_URL:-http://127.0.0.1:9091/trans
 TRANSMISSION_RPC_USERNAME="${HACKME_TRANSMISSION_RPC_USERNAME:-}"
 TRANSMISSION_RPC_PASSWORD="${HACKME_TRANSMISSION_RPC_PASSWORD:-}"
 DRY_RUN=0
+BACKUP_RUNTIME=0
+BACKUP_ARCHIVE=""
+RESTORE_ARCHIVE=""
+RESET_RUNTIME=0
+DELETE_RUNTIME=0
 
 is_auto_capacity_value() {
   local value="${1:-}"
@@ -435,9 +440,10 @@ Options:
                            external HTTPS test URL. Alias-friendly for NAT IPs.
   --allow-any-host         Development escape hatch: disable Flask trusted-host
                            checks for this launch. Do not use for production.
-  --shutdown               Stop prior dev server process group / child tree for
+  --stop                   Stop prior dev server process group / child tree for
                            --port and exit. Only terminates processes launched
                            from hackme_web dev runtime paths or this source repo.
+                           --shutdown remains accepted as a compatibility alias.
   --feature-mode MODE      all, defaults, bundles, or custom. Default: all
   --feature-bundles LIST   Comma-separated feature package names such as
                            ops-minimum,safe-community,creator-media,exchange-ops,ai.
@@ -542,6 +548,24 @@ Options:
                            upload QA. Blank keeps app/root setting default
                            (8192 MB unless changed in root settings).
   --dry-run                Print resolved config and exit before copying/starting
+  --backup [PATH]          Create a runtime-state backup archive and exit. If PATH
+                           is omitted, writes under the runtime parent directory.
+                           Excludes storage/, venv/, pycache/, logs/, pid files,
+                           and temporary caches.
+  --restore PATH           Restore runtime state from a --backup archive and exit.
+                           Existing runtime state is moved aside to a timestamped
+                           .pre-restore-* directory before restore. Does not stop
+                           a running server; run --stop first when restoring the
+                           active runtime.
+  --reset                  Reset selected runtime state and exit. Refuses to run
+                           while that runtime is active. Clears database/, chats/,
+                           anchors/, reports/, logs/, dev token/cache/temp/pid files;
+                           preserves storage/ and venv/.
+  --delete                 Delete selected runtime root and exit. Refuses to run
+                           while that runtime is active. If storage/ is inside the
+                           runtime root, it is moved to a timestamped
+                           .storage-preserved-* sibling before deletion. External
+                           cloud-drive storage roots are never deleted.
   --run-root PATH          Use a fixed /tmp run root instead of auto-generating one
   --runtime-root PATH,
   --runtime-dir PATH       Use PATH as the runtime directory instead of the
@@ -3048,6 +3072,206 @@ for warning in payload.get("warnings") or []:
 PY
 }
 
+runtime_backup_default_archive() {
+  local parent
+  parent="$(dirname "$RUNTIME_ROOT")"
+  printf '%s\n' "$parent/hackme_runtime_backup_${RUN_ID}.tar.gz"
+}
+
+path_is_inside_runtime() {
+  local candidate="$1"
+  "$PYTHON_BIN" - "$RUNTIME_ROOT" "$candidate" <<'INNERPY'
+from pathlib import Path
+import sys
+root = Path(sys.argv[1]).resolve()
+path = Path(sys.argv[2]).expanduser().resolve(strict=False)
+try:
+    path.relative_to(root)
+except ValueError:
+    raise SystemExit(1)
+raise SystemExit(0)
+INNERPY
+}
+
+validate_restore_archive_members() {
+  local archive="$1"
+  "$PYTHON_BIN" - "$archive" <<'INNERPY'
+import posixpath
+import sys
+import tarfile
+archive = sys.argv[1]
+try:
+    with tarfile.open(archive, "r:gz") as tf:
+        for member in tf.getmembers():
+            name = str(member.name or "").strip()
+            if not name:
+                continue
+            normalized = posixpath.normpath(name)
+            if normalized.startswith("/") or normalized == ".." or normalized.startswith("../") or "/../" in normalized:
+                print(f"unsafe archive member: {name}", file=sys.stderr)
+                raise SystemExit(1)
+except tarfile.TarError as exc:
+    print(f"invalid tar archive: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+INNERPY
+}
+
+runtime_archive_is_safe_path() {
+  local archive="$1"
+  [[ -n "$archive" ]] || return 1
+  case "$archive" in
+    *.tar.gz|*.tgz) return 0 ;;
+  esac
+  return 1
+}
+
+backup_runtime_state() {
+  local archive="$1"
+  if [[ ! -d "$RUNTIME_ROOT" ]]; then
+    die "runtime root does not exist; cannot backup: $RUNTIME_ROOT"
+  fi
+  [[ -n "$archive" ]] || archive="$(runtime_backup_default_archive)"
+  runtime_archive_is_safe_path "$archive" || die "backup archive must end with .tar.gz or .tgz: $archive"
+  if path_is_inside_runtime "$archive"; then
+    die "backup archive must be outside runtime root: $archive"
+  fi
+  mkdir -p "$(dirname "$archive")"
+  if [[ -e "$archive" ]]; then
+    die "backup archive already exists: $archive"
+  fi
+  say "[dev-tmp] backup:   runtime=$RUNTIME_ROOT"
+  say "[dev-tmp] backup:   archive=$archive"
+  say "[dev-tmp] backup:   excluding storage/, venv/, pycache/, logs/, pid/cache/temp files"
+  tar -C "$RUNTIME_ROOT" \
+    --exclude='./storage' \
+    --exclude='./venv' \
+    --exclude='./pycache' \
+    --exclude='./logs' \
+    --exclude='./server.pid' \
+    --exclude='./*.sock' \
+    --exclude='./*.lock' \
+    --exclude='./__pycache__' \
+    --exclude='./tmp' \
+    --exclude='./temp' \
+    -czf "$archive" .
+  say "[dev-tmp] backup:   created $archive"
+}
+
+restore_runtime_state() {
+  local archive="$1"
+  [[ -n "$archive" ]] || die "--restore requires a backup archive path"
+  [[ -f "$archive" ]] || die "restore archive not found: $archive"
+  runtime_archive_is_safe_path "$archive" || die "restore archive must end with .tar.gz or .tgz: $archive"
+  validate_restore_archive_members "$archive" || die "restore archive contains unsafe paths: $archive"
+  if path_is_inside_runtime "$archive"; then
+    die "restore archive must be outside runtime root: $archive"
+  fi
+  ensure_runtime_not_running "restore"
+  mkdir -p "$(dirname "$RUNTIME_ROOT")"
+  local stamp backup_existing
+  stamp="$(date +%Y%m%d_%H%M%S)"
+  backup_existing="${RUNTIME_ROOT}.pre-restore-${stamp}"
+  say "[dev-tmp] restore:  runtime=$RUNTIME_ROOT"
+  say "[dev-tmp] restore:  archive=$archive"
+  say "[dev-tmp] restore:  storage/ is not restored by this archive format"
+  if [[ -e "$RUNTIME_ROOT" ]]; then
+    [[ ! -e "$backup_existing" ]] || die "pre-restore path already exists: $backup_existing"
+    mv "$RUNTIME_ROOT" "$backup_existing"
+    say "[dev-tmp] restore:  moved existing runtime to $backup_existing"
+  fi
+  mkdir -p "$RUNTIME_ROOT"
+  tar -C "$RUNTIME_ROOT" -xzf "$archive"
+  mkdir -p "$RUNTIME_ROOT/database" "$RUNTIME_ROOT/logs" "$RUNTIME_ROOT/chats" "$RUNTIME_ROOT/anchors" "$RUNTIME_ROOT/reports"
+  say "[dev-tmp] restore:  restored runtime state"
+}
+
+process_uses_runtime_root() {
+  local pid="$1"
+  local runtime_real cwd env_runtime args
+  [[ -n "$pid" && -r "/proc/$pid/cmdline" ]] || return 1
+  runtime_real="$(readlink -f "$RUNTIME_ROOT" 2>/dev/null || true)"
+  [[ -n "$runtime_real" ]] || return 1
+  args="$(tr '\000' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
+  cwd="$(readlink -f "/proc/$pid/cwd" 2>/dev/null || true)"
+  if [[ "$args" == *"$runtime_real"* || "$cwd" == "$runtime_real" || "$cwd" == "$runtime_real"/* ]]; then
+    return 0
+  fi
+  if [[ -r "/proc/$pid/environ" ]]; then
+    env_runtime="$(tr '\000' '\n' < "/proc/$pid/environ" 2>/dev/null | sed -n 's/^HACKME_RUNTIME_DIR=//p' | tail -n 1)"
+    env_runtime="$(readlink -f "$env_runtime" 2>/dev/null || true)"
+    if [[ "$env_runtime" == "$runtime_real" ]]; then
+      return 0
+    fi
+  fi
+  return 1
+}
+
+ensure_runtime_not_running() {
+  local action="$1"
+  local candidates=()
+  local pid
+  if [[ -r "$PID_FILE" ]]; then
+    pid="$(sed -n '1p' "$PID_FILE" 2>/dev/null | tr -dc '0-9')"
+    [[ -n "$pid" ]] && append_unique_array_value candidates "$pid"
+  fi
+  while IFS= read -r pid; do
+    [[ -n "$pid" ]] && append_unique_array_value candidates "$pid"
+  done < <(scan_dev_server_pids 2>/dev/null || true)
+  for pid in "${candidates[@]:-}"; do
+    kill -0 "$pid" 2>/dev/null || continue
+    if process_uses_runtime_root "$pid"; then
+      die "$action refused because runtime appears active (pid $pid). Run --stop --port $PORT first: $RUNTIME_ROOT"
+    fi
+  done
+}
+
+reset_runtime_state() {
+  ensure_runtime_not_running "reset"
+  say "[dev-tmp] reset:    runtime=$RUNTIME_ROOT"
+  say "[dev-tmp] reset:    preserving storage/ and venv/"
+  mkdir -p "$RUNTIME_ROOT"
+  rm -rf \
+    "$RUNTIME_ROOT/database" \
+    "$RUNTIME_ROOT/chats" \
+    "$RUNTIME_ROOT/anchors" \
+    "$RUNTIME_ROOT/reports" \
+    "$RUNTIME_ROOT/logs" \
+    "$RUNTIME_ROOT/pycache" \
+    "$RUNTIME_ROOT/tmp" \
+    "$RUNTIME_ROOT/temp" \
+    "$RUNTIME_ROOT/dev_tokens.json" \
+    "$RUNTIME_ROOT/server.pid"
+  find "$RUNTIME_ROOT" -maxdepth 1 \( -name '*.sock' -o -name '*.lock' \) -type f -delete 2>/dev/null || true
+  mkdir -p "$RUNTIME_ROOT/database" "$RUNTIME_ROOT/logs" "$RUNTIME_ROOT/chats" "$RUNTIME_ROOT/anchors" "$RUNTIME_ROOT/reports"
+  say "[dev-tmp] reset:    completed"
+}
+
+runtime_storage_inside_runtime() {
+  [[ -n "${EFFECTIVE_STORAGE_ROOT:-}" && -e "$EFFECTIVE_STORAGE_ROOT" ]] || return 1
+  path_is_inside_runtime "$EFFECTIVE_STORAGE_ROOT"
+}
+
+delete_runtime_root() {
+  ensure_runtime_not_running "delete"
+  if [[ ! -e "$RUNTIME_ROOT" ]]; then
+    say "[dev-tmp] delete:   runtime does not exist: $RUNTIME_ROOT"
+    return 0
+  fi
+  local stamp preserved_storage runtime_real
+  runtime_real="$(readlink -f "$RUNTIME_ROOT" 2>/dev/null || true)"
+  [[ -n "$runtime_real" && "$runtime_real" != "/" ]] || die "refusing to delete unsafe runtime root: $RUNTIME_ROOT"
+  stamp="$(date +%Y%m%d_%H%M%S)"
+  if runtime_storage_inside_runtime; then
+    preserved_storage="$(dirname "$RUNTIME_ROOT")/$(basename "$RUNTIME_ROOT").storage-preserved-${stamp}"
+    [[ ! -e "$preserved_storage" ]] || die "preserved storage path already exists: $preserved_storage"
+    mv "$EFFECTIVE_STORAGE_ROOT" "$preserved_storage"
+    say "[dev-tmp] delete:   moved storage to $preserved_storage"
+  fi
+  say "[dev-tmp] delete:   removing runtime=$RUNTIME_ROOT"
+  rm -rf "$RUNTIME_ROOT"
+  say "[dev-tmp] delete:   completed"
+}
+
 normalize_port() {
   local value="$1"
   if [[ ! "$value" =~ ^[0-9]+$ ]]; then
@@ -3773,6 +3997,32 @@ while [[ $# -gt 0 ]]; do
       DRY_RUN=1
       shift
       ;;
+    --backup)
+      BACKUP_RUNTIME=1
+      if [[ $# -ge 2 && "${2:-}" != --* ]]; then
+        BACKUP_ARCHIVE="$2"
+        shift 2
+      else
+        shift
+      fi
+      ;;
+    --backup-file|--backup-archive)
+      BACKUP_RUNTIME=1
+      BACKUP_ARCHIVE="${2:?missing backup archive path}"
+      shift 2
+      ;;
+    --restore)
+      RESTORE_ARCHIVE="${2:?missing restore archive path}"
+      shift 2
+      ;;
+    --reset)
+      RESET_RUNTIME=1
+      shift
+      ;;
+    --delete)
+      DELETE_RUNTIME=1
+      shift
+      ;;
     --run-root)
       RUN_ROOT="${2:?missing run root}"
       shift 2
@@ -3849,7 +4099,7 @@ export HACKME_BT_BACKEND="$BT_DOWNLOAD_BACKEND"
 export HACKME_TRANSMISSION_RPC_URL="$TRANSMISSION_RPC_URL"
 export HACKME_TRANSMISSION_RPC_USERNAME="$TRANSMISSION_RPC_USERNAME"
 export HACKME_TRANSMISSION_RPC_PASSWORD="$TRANSMISSION_RPC_PASSWORD"
-if [[ "$CLI_MODE" == "1" || "$SHUTDOWN" == "1" ]]; then
+if [[ "$CLI_MODE" == "1" || "$SHUTDOWN" == "1" || "$BACKUP_RUNTIME" == "1" || -n "$RESTORE_ARCHIVE" || "$RESET_RUNTIME" == "1" || "$DELETE_RUNTIME" == "1" ]]; then
   load_local_capacity_report_defaults || load_local_capacity_defaults
 fi
 
@@ -3892,6 +4142,27 @@ LOG_CAPTURE="$RUNTIME_ROOT/logs/server_direct.out"
 GUNICORN_ACCESS_LOG="$RUNTIME_ROOT/logs/gunicorn_access.log"
 GUNICORN_ERROR_LOG="$RUNTIME_ROOT/logs/gunicorn_error.log"
 PID_FILE="$RUNTIME_ROOT/server.pid"
+
+if [[ "$BACKUP_RUNTIME" == "1" || -n "$RESTORE_ARCHIVE" || "$RESET_RUNTIME" == "1" || "$DELETE_RUNTIME" == "1" ]]; then
+  action_count=0
+  [[ "$BACKUP_RUNTIME" == "1" ]] && action_count=$((action_count + 1))
+  [[ -n "$RESTORE_ARCHIVE" ]] && action_count=$((action_count + 1))
+  [[ "$RESET_RUNTIME" == "1" ]] && action_count=$((action_count + 1))
+  [[ "$DELETE_RUNTIME" == "1" ]] && action_count=$((action_count + 1))
+  if (( action_count != 1 )); then
+    die "choose exactly one of --backup, --restore, --reset, or --delete"
+  fi
+  if [[ "$BACKUP_RUNTIME" == "1" ]]; then
+    backup_runtime_state "$BACKUP_ARCHIVE"
+  elif [[ -n "$RESTORE_ARCHIVE" ]]; then
+    restore_runtime_state "$RESTORE_ARCHIVE"
+  elif [[ "$RESET_RUNTIME" == "1" ]]; then
+    reset_runtime_state
+  else
+    delete_runtime_root
+  fi
+  exit 0
+fi
 
 if [[ "$RUNTIME_IN_SOURCE" == "1" ]]; then
   :

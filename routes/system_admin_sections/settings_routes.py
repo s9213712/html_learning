@@ -1,6 +1,9 @@
+import base64
 import json
 import os
 import re
+import urllib.error
+import urllib.request
 
 from flask import request
 
@@ -121,6 +124,9 @@ def register_system_admin_settings_routes(app, ctx):
         huggingface_token = str(payload.get("comfyui_huggingface_api_token") or "").strip()
         payload["comfyui_huggingface_api_token"] = ""
         payload["comfyui_huggingface_api_token_configured"] = bool(huggingface_token)
+        transmission_password = str(payload.get("transmission_rpc_password") or "").strip()
+        payload["transmission_rpc_password"] = ""
+        payload["transmission_rpc_password_configured"] = bool(transmission_password)
         return payload
 
     def normalize_internal_test_token_features(value):
@@ -646,9 +652,14 @@ def register_system_admin_settings_routes(app, ctx):
             if rpc_url and not (rpc_url.startswith("http://") or rpc_url.startswith("https://")):
                 return json_resp({"ok":False,"msg":"transmission_rpc_url 必須是 http(s) RPC URL 或留空"}), 400
             data["transmission_rpc_url"] = rpc_url
-        for key in {"transmission_rpc_username", "transmission_rpc_password"}:
-            if key in data:
-                data[key] = str(data.get(key) or "").strip()
+        if "transmission_rpc_username" in data:
+            data["transmission_rpc_username"] = str(data.get("transmission_rpc_username") or "").strip()
+        if "transmission_rpc_password" in data:
+            password_value = str(data.get("transmission_rpc_password") or "").strip()
+            if password_value:
+                data["transmission_rpc_password"] = password_value
+            else:
+                data.pop("transmission_rpc_password", None)
         remote_download_ranges = {
             "remote_download_max_concurrent_global": (1, 64),
             "remote_download_max_concurrent_per_user": (1, 16),
@@ -710,6 +721,74 @@ def register_system_admin_settings_routes(app, ctx):
             "server_time": server_time_payload(get_system_settings()),
             "server_timezones": list(COMMON_SERVER_TIMEZONES),
         })
+
+
+    def _transmission_rpc_probe(rpc_url, username="", password="", *, timeout=4):
+        url = str(rpc_url or "").strip()
+        if not url or not (url.startswith("http://") or url.startswith("https://")):
+            return {"ok": False, "msg": "Transmission RPC URL 必須是 http(s) URL"}
+        headers = {"Content-Type": "application/json"}
+        username = str(username or "")
+        password = str(password or "")
+        if username or password:
+            token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+            headers["Authorization"] = f"Basic {token}"
+        payload = json.dumps({"method": "session-get"}).encode("utf-8")
+
+        def call(extra_headers=None):
+            merged = dict(headers)
+            if extra_headers:
+                merged.update(extra_headers)
+            req = urllib.request.Request(url, data=payload, headers=merged, method="POST")
+            return urllib.request.urlopen(req, timeout=timeout)
+
+        try:
+            try:
+                resp = call()
+            except urllib.error.HTTPError as exc:
+                if exc.code != 409:
+                    if exc.code in {401, 403}:
+                        return {"ok": False, "msg": "Transmission RPC 認證失敗，請檢查帳號密碼"}
+                    return {"ok": False, "msg": f"Transmission RPC HTTP {exc.code}"}
+                session_id = exc.headers.get("X-Transmission-Session-Id") or ""
+                if not session_id:
+                    return {"ok": False, "msg": "Transmission RPC 未回傳 session id"}
+                resp = call({"X-Transmission-Session-Id": session_id})
+            with resp:
+                body = resp.read().decode("utf-8", errors="replace")
+            data = json.loads(body or "{}")
+            if data.get("result") != "success":
+                return {"ok": False, "msg": f"Transmission RPC 回應失敗：{data.get('result') or 'unknown'}"}
+            args = data.get("arguments") if isinstance(data.get("arguments"), dict) else {}
+            version = str(args.get("version") or "").strip()
+            return {"ok": True, "msg": "Transmission RPC 連線成功", "version": version}
+        except TimeoutError:
+            return {"ok": False, "msg": "Transmission RPC 連線逾時"}
+        except urllib.error.URLError as exc:
+            reason = getattr(exc, "reason", exc)
+            return {"ok": False, "msg": f"Transmission RPC 連線失敗：{reason}"}
+        except Exception as exc:
+            return {"ok": False, "msg": f"Transmission RPC 測試失敗：{exc}"}
+
+    @app.route("/api/admin/settings/transmission/test", methods=["POST"])
+    @require_csrf_safe
+    def admin_settings_transmission_test():
+        actor, error = require_root_actor()
+        if error:
+            return error
+        try:
+            data = request.get_json(force=True) or {}
+        except Exception:
+            return json_resp({"ok": False, "msg": "請求 JSON 格式錯誤"}), 400
+        settings = get_system_settings()
+        rpc_url = str(data.get("transmission_rpc_url") or settings.get("transmission_rpc_url") or "").strip()
+        username = str(data.get("transmission_rpc_username") or settings.get("transmission_rpc_username") or "").strip()
+        password = str(data.get("transmission_rpc_password") or "").strip()
+        if not password:
+            password = str(settings.get("transmission_rpc_password") or "").strip()
+        result = _transmission_rpc_probe(rpc_url, username, password)
+        status = 200 if result.get("ok") else 400
+        return json_resp(result), status
 
     @app.route("/api/root/backpressure", methods=["GET", "PUT", "POST"])
     @require_csrf_safe

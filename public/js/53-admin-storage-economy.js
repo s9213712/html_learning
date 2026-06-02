@@ -95,6 +95,13 @@ function setRootStorageMsg(text, ok = true) {
   msg.style.color = ok ? "#4caf50" : "#ff4f6d";
 }
 
+function setDriveRootStorageSettingsMsg(text, ok = true) {
+  const msg = $("cloud-drive-storage-status");
+  if (!msg) return;
+  msg.textContent = text || "";
+  msg.style.color = ok ? "#4caf50" : "#ff4f6d";
+}
+
 function renderRootStorageCapacity(capacity) {
   const target = $("root-storage-capacity-summary");
   if (!target) return;
@@ -203,7 +210,14 @@ async function saveDriveRootStorageSettings() {
     cloud_drive_storage_root: ($("s-cloud-drive-storage-root")?.value || "").trim(),
     cloud_drive_global_capacity_limit_mb: parseInt($("s-cloud-drive-global-capacity-limit-mb")?.value || "-1", 10),
     server_max_content_mb: parseInt($("s-server-max-content-mb")?.value || "8192", 10),
+    remote_download_max_concurrent_global: parseInt($("s-remote-download-max-concurrent-global")?.value || "1", 10) || 1,
+    remote_download_max_concurrent_per_user: parseInt($("s-remote-download-max-concurrent-per-user")?.value || "1", 10) || 1,
+    bt_download_backend: ($("s-bt-download-backend")?.value || "auto"),
+    transmission_rpc_url: ($("s-transmission-rpc-url")?.value || "").trim(),
+    transmission_rpc_username: ($("s-transmission-rpc-username")?.value || "").trim(),
   };
+  const transmissionRpcPassword = ($("s-transmission-rpc-password")?.value || "").trim();
+  if (transmissionRpcPassword) payload.transmission_rpc_password = transmissionRpcPassword;
   const res = await apiFetch(API + "/admin/settings", {
     method: "PUT",
     credentials: "same-origin",
@@ -211,10 +225,48 @@ async function saveDriveRootStorageSettings() {
     body: JSON.stringify(payload),
   });
   const json = await res.json().catch(() => ({}));
-  setRootStorageMsg(json.ok ? "雲端硬碟儲存設定已儲存" : (json.msg || "儲存失敗"), !!json.ok);
+  setDriveRootStorageSettingsMsg(json.ok ? "雲端硬碟儲存設定已儲存" : (json.msg || "儲存失敗"), !!json.ok);
   if (json.ok) {
     await loadSettings();
     await loadRootStorageUsers();
+  }
+}
+
+
+async function testTransmissionRpcConnection() {
+  if (currentUser !== "root") return;
+  const btn = $("transmission-rpc-test-btn");
+  const originalText = btn ? btn.textContent : "";
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "測試中...";
+  }
+  setDriveRootStorageSettingsMsg("正在測試 Transmission RPC 連線...", true);
+  try {
+    await fetchCsrfToken({ force: true });
+    const csrf = getCsrfToken();
+    const payload = {
+      transmission_rpc_url: ($("s-transmission-rpc-url")?.value || "").trim(),
+      transmission_rpc_username: ($("s-transmission-rpc-username")?.value || "").trim(),
+    };
+    const password = ($("s-transmission-rpc-password")?.value || "").trim();
+    if (password) payload.transmission_rpc_password = password;
+    const res = await apiFetch(API + "/admin/settings/transmission/test", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf || "" },
+      body: JSON.stringify(payload),
+    });
+    const json = await res.json().catch(() => ({}));
+    const suffix = json.version ? `（${json.version}）` : "";
+    setDriveRootStorageSettingsMsg(json.ok ? `${json.msg || "Transmission RPC 連線成功"}${suffix}` : (json.msg || "Transmission RPC 連線失敗"), !!json.ok);
+  } catch (err) {
+    setDriveRootStorageSettingsMsg(err?.message || "Transmission RPC 連線測試失敗", false);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = originalText || "測試 Transmission 連線";
+    }
   }
 }
 

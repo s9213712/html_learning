@@ -87,6 +87,7 @@ function bindUiEvents() {
   const adminReportsBulkRejectBtn = $("admin-reports-bulk-reject");
   const settingsSave = $("settings-save-btn");
   const driveRootStorageSettingsSave = $("drive-root-storage-settings-save-btn");
+  const transmissionRpcTestBtn = $("transmission-rpc-test-btn");
   const settingsPanel = $("sec-server-settings");
   const serverTimeCheckBtn = $("server-time-check-btn");
   const comfyuiTestConnectionBtn = $("comfyui-test-connection-btn");
@@ -572,6 +573,7 @@ function bindUiEvents() {
   if (typeof bindSettingsAssistants === "function") bindSettingsAssistants();
   if (cloudDrivePolicySave) cloudDrivePolicySave.addEventListener("click", saveCloudDriveAdminPolicy);
   if (driveRootStorageSettingsSave) driveRootStorageSettingsSave.addEventListener("click", saveDriveRootStorageSettings);
+  if (transmissionRpcTestBtn) transmissionRpcTestBtn.addEventListener("click", testTransmissionRpcConnection);
   if (rootCatalogNew) rootCatalogNew.addEventListener("click", clearRootCatalogForm);
   if (rootCatalogRefresh) rootCatalogRefresh.addEventListener("click", loadRootEconomyCatalog);
   if (rootCatalogSave) rootCatalogSave.addEventListener("click", saveRootEconomyCatalogItem);
