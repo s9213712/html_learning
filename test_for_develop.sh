@@ -304,11 +304,13 @@ prompt_capacity_defaults_source() {
       1|json|report)
         [[ "$has_json" == "1" ]] || { say "JSON capacity report is unavailable; choose another option."; continue; }
         load_local_capacity_report_defaults || die "selected JSON capacity report could not be loaded"
+        CAPACITY_SETTINGS_FINALIZED=1
         return 0
         ;;
       2|env|defaults)
         [[ "$has_env" == "1" ]] || { say "Env defaults are unavailable; choose another option."; continue; }
         load_local_capacity_defaults force
+        CAPACITY_SETTINGS_FINALIZED=1
         say "[dev-tmp] capacity defaults: loaded env defaults from $CAPACITY_DEFAULTS_FILE"
         return 0
         ;;
