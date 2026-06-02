@@ -3137,16 +3137,76 @@ shutdown_dev_server_pids() {
   fi
 }
 
+collect_pid_file_pids() {
+  local candidates=()
+  local file pid
+  append_unique_array_value candidates "$SOURCE_ROOT/runtime/server.pid"
+  if [[ -n "${CUSTOM_RUNTIME_ROOT:-}" ]]; then
+    append_unique_array_value candidates "$CUSTOM_RUNTIME_ROOT/server.pid"
+  fi
+  while IFS= read -r file; do
+    append_unique_array_value candidates "$file"
+  done < <(find /tmp -maxdepth 5 \
+    \( -path '/tmp/hackme_web_dev_*/runtime/server.pid' \
+       -o -path '/tmp/hackme_web_dev_*/hackme_web/runtime/server.pid' \
+       -o -path '/tmp/hackme_predeploy_capacity_*/profile_*/hackme_web/runtime/server.pid' \) \
+    -type f 2>/dev/null || true)
+  for file in "${candidates[@]:-}"; do
+    [[ -r "$file" ]] || continue
+    pid="$(sed -n '1p' "$file" 2>/dev/null | tr -dc '0-9')"
+    [[ -n "$pid" ]] || continue
+    printf '%s\n' "$pid"
+  done
+}
+
+scan_dev_server_pids() {
+  command -v pgrep >/dev/null 2>&1 || return 0
+  {
+    pgrep -f 'gunicorn .*server:app' 2>/dev/null || true
+    pgrep -f 'server.py' 2>/dev/null || true
+  } | sort -u
+}
+
+pid_matches_shutdown_port() {
+  local pid="$1"
+  local port="$2"
+  local args env_port
+  [[ -n "$pid" && -r "/proc/$pid/cmdline" ]] || return 1
+  args="$(tr '\000' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
+  if [[ "$args" == *"--bind"*":$port"* || "$args" == *"--bind="*":$port"* ]]; then
+    return 0
+  fi
+  if [[ -r "/proc/$pid/environ" ]]; then
+    env_port="$(tr '\000' '\n' < "/proc/$pid/environ" 2>/dev/null | sed -n 's/^PORT=//p' | tail -n 1)"
+    if [[ "$env_port" == "$port" ]]; then
+      return 0
+    fi
+  fi
+  return 1
+}
+
+shutdown_candidate_pids_for_port() {
+  local port="$1"
+  local pid
+  port_pid_list "$port" | tr ' ' '\n'
+  while IFS= read -r pid; do
+    [[ -n "$pid" ]] || continue
+    pid_matches_shutdown_port "$pid" "$port" || continue
+    printf '%s\n' "$pid"
+  done < <({ collect_pid_file_pids; scan_dev_server_pids; } | sort -u)
+}
+
 shutdown_dev_servers_for_port() {
   normalize_port "$PORT"
   PORT="$NORMALIZED_PORT"
-  local pids
-  pids="$(port_pid_list "$PORT")"
-  if [[ -z "$pids" ]]; then
-    say "[dev-tmp] shutdown: no listener on $HOST:$PORT"
-    return 0
+  local listener_pids pids
+  listener_pids="$(port_pid_list "$PORT")"
+  if [[ -z "$listener_pids" ]]; then
+    say "[dev-tmp] shutdown: no listener on $HOST:$PORT; checking dev pid files and process scan"
+  else
+    show_port_processes "$PORT" "$listener_pids"
   fi
-  show_port_processes "$PORT" "$pids"
+  pids="$(shutdown_candidate_pids_for_port "$PORT" | paste -sd ' ' - | sed 's/[[:space:]]*$//')"
   shutdown_dev_server_pids "$pids"
 }
 
