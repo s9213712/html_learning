@@ -14485,6 +14485,17 @@
   content: "Ⅱ";
 }
 
+#module-drive .drive-card-heading > .drive-file-actions :is(.btn, button)[data-drive-action],
+#module-drive .drive-e2ee-session-card .drive-file-actions :is(.btn, button)[data-drive-action] {
+  font-size: inherit !important;
+}
+
+#module-drive .drive-card-heading > .drive-file-actions :is(.btn, button)[data-drive-action]::before,
+#module-drive .drive-e2ee-session-card .drive-file-actions :is(.btn, button)[data-drive-action]::before {
+  content: none !important;
+}
+
+
 .video-stream-debug-panel {
   margin-top: 0.75rem;
   width: 100%;

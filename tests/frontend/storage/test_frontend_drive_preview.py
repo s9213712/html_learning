@@ -568,12 +568,18 @@ def test_cloud_drive_toolbar_buttons_wrap_on_mobile():
     index_html = (ROOT / "public" / "index.html").read_text(encoding="utf-8")
     css = (ROOT / "public" / "styles.css").read_text(encoding="utf-8")
 
+    assert '/styles.css?v=20260602-drive-action-text-fix' in index_html
     assert 'data-drive-action="open-text-document-modal">新增文檔</button>' in index_html
+    assert 'data-drive-action="set-drive-e2ee-session-passphrase">套用到本次瀏覽器</button>' in index_html
+    assert 'data-drive-action="clear-drive-e2ee-session-passphrase">清除</button>' in index_html
     assert "#module-drive .drive-card-heading > .drive-file-actions" in css
     assert "grid-template-columns: repeat(auto-fit, minmax(6.8rem, 1fr));" in css
     assert "white-space: normal;" in css
     assert "overflow-wrap: anywhere;" in css
     assert "text-align: center;" in css
+    assert "#module-drive .drive-e2ee-session-card .drive-file-actions :is(.btn, button)[data-drive-action]" in css
+    assert "font-size: inherit !important;" in css
+    assert "content: none !important;" in css
 
 
 def test_cloud_drive_privacy_modes_use_human_labels():
