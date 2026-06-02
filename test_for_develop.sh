@@ -33,6 +33,7 @@ REQUIREMENTS_FILE_SET=0
 FEATURE_MODE="${HACKME_DEV_FEATURE_MODE:-all}"
 FEATURE_LIST="${HACKME_DEV_FEATURES:-}"
 FEATURE_BUNDLES="${HACKME_DEV_FEATURE_BUNDLES:-${HACKME_DEV_FEATURE_PACKAGES:-}}"
+FEATURE_LIST_FINALIZED=0
 DEV_TOKEN_FEATURES="${HACKME_DEV_TOKEN_FEATURES:-${HACKME_DEV_INTERNAL_TEST_TOKEN_FEATURES:-}}"
 DEV_TOKEN_TTL_MINUTES="${HACKME_DEV_TOKEN_TTL_MINUTES:-1440}"
 DEV_TOKEN_USER="${HACKME_DEV_TOKEN_USER:-test}"
@@ -865,8 +866,10 @@ normalize_runtime_options() {
     normalize_feature_or_bundle_selection "$FEATURE_BUNDLES" "bundle" || die "invalid feature bundle selection: $FEATURE_BUNDLES"
     FEATURE_LIST="$NORMALIZED_FEATURE_SELECTION"
   elif [[ "$FEATURE_MODE" == "custom" ]]; then
-    normalize_feature_or_bundle_selection "$FEATURE_LIST" || die "invalid feature selection: $FEATURE_LIST"
-    FEATURE_LIST="$NORMALIZED_FEATURE_SELECTION"
+    if [[ "$FEATURE_LIST_FINALIZED" != "1" ]]; then
+      normalize_feature_or_bundle_selection "$FEATURE_LIST" || die "invalid feature selection: $FEATURE_LIST"
+      FEATURE_LIST="$NORMALIZED_FEATURE_SELECTION"
+    fi
   fi
   normalize_server_mode
   normalize_token_feature_selection "$DEV_TOKEN_FEATURES" || die "invalid generated dev token feature selection: $DEV_TOKEN_FEATURES"
@@ -1032,6 +1035,11 @@ print_resolved_config() {
   say "  token_password:      <keep existing / auto-generate for new user>"
   fi
   say "  security_enabled:    $SECURITY_SETTINGS_ENABLED"
+  if [[ "$SECURITY_SETTINGS_ENABLED" == "1" ]]; then
+    say "  password_policy:     enforced"
+  else
+    say "  password_policy:     dev-disabled (default-password change gate off)"
+  fi
   say "  idle_logout_minutes: ${SESSION_IDLE_TIMEOUT_MINUTES:-<profile default>}"
   say "  server_mode:         $SERVER_MODE"
   say "  cloud_drive_root:    ${CLOUD_DRIVE_STORAGE_ROOT:-<runtime/storage>}"
@@ -1755,10 +1763,11 @@ prompt_feature_settings() {
   esac
 
   say "Feature mode:"
-  say "  1) all      Enable every server DEFAULT_SETTINGS feature_* flag"
-  say "  2) defaults Keep server feature defaults"
-  say "  3) bundles  Enable feature packages with dependencies already grouped"
-  say "  4) custom   Advanced: enter package names and/or feature_* keys"
+  say "  1) all-except Enable every service, then choose services/packages to disable"
+  say "  2) defaults   Keep server feature defaults"
+  say "  3) bundles    Enable only selected feature packages"
+  say "  4) custom     Advanced allow-list: enter package names and/or feature_* keys"
+  say "  5) all        Enable every server DEFAULT_SETTINGS feature_* flag with no exclusions"
   while true; do
     printf 'Feature mode [%s]: ' "$default_choice"
     if ! read -r choice; then
@@ -1766,31 +1775,40 @@ prompt_feature_settings() {
     fi
     choice="${choice:-$default_choice}"
     case "${choice,,}" in
-      1|all)
-        FEATURE_MODE="all"
-        FEATURE_LIST=""
+      1|all-except|except|subtract|subtractive|minus)
+        prompt_feature_exclusion_scope
         return 0
         ;;
       2|default|defaults)
         FEATURE_MODE="defaults"
         FEATURE_LIST=""
         FEATURE_BUNDLES=""
+        FEATURE_LIST_FINALIZED=0
         return 0
         ;;
       3|bundle|bundles|package|packages|preset|presets)
         FEATURE_MODE="bundles"
+        FEATURE_LIST_FINALIZED=0
         prompt_feature_bundle_scope
         return 0
         ;;
       4|custom)
         FEATURE_MODE="custom"
+        FEATURE_LIST_FINALIZED=0
         print_known_feature_bundles
         print_known_feature_keys
         prompt_value "Enabled feature packages / keys, comma-separated" "$FEATURE_LIST" FEATURE_LIST
         return 0
         ;;
+      5|all)
+        FEATURE_MODE="all"
+        FEATURE_LIST=""
+        FEATURE_BUNDLES=""
+        FEATURE_LIST_FINALIZED=0
+        return 0
+        ;;
       *)
-        say "Please choose 1, 2, 3, or 4."
+        say "Please choose 1, 2, 3, 4, or 5."
         ;;
     esac
   done
@@ -1930,13 +1948,15 @@ PY
 normalize_feature_or_bundle_selection() {
   local raw_value="$1"
   local number_mode="${2:-feature}"
+  local include_dependencies="${3:-1}"
   local normalized
-  if ! normalized="$(PYTHONPATH="$SOURCE_ROOT" python3 - "$raw_value" "$number_mode" <<'PY'
+  if ! normalized="$(PYTHONPATH="$SOURCE_ROOT" python3 - "$raw_value" "$number_mode" "$include_dependencies" <<'PY'
 import re
 import sys
 
 raw_value = str(sys.argv[1] or "").strip()
 number_mode = str(sys.argv[2] or "feature").strip().lower()
+include_dependencies = str(sys.argv[3] or "1").strip().lower() not in {"0", "false", "no", "off"}
 try:
     from services.platform.settings import FEATURE_DEPENDENCY_RULES, FEATURE_FLAG_KEYS, normalize_feature_key
 except Exception as exc:
@@ -2107,16 +2127,17 @@ if unknown:
     print(f"unknown feature choice(s): {', '.join(unknown)}", file=sys.stderr)
     raise SystemExit(2)
 
-changed = True
-while changed:
-    changed = False
-    for key in list(allowed):
-        rule = FEATURE_DEPENDENCY_RULES.get(key, {}) or {}
-        for dep in tuple(rule.get("required", ()) or ()) + tuple(rule.get("recommended", ()) or ()):
-            dep = normalize_feature_key(dep)
-            if dep in feature_key_set and dep not in allowed:
-                allowed.append(dep)
-                changed = True
+if include_dependencies:
+    changed = True
+    while changed:
+        changed = False
+        for key in list(allowed):
+            rule = FEATURE_DEPENDENCY_RULES.get(key, {}) or {}
+            for dep in tuple(rule.get("required", ()) or ()) + tuple(rule.get("recommended", ()) or ()):
+                dep = normalize_feature_key(dep)
+                if dep in feature_key_set and dep not in allowed:
+                    allowed.append(dep)
+                    changed = True
 
 print(",".join(allowed))
 PY
@@ -2131,6 +2152,62 @@ normalize_token_feature_selection() {
   normalize_feature_or_bundle_selection "$1" "feature" || return 1
   NORMALIZED_DEV_TOKEN_FEATURES="$NORMALIZED_FEATURE_SELECTION"
   return 0
+}
+
+normalize_feature_exclusion_selection() {
+  local raw_value="$1"
+  local excluded_csv
+  local normalized
+
+  normalize_feature_or_bundle_selection "$raw_value" "feature" 0 || return 1
+  excluded_csv="$NORMALIZED_FEATURE_SELECTION"
+  if ! normalized="$(PYTHONPATH="$SOURCE_ROOT" python3 - "$excluded_csv" <<'PY'
+import sys
+
+try:
+    from services.platform.settings import FEATURE_FLAG_KEYS
+except Exception as exc:
+    print(f"feature catalog unavailable: {exc}", file=sys.stderr)
+    raise SystemExit(2)
+
+excluded = {item.strip() for item in str(sys.argv[1] or "").split(",") if item.strip()}
+enabled = [key for key in FEATURE_FLAG_KEYS if key not in excluded]
+print(",".join(enabled))
+PY
+)"; then
+    return 1
+  fi
+  NORMALIZED_FEATURE_SELECTION="$normalized"
+  return 0
+}
+
+prompt_feature_exclusion_scope() {
+  local answer
+  say "Disable services/packages:"
+  print_known_feature_bundles
+  print_known_feature_keys
+  say "Enter comma-separated package names, b-numbers, f-numbers, or feature keys to disable. Blank keeps every feature enabled."
+  while true; do
+    prompt_value "Disabled feature packages / keys" "" answer
+    if [[ -z "${answer//[[:space:]]/}" ]]; then
+      FEATURE_MODE="all"
+      FEATURE_LIST=""
+      FEATURE_BUNDLES=""
+      FEATURE_LIST_FINALIZED=0
+      say "Feature exclusions: none; every feature flag stays enabled."
+      return 0
+    fi
+    if normalize_feature_exclusion_selection "$answer"; then
+      FEATURE_MODE="custom"
+      FEATURE_BUNDLES=""
+      FEATURE_LIST="$NORMALIZED_FEATURE_SELECTION"
+      FEATURE_LIST_FINALIZED=1
+      say "Feature exclusions: $answer"
+      say "Resolved enabled feature keys after subtraction: ${FEATURE_LIST:-<none>}"
+      return 0
+    fi
+    say "Please enter valid package names, b-numbers, f-numbers, or feature keys."
+  done
 }
 
 prompt_feature_bundle_scope() {
@@ -3539,8 +3616,11 @@ export HTML_LEARNING_BACKPRESSURE_FAST_LANE_RESERVED="${HTML_LEARNING_BACKPRESSU
 export HTML_LEARNING_BACKPRESSURE_RETRY_AFTER_SECONDS="${HTML_LEARNING_BACKPRESSURE_RETRY_AFTER_SECONDS:-2}"
 if [[ "$SECURITY_SETTINGS_ENABLED" == "1" ]]; then
   export HTML_LEARNING_DISABLE_DEFAULT_PASSWORD_POLICY=0
+  export HTML_LEARNING_DISABLE_DEFAULT_PASSWORD_CHANGE=0
 else
   export HTML_LEARNING_DISABLE_DEFAULT_PASSWORD_POLICY=1
+  export HTML_LEARNING_DISABLE_DEFAULT_PASSWORD_CHANGE=1
+  export HTML_LEARNING_ALLOW_DEFAULT_PASSWORDS=1
 fi
 export HACKME_DEV_TRADING_ALLOW_CONSERVATIVE_MARKET_ORDERS=1
 export HACKME_DEV_TRADING_ALLOW_UNREADY_MARKETS=1

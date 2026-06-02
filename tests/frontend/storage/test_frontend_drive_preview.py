@@ -564,6 +564,18 @@ def test_album_gallery_layout_wraps_long_filenames():
     assert "word-break: break-word;" in css
 
 
+def test_cloud_drive_toolbar_buttons_wrap_on_mobile():
+    index_html = (ROOT / "public" / "index.html").read_text(encoding="utf-8")
+    css = (ROOT / "public" / "styles.css").read_text(encoding="utf-8")
+
+    assert 'data-drive-action="open-text-document-modal">新增文檔</button>' in index_html
+    assert "#module-drive .drive-card-heading > .drive-file-actions" in css
+    assert "grid-template-columns: repeat(auto-fit, minmax(6.8rem, 1fr));" in css
+    assert "white-space: normal;" in css
+    assert "overflow-wrap: anywhere;" in css
+    assert "text-align: center;" in css
+
+
 def test_cloud_drive_privacy_modes_use_human_labels():
     index_html = (ROOT / "public" / "index.html").read_text(encoding="utf-8")
     drive_js = ((ROOT / "public" / "js" / "35-drive.js").read_text(encoding="utf-8") + "\n" + (ROOT / "public" / "js" / "35-drive-preview-share.js").read_text(encoding="utf-8"))
