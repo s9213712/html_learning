@@ -11,6 +11,7 @@ MAX_CONTENT_MB="${HACKME_DEV_MAX_CONTENT_MB:-${HTML_LEARNING_MAX_CONTENT_MB:-}}"
 RUN_ID="$(date +%Y%m%d_%H%M%S)"
 RUN_ROOT=""
 CUSTOM_RUNTIME_ROOT="${HACKME_DEV_RUNTIME_ROOT:-}"
+CUSTOM_RUNTIME_ROOT_PROMPTED=0
 HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-5000}"
 TRUSTED_HOSTS="${HTML_LEARNING_TRUSTED_HOSTS:-}"
@@ -130,6 +131,208 @@ load_local_capacity_report_defaults() {
   CAPACITY_REPORT_DEFAULTS_LOADED=1
   say "[dev-tmp] capacity report: loaded $CAPACITY_REPORT_PROFILE from $CAPACITY_REPORT_DEFAULTS_FILE"
   return 0
+}
+
+
+load_capacity_env_defaults_preview() {
+  CAPACITY_ENV_WORKERS=""
+  CAPACITY_ENV_THREADS=""
+  CAPACITY_ENV_MAX_REQUESTS=""
+  CAPACITY_ENV_MAX_REQUESTS_JITTER=""
+  CAPACITY_ENV_BACKPRESSURE=""
+  [[ -f "$CAPACITY_DEFAULTS_FILE" ]] || return 1
+  local line key value
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%%#*}"
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [[ -n "$line" && "$line" == *=* ]] || continue
+    key="${line%%=*}"
+    value="${line#*=}"
+    key="${key#"${key%%[![:space:]]*}"}"
+    key="${key%"${key##*[![:space:]]}"}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    value="${value%\"}"
+    value="${value#\"}"
+    value="${value%\'}"
+    value="${value#\'}"
+    case "$key" in
+      HACKME_DEV_GUNICORN_WORKERS) CAPACITY_ENV_WORKERS="$value" ;;
+      HACKME_DEV_GUNICORN_THREADS) CAPACITY_ENV_THREADS="$value" ;;
+      HACKME_DEV_GUNICORN_MAX_REQUESTS) CAPACITY_ENV_MAX_REQUESTS="$value" ;;
+      HACKME_DEV_GUNICORN_MAX_REQUESTS_JITTER) CAPACITY_ENV_MAX_REQUESTS_JITTER="$value" ;;
+      HTML_LEARNING_BACKPRESSURE_THREAD_CAPACITY) CAPACITY_ENV_BACKPRESSURE="$value" ;;
+    esac
+  done < "$CAPACITY_DEFAULTS_FILE"
+  [[ -n "$CAPACITY_ENV_WORKERS" || -n "$CAPACITY_ENV_THREADS" || -n "$CAPACITY_ENV_BACKPRESSURE" ]]
+}
+
+load_capacity_report_defaults_preview() {
+  CAPACITY_JSON_OK=0
+  CAPACITY_JSON_WORKERS=""
+  CAPACITY_JSON_THREADS=""
+  CAPACITY_JSON_MAX_REQUESTS=""
+  CAPACITY_JSON_MAX_REQUESTS_JITTER=""
+  CAPACITY_JSON_BACKPRESSURE=""
+  CAPACITY_JSON_PROFILE=""
+  CAPACITY_JSON_ACCOUNTS=""
+  CAPACITY_JSON_TARGET_P95=""
+  CAPACITY_JSON_LAT_P50=""
+  CAPACITY_JSON_LAT_P95=""
+  CAPACITY_JSON_LAT_P99=""
+  CAPACITY_JSON_LAT_MAX=""
+  [[ -n "$CAPACITY_REPORT_DEFAULTS_FILE" && -s "$CAPACITY_REPORT_DEFAULTS_FILE" ]] || return 1
+  local preview
+  if ! preview="$($PYTHON_BIN - "$CAPACITY_REPORT_DEFAULTS_FILE" <<'REPORTPREVIEWPY'
+import json
+import shlex
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    report = json.loads(path.read_text(encoding="utf-8"))
+except Exception as exc:
+    print("CAPACITY_JSON_OK=0")
+    print(f"CAPACITY_JSON_ERROR={shlex.quote(type(exc).__name__ + ': ' + str(exc))}")
+    raise SystemExit(0)
+recommendation = report.get("recommendation") or {}
+suggested_env = recommendation.get("suggested_env") or {}
+latency = recommendation.get("observed_latency_ms") or {}
+workers = recommendation.get("workers") if recommendation.get("ok") else ""
+threads = recommendation.get("threads") if recommendation.get("ok") else ""
+
+def emit(key, value):
+    if value is None:
+        value = ""
+    print(f"{key}={shlex.quote(str(value))}")
+
+emit("CAPACITY_JSON_OK", "1" if recommendation.get("ok") else "0")
+emit("CAPACITY_JSON_WORKERS", workers or "")
+emit("CAPACITY_JSON_THREADS", threads or "")
+emit("CAPACITY_JSON_MAX_REQUESTS", suggested_env.get("HACKME_DEV_GUNICORN_MAX_REQUESTS") or "")
+emit("CAPACITY_JSON_MAX_REQUESTS_JITTER", suggested_env.get("HACKME_DEV_GUNICORN_MAX_REQUESTS_JITTER") or "")
+emit("CAPACITY_JSON_BACKPRESSURE", suggested_env.get("HTML_LEARNING_BACKPRESSURE_THREAD_CAPACITY") or (max(4, int(threads or 0)) if threads else ""))
+emit("CAPACITY_JSON_PROFILE", f"{workers}x{threads}" if workers and threads else "")
+emit("CAPACITY_JSON_ACCOUNTS", recommendation.get("max_passing_accounts") or "")
+emit("CAPACITY_JSON_TARGET_P95", recommendation.get("target_p95_ms") or "")
+emit("CAPACITY_JSON_LAT_P50", latency.get("p50") or "")
+emit("CAPACITY_JSON_LAT_P95", latency.get("p95") or "")
+emit("CAPACITY_JSON_LAT_P99", latency.get("p99") or "")
+emit("CAPACITY_JSON_LAT_MAX", latency.get("max") or "")
+REPORTPREVIEWPY
+)"; then
+    return 1
+  fi
+  eval "$preview"
+  [[ "${CAPACITY_JSON_OK:-0}" == "1" ]]
+}
+
+print_capacity_defaults_candidate() {
+  local label="$1"
+  local source_path="$2"
+  local workers="$3"
+  local threads="$4"
+  local backpressure="$5"
+  local max_requests="$6"
+  local jitter="$7"
+  local extra="$8"
+  say "  $label"
+  say "     file:        $source_path"
+  say "     gunicorn:    workers=${workers:-?} threads=${threads:-?} max_requests=${max_requests:-?} jitter=${jitter:-?}"
+  say "     backpressure:${backpressure:-?}"
+  if [[ -n "$extra" ]]; then
+    say "     observed:    $extra"
+  fi
+}
+
+prompt_capacity_defaults_source() {
+  [[ "${HACKME_DEV_USE_CAPACITY_DEFAULTS:-1}" != "0" ]] || return 0
+  if [[ "$CLI_MODE" == "1" || "$SHUTDOWN" == "1" ]]; then
+    load_local_capacity_report_defaults || load_local_capacity_defaults
+    return 0
+  fi
+
+  local has_json=0
+  local has_env=0
+  load_capacity_report_defaults_preview && has_json=1 || true
+  load_capacity_env_defaults_preview && has_env=1 || true
+
+  if [[ "$has_json" != "1" && "$has_env" != "1" ]]; then
+    return 0
+  fi
+
+  say "Detected existing capacity/backpressure defaults. Choose how to use them for this launch:"
+  if [[ "$has_json" == "1" ]]; then
+    print_capacity_defaults_candidate \
+      "1) JSON capacity report" \
+      "$CAPACITY_REPORT_DEFAULTS_FILE" \
+      "$CAPACITY_JSON_WORKERS" \
+      "$CAPACITY_JSON_THREADS" \
+      "$CAPACITY_JSON_BACKPRESSURE" \
+      "$CAPACITY_JSON_MAX_REQUESTS" \
+      "$CAPACITY_JSON_MAX_REQUESTS_JITTER" \
+      "safe_accounts=${CAPACITY_JSON_ACCOUNTS:-?} p50=${CAPACITY_JSON_LAT_P50:-?}ms p95=${CAPACITY_JSON_LAT_P95:-?}ms p99=${CAPACITY_JSON_LAT_P99:-?}ms max=${CAPACITY_JSON_LAT_MAX:-?}ms target_p95=${CAPACITY_JSON_TARGET_P95:-?}ms"
+  else
+    say "  1) JSON capacity report unavailable: $CAPACITY_REPORT_DEFAULTS_FILE"
+  fi
+  if [[ "$has_env" == "1" ]]; then
+    print_capacity_defaults_candidate \
+      "2) Env defaults" \
+      "$CAPACITY_DEFAULTS_FILE" \
+      "$CAPACITY_ENV_WORKERS" \
+      "$CAPACITY_ENV_THREADS" \
+      "$CAPACITY_ENV_BACKPRESSURE" \
+      "$CAPACITY_ENV_MAX_REQUESTS" \
+      "$CAPACITY_ENV_MAX_REQUESTS_JITTER" \
+      ""
+  else
+    say "  2) Env defaults unavailable: $CAPACITY_DEFAULTS_FILE"
+  fi
+  say "  3) retest capacity now"
+  say "  4) enter manual capacity/backpressure settings"
+  say "  5) conservative fallback"
+  local choice
+  while true; do
+    printf 'Choose capacity defaults source [1]: '
+    if ! read -r choice; then
+      die "interactive setup was interrupted"
+    fi
+    choice="${choice:-1}"
+    case "${choice,,}" in
+      1|json|report)
+        [[ "$has_json" == "1" ]] || { say "JSON capacity report is unavailable; choose another option."; continue; }
+        load_local_capacity_report_defaults || die "selected JSON capacity report could not be loaded"
+        return 0
+        ;;
+      2|env|defaults)
+        [[ "$has_env" == "1" ]] || { say "Env defaults are unavailable; choose another option."; continue; }
+        load_local_capacity_defaults force
+        say "[dev-tmp] capacity defaults: loaded env defaults from $CAPACITY_DEFAULTS_FILE"
+        return 0
+        ;;
+      3|retest|probe|rerun)
+        CAPACITY_PROBE_MODE="force"
+        if [[ "$CAPACITY_PROBE_TIER" == "auto" ]]; then
+          prompt_capacity_probe_tier
+        fi
+        run_capacity_probe_for_defaults
+        return 0
+        ;;
+      4|manual|custom)
+        prompt_manual_capacity_settings
+        return 0
+        ;;
+      5|fallback|conservative)
+        reset_capacity_to_conservative_fallback
+        return 0
+        ;;
+      *)
+        say "Please choose 1, 2, 3, 4, or 5."
+        ;;
+    esac
+  done
 }
 
 usage() {
@@ -780,8 +983,13 @@ print_resolved_config() {
     say "  launch_mode:         source runtime deployment"
     default_runtime_root="$SOURCE_ROOT/runtime"
   elif [[ "$IN_PLACE" == "1" ]]; then
-    say "  run_root:            ${RUN_ROOT:-/tmp/hackme_web_dev_${RUN_ID}_$$}"
-    say "  launch_mode:         in-place (no source copy; tmp runtime)"
+    if [[ -n "$CUSTOM_RUNTIME_ROOT" ]]; then
+      say "  run_root:            <not used; custom runtime>"
+      say "  launch_mode:         in-place (no source copy; custom runtime)"
+    else
+      say "  run_root:            ${RUN_ROOT:-/tmp/hackme_web_dev_${RUN_ID}_$$}"
+      say "  launch_mode:         in-place (no source copy; tmp runtime)"
+    fi
     default_runtime_root="${RUN_ROOT:-/tmp/hackme_web_dev_${RUN_ID}_$$}/runtime"
   else
     say "  run_root:            ${RUN_ROOT:-/tmp/hackme_web_dev_${RUN_ID}_$$}"
@@ -1933,6 +2141,7 @@ prompt_launch_layout() {
   say "  1) isolated tmp copy + tmp runtime (best for QA; no repo runtime changes)"
   say "  2) current repo + tmp runtime (no source copy; runtime stays under --run-root)"
   say "  3) current repo + ./runtime (local deployment layout)"
+  say "  4) current repo + custom runtime directory/path"
   while true; do
     printf 'Choose launch layout [default %s]: ' "$default_choice"
     if ! read -r answer; then
@@ -1955,8 +2164,16 @@ prompt_launch_layout() {
         RUNTIME_IN_SOURCE=1
         return 0
         ;;
+      4|custom|custom-runtime|runtime-root|runtime-dir|runtime-directory)
+        IN_PLACE=1
+        RUNTIME_IN_SOURCE=0
+        prompt_value "Custom runtime directory/path" "$CUSTOM_RUNTIME_ROOT" CUSTOM_RUNTIME_ROOT
+        [[ -n "$CUSTOM_RUNTIME_ROOT" ]] || die "custom runtime directory/path cannot be blank when launch layout 4 is selected"
+        CUSTOM_RUNTIME_ROOT_PROMPTED=1
+        return 0
+        ;;
       *)
-        say "Please choose 1, 2, or 3."
+        say "Please choose 1, 2, 3, or 4."
         ;;
     esac
   done
@@ -2001,6 +2218,9 @@ prompt_server_runner() {
 
   normalize_capacity_probe_mode
   normalize_capacity_probe_tier
+  if [[ "$CAPACITY_PROBE_MODE" != "force" ]]; then
+    prompt_capacity_defaults_source
+  fi
   if [[ "$CAPACITY_PROBE_MODE" == "force" ]]; then
     if [[ "$CAPACITY_PROBE_TIER" == "auto" ]]; then
       prompt_capacity_probe_tier
@@ -2054,10 +2274,12 @@ prompt_runtime_config() {
 
   say "[dev-tmp] interactive setup; pass --cli to skip prompts"
   prompt_launch_layout
-  if [[ "$RUNTIME_IN_SOURCE" != "1" ]]; then
+  if [[ "$RUNTIME_IN_SOURCE" != "1" && !( "$IN_PLACE" == "1" && -n "$CUSTOM_RUNTIME_ROOT" ) ]]; then
     prompt_value "Tmp workspace/run root" "$default_run_root" RUN_ROOT
   fi
-  prompt_value "Runtime root override (blank = launch layout default)" "$CUSTOM_RUNTIME_ROOT" CUSTOM_RUNTIME_ROOT
+  if [[ "$CUSTOM_RUNTIME_ROOT_PROMPTED" != "1" ]]; then
+    prompt_value "Custom runtime directory/path (blank = launch layout default)" "$CUSTOM_RUNTIME_ROOT" CUSTOM_RUNTIME_ROOT
+  fi
   prompt_value "Cloud drive actual storage root (blank = runtime/storage)" "$CLOUD_DRIVE_STORAGE_ROOT" CLOUD_DRIVE_STORAGE_ROOT
   prompt_value "Cloud drive max occupancy (MB or 10G; blank = keep app default, -1 = disk 95%)" "$CLOUD_DRIVE_GLOBAL_CAPACITY_LIMIT_MB" CLOUD_DRIVE_GLOBAL_CAPACITY_LIMIT_MB
   prompt_value "Host" "$HOST" HOST
@@ -3044,7 +3266,9 @@ fi
 
 normalize_capacity_probe_mode
 normalize_capacity_probe_tier
-load_local_capacity_report_defaults || load_local_capacity_defaults
+if [[ "$CLI_MODE" == "1" || "$SHUTDOWN" == "1" ]]; then
+  load_local_capacity_report_defaults || load_local_capacity_defaults
+fi
 
 if [[ "$SHUTDOWN" == "1" ]]; then
   normalize_port_conflict_action
