@@ -1505,9 +1505,7 @@ def register_video_routes(app, deps):
         return ordered or ["direct"]
 
     def _default_streaming_modes_for_privacy(privacy_mode):
-        if str(privacy_mode or "").strip() == "server_encrypted":
-            return {"prepared_hls"}
-        return {"direct"}
+        return {"direct", "realtime_proxy", "prepared_hls"}
 
     def _stored_video_streaming_modes(conn, video_id):
         try:
@@ -1533,56 +1531,17 @@ def register_video_routes(app, deps):
 
     def _apply_video_streaming_mode_policy(conn, payload, video_id):
         modes = _stored_video_streaming_modes(conn, video_id)
-        payload["published_streaming_modes"] = _streaming_modes_payload(modes)
-        if isinstance(payload.get("streaming_options"), list):
-            payload["streaming_options"] = [
-                option for option in payload["streaming_options"]
-                if str(option.get("mode") or "") in modes
-            ]
+        mode_payload = _streaming_modes_payload(modes)
+        payload["published_streaming_modes"] = mode_payload
         service_policy = payload.setdefault("service_policy", {})
-        service_policy["customer_selectable_modes"] = _streaming_modes_payload(modes)
+        service_policy["customer_selectable_modes"] = mode_payload
         preferred = "prepared_hls" if "prepared_hls" in modes else ("realtime_proxy" if "realtime_proxy" in modes else "direct")
         service_policy["default_mode"] = preferred
         service_policy["recommended_mode"] = preferred
+        service_policy["mode_policy"] = "recommend_only"
+        service_policy["mode_policy_note"] = "Published streaming modes guide the default recommendation; direct/realtime/HLS fallbacks remain exposed when technically available."
         if "prepared_hls" not in modes:
             payload["high_performance_streaming"] = False
-        direct_url = f"/api/videos/{int(video_id)}/stream"
-        if "direct" not in modes:
-            if payload.get("stream_url") == direct_url:
-                payload["stream_url"] = ""
-            if payload.get("fallback_url") == direct_url:
-                payload["fallback_url"] = ""
-            payload["direct_fallback_allowed"] = False
-            payload["direct_disabled_reason"] = "direct_stream_disabled"
-        realtime_url = payload.get("realtime_proxy_url") or str((payload.get("realtime_proxy") or {}).get("url") or "")
-        if "realtime_proxy" not in modes:
-            if payload.get("stream_url") == realtime_url:
-                payload["stream_url"] = payload.get("fallback_url") if "direct" in modes else ""
-            payload["realtime_proxy_url"] = ""
-            realtime = dict(payload.get("realtime_proxy") or {})
-            if realtime:
-                realtime["available"] = False
-                realtime["url"] = ""
-                realtime["reason"] = "realtime_proxy_disabled"
-                realtime["implementation_status"] = "disabled_by_video_policy"
-                payload["realtime_proxy"] = realtime
-        if "prepared_hls" not in modes:
-            hls_urls = {
-                str(payload.get("master_url") or ""),
-                str(payload.get("hls_url") or ""),
-                str(payload.get("hls_manifest_url") or ""),
-            }
-            if str(payload.get("stream_url") or "") in hls_urls:
-                payload["stream_url"] = payload.get("fallback_url") if "direct" in modes else ""
-            payload["master_url"] = ""
-            payload["hls_url"] = ""
-            payload["hls_js_url"] = ""
-            payload["hls_manifest_url"] = ""
-            payload["hls_available"] = False
-            payload["streaming_ready"] = False
-            payload["variants"] = []
-            payload["audio_tracks"] = []
-            payload["subtitles"] = []
         return payload
 
     def _parse_publish_request():
