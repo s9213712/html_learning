@@ -164,8 +164,10 @@ Remote downloads are integrated into Cloud Drive:
 - magnet links
 - uploaded `.torrent` files
 
-BT/magnet/`.torrent` downloads require `aria2c` on the server. Downloaded files
-are saved through the same quota, scan, privacy-mode, and logical-folder
+BT/magnet/`.torrent` downloads can use Transmission RPC or aria2c on the server;
+production should prefer Transmission RPC with aria2c fallback. See
+[13_REMOTE_DOWNLOAD_TRANSMISSION.md](13_REMOTE_DOWNLOAD_TRANSMISSION.md) for deployer settings.
+Downloaded files are saved through the same quota, scan, privacy-mode, and logical-folder
 pipeline as normal uploads. BT transfers run in an external worker process by
 default; the Flask server only tracks progress and stores the completed file.
 The task center lazy-loads and polls real progress only while the user is on

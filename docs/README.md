@@ -93,3 +93,5 @@ operator guidance.
 - Treat `archive/`, `evidence/`, and one-off reports as history, not current operator guidance.
 - Treat `AGENTS/research/` as future-work specification unless the referenced feature also appears in the numbered guides or API reference as implemented.
 - When a feature document has both implemented and planned sections, deploy only the implemented surface and keep planned endpoints behind feature flags or release gates.
+
+- [13_REMOTE_DOWNLOAD_TRANSMISSION.md](13_REMOTE_DOWNLOAD_TRANSMISSION.md) - Transmission / aria2 remote-download deployment settings.

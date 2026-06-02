@@ -87,3 +87,5 @@ Trading 背景常駐引擎設計入口：
 - [RELEASE_LAYOUT.md](RELEASE_LAYOUT.md)
 - [REPOSITORY_STRUCTURE.md](REPOSITORY_STRUCTURE.md)
 - [ARCHIVE_INDEX.md](ARCHIVE_INDEX.md)
+
+- [13_REMOTE_DOWNLOAD_TRANSMISSION.md](13_REMOTE_DOWNLOAD_TRANSMISSION.md) - Transmission / aria2 remote-download deployment settings.

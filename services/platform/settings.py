@@ -6,6 +6,25 @@ from datetime import datetime
 from services.comfyui.settings import COMFYUI_DEFAULT_SETTINGS
 
 SYSTEM_SETTINGS_TABLE = "system_settings"
+
+
+def _env_int(name, default, *, minimum=None, maximum=None):
+    try:
+        value = int(os.environ.get(name, default))
+    except Exception:
+        value = int(default)
+    if minimum is not None:
+        value = max(int(minimum), value)
+    if maximum is not None:
+        value = min(int(maximum), value)
+    return value
+
+
+def _env_choice(name, default, choices):
+    value = str(os.environ.get(name, default) or default).strip().lower()
+    return value if value in set(choices) else default
+
+
 DEFAULT_SETTINGS = {
     "audit_chain_enabled": True,
     "audit_chain_reseal_required": False,
@@ -62,12 +81,12 @@ DEFAULT_SETTINGS = {
     "cloud_drive_global_capacity_limit_mb": -1,
     "cloud_drive_transfer_limits_enabled": False,
     "cloud_drive_transfer_limits_json": '{"newbie":{"upload_kb_per_sec":256,"download_kb_per_sec":512,"priority":20},"normal":{"upload_kb_per_sec":512,"download_kb_per_sec":1024,"priority":40},"trusted":{"upload_kb_per_sec":2048,"download_kb_per_sec":4096,"priority":70},"vip":{"upload_kb_per_sec":8192,"download_kb_per_sec":16384,"priority":90},"restricted":{"upload_kb_per_sec":128,"download_kb_per_sec":256,"priority":10},"suspended":{"upload_kb_per_sec":0,"download_kb_per_sec":0,"priority":0}}',
-    "remote_download_max_concurrent_global": 1,
-    "remote_download_max_concurrent_per_user": 1,
-    "bt_download_backend": "auto",
-    "transmission_rpc_url": "http://127.0.0.1:9091/transmission/rpc",
-    "transmission_rpc_username": "",
-    "transmission_rpc_password": "",
+    "remote_download_max_concurrent_global": _env_int("HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL", 1, minimum=1, maximum=64),
+    "remote_download_max_concurrent_per_user": _env_int("HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_PER_USER", 1, minimum=1, maximum=16),
+    "bt_download_backend": _env_choice("HACKME_BT_BACKEND", "auto", {"auto", "transmission", "aria2"}),
+    "transmission_rpc_url": os.environ.get("HACKME_TRANSMISSION_RPC_URL", "http://127.0.0.1:9091/transmission/rpc"),
+    "transmission_rpc_username": os.environ.get("HACKME_TRANSMISSION_RPC_USERNAME", ""),
+    "transmission_rpc_password": os.environ.get("HACKME_TRANSMISSION_RPC_PASSWORD", ""),
     "allow_register": True,
     "require_email_verification": False,
     "password_strength_policy_enabled": True,

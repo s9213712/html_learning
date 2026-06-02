@@ -161,8 +161,9 @@ done
 - 正式部署的 env、runtime、依賴與權限仍應由部署者自己明確準備。
 - 正式部署請使用 `deploy/nginx/` 與 `deploy/systemd/` 範本，讓 Nginx 對外、
   Gunicorn 只綁 loopback，並把長任務留給獨立 worker。
-- `BT/magnet` 遠端下載需要 `aria2c`，upload malware 掃描若要啟用則需
-  `clamscan` 或 `clamdscan`；完整依賴請看
+- `BT/magnet` 遠端下載可用 Transmission RPC 或 `aria2c`；正式部署建議看
+  [13_REMOTE_DOWNLOAD_TRANSMISSION.md](13_REMOTE_DOWNLOAD_TRANSMISSION.md) 設定 `HACKME_BT_BACKEND`、
+  Transmission RPC URL 與併發限制。upload malware 掃描若要啟用則需 `clamscan` 或 `clamdscan`；完整依賴請看
   [SYSTEM_DEPENDENCIES.md](SYSTEM_DEPENDENCIES.md)。
 - repo 只追蹤原始碼；DB、logs、storage、keys、TLS 憑證、reports 都是
   runtime 檔，啟動後才生成。

@@ -157,8 +157,9 @@ strict E2EE 分享的解密片段在 URL `#...` fragment 內，伺服器看不�
 ### TRB-DRIVE-006 BT / direct link 下載看起來停住
 
 先看任務中心的速度、phase、可用度與 pause/cancel 狀態。BT timeout 是 idle-progress
-timeout，不是固定總時間；若速度持續為 0，先檢查 tracker 是否被安全策略阻擋、aria2c 是否可用、
-以及是否有其他高可用度任務正在佔用 worker。
+timeout，不是固定總時間；若速度持續為 0，先檢查 tracker 是否被安全策略阻擋、Transmission RPC / aria2c 是否可用、
+以及是否有其他高可用度任務正在佔用 worker。Transmission 串接細節看
+[13_REMOTE_DOWNLOAD_TRANSMISSION.md](13_REMOTE_DOWNLOAD_TRANSMISSION.md)。
 
 ## E. Video / E2EE / HLS
 

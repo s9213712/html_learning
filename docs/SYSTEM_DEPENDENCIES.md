@@ -142,16 +142,18 @@ Production 範本放在 `deploy/nginx/` 與 `deploy/systemd/`。
 
 ### 3.1 BT / Magnet Remote Download
 
-- `aria2c`
+- `transmission-daemon` / `transmission-remote`（production 建議）
+- `aria2c`（fallback 或強制 aria2 backend）
 
 用途：
 
-- Cloud Drive 的 BT / magnet 下載
+- Cloud Drive 的 BT / magnet / `.torrent` 下載
 
 缺少時的行為：
 
 - 一般 HTTP/HTTPS 遠端下載仍可用
-- BT / magnet 會被明確拒絕，並回覆安裝指引
+- 若 Transmission RPC 與 aria2c 都不可用，BT / magnet 會被明確拒絕
+- 詳細部署設定請看 [13_REMOTE_DOWNLOAD_TRANSMISSION.md](13_REMOTE_DOWNLOAD_TRANSMISSION.md)
 
 ### 3.2 Malware Scanning
 
