@@ -5837,6 +5837,16 @@
               <div class="field">
                 <label><input type="checkbox" id="s-video-e2ee-derivative-quota-exempt" /> E2EE 衍生畫質不計入用戶雲端硬碟容量</label>
               </div>
+              <div class="field">
+                <label>遠端下載全站併發</label>
+                <input type="number" id="s-remote-download-max-concurrent-global" min="1" max="64" step="1" value="1" />
+                <div class="field-hint">控制 Direct link / BT / magnet 外部下載 worker 的全站同時任務數；老硬體建議 1，最多先測 2。</div>
+              </div>
+              <div class="field">
+                <label>遠端下載單用戶併發</label>
+                <input type="number" id="s-remote-download-max-concurrent-per-user" min="1" max="16" step="1" value="1" />
+                <div class="field-hint">同一帳號同時跑的遠端下載任務數，避免單一用戶用 BT/aria2 佔滿 IO 與網路。</div>
+              </div>
             </div>
             <div class="settings-option-grid billing-editor-grid" style="margin: .85rem 0;">
               <div class="field">

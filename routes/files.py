@@ -1952,16 +1952,29 @@ def register_file_routes(app, deps):
             )
 
     def _remote_download_concurrency_limits():
-        def _limit_from_env(name, default_value):
+        settings = get_system_settings() or {}
+
+        def _limit_from_settings_or_env(setting_name, env_name, default_value):
+            raw = settings.get(setting_name)
+            if raw in (None, ""):
+                raw = os.environ.get(env_name, default_value)
             try:
-                value = int(os.environ.get(name, default_value))
+                value = int(raw)
             except Exception:
                 value = default_value
             return max(1, int(value))
 
         return {
-            "global": _limit_from_env("HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL", 4),
-            "per_user": _limit_from_env("HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_PER_USER", 2),
+            "global": _limit_from_settings_or_env(
+                "remote_download_max_concurrent_global",
+                "HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL",
+                1,
+            ),
+            "per_user": _limit_from_settings_or_env(
+                "remote_download_max_concurrent_per_user",
+                "HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_PER_USER",
+                1,
+            ),
         }
 
     def _remote_download_task_sort_key(task):

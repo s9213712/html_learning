@@ -2566,6 +2566,8 @@ async function loadSettings() {
   }
   if ($("s-cloud-drive-transfer-limits-enabled")) $("s-cloud-drive-transfer-limits-enabled").checked = !!s.cloud_drive_transfer_limits_enabled;
   renderCloudDriveTransferLimits(s.cloud_drive_transfer_limits_json);
+  if ($("s-remote-download-max-concurrent-global")) $("s-remote-download-max-concurrent-global").value = s.remote_download_max_concurrent_global ?? 1;
+  if ($("s-remote-download-max-concurrent-per-user")) $("s-remote-download-max-concurrent-per-user").value = s.remote_download_max_concurrent_per_user ?? 1;
   if ($("s-storage-maintenance-auto-enabled")) $("s-storage-maintenance-auto-enabled").checked = !!s.storage_maintenance_auto_enabled;
   if ($("s-storage-maintenance-daily-time")) $("s-storage-maintenance-daily-time").value = s.storage_maintenance_daily_time || "04:00";
   if ($("s-storage-trash-retention-days")) $("s-storage-trash-retention-days").value = s.storage_trash_retention_days || 30;
@@ -4837,6 +4839,8 @@ async function saveSettings() {
     cloud_drive_global_capacity_limit_mb: parseInt($("s-cloud-drive-global-capacity-limit-mb")?.value || "-1"),
     cloud_drive_transfer_limits_enabled: !!$("s-cloud-drive-transfer-limits-enabled")?.checked,
     cloud_drive_transfer_limits_json: JSON.stringify(collectCloudDriveTransferLimits()),
+    remote_download_max_concurrent_global: parseInt($("s-remote-download-max-concurrent-global")?.value || "1", 10) || 1,
+    remote_download_max_concurrent_per_user: parseInt($("s-remote-download-max-concurrent-per-user")?.value || "1", 10) || 1,
     storage_maintenance_auto_enabled: !!$("s-storage-maintenance-auto-enabled")?.checked,
     storage_maintenance_daily_time: $("s-storage-maintenance-daily-time")?.value || "04:00",
     storage_trash_retention_days: parseInt($("s-storage-trash-retention-days")?.value || "30"),

@@ -2444,6 +2444,51 @@ def recommend_hls_capacity_policy(profile: dict[str, Any], probe: dict[str, Any]
     }
 
 
+def recommend_remote_download_capacity_policy(profile: dict[str, Any], probe: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+    tier = str(getattr(args, "capacity_tier", "auto") or "auto").strip().lower()
+    latency = probe.get("latency_ms") or {}
+    cpu = probe.get("cpu") or {}
+    try:
+        p95 = float(latency.get("p95") or 0)
+    except Exception:
+        p95 = 0.0
+    try:
+        target_p95 = float(getattr(args, "target_p95_ms", 0) or 0)
+    except Exception:
+        target_p95 = 0.0
+    try:
+        cpu_peak = float(cpu.get("total_worker_cpu_peak_percent") or 0)
+    except Exception:
+        cpu_peak = 0.0
+    latency_ratio = (p95 / target_p95) if target_p95 > 0 and p95 > 0 else 1.0
+    global_limit = 1
+    per_user_limit = 1
+    reasons: list[str] = []
+    if tier in {"highend"} and latency_ratio <= 0.55 and cpu_peak <= 220:
+        global_limit = 4
+        per_user_limit = 2
+        reasons.append("highend_network_io_headroom")
+    elif tier in {"midrange", "highend", "auto"} and latency_ratio <= 0.65 and cpu_peak <= 260:
+        global_limit = 2
+        per_user_limit = 1
+        reasons.append("moderate_network_io_headroom")
+    else:
+        reasons.append("protect_io_network_and_request_p95_p99")
+    return {
+        "remote_download_max_concurrent_global": global_limit,
+        "remote_download_max_concurrent_per_user": per_user_limit,
+        "basis": {
+            "capacity_tier": tier,
+            "selected_round_p95_ms": p95,
+            "target_p95_ms": target_p95,
+            "p95_to_target_ratio": round(latency_ratio, 3),
+            "worker_cpu_peak_percent": cpu_peak,
+        },
+        "reasons": reasons,
+        "note": "Derived from request-capacity headroom. BT/aria2 is network/peer dependent; validate with a controlled remote-download probe before raising on production.",
+    }
+
+
 def choose_recommendation(results: list[dict[str, Any]], args: argparse.Namespace) -> dict[str, Any]:
     candidates: list[dict[str, Any]] = []
     fallback: list[dict[str, Any]] = []
@@ -2474,6 +2519,7 @@ def choose_recommendation(results: list[dict[str, Any]], args: argparse.Namespac
     profile = best["profile"]
     probe = best["round"]["probe"]
     hls_capacity = recommend_hls_capacity_policy(profile, probe, args)
+    remote_download_capacity = recommend_remote_download_capacity_policy(profile, probe, args)
     return {
         "ok": True,
         "workers": profile["workers"],
@@ -2491,8 +2537,11 @@ def choose_recommendation(results: list[dict[str, Any]], args: argparse.Namespac
             "HTML_LEARNING_BACKPRESSURE_THREAD_CAPACITY": str(max(4, int(profile["threads"]))),
             "HACKME_MEDIA_HLS_MAX_CONCURRENT": str(hls_capacity["hls_max_concurrent"]),
             "HACKME_MEDIA_HLS_SERIALIZE_ALL": str(hls_capacity["hls_serialize_all"]),
+            "HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL": str(remote_download_capacity["remote_download_max_concurrent_global"]),
+            "HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_PER_USER": str(remote_download_capacity["remote_download_max_concurrent_per_user"]),
         },
         "hls_capacity_policy": hls_capacity,
+        "remote_download_capacity_policy": remote_download_capacity,
         "suggested_test_for_develop_args": [
             "--server-runner",
             "gunicorn",
@@ -2589,6 +2638,8 @@ def sync_capacity_defaults(
         "HTML_LEARNING_BACKPRESSURE_THREAD_CAPACITY",
         "HACKME_MEDIA_HLS_MAX_CONCURRENT",
         "HACKME_MEDIA_HLS_SERIALIZE_ALL",
+        "HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL",
+        "HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_PER_USER",
     ]
     path = Path(args.capacity_defaults_file).expanduser().resolve()
     path.parent.mkdir(parents=True, exist_ok=True)

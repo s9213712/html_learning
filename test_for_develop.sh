@@ -135,6 +135,16 @@ load_local_capacity_defaults() {
           export HACKME_MEDIA_HLS_SERIALIZE_ALL="$value"
         fi
         ;;
+      HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL)
+        if [[ "$mode" == "force" || -z "${HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL+x}" || "$(printf '%s' "${HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL:-}" | tr '[:upper:]' '[:lower:]')" == "auto" ]]; then
+          export HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL="$value"
+        fi
+        ;;
+      HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_PER_USER)
+        if [[ "$mode" == "force" || -z "${HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_PER_USER+x}" || "$(printf '%s' "${HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_PER_USER:-}" | tr '[:upper:]' '[:lower:]')" == "auto" ]]; then
+          export HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_PER_USER="$value"
+        fi
+        ;;
     esac
   done < "$CAPACITY_DEFAULTS_FILE"
 }
@@ -159,6 +169,8 @@ load_capacity_env_defaults_preview() {
   CAPACITY_ENV_BACKPRESSURE=""
   CAPACITY_ENV_HLS_MAX_CONCURRENT=""
   CAPACITY_ENV_HLS_SERIALIZE_ALL=""
+  CAPACITY_ENV_REMOTE_DOWNLOAD_GLOBAL=""
+  CAPACITY_ENV_REMOTE_DOWNLOAD_PER_USER=""
   [[ -f "$CAPACITY_DEFAULTS_FILE" ]] || return 1
   local line key value
   while IFS= read -r line || [[ -n "$line" ]]; do
@@ -184,9 +196,11 @@ load_capacity_env_defaults_preview() {
       HTML_LEARNING_BACKPRESSURE_THREAD_CAPACITY) CAPACITY_ENV_BACKPRESSURE="$value" ;;
       HACKME_MEDIA_HLS_MAX_CONCURRENT) CAPACITY_ENV_HLS_MAX_CONCURRENT="$value" ;;
       HACKME_MEDIA_HLS_SERIALIZE_ALL) CAPACITY_ENV_HLS_SERIALIZE_ALL="$value" ;;
+      HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL) CAPACITY_ENV_REMOTE_DOWNLOAD_GLOBAL="$value" ;;
+      HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_PER_USER) CAPACITY_ENV_REMOTE_DOWNLOAD_PER_USER="$value" ;;
     esac
   done < "$CAPACITY_DEFAULTS_FILE"
-  [[ -n "$CAPACITY_ENV_WORKERS" || -n "$CAPACITY_ENV_THREADS" || -n "$CAPACITY_ENV_BACKPRESSURE" || -n "$CAPACITY_ENV_HLS_MAX_CONCURRENT" ]]
+  [[ -n "$CAPACITY_ENV_WORKERS" || -n "$CAPACITY_ENV_THREADS" || -n "$CAPACITY_ENV_BACKPRESSURE" || -n "$CAPACITY_ENV_HLS_MAX_CONCURRENT" || -n "$CAPACITY_ENV_REMOTE_DOWNLOAD_GLOBAL" ]]
 }
 
 load_capacity_report_defaults_preview() {
@@ -198,6 +212,8 @@ load_capacity_report_defaults_preview() {
   CAPACITY_JSON_BACKPRESSURE=""
   CAPACITY_JSON_HLS_MAX_CONCURRENT=""
   CAPACITY_JSON_HLS_SERIALIZE_ALL=""
+  CAPACITY_JSON_REMOTE_DOWNLOAD_GLOBAL=""
+  CAPACITY_JSON_REMOTE_DOWNLOAD_PER_USER=""
   CAPACITY_JSON_PROFILE=""
   CAPACITY_JSON_ACCOUNTS=""
   CAPACITY_JSON_TARGET_P95=""
@@ -239,6 +255,8 @@ emit("CAPACITY_JSON_MAX_REQUESTS_JITTER", suggested_env.get("HACKME_DEV_GUNICORN
 emit("CAPACITY_JSON_BACKPRESSURE", suggested_env.get("HTML_LEARNING_BACKPRESSURE_THREAD_CAPACITY") or (max(4, int(threads or 0)) if threads else ""))
 emit("CAPACITY_JSON_HLS_MAX_CONCURRENT", suggested_env.get("HACKME_MEDIA_HLS_MAX_CONCURRENT") or "")
 emit("CAPACITY_JSON_HLS_SERIALIZE_ALL", suggested_env.get("HACKME_MEDIA_HLS_SERIALIZE_ALL") or "")
+emit("CAPACITY_JSON_REMOTE_DOWNLOAD_GLOBAL", suggested_env.get("HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL") or "")
+emit("CAPACITY_JSON_REMOTE_DOWNLOAD_PER_USER", suggested_env.get("HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_PER_USER") or "")
 emit("CAPACITY_JSON_PROFILE", f"{workers}x{threads}" if workers and threads else "")
 emit("CAPACITY_JSON_ACCOUNTS", recommendation.get("max_passing_accounts") or "")
 emit("CAPACITY_JSON_TARGET_P95", recommendation.get("target_p95_ms") or "")
@@ -264,12 +282,15 @@ print_capacity_defaults_candidate() {
   local jitter="$7"
   local hls_max="$8"
   local hls_serialize="$9"
-  local extra="${10}"
+  local remote_global="${10}"
+  local remote_per_user="${11}"
+  local extra="${12}"
   say "  $label"
   say "     file:        $source_path"
   say "     gunicorn:    workers=${workers:-?} threads=${threads:-?} max_requests=${max_requests:-?} jitter=${jitter:-?}"
   say "     backpressure:${backpressure:-?}"
   say "     hls:         max_concurrent=${hls_max:-?} serialize_all=${hls_serialize:-?}"
+  say "     remote dl:   global=${remote_global:-?} per_user=${remote_per_user:-?}"
   if [[ -n "$extra" ]]; then
     say "     observed:    $extra"
   fi
@@ -301,6 +322,10 @@ prompt_capacity_defaults_source() {
       "$CAPACITY_JSON_BACKPRESSURE" \
       "$CAPACITY_JSON_MAX_REQUESTS" \
       "$CAPACITY_JSON_MAX_REQUESTS_JITTER" \
+      "$CAPACITY_JSON_HLS_MAX_CONCURRENT" \
+      "$CAPACITY_JSON_HLS_SERIALIZE_ALL" \
+      "$CAPACITY_JSON_REMOTE_DOWNLOAD_GLOBAL" \
+      "$CAPACITY_JSON_REMOTE_DOWNLOAD_PER_USER" \
       "safe_accounts=${CAPACITY_JSON_ACCOUNTS:-?} p50=${CAPACITY_JSON_LAT_P50:-?}ms p95=${CAPACITY_JSON_LAT_P95:-?}ms p99=${CAPACITY_JSON_LAT_P99:-?}ms max=${CAPACITY_JSON_LAT_MAX:-?}ms target_p95=${CAPACITY_JSON_TARGET_P95:-?}ms"
   else
     say "  1) JSON capacity report unavailable: $CAPACITY_REPORT_DEFAULTS_FILE"
@@ -314,6 +339,10 @@ prompt_capacity_defaults_source() {
       "$CAPACITY_ENV_BACKPRESSURE" \
       "$CAPACITY_ENV_MAX_REQUESTS" \
       "$CAPACITY_ENV_MAX_REQUESTS_JITTER" \
+      "$CAPACITY_ENV_HLS_MAX_CONCURRENT" \
+      "$CAPACITY_ENV_HLS_SERIALIZE_ALL" \
+      "$CAPACITY_ENV_REMOTE_DOWNLOAD_GLOBAL" \
+      "$CAPACITY_ENV_REMOTE_DOWNLOAD_PER_USER" \
       ""
   else
     say "  2) Env defaults unavailable: $CAPACITY_DEFAULTS_FILE"
@@ -1102,6 +1131,7 @@ print_resolved_config() {
   if [[ "$SERVER_RUNNER" == "gunicorn" ]]; then
     say "  gunicorn:            workers=$GUNICORN_WORKERS threads=$GUNICORN_THREADS timeout=$GUNICORN_TIMEOUT backlog=$GUNICORN_BACKLOG max_requests=$GUNICORN_MAX_REQUESTS jitter=$GUNICORN_MAX_REQUESTS_JITTER"
     say "  hls_slots:           max_concurrent=${HACKME_MEDIA_HLS_MAX_CONCURRENT:-<worker default 1>} serialize_all=${HACKME_MEDIA_HLS_SERIALIZE_ALL:-<worker default>} probe=$HLS_SLOT_PROBE_MODE"
+    say "  remote_download:     global=${HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL:-<root/env default 1>} per_user=${HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_PER_USER:-<root/env default 1>}"
     if [[ -n "$HLS_SLOT_PROBE_REPORT_FILE" ]]; then
       say "  hls_slot_report:     $HLS_SLOT_PROBE_REPORT_FILE"
     fi
@@ -1451,6 +1481,9 @@ emit("CAPACITY_REPORT_BACKPRESSURE", suggested_env.get("HTML_LEARNING_BACKPRESSU
 emit("CAPACITY_REPORT_HLS_MAX_CONCURRENT", suggested_env.get("HACKME_MEDIA_HLS_MAX_CONCURRENT") or "")
 emit("CAPACITY_REPORT_HLS_SERIALIZE_ALL", suggested_env.get("HACKME_MEDIA_HLS_SERIALIZE_ALL") or "")
 emit("CAPACITY_REPORT_HLS_POLICY", json.dumps(recommendation.get("hls_capacity_policy") or {}, sort_keys=True, separators=(",", ":")))
+emit("CAPACITY_REPORT_REMOTE_DOWNLOAD_GLOBAL", suggested_env.get("HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL") or "")
+emit("CAPACITY_REPORT_REMOTE_DOWNLOAD_PER_USER", suggested_env.get("HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_PER_USER") or "")
+emit("CAPACITY_REPORT_REMOTE_DOWNLOAD_POLICY", json.dumps(recommendation.get("remote_download_capacity_policy") or {}, sort_keys=True, separators=(",", ":")))
 emit("CAPACITY_REPORT_MAX_SAFE_ACCOUNTS", accounts or "")
 emit("CAPACITY_REPORT_TARGET_P95_MS", recommendation.get("target_p95_ms") or thresholds.get("target_p95_ms") or "")
 emit("CAPACITY_REPORT_MAX_DURATION_SECONDS", thresholds.get("max_duration_seconds") or "")
@@ -1509,6 +1542,12 @@ REPORTPY
     if [[ -n "${CAPACITY_REPORT_HLS_SERIALIZE_ALL:-}" ]]; then
       export HACKME_MEDIA_HLS_SERIALIZE_ALL="$CAPACITY_REPORT_HLS_SERIALIZE_ALL"
     fi
+    if [[ -n "${CAPACITY_REPORT_REMOTE_DOWNLOAD_GLOBAL:-}" ]]; then
+      export HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL="$CAPACITY_REPORT_REMOTE_DOWNLOAD_GLOBAL"
+    fi
+    if [[ -n "${CAPACITY_REPORT_REMOTE_DOWNLOAD_PER_USER:-}" ]]; then
+      export HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_PER_USER="$CAPACITY_REPORT_REMOTE_DOWNLOAD_PER_USER"
+    fi
   fi
   return 0
 }
@@ -1517,6 +1556,8 @@ print_capacity_probe_conclusion() {
   local backpressure_capacity="${HTML_LEARNING_BACKPRESSURE_THREAD_CAPACITY:-auto}"
   local hls_max_concurrent="${HACKME_MEDIA_HLS_MAX_CONCURRENT:-auto}"
   local hls_serialize_all="${HACKME_MEDIA_HLS_SERIALIZE_ALL:-auto}"
+  local remote_download_global="${HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL:-auto}"
+  local remote_download_per_user="${HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_PER_USER:-auto}"
   say "[dev-tmp] capacity probe conclusion:"
   if [[ "${CAPACITY_REPORT_OK:-}" == "1" ]]; then
     say "  recommendation:                 ${CAPACITY_REPORT_PROFILE} (${CAPACITY_REPORT_TOTAL_LANES} worker-thread lanes)"
@@ -1533,6 +1574,9 @@ print_capacity_probe_conclusion() {
     say "  selected_round_cpu:             active_workers=${CAPACITY_REPORT_CPU_ACTIVE_WORKERS:-?} worker_cpu_peak=${CAPACITY_REPORT_CPU_PEAK:-?}%"
     if [[ -n "${CAPACITY_REPORT_HLS_POLICY:-}" ]]; then
       say "  hls_capacity_policy:            ${CAPACITY_REPORT_HLS_POLICY}"
+    fi
+    if [[ -n "${CAPACITY_REPORT_REMOTE_DOWNLOAD_POLICY:-}" ]]; then
+      say "  remote_download_policy:         ${CAPACITY_REPORT_REMOTE_DOWNLOAD_POLICY}"
     fi
     say "  tested_profiles:                ${CAPACITY_REPORT_TESTED_PROFILES}"
     say "  tested_load:                    ${CAPACITY_REPORT_LOAD_PROFILE} (${CAPACITY_REPORT_LOAD_KINDS})"
@@ -1576,6 +1620,8 @@ print_capacity_probe_conclusion() {
   say "  backpressure_thread_capacity:   $backpressure_capacity"
   say "  hls_max_concurrent:             $hls_max_concurrent"
   say "  hls_serialize_all:              $hls_serialize_all"
+  say "  remote_download_global:         $remote_download_global"
+  say "  remote_download_per_user:       $remote_download_per_user"
   say "  gunicorn_max_requests:          $GUNICORN_MAX_REQUESTS"
   say "  gunicorn_max_requests_jitter:   $GUNICORN_MAX_REQUESTS_JITTER"
 }

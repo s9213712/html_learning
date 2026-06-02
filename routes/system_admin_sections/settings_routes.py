@@ -636,6 +636,17 @@ def register_system_admin_settings_routes(app, ctx):
             if not is_hhmm(data.get("snapshot_daily_time")):
                 return json_resp({"ok":False,"msg":"snapshot_daily_time 必須是 HH:MM"}), 400
             data["snapshot_daily_time"] = str(data.get("snapshot_daily_time")).strip()
+        remote_download_ranges = {
+            "remote_download_max_concurrent_global": (1, 64),
+            "remote_download_max_concurrent_per_user": (1, 16),
+        }
+        for key, (minimum, maximum) in remote_download_ranges.items():
+            if key not in data:
+                continue
+            value = parse_int_in_range(data.get(key), minimum, maximum)
+            if value is None:
+                return json_resp({"ok":False,"msg":f"{key} 必須是 {minimum}-{maximum} 的整數"}), 400
+            data[key] = value
         if "storage_trash_retention_days" in data:
             try:
                 retention_days = int(data.get("storage_trash_retention_days"))
