@@ -2922,23 +2922,35 @@ async function restoreDriveBackgroundTransfers() {
   } catch (_) {}
 }
 
+function triggerBrowserDownload(url, filename = "") {
+  const a = document.createElement("a");
+  a.href = url;
+  if (filename) a.download = filename;
+  a.rel = "noopener";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
 async function downloadDriveFile(fileId, likelyHighRisk) {
+  const known = findKnownDriveFile(fileId);
+  const isE2ee = driveFileIsE2ee(known);
+  const confirmed = likelyHighRisk
+    ? window.confirm("此檔案可能高風險、未完整掃描或為 E2EE 密文。請確認你信任來源後再下載。")
+    : false;
+  if (likelyHighRisk && !confirmed) return;
+  const downloadUrl = `${API}/cloud-drive/files/${encodeURIComponent(fileId)}/download${confirmed ? "?confirm_high_risk=1" : ""}`;
+  if (!isE2ee) {
+    triggerBrowserDownload(downloadUrl, known?.original_filename_plain_for_public || known?.display_name || "");
+    return;
+  }
+
   await fetchCsrfToken({ force: true });
   const csrf = getCsrfToken();
-  const doFetch = (confirmed) => apiFetch(API + `/cloud-drive/files/${encodeURIComponent(fileId)}/download${confirmed ? "?confirm_high_risk=1" : ""}`, {
+  const res = await apiFetch(downloadUrl, {
     credentials: "same-origin",
     headers: { "X-CSRF-Token": csrf || "" }
   });
-  let res = await doFetch(false);
-  if (res.status === 409 || likelyHighRisk) {
-    let warningText = "此檔案可能高風險、未完整掃描或為 E2EE 密文。請確認你信任來源後再下載。";
-    if (res.status === 409) {
-      const json = await res.json().catch(() => ({}));
-      warningText = json.msg || warningText;
-    }
-    if (!window.confirm(warningText)) return;
-    res = await doFetch(true);
-  }
   if (!res.ok) {
     const json = await res.json().catch(() => ({}));
     alert(json.msg || "下載失敗");
@@ -2975,13 +2987,8 @@ async function downloadDriveFile(fileId, likelyHighRisk) {
     }
   }
   const url = URL.createObjectURL(outputBlob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = name;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
+  triggerBrowserDownload(url, name);
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 async function deleteDriveFile(fileId) {
@@ -3286,31 +3293,80 @@ function drivePreviewAudioTracks(preview) {
     }));
 }
 
+function drivePreviewNativeDirectSupport(preview) {
+  const category = String(preview?.category || "");
+  const filename = String(preview?.filename || preview?.display_name || preview?.name || "");
+  const mime = String(preview?.mime_type || preview?.mime_type_plain_for_public || "").toLowerCase();
+  const ext = driveFileExtension(filename);
+  if (category === "audio") {
+    return ["audio/mpeg", "audio/mp4", "audio/aac", "audio/wav", "audio/x-wav", "audio/ogg", "audio/webm"].includes(mime)
+      || [".mp3", ".m4a", ".aac", ".wav", ".oga", ".ogg", ".opus", ".weba"].includes(ext);
+  }
+  if (category === "video") {
+    return ["video/mp4", "video/webm", "video/ogg"].includes(mime)
+      || [".mp4", ".m4v", ".webm", ".ogv"].includes(ext);
+  }
+  return true;
+}
+
+function drivePreviewDirectCompatibilitySummary(preview) {
+  if (drivePreviewNativeDirectSupport(preview)) return "最低費率；直接送原始檔，適合 MP4/WebM/Ogg 等瀏覽器原生格式。";
+  return "最低費率；此檔案格式多半不是瀏覽器原生可播，建議改用即時轉封裝或 HLS。";
+}
+
+function drivePreviewDirectWarningMarkup(preview) {
+  if (drivePreviewNativeDirectSupport(preview)) return "";
+  return '<div class="drive-card-sub drive-preview-stream-warning">此檔案格式可能無法由瀏覽器直接播放；若一直轉圈，請改用 Standard 即時轉封裝或 Premium HLS。</div>';
+}
+
+function drivePreviewIsAppleNativeMediaClient() {
+  const ua = String(navigator.userAgent || "");
+  const platform = String(navigator.platform || "");
+  return /\b(iPad|iPhone|iPod)\b/i.test(ua) || (platform === "MacIntel" && Number(navigator.maxTouchPoints || 0) > 1);
+}
+
+function drivePreviewRealtimeProxyUsable(preview, realtimeAvailable) {
+  if (!realtimeAvailable) return false;
+  if (drivePreviewIsAppleNativeMediaClient() && String(preview?.privacy_mode || "") === "server_encrypted") return false;
+  return true;
+}
+
+function drivePreviewNoPlayableModeMarkup(preview) {
+  if (preview?.category !== "video" && preview?.category !== "audio") return "";
+  return '<div class="drive-empty">此裝置無法直接播放這個檔案格式；請先建立 Premium HLS 預處理串流後再播放。</div>';
+}
+
 function drivePreviewServiceOptions(preview) {
   const category = String(preview?.category || "");
   if (!["audio", "video"].includes(category)) return [];
   const stream = drivePreviewStreamAsset(preview);
   const proxy = stream?.realtime_proxy || {};
-  const realtimeAvailable = !!(stream?.realtime_proxy_url || proxy.url) && proxy.available !== false;
+  const rawRealtimeAvailable = !!(stream?.realtime_proxy_url || proxy.url) && proxy.available !== false;
+  const realtimeAvailable = drivePreviewRealtimeProxyUsable(preview, rawRealtimeAvailable);
+  const hlsAvailable = drivePreviewHasReadyHls(preview);
+  const directNative = drivePreviewNativeDirectSupport(preview);
+  const directAvailable = directNative || !drivePreviewIsAppleNativeMediaClient();
   const profilePolicy = stream?.premium_hls_profile_policy || {};
   const profileDriftSuffix = profilePolicy.profile_drift ? " 目前 HLS 資產與現行 Premium profile 不一致，建議排程重建。" : "";
   return [
     {
       mode: "direct",
       label: "Basic · 直接串流",
-      available: true,
-      summary: "最低費率；直接送原始檔，格式相容性取決於瀏覽器。",
+      available: directAvailable,
+      summary: drivePreviewDirectCompatibilitySummary(preview),
     },
     {
       mode: "realtime_proxy",
       label: "Standard · 即時轉封裝",
       available: realtimeAvailable,
-      summary: "中階費率；用即時 CPU 處理 MKV 或特殊音訊，一次輸出選定音軌。",
+      summary: rawRealtimeAvailable && !realtimeAvailable
+        ? "此裝置對加密長片的即時 fragmented MP4 支援不穩，請使用 Premium HLS。"
+        : "中階費率；用即時 CPU 處理 MKV 或特殊音訊，一次輸出選定音軌。",
     },
     {
       mode: "prepared_hls",
       label: "Premium · 預處理 HLS",
-      available: drivePreviewHasReadyHls(preview),
+      available: hlsAvailable,
       summary: "最高費率；預先建立分段串流，支援多音軌、多字幕與穩定跳轉。" + profileDriftSuffix,
     },
   ];
@@ -3333,7 +3389,7 @@ function selectedDrivePreviewServiceMode(fileId, preview) {
   if (availableModes.has("prepared_hls")) return "prepared_hls";
   if (availableModes.has("realtime_proxy")) return "realtime_proxy";
   if (availableModes.has("direct")) return "direct";
-  return "direct";
+  return "";
 }
 
 function saveDrivePreviewServiceMode(fileId, mode) {
@@ -3517,8 +3573,9 @@ function driveDirectPlayerMarkup(fileId, preview, url, { fullscreen = false } = 
   const playerId = fullscreen ? "drive-fullscreen-hls-player" : "drive-preview-hls-player";
   const autoplay = fullscreen ? "autoplay " : "";
   const controls = driveSubtitleShiftControlsMarkup(preview, { fullscreen, fileId, selectedMode: "direct" });
-  if (preview.category === "audio") return `<audio id="${playerId}" controls ${autoplay}preload="metadata" src="${sanitize(url)}"></audio>${controls}`;
-  return `<video id="${playerId}" controls ${autoplay}preload="metadata" playsinline src="${sanitize(url)}"></video>${controls}`;
+  const warning = drivePreviewDirectWarningMarkup(preview);
+  if (preview.category === "audio") return `<audio id="${playerId}" controls ${autoplay}preload="metadata" src="${sanitize(url)}"></audio>${warning}${controls}`;
+  return `<video id="${playerId}" controls ${autoplay}preload="metadata" playsinline src="${sanitize(url)}"></video>${warning}${controls}`;
 }
 
 function driveRealtimeProxyPlayerMarkup(fileId, preview, { fullscreen = false } = {}) {
@@ -3536,6 +3593,25 @@ function attachDrivePlainMediaPreview(fileId, preview, { fullscreen = false } = 
   player.dataset.fileId = String(fileId || "");
   syncDrivePreviewSubtitleTracks(player, preview, fileId);
   bindDriveSubtitleShiftControls(fileId, preview, player, { fullscreen });
+  const stream = drivePreviewStreamAsset(preview);
+  const proxy = stream?.realtime_proxy || {};
+  const canUseProxy = !!(stream?.realtime_proxy_url || proxy.url) && proxy.available !== false;
+  if (!drivePreviewIsAppleNativeMediaClient() || selectedDrivePreviewServiceMode(fileId, preview) !== "direct" || !canUseProxy || drivePreviewNativeDirectSupport(preview)) return;
+  let switched = false;
+  const switchToProxy = () => {
+    if (switched) return;
+    switched = true;
+    saveDrivePreviewServiceMode(fileId, "realtime_proxy");
+    if (fullscreen) {
+      previewAlbumFileFullscreen(fileId, preview?.filename || "", { skipRepeatCheck: true }).catch((err) => alert(err.message || "預覽失敗"));
+    } else {
+      previewDriveFile(fileId, { skipRepeatCheck: true, fileName: preview?.filename || "" }).catch((err) => alert(err.message || "預覽失敗"));
+    }
+  };
+  player.addEventListener("error", switchToProxy, { once: true });
+  window.setTimeout(() => {
+    if (!switched && player.readyState < 2 && !player.paused) switchToProxy();
+  }, 8000);
 }
 
 async function attachDriveHlsPreview(fileId, preview, { fullscreen = false } = {}) {
@@ -3862,6 +3938,10 @@ async function previewDriveFile(fileId, options = {}) {
     }
     if (preview.render_mode === "media") {
       const serviceMode = selectedDrivePreviewServiceMode(fileId, preview);
+      if (["audio", "video"].includes(preview.category) && !serviceMode) {
+        panel.innerHTML += drivePreviewNoPlayableModeMarkup(preview);
+        return;
+      }
       if (["audio", "video"].includes(preview.category) && serviceMode === "prepared_hls" && drivePreviewHasReadyHls(preview)) {
         panel.innerHTML += driveHlsPlayerMarkup(preview, { fileId });
         await attachDriveHlsPreview(fileId, preview);
@@ -3988,6 +4068,10 @@ async function previewAlbumFileFullscreen(fileId, fileName = "", options = {}) {
       throw new Error("這個檔案類型目前只提供右側 metadata 預覽");
     }
     const serviceMode = selectedDrivePreviewServiceMode(fileId, preview);
+    if (["audio", "video"].includes(preview.category) && !serviceMode) {
+      body.innerHTML = drivePreviewNoPlayableModeMarkup(preview);
+      return;
+    }
     if (["audio", "video"].includes(preview.category) && serviceMode === "prepared_hls" && drivePreviewHasReadyHls(preview)) {
       if (meta) meta.textContent = `${formatDriveBytes(preview.size_bytes || 0)} · ${preview.mime_type || "-"} · HLS 串流已就緒 · 字幕 ${drivePreviewSubtitles(preview).length} 軌`;
       body.innerHTML = driveHlsPlayerMarkup(preview, { fullscreen: true, fileId });
@@ -5433,26 +5517,8 @@ async function purgeStorageTrash() {
 }
 
 async function downloadStorageFile(id) {
-  await fetchCsrfToken();
-  const csrf = getCsrfToken();
-  const res = await apiFetch(API + `/storage/files/${encodeURIComponent(id)}/download`, {
-    credentials: "same-origin",
-    headers: { "X-CSRF-Token": csrf || "" }
-  });
-  if (!res.ok) {
-    const json = await res.json().catch(() => ({}));
-    alert(json.msg || "下載失敗");
-    return;
-  }
-  const blob = await res.blob();
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = "download.bin";
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
+  const known = (Array.isArray(storageFilesCache) ? storageFilesCache : []).find((file) => String(file?.id || "") === String(id || ""));
+  triggerBrowserDownload(`${API}/storage/files/${encodeURIComponent(id)}/download`, known?.display_name || "");
 }
 
 async function ensureAlbumChoicesLoaded() {

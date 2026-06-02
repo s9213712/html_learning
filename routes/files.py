@@ -4136,11 +4136,12 @@ def register_file_routes(app, deps):
                 preview = _decryption_unavailable_preview(preview_row, str(exc))
             try:
                 stream_asset = get_stream_status(conn, file_row=row, include_segments=False)
-                if stream_asset:
+                if preview.get("category") in {"audio", "video"} or stream_asset:
                     proxy_state = realtime_proxy_availability(row)
+                    stream_asset = stream_asset or {}
                     stream_payload = {
                         "status": stream_asset.get("status") or "",
-                        "media_type": stream_asset.get("media_type") or "",
+                        "media_type": stream_asset.get("media_type") or preview.get("category") or "",
                         "master_manifest_ready": bool(stream_asset.get("master_manifest_path")),
                         "master_url": f"/api/cloud-drive/files/{file_id}/hls/master.m3u8" if stream_asset.get("master_manifest_path") else "",
                         "realtime_proxy_url": f"/api/cloud-drive/files/{file_id}/realtime-proxy" if proxy_state.get("available") else "",
@@ -4234,6 +4235,166 @@ def register_file_routes(app, deps):
     def _cloud_drive_realtime_proxy_audio_selector():
         return request.args.get("audio") or request.args.get("audio_track") or request.args.get("track") or ""
 
+    def _cloud_drive_encrypted_realtime_proxy_response(row, path):
+        audio_selector = _cloud_drive_realtime_proxy_audio_selector()
+        cmd = [
+            ffmpeg_bin,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-fflags",
+            "+genpts",
+            "-i",
+            "pipe:0",
+        ]
+        start = request.args.get("start") or ""
+        try:
+            start_value = float(start) if start else 0.0
+        except Exception:
+            start_value = 0.0
+        if start_value > 0:
+            cmd.extend(["-ss", f"{start_value:.3f}".rstrip("0").rstrip(".")])
+        cmd.extend(["-map", "0:v:0?"])
+        if str(audio_selector).strip().isdigit():
+            cmd.extend(["-map", f"0:{int(audio_selector)}"])
+        else:
+            cmd.extend(["-map", "0:a:0?"])
+        cmd.extend([
+            "-map_metadata",
+            "-1",
+            "-map_chapters",
+            "-1",
+            "-sn",
+            "-dn",
+            "-c:v",
+            "libx264",
+            "-threads",
+            "1",
+            "-preset",
+            "ultrafast",
+            "-profile:v",
+            "baseline",
+            "-pix_fmt",
+            "yuv420p",
+            "-tune",
+            "zerolatency",
+            "-crf",
+            "23",
+            "-g",
+            "48",
+            "-keyint_min",
+            "48",
+            "-sc_threshold",
+            "0",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-ac",
+            "2",
+            "-movflags",
+            "frag_keyframe+empty_moov+default_base_moof",
+            "-flush_packets",
+            "1",
+            "-f",
+            "mp4",
+            "pipe:1",
+        ])
+        stderr_file = tempfile.TemporaryFile()
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr_file, bufsize=0)
+        stop_event = threading.Event()
+
+        def _feed_plaintext():
+            try:
+                for chunk in iter_decrypted_server_encrypted_chunks(path, server_file_fernet):
+                    if stop_event.is_set():
+                        break
+                    try:
+                        proc.stdin.write(chunk)
+                    except (BrokenPipeError, ValueError):
+                        break
+            except Exception as exc:
+                app.logger.warning("cloud_drive_realtime_proxy_decrypt_feed_failed file_id=%s error=%s", row["id"], exc)
+            finally:
+                try:
+                    if proc.stdin:
+                        proc.stdin.close()
+                except Exception:
+                    pass
+
+        feeder = threading.Thread(target=_feed_plaintext, name=f"cloud-drive-realtime-feed-{row['id']}", daemon=True)
+        feeder.start()
+
+        def _stream_chunks():
+            bytes_sent = 0
+            try:
+                stdout = proc.stdout
+                while stdout is not None:
+                    ready, _, _ = select.select([stdout], [], [], 1.0)
+                    if not ready:
+                        if proc.poll() is not None:
+                            break
+                        continue
+                    chunk = stdout.read(256 * 1024)
+                    if not chunk:
+                        break
+                    bytes_sent += len(chunk)
+                    yield chunk
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    pass
+            finally:
+                stop_event.set()
+                try:
+                    if proc.stdout:
+                        proc.stdout.close()
+                except Exception:
+                    pass
+                if proc.poll() is None:
+                    try:
+                        proc.terminate()
+                        proc.wait(timeout=2)
+                    except Exception:
+                        try:
+                            proc.kill()
+                        except Exception:
+                            pass
+                try:
+                    feeder.join(timeout=1)
+                except Exception:
+                    pass
+                try:
+                    stderr_file.seek(0)
+                    stderr_text = stderr_file.read(4096).decode("utf-8", errors="replace").strip()
+                except Exception:
+                    stderr_text = ""
+                finally:
+                    try:
+                        stderr_file.close()
+                    except Exception:
+                        pass
+                if bytes_sent == 0 or proc.poll() not in (0, None):
+                    app.logger.warning(
+                        "cloud_drive_realtime_proxy_final file_id=%s bytes_sent=%s returncode=%s stderr=%s",
+                        row["id"],
+                        bytes_sent,
+                        proc.poll(),
+                        stderr_text[:1000],
+                    )
+
+        source_filename = row["original_filename_plain_for_public"] or "video.mp4"
+        filename = str(Path(source_filename).with_suffix(".mp4")) if Path(source_filename).suffix else f"{source_filename}.mp4"
+        response = Response(stream_with_context(_stream_chunks()), status=200, mimetype="video/mp4", direct_passthrough=True)
+        response.headers["Content-Disposition"] = build_content_disposition("inline", filename)
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["X-Accel-Buffering"] = "no"
+        response.headers["Accept-Ranges"] = "none"
+        response.headers["X-Hackme-Transfer-Mode"] = "python_realtime_proxy_server_decrypt_pipe"
+        response.headers["X-Hackme-Streaming-Mode"] = "realtime_proxy"
+        return response
+
     def _cloud_drive_realtime_proxy_response(row):
         availability = realtime_proxy_availability(row)
         if not availability.get("available"):
@@ -4249,13 +4410,7 @@ def register_file_routes(app, deps):
         cleanup_path = None
         try:
             if is_server_encrypted_file(row):
-                handle = tempfile.NamedTemporaryFile(prefix="cloud-drive-realtime-plain-", delete=False)
-                try:
-                    cleanup_path = handle.name
-                finally:
-                    handle.close()
-                write_decrypted_server_encrypted_file(path, cleanup_path, server_file_fernet)
-                path = Path(cleanup_path)
+                return _cloud_drive_encrypted_realtime_proxy_response(row, path)
             stream_info = open_realtime_proxy_stream(
                 path,
                 audio_track=_cloud_drive_realtime_proxy_audio_selector(),
@@ -4308,7 +4463,8 @@ def register_file_routes(app, deps):
                     except Exception:
                         pass
 
-        filename = row["original_filename_plain_for_public"] or "video.mp4"
+        source_filename = row["original_filename_plain_for_public"] or "video.mp4"
+        filename = str(Path(source_filename).with_suffix(".mp4")) if Path(source_filename).suffix else f"{source_filename}.mp4"
         response = Response(
             stream_with_context(_stream_chunks_with_cleanup()),
             status=200,
