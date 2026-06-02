@@ -66,6 +66,10 @@ CAPACITY_SETTINGS_FINALIZED=0
 HLS_SLOT_PROBE_MODE="${HACKME_DEV_HLS_SLOT_PROBE:-ask}"
 HLS_SLOT_PROBE_RAN=0
 HLS_SLOT_PROBE_REPORT_FILE=""
+BT_DOWNLOAD_BACKEND="${HACKME_BT_BACKEND:-auto}"
+TRANSMISSION_RPC_URL="${HACKME_TRANSMISSION_RPC_URL:-http://127.0.0.1:9091/transmission/rpc}"
+TRANSMISSION_RPC_USERNAME="${HACKME_TRANSMISSION_RPC_USERNAME:-}"
+TRANSMISSION_RPC_PASSWORD="${HACKME_TRANSMISSION_RPC_PASSWORD:-}"
 DRY_RUN=0
 
 is_auto_capacity_value() {
@@ -508,6 +512,15 @@ Options:
                            Default: .hackme_capacity_report.json in repo root
   --hls-slot-probe         Run a quick Premium HLS slot sizing probe before launch
   --no-hls-slot-probe      Skip the HLS slot sizing startup test
+  --bt-backend BACKEND     BT/magnet backend: auto, transmission, or aria2
+  --transmission-rpc-url URL
+                           Transmission RPC endpoint for BT/magnet downloads
+  --transmission-rpc-username USER
+  --transmission-rpc-password PASS
+                           Optional Transmission RPC credentials
+  --remote-download-global N
+  --remote-download-per-user N
+                           Remote download global/per-user concurrency defaults
   --cloud-drive-root PATH,
   --cloud-drive-storage-root PATH
                            Use PATH as the actual cloud-drive file storage
@@ -1132,6 +1145,7 @@ print_resolved_config() {
     say "  gunicorn:            workers=$GUNICORN_WORKERS threads=$GUNICORN_THREADS timeout=$GUNICORN_TIMEOUT backlog=$GUNICORN_BACKLOG max_requests=$GUNICORN_MAX_REQUESTS jitter=$GUNICORN_MAX_REQUESTS_JITTER"
     say "  hls_slots:           max_concurrent=${HACKME_MEDIA_HLS_MAX_CONCURRENT:-<worker default 1>} serialize_all=${HACKME_MEDIA_HLS_SERIALIZE_ALL:-<worker default>} probe=$HLS_SLOT_PROBE_MODE"
     say "  remote_download:     global=${HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL:-<root/env default 1>} per_user=${HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_PER_USER:-<root/env default 1>}"
+    say "  bt_backend:          ${BT_DOWNLOAD_BACKEND:-${HACKME_BT_BACKEND:-auto}} transmission_rpc=${TRANSMISSION_RPC_URL:-${HACKME_TRANSMISSION_RPC_URL:-http://127.0.0.1:9091/transmission/rpc}}"
     if [[ -n "$HLS_SLOT_PROBE_REPORT_FILE" ]]; then
       say "  hls_slot_report:     $HLS_SLOT_PROBE_REPORT_FILE"
     fi
@@ -1160,15 +1174,15 @@ prompt_value() {
   local label="$1"
   local default_value="$2"
   local target_var="$3"
-  local answer
+  local prompt_answer
   printf '%s [%s]: ' "$label" "$default_value"
-  if ! read -r answer; then
+  if ! read -r prompt_answer; then
     die "interactive setup was interrupted"
   fi
-  if [[ -z "$answer" ]]; then
-    answer="$default_value"
+  if [[ -z "$prompt_answer" ]]; then
+    prompt_answer="$default_value"
   fi
-  printf -v "$target_var" '%s' "$answer"
+  printf -v "$target_var" '%s' "$prompt_answer"
 }
 
 requirements_file_description() {
@@ -1695,6 +1709,71 @@ prompt_hls_slot_probe() {
   fi
 }
 
+normalize_bt_download_backend() {
+  BT_DOWNLOAD_BACKEND="${BT_DOWNLOAD_BACKEND:-auto}"
+  case "${BT_DOWNLOAD_BACKEND,,}" in
+    auto|transmission|aria2) BT_DOWNLOAD_BACKEND="${BT_DOWNLOAD_BACKEND,,}" ;;
+    aria2c) BT_DOWNLOAD_BACKEND="aria2" ;;
+    transmission-rpc|rpc) BT_DOWNLOAD_BACKEND="transmission" ;;
+    *) die "BT backend must be auto, transmission, or aria2" ;;
+  esac
+}
+
+prompt_bt_backend_choice() {
+  local answer
+  normalize_bt_download_backend
+  say "BT/magnet remote-download backend:"
+  say "  1) auto - prefer Transmission RPC, fallback aria2 when RPC is unavailable"
+  say "  2) transmission - require Transmission RPC"
+  say "  3) aria2 - force aria2c"
+  while true; do
+    printf 'Choose BT backend [%s]: ' "$BT_DOWNLOAD_BACKEND"
+    if ! read -r answer; then
+      die "interactive setup was interrupted"
+    fi
+    answer="${answer:-$BT_DOWNLOAD_BACKEND}"
+    case "${answer,,}" in
+      1|auto) BT_DOWNLOAD_BACKEND="auto"; return 0 ;;
+      2|transmission|transmission-rpc|rpc) BT_DOWNLOAD_BACKEND="transmission"; return 0 ;;
+      3|aria2|aria2c) BT_DOWNLOAD_BACKEND="aria2"; return 0 ;;
+      *) say "Please choose 1, 2, 3, auto, transmission, or aria2." ;;
+    esac
+  done
+}
+
+prompt_remote_download_settings() {
+  local configure=0
+  local default_global="${HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL:-1}"
+  local default_per_user="${HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_PER_USER:-1}"
+
+  say "Remote download / BT settings can also be changed later from root system settings."
+  prompt_yes_no "Configure remote download / BT backend for this launch" 0 configure
+  if [[ "$configure" != "1" ]]; then
+    normalize_bt_download_backend
+    export HACKME_BT_BACKEND="$BT_DOWNLOAD_BACKEND"
+    export HACKME_TRANSMISSION_RPC_URL="$TRANSMISSION_RPC_URL"
+    [[ -n "$TRANSMISSION_RPC_USERNAME" ]] && export HACKME_TRANSMISSION_RPC_USERNAME="$TRANSMISSION_RPC_USERNAME"
+    [[ -n "$TRANSMISSION_RPC_PASSWORD" ]] && export HACKME_TRANSMISSION_RPC_PASSWORD="$TRANSMISSION_RPC_PASSWORD"
+    return 0
+  fi
+
+  prompt_bt_backend_choice
+  if [[ "$BT_DOWNLOAD_BACKEND" != "aria2" ]]; then
+    prompt_value "Transmission RPC URL" "$TRANSMISSION_RPC_URL" TRANSMISSION_RPC_URL
+    prompt_value "Transmission RPC username (blank = no auth)" "$TRANSMISSION_RPC_USERNAME" TRANSMISSION_RPC_USERNAME
+    prompt_value "Transmission RPC password (blank = no auth)" "$TRANSMISSION_RPC_PASSWORD" TRANSMISSION_RPC_PASSWORD
+  fi
+  prompt_capacity_integer "Remote download global concurrency" "$default_global" HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL
+  prompt_capacity_integer "Remote download per-user concurrency" "$default_per_user" HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_PER_USER
+
+  export HACKME_BT_BACKEND="$BT_DOWNLOAD_BACKEND"
+  export HACKME_TRANSMISSION_RPC_URL="$TRANSMISSION_RPC_URL"
+  export HACKME_TRANSMISSION_RPC_USERNAME="$TRANSMISSION_RPC_USERNAME"
+  export HACKME_TRANSMISSION_RPC_PASSWORD="$TRANSMISSION_RPC_PASSWORD"
+  export HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL
+  export HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_PER_USER
+}
+
 prompt_capacity_integer() {
   local label="$1"
   local default_value="$2"
@@ -1703,6 +1782,7 @@ prompt_capacity_integer() {
   local answer
   while true; do
     prompt_value "$label" "$default_value" answer
+    answer="${answer:-}"
     if [[ "$answer" =~ ^[0-9]+$ ]] && { [[ "$allow_zero" == "1" ]] || (( answer > 0 )); }; then
       printf -v "$target_var" '%s' "$answer"
       return 0
@@ -2377,7 +2457,7 @@ prompt_feature_exclusion_scope() {
   say "Enter comma-separated package names, b-numbers, f-numbers, or feature keys to disable. Blank keeps every feature enabled."
   while true; do
     prompt_value "Disabled feature packages / keys" "" answer
-    if [[ -z "${answer//[[:space:]]/}" ]]; then
+    if [[ -z "${answer:-}" || -z "${answer//[[:space:]]/}" ]]; then
       FEATURE_MODE="all"
       FEATURE_LIST=""
       FEATURE_BUNDLES=""
@@ -2673,6 +2753,7 @@ prompt_runtime_config() {
   prompt_value "Port" "$PORT" PORT
   prompt_yes_no "Disable trusted-host checks for dev convenience" "$DISABLE_TRUSTED_HOSTS" DISABLE_TRUSTED_HOSTS
   prompt_server_runner
+  prompt_remote_download_settings
   prompt_yes_no "Skip dependency install / reuse existing environment" "$SKIP_INSTALL" SKIP_INSTALL
   prompt_feature_settings
   prompt_yes_no "Enable security settings" "$SECURITY_SETTINGS_ENABLED" SECURITY_SETTINGS_ENABLED
@@ -3638,6 +3719,32 @@ while [[ $# -gt 0 ]]; do
       HLS_SLOT_PROBE_MODE=never
       shift
       ;;
+    --bt-backend|--bt-download-backend)
+      BT_DOWNLOAD_BACKEND="${2:?missing BT backend}"
+      shift 2
+      ;;
+    --transmission-rpc-url)
+      TRANSMISSION_RPC_URL="${2:?missing Transmission RPC URL}"
+      shift 2
+      ;;
+    --transmission-rpc-username)
+      TRANSMISSION_RPC_USERNAME="${2:?missing Transmission RPC username}"
+      shift 2
+      ;;
+    --transmission-rpc-password)
+      TRANSMISSION_RPC_PASSWORD="${2:?missing Transmission RPC password}"
+      shift 2
+      ;;
+    --remote-download-global|--remote-download-max-concurrent-global)
+      HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL="${2:?missing remote download global concurrency}"
+      export HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL
+      shift 2
+      ;;
+    --remote-download-per-user|--remote-download-max-concurrent-per-user)
+      HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_PER_USER="${2:?missing remote download per-user concurrency}"
+      export HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_PER_USER
+      shift 2
+      ;;
     --capacity-defaults-file)
       CAPACITY_DEFAULTS_FILE="${2:?missing capacity defaults file}"
       shift 2
@@ -3737,6 +3844,11 @@ fi
 normalize_capacity_probe_mode
 normalize_capacity_probe_tier
 normalize_hls_slot_probe_mode
+normalize_bt_download_backend
+export HACKME_BT_BACKEND="$BT_DOWNLOAD_BACKEND"
+export HACKME_TRANSMISSION_RPC_URL="$TRANSMISSION_RPC_URL"
+export HACKME_TRANSMISSION_RPC_USERNAME="$TRANSMISSION_RPC_USERNAME"
+export HACKME_TRANSMISSION_RPC_PASSWORD="$TRANSMISSION_RPC_PASSWORD"
 if [[ "$CLI_MODE" == "1" || "$SHUTDOWN" == "1" ]]; then
   load_local_capacity_report_defaults || load_local_capacity_defaults
 fi

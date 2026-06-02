@@ -37,6 +37,42 @@ HACKME_TRANSMISSION_RPC_URL=http://127.0.0.1:9091/transmission/rpc
 
 注意：env 會作為 fresh DB / first boot 的預設值。已存在的站點若 root 前台已保存過設定，請以 root 前台為準，或直接更新 DB/system settings。
 
+## 互動式啟動腳本設定
+
+本機 / staging 用 `./test_for_develop.sh` 時，不一定要手寫 env 檔。互動模式會在 server runner / capacity 後詢問：
+
+```text
+Configure remote download / BT backend for this launch [y/N]:
+BT/magnet remote-download backend:
+  1) auto - prefer Transmission RPC, fallback aria2 when RPC is unavailable
+  2) transmission - require Transmission RPC
+  3) aria2 - force aria2c
+Transmission RPC URL [http://127.0.0.1:9091/transmission/rpc]:
+Transmission RPC username (blank = no auth) []:
+Transmission RPC password (blank = no auth) []:
+Remote download global concurrency [1]:
+Remote download per-user concurrency [1]:
+```
+
+非互動模式可用 flags：
+
+```bash
+./test_for_develop.sh --cli \
+  --bt-backend auto \
+  --transmission-rpc-url http://127.0.0.1:9091/transmission/rpc \
+  --remote-download-global 1 \
+  --remote-download-per-user 1
+```
+
+若有 RPC 帳密，再加：
+
+```bash
+  --transmission-rpc-username USER \
+  --transmission-rpc-password PASS
+```
+
+互動式腳本只影響本次啟動匯出的 env。正式部署仍應把穩定值寫進 `/etc/hackme_web/hackme-web.env` 或在 root 前台保存。
+
 ## root 前台設定
 
 root 登入後到系統設定，設定：
