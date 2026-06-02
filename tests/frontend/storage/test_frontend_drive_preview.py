@@ -168,6 +168,7 @@ def test_filemanager_and_albummanager_ui_are_wired():
     assert "加密完成，開始上傳密文" in drive_js
     assert "DRIVE_RESUMABLE_UPLOAD_THRESHOLD_BYTES" in drive_js
     assert "async function uploadDriveBlobResumable" in drive_js
+    assert "[\"upload\", \"folder_upload\", \"resumable_upload\"].includes(item.kind)" in drive_js
     assert '"/cloud-drive/resumable-upload/start"' in drive_js
     assert '"/cloud-drive/resumable-upload/sessions?limit=20"' in drive_js
     assert "completeDriveResumableUpload" in drive_js
@@ -176,6 +177,11 @@ def test_filemanager_and_albummanager_ui_are_wired():
     assert "function restoreDriveBackgroundTransfers()" in drive_js
     assert "function applyResumableUploadSessionToTransfer" in drive_js
     assert 'data-drive-action="cancel-resumable-upload"' in drive_js
+    assert 'data-drive-action="resume-resumable-upload"' in drive_js
+    assert "function chooseResumableResumeFile" in drive_js
+    assert "function resumeResumableUploadSession" in drive_js
+    assert "請選擇同一個檔案" in drive_js
+    assert "resumeSession: session" in drive_js
     assert "function syncDriveCsrfFromCookie()" in drive_js
     assert "async function currentDriveCsrfToken" in drive_js
     assert 'readCookie("csrf_token")' in drive_js

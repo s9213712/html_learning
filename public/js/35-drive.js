@@ -102,7 +102,7 @@ function isDriveTransferActive(item = {}) {
 }
 
 function hasActiveDriveBrowserUpload() {
-  return driveTransferRows.some((item) => ["upload", "folder_upload"].includes(item.kind) && isDriveTransferActive(item));
+  return driveTransferRows.some((item) => ["upload", "folder_upload", "resumable_upload"].includes(item.kind) && isDriveTransferActive(item));
 }
 
 function syncDriveTransferIdleSuspend() {
@@ -1573,12 +1573,14 @@ function renderDriveTransferRow(item) {
   const canPause = hasRemoteTask && ["queued", "running"].includes(item.status) && !remoteControlLocked;
   const canResume = hasRemoteTask && item.status === "paused";
   const canCancel = hasRemoteTask && ["queued", "running", "paused"].includes(item.status) && !["saving", "cancel_requested"].includes(item.phase);
+  const canResumeResumable = hasResumableSession && item.status === "waiting_resume";
   const canCancelResumable = hasResumableSession && ["waiting_resume", "running"].includes(item.status) && !["completing", "finalizing", "server_processing"].includes(item.phase);
   const canDismiss = item.status === "failed" || item.status === "completed" || item.status === "paused" || item.status === "cancelled";
   const controls = [
     canPause ? `<button class="btn btn-small" type="button" data-drive-action="pause-remote-download" data-transfer-id="${sanitize(item.id)}" data-task-id="${sanitize(item.task_id || "")}">暫停</button>` : "",
     canResume ? `<button class="btn btn-small btn-primary" type="button" data-drive-action="resume-remote-download" data-transfer-id="${sanitize(item.id)}" data-task-id="${sanitize(item.task_id || "")}">繼續</button>` : "",
     canCancel ? `<button class="btn btn-small btn-danger" type="button" data-drive-action="cancel-remote-download" data-transfer-id="${sanitize(item.id)}" data-task-id="${sanitize(item.task_id || "")}">取消</button>` : "",
+    canResumeResumable ? `<button class="btn btn-small btn-primary" type="button" data-drive-action="resume-resumable-upload" data-transfer-id="${sanitize(item.id)}" data-session-id="${sanitize(item.session_id || "")}">選同檔續傳</button>` : "",
     canCancelResumable ? `<button class="btn btn-small btn-danger" type="button" data-drive-action="cancel-resumable-upload" data-transfer-id="${sanitize(item.id)}" data-session-id="${sanitize(item.session_id || "")}">中止</button>` : "",
     canDismiss ? `<button class="btn btn-small" type="button" data-drive-action="dismiss-transfer" data-transfer-id="${sanitize(item.id)}" data-task-id="${sanitize(item.task_id || "")}">移除</button>` : "",
   ].join("");
@@ -2209,6 +2211,93 @@ async function completeDriveResumableUpload(sessionId, csrf = "") {
   });
 }
 
+function chooseResumableResumeFile(session = {}) {
+  return new Promise((resolve) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.style.position = "fixed";
+    input.style.left = "-9999px";
+    input.setAttribute("aria-hidden", "true");
+    input.addEventListener("change", () => {
+      const file = input.files && input.files[0] ? input.files[0] : null;
+      input.remove();
+      resolve(file);
+    }, { once: true });
+    document.body.appendChild(input);
+    input.click();
+  });
+}
+
+async function resumeResumableUploadSession(sessionId, transferId = "") {
+  if (!sessionId) return null;
+  await fetchCsrfToken({ force: true });
+  const csrf = getCsrfToken();
+  const session = await getDriveResumableUploadStatus(sessionId, csrf);
+  if (!session?.session_id) throw new Error("找不到等待續傳的 upload session");
+  const selected = await chooseResumableResumeFile(session);
+  if (!selected) return null;
+  const expectedName = String(session.filename || "");
+  const actualName = String(selected.name || "");
+  const expectedBytes = Number(session.total_bytes || 0);
+  const actualBytes = Number(selected.size || 0);
+  if (expectedName && actualName !== expectedName) {
+    alert(`請選擇同一個檔案：${expectedName}`);
+    return null;
+  }
+  if (expectedBytes !== actualBytes) {
+    alert(`檔案大小不一致，請重新選擇同一個檔案（需要 ${formatDriveBytes(expectedBytes)}，目前 ${formatDriveBytes(actualBytes)}）`);
+    return null;
+  }
+  const rowId = transferId || findDriveTransferRowIdForSession(sessionId) || resumableUploadTransferId(sessionId);
+  updateDriveTransferRow(rowId, {
+    kind: "resumable_upload",
+    session_id: sessionId,
+    source_ref: driveResumableUploadSourceRef(sessionId),
+    name: expectedName || actualName || "分段上傳",
+    status: "running",
+    phase: "resumable_uploading",
+    loaded_bytes: session.received_bytes,
+    total_bytes: session.total_bytes,
+    progress_percent: session.progress_percent,
+    msg: "已重新選取同一檔案，準備續傳",
+  });
+  try {
+    const json = await uploadDriveBlobResumable({
+      blob: selected,
+      sourceFile: selected,
+      filename: expectedName || actualName || "upload.bin",
+      mimeType: session.mime_type || selected.type || "application/octet-stream",
+      privacyMode: session.privacy_mode || "standard_plain",
+      target: session.target || "cloud_drive",
+      transferId: rowId,
+      csrf,
+      label: expectedName || actualName || "upload.bin",
+      resumeSession: session,
+    });
+    updateDriveTransferRow(rowId, {
+      status: "completed",
+      phase: "completed",
+      msg: "續傳完成",
+      progress_percent: 100,
+      loaded_bytes: selected.size,
+      total_bytes: selected.size,
+      source_ref: json.file?.file_id ? `cloud_file:${json.file.file_id}` : driveResumableUploadSourceRef(sessionId),
+    });
+    await loadDriveDashboard();
+    setTimeout(() => removeDriveTransferRow(rowId), DRIVE_TRANSFER_COMPLETED_VISIBLE_MS);
+    return json;
+  } catch (err) {
+    updateDriveTransferRow(rowId, {
+      status: "waiting_resume",
+      phase: "waiting_resume",
+      msg: err.message || "續傳失敗，請重新選擇同一檔案再試一次",
+      progress_percent: session.progress_percent,
+    });
+    alert(err.message || "續傳失敗");
+    return null;
+  }
+}
+
 async function uploadDriveBlobResumable({
   blob,
   sourceFile = null,
@@ -2225,14 +2314,25 @@ async function uploadDriveBlobResumable({
   aggregateTotalBytes = 0,
   label = "",
   exposeSessionAsTransfer = true,
+  resumeSession = null,
 } = {}) {
   if (!blob) throw new Error("缺少要上傳的檔案資料");
   const totalBytes = Number(blob.size || 0);
   const chunkSize = DRIVE_RESUMABLE_UPLOAD_CHUNK_BYTES;
   const totalForDisplay = Number(aggregateTotalBytes || totalBytes);
   const storageKey = driveResumableUploadKey({ file: sourceFile, blob, target, virtualPath, privacyMode });
-  let session = null;
-  const remembered = rememberedDriveResumableUpload(storageKey);
+  let session = resumeSession || null;
+  if (session) {
+    if (
+      session.filename !== filename
+      || Number(session.total_bytes || 0) !== totalBytes
+      || session.target !== target
+      || String(session.privacy_mode || privacyMode || "standard_plain") !== String(privacyMode || "standard_plain")
+    ) {
+      throw new Error("選取的檔案與等待續傳的 upload session 不一致");
+    }
+  }
+  const remembered = session ? "" : rememberedDriveResumableUpload(storageKey);
   if (remembered) {
     const existing = await getDriveResumableUploadStatus(remembered, csrf);
     if (
@@ -2259,8 +2359,8 @@ async function uploadDriveBlobResumable({
       display_name: displayName,
       ...fields,
     }, csrf);
-    rememberDriveResumableUpload(storageKey, session.session_id);
   }
+  rememberDriveResumableUpload(storageKey, session.session_id);
   if (exposeSessionAsTransfer) {
     updateDriveTransferRow(transferId, {
       kind: "resumable_upload",
@@ -5503,6 +5603,7 @@ document.addEventListener("click", (event) => {
     if (action === "pause-remote-download") return pauseRemoteDownloadTask(taskId, transferId);
     if (action === "resume-remote-download") return resumeRemoteDownloadTask(taskId, transferId);
     if (action === "cancel-remote-download") return cancelRemoteDownloadTask(taskId, transferId);
+    if (action === "resume-resumable-upload") return resumeResumableUploadSession(sessionId, transferId);
     if (action === "cancel-resumable-upload") return cancelResumableUploadSession(sessionId, transferId);
     if (action === "album-full-preview") return previewAlbumFileFullscreen(fileId, name, albumSequence === "viewer" ? { files: albumPreviewSequence } : {});
     if (action === "album-preview-prev") return stepAlbumPreview(-1);
