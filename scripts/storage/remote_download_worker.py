@@ -72,6 +72,8 @@ def main(argv=None):
     parser.add_argument("--max-bytes", type=int, default=0)
     parser.add_argument("--rate-limit-kb-per-sec", type=int, default=0)
     parser.add_argument("--control-file", default="")
+    parser.add_argument("--owner-user-id", default="")
+    parser.add_argument("--task-id", default="")
     args = parser.parse_args(argv)
 
     max_bytes = _positive_int_or_none(args.max_bytes)
@@ -88,6 +90,8 @@ def main(argv=None):
                 progress_callback=_progress,
                 rate_limit_kb_per_sec=rate_limit,
                 cancel_check=cancel_check,
+                owner_user_id=args.owner_user_id,
+                task_id=args.task_id,
             )
         elif args.source_type == "torrent_url":
             downloaded = download_torrent_url_with_aria2(
@@ -97,6 +101,8 @@ def main(argv=None):
                 progress_callback=_progress,
                 rate_limit_kb_per_sec=rate_limit,
                 cancel_check=cancel_check,
+                owner_user_id=args.owner_user_id,
+                task_id=args.task_id,
             )
         else:
             downloaded = download_remote_url(
@@ -107,6 +113,8 @@ def main(argv=None):
                 rate_limit_kb_per_sec=rate_limit,
                 treat_torrent_as_bt=args.source_type != "direct",
                 cancel_check=cancel_check,
+                owner_user_id=args.owner_user_id,
+                task_id=args.task_id,
             )
         _emit({
             "type": "result",

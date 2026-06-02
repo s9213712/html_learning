@@ -396,6 +396,34 @@ def _bt_progress_interval_seconds():
     return max(0.5, min(10.0, _env_positive_float("HACKME_BT_PROGRESS_INTERVAL_SECONDS", 2.0)))
 
 
+def _safe_staging_component(value, fallback):
+    text = safe_public_filename(str(value or "").strip())
+    return text or str(fallback)
+
+
+def _bt_staging_root():
+    raw = str(os.environ.get("HACKME_BT_DOWNLOAD_STAGING_DIR", "") or "").strip()
+    if not raw:
+        return None
+    return Path(raw).expanduser()
+
+
+def _make_bt_tempdir(prefix, *, owner_user_id=None, task_id=None):
+    root = _bt_staging_root()
+    if root is None:
+        return tempfile.mkdtemp(prefix=prefix)
+    user_part = _safe_staging_component(f"user-{owner_user_id}", "user-unknown")
+    task_part = _safe_staging_component(f"task-{task_id}", "task-unknown")
+    parent = root / user_part / task_part
+    parent.mkdir(parents=True, exist_ok=True)
+    tmpdir = tempfile.mkdtemp(prefix=prefix, dir=str(parent))
+    try:
+        os.chmod(tmpdir, 0o2770)
+    except OSError:
+        pass
+    return tmpdir
+
+
 def _directory_downloaded_bytes(path):
     total = 0
     for item in Path(path).rglob("*"):
@@ -608,8 +636,8 @@ def _torrent_files_from_transmission(tmpdir):
     return files
 
 
-def _download_bt_with_transmission(source, *, source_label="BT/magnet", source_is_torrent_file=False, timeout_seconds=300, max_bytes=None, progress_callback=None, rate_limit_kb_per_sec=None, cancel_check=None):
-    tmpdir = tempfile.mkdtemp(prefix="hackme_bt_transmission_")
+def _download_bt_with_transmission(source, *, source_label="BT/magnet", source_is_torrent_file=False, timeout_seconds=300, max_bytes=None, progress_callback=None, rate_limit_kb_per_sec=None, cancel_check=None, owner_user_id=None, task_id=None):
+    tmpdir = _make_bt_tempdir("hackme_bt_transmission_", owner_user_id=owner_user_id, task_id=task_id)
     torrent_id = None
     idle_timeout_seconds = _bt_idle_timeout_seconds(timeout_seconds)
     absolute_timeout_seconds = _bt_absolute_timeout_seconds()
@@ -647,7 +675,7 @@ def _download_bt_with_transmission(source, *, source_label="BT/magnet", source_i
                 torrent_id = None
                 raise
             now_ts = time.monotonic()
-            fields = ["id", "name", "status", "percentDone", "totalSize", "downloadedEver", "rateDownload", "error", "errorString", "files"]
+            fields = ["id", "name", "status", "percentDone", "totalSize", "downloadedEver", "rateDownload", "eta", "error", "errorString", "files"]
             info = _transmission_rpc_call("torrent-get", {"ids": [torrent_id], "fields": fields}, timeout_seconds=10)
             torrents = info.get("torrents") or []
             if not torrents:
@@ -674,7 +702,23 @@ def _download_bt_with_transmission(source, *, source_label="BT/magnet", source_i
                 torrent_id = None
                 raise RemoteDownloadError(f"BT 下載停滯逾時：已 {idle_timeout_seconds} 秒沒有下載進度。請確認做種/節點、tracker、DHT 與防火牆狀態。")
             speed = int(item.get("rateDownload") or _progress_speed_bytes_per_sec(downloaded, last_progress_bytes, now_ts, last_progress_ts))
-            _emit_progress(progress_callback, phase="downloading", filename=name, loaded_bytes=downloaded, total_bytes=total_size, speed_bytes_per_sec=speed)
+            progress_percent = None
+            try:
+                progress_percent = max(0, min(100, round(float(item.get("percentDone") or 0) * 100, 1)))
+            except Exception:
+                progress_percent = None
+            _emit_progress(
+                progress_callback,
+                phase="downloading",
+                filename=name,
+                loaded_bytes=downloaded,
+                total_bytes=total_size,
+                speed_bytes_per_sec=speed,
+                progress_percent=progress_percent,
+                eta_seconds=item.get("eta"),
+                transmission_status=item.get("status"),
+                transmission_torrent_id=torrent_id,
+            )
             last_progress_bytes = downloaded
             last_progress_ts = now_ts
             if float(item.get("percentDone") or 0) >= 1.0:
@@ -714,7 +758,7 @@ def _download_bt_with_transmission(source, *, source_label="BT/magnet", source_i
         raise
 
 
-def _download_bt_with_preferred_backend(source, *, source_label="BT/magnet", source_is_torrent_file=False, timeout_seconds=300, max_bytes=None, progress_callback=None, rate_limit_kb_per_sec=None, exclude_trackers=None, cancel_check=None):
+def _download_bt_with_preferred_backend(source, *, source_label="BT/magnet", source_is_torrent_file=False, timeout_seconds=300, max_bytes=None, progress_callback=None, rate_limit_kb_per_sec=None, exclude_trackers=None, cancel_check=None, owner_user_id=None, task_id=None):
     backend = _bt_backend_preference()
     if backend in {"auto", "transmission"}:
         try:
@@ -727,6 +771,8 @@ def _download_bt_with_preferred_backend(source, *, source_label="BT/magnet", sou
                 progress_callback=progress_callback,
                 rate_limit_kb_per_sec=rate_limit_kb_per_sec,
                 cancel_check=cancel_check,
+                owner_user_id=owner_user_id,
+                task_id=task_id,
             )
         except (RemoteDownloadCancelled, RemoteDownloadPaused):
             raise
@@ -745,6 +791,8 @@ def _download_bt_with_preferred_backend(source, *, source_label="BT/magnet", sou
         rate_limit_kb_per_sec=rate_limit_kb_per_sec,
         exclude_trackers=exclude_trackers,
         cancel_check=cancel_check,
+        owner_user_id=owner_user_id,
+        task_id=task_id,
     )
 
 
@@ -799,11 +847,11 @@ def _terminate_child_process(proc, *, timeout=5):
         pass
 
 
-def _download_bt_with_aria2(source, *, source_label="BT/magnet", timeout_seconds=300, max_bytes=None, progress_callback=None, rate_limit_kb_per_sec=None, exclude_trackers=None, cancel_check=None):
+def _download_bt_with_aria2(source, *, source_label="BT/magnet", timeout_seconds=300, max_bytes=None, progress_callback=None, rate_limit_kb_per_sec=None, exclude_trackers=None, cancel_check=None, owner_user_id=None, task_id=None):
     aria2c = shutil.which("aria2c")
     if not aria2c:
         raise RemoteDownloadError("BT 下載需要先安裝 aria2c")
-    tmpdir = tempfile.mkdtemp(prefix="hackme_bt_")
+    tmpdir = _make_bt_tempdir("hackme_bt_", owner_user_id=owner_user_id, task_id=task_id)
     log_path = os.path.join(tmpdir, "aria2.log")
     idle_timeout_seconds = _bt_idle_timeout_seconds(timeout_seconds)
     absolute_timeout_seconds = _bt_absolute_timeout_seconds()
@@ -918,7 +966,7 @@ def _download_bt_with_aria2(source, *, source_label="BT/magnet", timeout_seconds
         raise
 
 
-def download_magnet_with_aria2(url, *, timeout_seconds=300, max_bytes=None, progress_callback=None, rate_limit_kb_per_sec=None, cancel_check=None):
+def download_magnet_with_aria2(url, *, timeout_seconds=300, max_bytes=None, progress_callback=None, rate_limit_kb_per_sec=None, cancel_check=None, owner_user_id=None, task_id=None):
     tracker_report = validate_magnet_trackers(url)
     return _download_bt_with_preferred_backend(
         url,
@@ -930,10 +978,12 @@ def download_magnet_with_aria2(url, *, timeout_seconds=300, max_bytes=None, prog
         rate_limit_kb_per_sec=rate_limit_kb_per_sec,
         exclude_trackers=[item["url"] for item in tracker_report.get("blocked", [])],
         cancel_check=cancel_check,
+        owner_user_id=owner_user_id,
+        task_id=task_id,
     )
 
 
-def download_torrent_file_with_aria2(torrent_path, *, display_name="BT 檔案", timeout_seconds=300, max_bytes=None, progress_callback=None, rate_limit_kb_per_sec=None, cancel_check=None):
+def download_torrent_file_with_aria2(torrent_path, *, display_name="BT 檔案", timeout_seconds=300, max_bytes=None, progress_callback=None, rate_limit_kb_per_sec=None, cancel_check=None, owner_user_id=None, task_id=None):
     if not os.path.isfile(torrent_path):
         raise RemoteDownloadError("找不到 BT 種子檔")
     _check_remote_download_control(cancel_check)
@@ -948,10 +998,12 @@ def download_torrent_file_with_aria2(torrent_path, *, display_name="BT 檔案", 
         rate_limit_kb_per_sec=rate_limit_kb_per_sec,
         exclude_trackers=[item["url"] for item in tracker_report.get("blocked", [])],
         cancel_check=cancel_check,
+        owner_user_id=owner_user_id,
+        task_id=task_id,
     )
 
 
-def download_torrent_url_with_aria2(url, *, timeout_seconds=300, max_bytes=None, progress_callback=None, rate_limit_kb_per_sec=None, cancel_check=None):
+def download_torrent_url_with_aria2(url, *, timeout_seconds=300, max_bytes=None, progress_callback=None, rate_limit_kb_per_sec=None, cancel_check=None, owner_user_id=None, task_id=None):
     parsed = validate_remote_url(url)
     if parsed["kind"] != "torrent_url":
         raise RemoteDownloadError("BT/torrent URL 必須指向 .torrent 種子檔")
@@ -974,16 +1026,18 @@ def download_torrent_url_with_aria2(url, *, timeout_seconds=300, max_bytes=None,
             progress_callback=progress_callback,
             rate_limit_kb_per_sec=rate_limit_kb_per_sec,
             cancel_check=cancel_check,
+            owner_user_id=owner_user_id,
+            task_id=task_id,
         )
     finally:
         if torrent_file.cleanup_dir:
             shutil.rmtree(torrent_file.cleanup_dir, ignore_errors=True)
 
 
-def download_remote_url(url, *, timeout_seconds=120, max_bytes=None, progress_callback=None, rate_limit_kb_per_sec=None, treat_torrent_as_bt=True, cancel_check=None):
+def download_remote_url(url, *, timeout_seconds=120, max_bytes=None, progress_callback=None, rate_limit_kb_per_sec=None, treat_torrent_as_bt=True, cancel_check=None, owner_user_id=None, task_id=None):
     parsed = validate_remote_url(url)
     if parsed["kind"] == "magnet":
-        return download_magnet_with_aria2(parsed["url"], timeout_seconds=timeout_seconds, max_bytes=max_bytes, progress_callback=progress_callback, rate_limit_kb_per_sec=rate_limit_kb_per_sec, cancel_check=cancel_check)
+        return download_magnet_with_aria2(parsed["url"], timeout_seconds=timeout_seconds, max_bytes=max_bytes, progress_callback=progress_callback, rate_limit_kb_per_sec=rate_limit_kb_per_sec, cancel_check=cancel_check, owner_user_id=owner_user_id, task_id=task_id)
     if parsed["kind"] == "torrent_url" and treat_torrent_as_bt:
-        return download_torrent_url_with_aria2(parsed["url"], timeout_seconds=timeout_seconds, max_bytes=max_bytes, progress_callback=progress_callback, rate_limit_kb_per_sec=rate_limit_kb_per_sec, cancel_check=cancel_check)
+        return download_torrent_url_with_aria2(parsed["url"], timeout_seconds=timeout_seconds, max_bytes=max_bytes, progress_callback=progress_callback, rate_limit_kb_per_sec=rate_limit_kb_per_sec, cancel_check=cancel_check, owner_user_id=owner_user_id, task_id=task_id)
     return download_direct_link(parsed["url"], timeout_seconds=timeout_seconds, max_bytes=max_bytes, progress_callback=progress_callback, rate_limit_kb_per_sec=rate_limit_kb_per_sec, cancel_check=cancel_check)

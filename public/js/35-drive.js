@@ -1359,6 +1359,7 @@ function driveRemoteTaskToJobCenterJob(task = {}) {
       loaded_bytes: task.loaded_bytes,
       total_bytes: task.total_bytes,
       speed_bytes_per_sec: task.speed_bytes_per_sec,
+      recoverable: !!task.recoverable,
       availability_score: task.availability_score,
       availability_hint: task.availability_hint,
     },
@@ -1517,6 +1518,7 @@ async function controlRemoteDownloadTask(taskId, transferId, action) {
       total_bytes: task.total_bytes,
       progress_percent: task.progress_percent,
       speed_bytes_per_sec: task.speed_bytes_per_sec,
+      recoverable: !!task.recoverable,
       msg: task.msg || json.msg || "",
     });
   }
@@ -1540,6 +1542,33 @@ async function cancelRemoteDownloadTask(taskId, transferId) {
   if (!window.confirm("確定要取消這個下載任務？")) return null;
   const task = await controlRemoteDownloadTask(taskId, transferId, "cancel");
   flash($("drive-msg"), "已取消下載任務", true);
+  return task;
+}
+
+async function recoverRemoteDownloadTask(taskId, transferId) {
+  if (!taskId) return null;
+  const ok = window.confirm("這個遠端下載已完成但保存被中斷。要從 staging 檔恢復並保存到雲端硬碟嗎？");
+  if (!ok) return null;
+  await fetchCsrfToken({ force: true });
+  const res = await apiFetch(API + `/cloud-drive/remote-download/tasks/${encodeURIComponent(taskId)}/recover`, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "X-CSRF-Token": getCsrfToken() || "" }
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok || !json.ok) throw new Error(json.msg || `恢復保存失敗（HTTP ${res.status}）`);
+  const task = json.task || {};
+  if (transferId) updateDriveTransferRow(transferId, {
+    status: task.status || "completed",
+    phase: task.phase || "completed",
+    msg: task.msg || json.msg || "遠端下載已恢復並保存",
+    progress_percent: 100,
+    loaded_bytes: task.loaded_bytes,
+    total_bytes: task.total_bytes,
+    recoverable: false,
+  });
+  flash($("drive-msg"), json.msg || "遠端下載已恢復並保存", true);
+  await loadDriveDashboard();
   return task;
 }
 
@@ -1594,6 +1623,7 @@ function renderDriveTransferRow(item) {
   const canPause = hasRemoteTask && ["queued", "running"].includes(item.status) && !remoteControlLocked;
   const canResume = hasRemoteTask && item.status === "paused";
   const canCancel = hasRemoteTask && ["queued", "running", "paused"].includes(item.status) && !["saving", "cancel_requested"].includes(item.phase);
+  const canRecoverRemote = hasRemoteTask && !!item.recoverable;
   const canResumeResumable = hasResumableSession && item.status === "waiting_resume";
   const canCancelResumable = hasResumableSession && ["waiting_resume", "running"].includes(item.status) && !["completing", "finalizing", "server_processing"].includes(item.phase);
   const canDismiss = item.status === "failed" || item.status === "completed" || item.status === "paused" || item.status === "cancelled";
@@ -1601,6 +1631,7 @@ function renderDriveTransferRow(item) {
     canPause ? `<button class="btn btn-small" type="button" data-drive-action="pause-remote-download" data-transfer-id="${sanitize(item.id)}" data-task-id="${sanitize(item.task_id || "")}">暫停</button>` : "",
     canResume ? `<button class="btn btn-small btn-primary" type="button" data-drive-action="resume-remote-download" data-transfer-id="${sanitize(item.id)}" data-task-id="${sanitize(item.task_id || "")}">繼續</button>` : "",
     canCancel ? `<button class="btn btn-small btn-danger" type="button" data-drive-action="cancel-remote-download" data-transfer-id="${sanitize(item.id)}" data-task-id="${sanitize(item.task_id || "")}">取消</button>` : "",
+    canRecoverRemote ? `<button class="btn btn-small btn-primary" type="button" data-drive-action="recover-remote-download" data-transfer-id="${sanitize(item.id)}" data-task-id="${sanitize(item.task_id || "")}">恢復保存</button>` : "",
     canResumeResumable ? `<button class="btn btn-small btn-primary" type="button" data-drive-action="resume-resumable-upload" data-transfer-id="${sanitize(item.id)}" data-session-id="${sanitize(item.session_id || "")}">選同檔續傳</button>` : "",
     canCancelResumable ? `<button class="btn btn-small btn-danger" type="button" data-drive-action="cancel-resumable-upload" data-transfer-id="${sanitize(item.id)}" data-session-id="${sanitize(item.session_id || "")}">中止</button>` : "",
     canDismiss ? `<button class="btn btn-small" type="button" data-drive-action="dismiss-transfer" data-transfer-id="${sanitize(item.id)}" data-task-id="${sanitize(item.task_id || "")}">移除</button>` : "",
@@ -2519,14 +2550,18 @@ async function loadRemoteDownloadCapabilities() {
       bt_file: !!caps.bt_file,
     };
     const btReady = driveRemoteDownloadCapabilities.bt_magnet || driveRemoteDownloadCapabilities.bt_file;
+    const activeBackend = String(caps.bt_backend_active || caps.bt_backend || "");
+    const btBackendLabel = activeBackend === "transmission"
+      ? "Transmission RPC"
+      : (activeBackend === "aria2" ? (caps.aria2c_path || "aria2c") : (caps.transmission_rpc_available ? "Transmission RPC" : (caps.aria2c_path || "BT backend")));
     torrentButtons.forEach((button) => {
       button.disabled = !btReady;
-      button.title = btReady ? `BT 可用：${caps.aria2c_path || "aria2c"}` : "BT 不可用：伺服器需安裝 aria2c";
+      button.title = btReady ? `BT 可用：${btBackendLabel}` : "BT 不可用：請設定 Transmission RPC 或安裝 aria2c";
     });
     if (status) {
       status.textContent = btReady
-        ? `Direct link 可用；BT/magnet 可用（${caps.aria2c_path || "aria2c"}）`
-        : "Direct link 可用；BT/magnet 不可用，伺服器需安裝 aria2c";
+        ? `Direct link 可用；BT/magnet 可用（${btBackendLabel}）`
+        : "Direct link 可用；BT/magnet 不可用，請設定 Transmission RPC 或安裝 aria2c";
     }
   } catch (err) {
     driveRemoteDownloadCapabilities = { direct: true, bt_magnet: false, bt_file: false };
@@ -2572,7 +2607,7 @@ function openRemoteTorrentPicker() {
   const input = $("drive-remote-torrent-file");
   const caps = driveRemoteDownloadCapabilities || {};
   if (!caps.bt_file && !caps.bt_magnet) {
-    alert("BT 功能目前不可用，請確認伺服器已安裝 aria2c。");
+    alert("BT 功能目前不可用，請確認已設定 Transmission RPC 或安裝 aria2c。");
     return;
   }
   if (caps.bt_magnet) {
@@ -2613,11 +2648,11 @@ async function startRemoteDriveDownload({ source = "auto", downloadMode = "direc
   }
   const caps = driveRemoteDownloadCapabilities || {};
   if (detected.kind === "magnet" && !caps.bt_magnet) {
-    alert("BT magnet 功能目前不可用，請確認伺服器已安裝 aria2c。");
+    alert("BT magnet 功能目前不可用，請確認已設定 Transmission RPC 或安裝 aria2c。");
     return;
   }
   if ((detected.kind === "torrent_file" || detected.kind === "torrent_url") && !caps.bt_file) {
-    alert("BT torrent 功能目前不可用，請確認伺服器已安裝 aria2c。");
+    alert("BT torrent 功能目前不可用，請確認已設定 Transmission RPC 或安裝 aria2c。");
     return;
   }
   const options = await askDriveUploadPrivacyOptions({ allowE2ee: false, title: `${detected.label || "遠端下載"}儲存前選擇隱私模式` });
@@ -3272,6 +3307,7 @@ function drivePreviewSubtitles(preview) {
   return tracks
     .filter((track) => track && track.name && track.url)
     .map((track) => ({
+      name: String(track.name || ""),
       label: String(track.label || track.language || "字幕"),
       language: String(track.language || "und"),
       url: String(track.url || ""),
@@ -3288,6 +3324,7 @@ function drivePreviewAudioTracks(preview) {
       name: String(track.name || ""),
       label: String(track.label || track.language || track.name || "音軌"),
       language: String(track.language || "und"),
+      playlistUrl: String(track.playlist_url || track.url || ""),
       streamIndex: Number(track.stream_index ?? -1),
       isDefault: !!track.is_default,
     }));
@@ -3473,6 +3510,46 @@ function setDriveSubtitleShiftMs(fileId, value) {
   return offset;
 }
 
+function driveSubtitleTrackStorageKey(fileId) {
+  return `hackme_web.drive_subtitle_track.${String(fileId || "")}`;
+}
+
+function defaultDriveSubtitleTrackSelection(preview) {
+  const subtitles = drivePreviewSubtitles(preview);
+  if (!subtitles.length) return "off";
+  const defaultIndex = subtitles.findIndex((track) => track.isDefault);
+  return String(defaultIndex >= 0 ? defaultIndex : 0);
+}
+
+function getDriveSubtitleTrackSelection(fileId, preview) {
+  const subtitles = drivePreviewSubtitles(preview);
+  if (!subtitles.length) return "off";
+  try {
+    const saved = localStorage.getItem(driveSubtitleTrackStorageKey(fileId));
+    if (saved === "off") return "off";
+    const index = Number(saved);
+    if (Number.isInteger(index) && index >= 0 && index < subtitles.length) return String(index);
+  } catch (_) {}
+  return defaultDriveSubtitleTrackSelection(preview);
+}
+
+function setDriveSubtitleTrackSelection(fileId, value) {
+  const normalized = String(value || "off");
+  try {
+    const key = driveSubtitleTrackStorageKey(fileId);
+    if (normalized === "off") localStorage.setItem(key, "off");
+    else localStorage.setItem(key, normalized);
+  } catch (_) {}
+  return normalized;
+}
+
+function selectedDriveSubtitleTrackIndex(preview, fileId) {
+  const selected = getDriveSubtitleTrackSelection(fileId, preview);
+  if (selected === "off") return -1;
+  const index = Number(selected);
+  return Number.isInteger(index) ? index : -1;
+}
+
 function driveSubtitleUrlWithShift(url, shiftMs) {
   const raw = String(url || "");
   if (!raw) return raw;
@@ -3493,16 +3570,26 @@ function syncDrivePreviewSubtitleTracks(player, preview, fileId = "") {
   if (!player) return;
   Array.from(player.querySelectorAll('track[data-drive-preview-subtitle="1"]')).forEach((track) => track.remove());
   const shiftMs = getDriveSubtitleShiftMs(fileId);
-  drivePreviewSubtitles(preview).forEach((track, index) => {
+  const subtitles = drivePreviewSubtitles(preview);
+  const selectedIndex = selectedDriveSubtitleTrackIndex(preview, fileId);
+  subtitles.forEach((track, index) => {
     const el = document.createElement("track");
     el.kind = "subtitles";
     el.label = track.label || track.language || "字幕";
     el.srclang = track.language || "und";
     el.src = driveSubtitleUrlWithShift(track.url, shiftMs);
     el.dataset.drivePreviewSubtitle = "1";
-    if (track.isDefault || index === 0) el.default = true;
+    if (index === selectedIndex) el.default = true;
     player.appendChild(el);
   });
+  const applyModes = () => {
+    const tracks = player.textTracks || [];
+    for (let index = 0; index < tracks.length; index += 1) {
+      tracks[index].mode = index === selectedIndex ? "showing" : "disabled";
+    }
+  };
+  applyModes();
+  window.setTimeout(applyModes, 0);
 }
 
 function driveBrowserSupportsNativeHls(mediaType = "video") {
@@ -3558,23 +3645,35 @@ function driveSubtitleShiftControlsMarkup(preview, { fullscreen = false, fileId 
     <div class="video-quality-control drive-audio-track-control">
       <label for="${prefix}-audio-track-select">音軌</label>
       <select id="${prefix}-audio-track-select">
-        ${audioTracks.map((track, index) => `<option value="${index}"${index === defaultAudioIndex ? " selected" : ""}>${sanitize(track.label)}</option>`).join("")}
+        ${audioTracks.map((track, index) => `<option value="${index}" data-track-name="${sanitize(track.name)}"${index === defaultAudioIndex ? " selected" : ""}>${sanitize(track.label)}</option>`).join("")}
       </select>
       ${mode === "realtime_proxy" ? '<span class="drive-card-sub">Standard 即時轉封裝會重新開啟串流以套用音軌。</span>' : ""}
     </div>
   ` : "";
+  const selectedSubtitle = getDriveSubtitleTrackSelection(fileId, preview);
+  const subtitleSelectMarkup = subtitles.length ? `
+    <div class="video-quality-control drive-subtitle-track-control">
+      <label for="${prefix}-subtitle-track-select">字幕</label>
+      <select id="${prefix}-subtitle-track-select">
+        <option value="off"${selectedSubtitle === "off" ? " selected" : ""}>關閉</option>
+        ${subtitles.map((track, index) => `<option value="${index}"${selectedSubtitle === String(index) ? " selected" : ""}>${sanitize(track.label)}</option>`).join("")}
+      </select>
+    </div>
+  ` : "";
   const subtitleMarkup = subtitles.length ? `
-    <div class="video-quality-control drive-subtitle-shift-control">
-      <label for="${prefix}-subtitle-shift-seconds">字幕延遲</label>
+    <details class="video-quality-control drive-subtitle-shift-control">
+      <summary>字幕延遲微調</summary>
+      <label for="${prefix}-subtitle-shift-seconds">Offset</label>
       <button class="btn btn-sm" type="button" data-drive-subtitle-shift-step="-500">-0.5s</button>
       <input id="${prefix}-subtitle-shift-seconds" type="number" min="-3600" max="3600" step="0.1" value="${sanitize(driveSubtitleShiftSecondsValue(getDriveSubtitleShiftMs(fileId)))}" />
       <button class="btn btn-sm" type="button" data-drive-subtitle-shift-step="500">+0.5s</button>
       <button class="btn btn-sm" type="button" data-drive-subtitle-shift-reset="1">重置</button>
-    </div>
+    </details>
   ` : "";
   return `
     ${serviceMarkup}
     ${audioMarkup}
+    ${subtitleSelectMarkup}
     ${subtitleMarkup}
   `;
 }
@@ -3688,6 +3787,13 @@ function bindDriveSubtitleShiftControls(fileId, preview, player, { fullscreen = 
     audioSelect.dataset.fileId = String(fileId || "");
     audioSelect.addEventListener("change", () => applyDrivePreviewAudioTrack(preview, { fullscreen, fileId }));
   }
+  const subtitleSelect = $(`${prefix}-subtitle-track-select`);
+  if (subtitleSelect) {
+    subtitleSelect.addEventListener("change", () => {
+      setDriveSubtitleTrackSelection(fileId, subtitleSelect.value);
+      syncDrivePreviewSubtitleTracks(player, preview, fileId);
+    });
+  }
   const input = $(`${prefix}-subtitle-shift-seconds`);
   if (!input) return;
   const applyShift = (nextMs) => {
@@ -3708,8 +3814,8 @@ function applyDrivePreviewAudioTrack(preview, { fullscreen = false, fileId = "" 
   const tracks = drivePreviewAudioTracks(preview);
   const prefix = fullscreen ? "drive-fullscreen" : "drive-preview";
   const select = $(`${prefix}-audio-track-select`);
+  const player = $(fullscreen ? "drive-fullscreen-hls-player" : "drive-preview-hls-player");
   if (selectedDrivePreviewServiceMode(fileId, preview) === "realtime_proxy") {
-    const player = $(fullscreen ? "drive-fullscreen-hls-player" : "drive-preview-hls-player");
     const resolvedFileId = fileId || select?.dataset.fileId || player?.dataset.fileId || "";
     if (!select || tracks.length < 2 || !player || !resolvedFileId) return;
     const selected = Math.max(0, Math.min(tracks.length - 1, Number(select.value || 0)));
@@ -3722,16 +3828,43 @@ function applyDrivePreviewAudioTrack(preview, { fullscreen = false, fileId = "" 
     if (!wasPaused && typeof player.play === "function") player.play().catch(() => {});
     return;
   }
-  const hls = currentDrivePreviewHls;
-  if (!select || tracks.length < 2 || !hls || !Array.isArray(hls.audioTracks)) return;
+  if (!select || tracks.length < 2) return;
   const selected = Math.max(0, Math.min(tracks.length - 1, Number(select.value || 0)));
   const chosen = tracks[selected];
-  const index = hls.audioTracks.findIndex((track) => {
-    const name = String(track.name || track.label || "").toLowerCase();
-    const lang = String(track.lang || track.language || "").toLowerCase();
-    return name === chosen.label.toLowerCase() || lang === chosen.language.toLowerCase();
-  });
-  if (index >= 0) hls.audioTrack = index;
+  const chosenName = String(chosen?.name || "").toLowerCase();
+  const chosenLabel = String(chosen?.label || "").toLowerCase();
+  const chosenLanguage = String(chosen?.language || "").toLowerCase();
+  const chosenUrl = String(chosen?.playlistUrl || "").toLowerCase();
+  const chosenPath = (() => {
+    try {
+      return chosenUrl ? new URL(chosenUrl, window.location.origin).pathname.toLowerCase() : "";
+    } catch (_) {
+      return chosenUrl;
+    }
+  })();
+  const matchesChosenTrack = (track) => {
+    const name = String(track?.name || track?.label || "").toLowerCase();
+    const label = String(track?.label || track?.name || "").toLowerCase();
+    const lang = String(track?.lang || track?.language || "").toLowerCase();
+    const uri = String(track?.url || track?.uri || track?.attrs?.URI || track?.details?.url || "").toLowerCase();
+    return (chosenName && (name === chosenName || label === chosenName || uri.includes(`/${chosenName}/`) || uri.endsWith(`${chosenName}/playlist.m3u8`)))
+      || (chosenLabel && (name === chosenLabel || label === chosenLabel))
+      || (chosenPath && (uri === chosenPath || uri.endsWith(chosenPath) || uri.includes(chosenPath)))
+      || (chosenLanguage && chosenLanguage !== "und" && lang === chosenLanguage);
+  };
+  const hls = currentDrivePreviewHls;
+  if (hls && Array.isArray(hls.audioTracks)) {
+    let index = hls.audioTracks.findIndex(matchesChosenTrack);
+    if (index < 0 && selected >= 0 && selected < hls.audioTracks.length) index = selected;
+    if (index >= 0) hls.audioTrack = index;
+    return;
+  }
+  const nativeTracks = player?.audioTracks;
+  if (nativeTracks && typeof nativeTracks.length === "number") {
+    for (let index = 0; index < nativeTracks.length; index += 1) {
+      nativeTracks[index].enabled = !!matchesChosenTrack(nativeTracks[index]);
+    }
+  }
 }
 
 async function resolveDrivePreviewMediaUrl(fileId, csrf, preview, { fullscreen = false } = {}) {
@@ -5186,6 +5319,54 @@ function findDuplicateDriveUploadCandidate(file, privacyMode) {
   }) || null;
 }
 
+function findStorageFileByVirtualPath(virtualPath) {
+  const target = normalizeStoragePath(virtualPath);
+  if (!target) return null;
+  return (Array.isArray(storageFilesCache) ? storageFilesCache : []).find((item) => {
+    return normalizeStoragePath(item?.virtual_path || "") === target && !item?.deleted_at && !item?.is_trashed;
+  }) || null;
+}
+
+async function confirmStorageUploadReplacement(existing, options, csrf, virtualPath) {
+  if (!existing) return {};
+  const label = existing.display_name || storageBaseName(existing.virtual_path || virtualPath) || "既有檔案";
+  const ok = window.confirm(`同一路徑已有檔案「${label}」。要覆蓋並更新此檔案嗎？`);
+  if (!ok) throw new Error("已取消覆蓋上傳");
+  const fields = { replace_existing_confirmed: "1" };
+  const existingIsE2ee = driveFileIsE2ee(existing);
+  const nextIsE2ee = isDriveE2eeMode(options?.privacyMode);
+  if (!existingIsE2ee && !nextIsE2ee) return fields;
+  if (existingIsE2ee) {
+    const fileId = existing.file_id || existing.id;
+    const e2ee = await fetchDriveE2eeKey(fileId, csrf);
+    let verified = false;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const passphrase = await getDriveE2eeSessionPassphrase(
+        fileId,
+        "覆蓋或變更 E2EE 檔案前，請輸入原始檔案密碼。密碼不會送到伺服器。",
+        { force: true, allowPrompt: true }
+      );
+      if (!passphrase) throw new Error("覆蓋 E2EE 檔案需要輸入原始密碼");
+      try {
+        await unwrapDriveFileKey(e2ee.encrypted_file_key, passphrase);
+        rememberDriveE2eeSessionPassphrase(fileId, passphrase);
+        verified = true;
+        break;
+      } catch (err) {
+        forgetDriveE2eeSessionPassphrase(fileId);
+        if (attempt > 0) throw new Error("E2EE 原始密碼不正確，無法覆蓋檔案");
+        alert("E2EE 原始密碼不正確，請重新輸入。");
+      }
+    }
+    if (!verified) throw new Error("覆蓋 E2EE 檔案需要驗證原始密碼");
+  }
+  if (nextIsE2ee && !String(options?.passphrase || "")) {
+    throw new Error("上傳為 E2EE 需要輸入新的檔案密碼");
+  }
+  fields.replace_existing_password_confirmed = "1";
+  return fields;
+}
+
 async function uploadStorageFile() {
   const input = $("storage-upload-file");
   const pathInput = $("storage-upload-path");
@@ -5221,7 +5402,10 @@ async function uploadStorageFile() {
     let uploadMimeType = file.type || "application/octet-stream";
     let uploadFields = {};
     const virtualPath = pathInput?.value || joinStoragePath(currentStoragePath, file.name);
-    const duplicate = findDuplicateDriveUploadCandidate(file, options.privacyMode);
+    const existingStorageFile = findStorageFileByVirtualPath(virtualPath);
+    const replacementFields = await confirmStorageUploadReplacement(existingStorageFile, options, csrf, virtualPath);
+    uploadFields = { ...uploadFields, ...replacementFields };
+    const duplicate = existingStorageFile ? null : findDuplicateDriveUploadCandidate(file, options.privacyMode);
     if (duplicate?.id) {
       updateDriveTransferRow(transferId, { phase: "deduplicated", msg: "偵測到既有雲端檔案，改用既有版本", progress_percent: 100, status: "completed" });
       await storageAction("/storage/files/attach-existing", "POST", {
@@ -5242,7 +5426,7 @@ async function uploadStorageFile() {
       uploadBlob = encrypted.blob;
       uploadFilename = encrypted.filename;
       uploadMimeType = encrypted.blob.type || "application/octet-stream";
-      uploadFields = driveEncryptedUploadFields(encrypted);
+      uploadFields = { ...uploadFields, ...driveEncryptedUploadFields(encrypted) };
       updateDriveTransferRow(transferId, { phase: "uploading", msg: "加密完成，開始上傳密文", progress_percent: 0 });
     }
     let json = null;
@@ -5757,6 +5941,7 @@ document.addEventListener("click", (event) => {
     if (action === "pause-remote-download") return pauseRemoteDownloadTask(taskId, transferId);
     if (action === "resume-remote-download") return resumeRemoteDownloadTask(taskId, transferId);
     if (action === "cancel-remote-download") return cancelRemoteDownloadTask(taskId, transferId);
+    if (action === "recover-remote-download") return recoverRemoteDownloadTask(taskId, transferId);
     if (action === "resume-resumable-upload") return resumeResumableUploadSession(sessionId, transferId);
     if (action === "cancel-resumable-upload") return cancelResumableUploadSession(sessionId, transferId);
     if (action === "album-full-preview") return previewAlbumFileFullscreen(fileId, name, albumSequence === "viewer" ? { files: albumPreviewSequence } : {});

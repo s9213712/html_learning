@@ -101,6 +101,8 @@ from services.storage.storage_albums import (
     restore_storage_trash,
     restore_storage_file,
     revoke_share_link,
+    storage_existing_file_for_path,
+    storage_replacement_password_required,
     mark_share_link_accessed,
     smart_organize_albums,
     sync_user_storage_summary,
@@ -578,7 +580,12 @@ def register_file_routes(app, deps):
             "loaded_bytes": task.get("loaded_bytes"),
             "total_bytes": task.get("total_bytes"),
             "timeout_seconds": task.get("timeout_seconds"),
+            "privacy_mode": task.get("privacy_mode"),
+            "virtual_path": task.get("virtual_path"),
             "speed_bytes_per_sec": task.get("speed_bytes_per_sec"),
+            "eta_seconds": task.get("eta_seconds"),
+            "transmission_status": task.get("transmission_status"),
+            "transmission_torrent_id": task.get("transmission_torrent_id"),
             "file_id": file_info.get("file_id"),
             "file_size_bytes": file_info.get("size_bytes"),
             "file": file_info,
@@ -638,10 +645,15 @@ def register_file_routes(app, deps):
             "url": data.get("url") or "",
             "torrent_filename": data.get("torrent_filename") or "",
             "owner_user_id": job.get("owner_user_id"),
+            "privacy_mode": data.get("privacy_mode") or "standard_plain",
+            "virtual_path": data.get("virtual_path") or "",
             "loaded_bytes": data.get("loaded_bytes"),
             "total_bytes": data.get("total_bytes"),
             "progress_percent": job.get("progress_percent"),
             "speed_bytes_per_sec": data.get("speed_bytes_per_sec") or 0,
+            "eta_seconds": data.get("eta_seconds"),
+            "transmission_status": data.get("transmission_status"),
+            "transmission_torrent_id": data.get("transmission_torrent_id"),
             "msg": message,
             "error": job.get("error_message") or (message if status == "failed" else ""),
             "file": file_info or None,
@@ -1643,10 +1655,14 @@ def register_file_routes(app, deps):
             "total_bytes": task.get("total_bytes"),
             "progress_percent": task.get("progress_percent"),
             "speed_bytes_per_sec": task.get("speed_bytes_per_sec"),
+            "eta_seconds": task.get("eta_seconds"),
+            "transmission_status": task.get("transmission_status"),
+            "transmission_torrent_id": task.get("transmission_torrent_id"),
             "msg": task.get("msg"),
             "error": task.get("error"),
             "file": task.get("file"),
             "storage_file": task.get("storage_file"),
+            "recoverable": bool(task.get("recoverable")),
             "availability_score": int(task.get("availability_score") or 0),
             "availability_hint": task.get("availability_hint") or "",
             "created_at": task.get("created_at"),
@@ -2154,12 +2170,17 @@ def register_file_routes(app, deps):
                     return
             loaded = event.get("loaded_bytes")
             total = event.get("total_bytes")
-            percent = None
+            percent = event.get("progress_percent")
             try:
-                if total:
-                    percent = max(0, min(100, round((int(loaded or 0) / int(total)) * 100, 1)))
+                percent = None if percent is None else max(0, min(100, round(float(percent), 1)))
             except Exception:
                 percent = None
+            if percent is None:
+                try:
+                    if total:
+                        percent = max(0, min(100, round((int(loaded or 0) / int(total)) * 100, 1)))
+                except Exception:
+                    percent = None
             speed = event.get("speed_bytes_per_sec")
             try:
                 speed = int(speed or 0)
@@ -2188,6 +2209,9 @@ def register_file_routes(app, deps):
                 total_bytes=total,
                 progress_percent=percent,
                 speed_bytes_per_sec=max(0, int(speed or 0)),
+                eta_seconds=event.get("eta_seconds"),
+                transmission_status=event.get("transmission_status"),
+                transmission_torrent_id=event.get("transmission_torrent_id"),
                 msg=msg,
                 progress_heartbeat_at=progress_heartbeat_at,
             )
@@ -2264,6 +2288,10 @@ def register_file_routes(app, deps):
             str(int(rate_limit_kb_per_sec or 0)),
             "--control-file",
             control_file.name,
+            "--owner-user-id",
+            str(int(task.get("owner_user_id") or 0)),
+            "--task-id",
+            str(task.get("id") or ""),
         ]
         if source_type == "torrent_file":
             cmd.extend([
@@ -2420,6 +2448,8 @@ def register_file_routes(app, deps):
                     progress_callback=progress_callback,
                     rate_limit_kb_per_sec=remote_rate_kb_per_sec or None,
                     cancel_check=cancel_check,
+                    owner_user_id=owner_user_id,
+                    task_id=task_id,
                 )
             elif source_type == "torrent_url":
                 _task_update(task_id, status="running", phase="starting", msg="連線到遠端來源")
@@ -2430,6 +2460,8 @@ def register_file_routes(app, deps):
                     progress_callback=progress_callback,
                     rate_limit_kb_per_sec=remote_rate_kb_per_sec or None,
                     cancel_check=cancel_check,
+                    owner_user_id=owner_user_id,
+                    task_id=task_id,
                 )
             elif source_type == "magnet":
                 _task_update(task_id, status="running", phase="starting", msg="連線到遠端來源")
@@ -2440,6 +2472,8 @@ def register_file_routes(app, deps):
                     progress_callback=progress_callback,
                     rate_limit_kb_per_sec=remote_rate_kb_per_sec or None,
                     cancel_check=cancel_check,
+                    owner_user_id=owner_user_id,
+                    task_id=task_id,
                 )
             else:
                 _task_update(task_id, status="running", phase="starting", msg="連線到遠端來源")
@@ -2451,6 +2485,8 @@ def register_file_routes(app, deps):
                     rate_limit_kb_per_sec=remote_rate_kb_per_sec or None,
                     treat_torrent_as_bt=False,
                     cancel_check=cancel_check,
+                    owner_user_id=owner_user_id,
+                    task_id=task_id,
                 )
             _remote_download_cancel_check(task_id)
             _task_update(task_id, status="running", phase="saving", filename=downloaded.filename, msg="保存到雲端硬碟")
@@ -2627,6 +2663,8 @@ def register_file_routes(app, deps):
         "list_remote_download_tasks_for_actor": _list_remote_download_tasks_for_actor,
         "remote_download_capabilities": lambda: (_configure_remote_download_backend_from_settings(), remote_download_capabilities())[1],
         "remote_download_storage_path": _remote_download_storage_path,
+        "queue_cloud_drive_copy_only_hls_if_needed": _queue_cloud_drive_copy_only_hls_if_needed,
+        "start_cloud_drive_copy_only_hls_worker": _start_cloud_drive_copy_only_hls_worker,
         "remote_download_tasks": _REMOTE_DOWNLOAD_TASKS,
         "remote_download_tasks_lock": _REMOTE_DOWNLOAD_TASKS_LOCK,
         "require_csrf": require_csrf,
@@ -2870,6 +2908,21 @@ def register_file_routes(app, deps):
         except Exception:
             return None
 
+    def _truthy_upload_value(value):
+        return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+    def _storage_replace_confirmed_from_form():
+        return _truthy_upload_value(request.form.get("replace_existing_confirmed"))
+
+    def _storage_replace_password_confirmed_from_form():
+        return _truthy_upload_value(request.form.get("replace_existing_password_confirmed"))
+
+    def _storage_replace_confirmed_from_metadata(metadata):
+        return _truthy_upload_value((metadata or {}).get("replace_existing_confirmed"))
+
+    def _storage_replace_password_confirmed_from_metadata(metadata):
+        return _truthy_upload_value((metadata or {}).get("replace_existing_password_confirmed"))
+
     def _resumable_json_payload():
         data = request.get_json(silent=True)
         return data if isinstance(data, dict) else {}
@@ -2910,6 +2963,8 @@ def register_file_routes(app, deps):
             "encryption_version": str(data.get("encryption_version") or "").strip(),
             "nonce": str(data.get("nonce") or "").strip(),
             "client_scan_report": data.get("client_scan_report") if isinstance(data.get("client_scan_report"), dict) else None,
+            "replace_existing_confirmed": "1" if _truthy_upload_value(data.get("replace_existing_confirmed")) else "",
+            "replace_existing_password_confirmed": "1" if _truthy_upload_value(data.get("replace_existing_password_confirmed")) else "",
         }
         conn = get_db()
         try:
@@ -2924,6 +2979,32 @@ def register_file_routes(app, deps):
             capacity_error = _resumable_upload_capacity_error(conn, actor, total_bytes=total_bytes, member_rule=rule)
             if capacity_error:
                 return json_resp({"ok": False, "msg": capacity_error, "error": "quota_or_capacity"}), 400
+            existing_storage_file = None
+            if target == "storage":
+                existing_storage_file = storage_existing_file_for_path(
+                    conn,
+                    owner_user_id=int(actor["id"]),
+                    virtual_path=metadata.get("virtual_path") or "",
+                    display_name=metadata.get("display_name") or filename,
+                )
+            if existing_storage_file and not _storage_replace_confirmed_from_metadata(metadata):
+                return json_resp({
+                    "ok": False,
+                    "msg": "同一路徑已有檔案，請確認是否覆蓋",
+                    "error": "replace_confirm_required",
+                }), 409
+            if existing_storage_file and storage_replacement_password_required(
+                conn,
+                owner_user_id=int(actor["id"]),
+                virtual_path=metadata.get("virtual_path") or "",
+                display_name=metadata.get("display_name") or filename,
+                new_privacy_mode=privacy_mode,
+            ) and not _storage_replace_password_confirmed_from_metadata(metadata):
+                return json_resp({
+                    "ok": False,
+                    "msg": "覆寫 E2EE 檔案或變更加密方式需要重新輸入檔案密碼",
+                    "error": "replace_password_required",
+                }), 409
             session_id = uuid.uuid4().hex
             temp_dir = _resumable_session_dir(session_id)
             temp_dir.mkdir(parents=True, exist_ok=False)
@@ -3211,6 +3292,9 @@ def register_file_routes(app, deps):
                     virtual_path=metadata.get("virtual_path") or "",
                     display_name=metadata.get("display_name") or row["filename"],
                     source="resumable_upload",
+                    replace_existing=_storage_replace_confirmed_from_metadata(metadata),
+                    storage_root=storage_root,
+                    replace_existing_password_confirmed=_storage_replace_password_confirmed_from_metadata(metadata),
                 )
                 if storage_msg:
                     raise ValueError(storage_msg)
@@ -3399,6 +3483,33 @@ def register_file_routes(app, deps):
             if upload_policy_error:
                 return upload_policy_error
             rule = get_member_level_rule(conn, _actor_value(actor, "effective_level") or _actor_value(actor, "member_level"))
+            privacy_mode = (request.form.get("privacy_mode") or "standard_plain").strip() or "standard_plain"
+            virtual_path = (request.form.get("virtual_path") or "").strip()
+            display_name = (request.form.get("display_name") or "").strip() or None
+            existing_storage_file = storage_existing_file_for_path(
+                conn,
+                owner_user_id=int(actor["id"]),
+                virtual_path=virtual_path,
+                display_name=display_name or getattr(request.files["file"], "filename", ""),
+            )
+            if existing_storage_file and not _storage_replace_confirmed_from_form():
+                return json_resp({
+                    "ok": False,
+                    "msg": "同一路徑已有檔案，請確認是否覆蓋",
+                    "error": "replace_confirm_required",
+                }), 409
+            if existing_storage_file and storage_replacement_password_required(
+                conn,
+                owner_user_id=int(actor["id"]),
+                virtual_path=virtual_path,
+                display_name=display_name or getattr(request.files["file"], "filename", ""),
+                new_privacy_mode=privacy_mode,
+            ) and not _storage_replace_password_confirmed_from_form():
+                return json_resp({
+                    "ok": False,
+                    "msg": "覆寫 E2EE 檔案或變更加密方式需要重新輸入檔案密碼",
+                    "error": "replace_password_required",
+                }), 409
             try:
                 upload_result, msg = store_cloud_upload(
                     conn,
@@ -3406,7 +3517,7 @@ def register_file_routes(app, deps):
                     member_rule=rule,
                     storage_root=storage_root,
                     file_storage=request.files["file"],
-                    privacy_mode=(request.form.get("privacy_mode") or "standard_plain").strip(),
+                    privacy_mode=privacy_mode,
                     encrypted_metadata=(request.form.get("encrypted_metadata") or "").strip() or None,
                     encrypted_file_key=(request.form.get("encrypted_file_key") or "").strip() or None,
                     wrapped_by=(request.form.get("wrapped_by") or "user_public_key").strip() or "user_public_key",
@@ -3429,9 +3540,12 @@ def register_file_routes(app, deps):
                 conn,
                 actor=actor,
                 file_row=file_row,
-                virtual_path=(request.form.get("virtual_path") or "").strip(),
-                display_name=(request.form.get("display_name") or "").strip() or None,
+                virtual_path=virtual_path,
+                display_name=display_name,
                 source="upload",
+                replace_existing=_storage_replace_confirmed_from_form(),
+                storage_root=storage_root,
+                replace_existing_password_confirmed=_storage_replace_password_confirmed_from_form(),
             )
             if msg:
                 conn.rollback()

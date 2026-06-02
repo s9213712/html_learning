@@ -221,6 +221,33 @@ def _display_name_from_path(path):
     return str(path or "").rstrip("/").split("/")[-1] or "untitled"
 
 
+def storage_existing_file_for_path(conn, *, owner_user_id, virtual_path=None, display_name=None):
+    try:
+        normalized_path = normalize_virtual_path(virtual_path, display_name)
+    except ValueError:
+        return None
+    row = conn.execute(
+        """
+        SELECT sf.id, sf.file_id, sf.display_name, sf.virtual_path, f.privacy_mode, f.size_bytes
+        FROM storage_files sf
+        JOIN uploaded_files f ON f.id=sf.file_id
+        WHERE sf.owner_user_id=? AND sf.virtual_path=?
+          AND sf.deleted_at IS NULL AND f.deleted_at IS NULL
+        """,
+        (int(owner_user_id), normalized_path),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def storage_replacement_password_required(conn, *, owner_user_id, virtual_path=None, display_name=None, new_privacy_mode="standard_plain"):
+    row = storage_existing_file_for_path(conn, owner_user_id=owner_user_id, virtual_path=virtual_path, display_name=display_name)
+    if not row:
+        return False
+    old_mode = str(row["privacy_mode"] or "standard_plain").strip()
+    next_mode = str(new_privacy_mode or "standard_plain").strip()
+    return old_mode == "e2ee" or next_mode == "e2ee"
+
+
 def _folder_prefix(path):
     normalized = normalize_virtual_path(path, "folder")
     return normalized.rstrip("/")
@@ -426,7 +453,7 @@ def sync_user_storage_summary(conn, user_id, *, actor_user_id=None, source="syst
     return get_user_storage_summary(conn, user_id)
 
 
-def create_storage_file_entry(conn, *, actor, file_row, virtual_path=None, display_name=None, source="upload"):
+def create_storage_file_entry(conn, *, actor, file_row, virtual_path=None, display_name=None, source="upload", replace_existing=False, storage_root=None, replace_existing_password_confirmed=False):
     ensure_storage_album_schema(conn)
     owner_user_id = int(file_row["owner_user_id"])
     if owner_user_id != int(actor["id"]):
@@ -441,12 +468,95 @@ def create_storage_file_entry(conn, *, actor, file_row, virtual_path=None, displ
     except ValueError:
         return None, "storage path 不安全或格式錯誤"
     existing = conn.execute(
-        "SELECT id FROM storage_files WHERE owner_user_id=? AND virtual_path=? AND deleted_at IS NULL",
+        """
+        SELECT sf.id, sf.file_id, f.size_bytes AS old_size_bytes, f.privacy_mode AS old_privacy_mode
+        FROM storage_files sf
+        LEFT JOIN uploaded_files f ON f.id=sf.file_id
+        WHERE sf.owner_user_id=? AND sf.virtual_path=? AND sf.deleted_at IS NULL
+        """,
         (owner_user_id, normalized_path),
     ).fetchone()
-    if existing:
-        return None, "storage path 已存在"
     now = _now()
+    if existing:
+        if not replace_existing:
+            return None, "storage path 已存在"
+        old_file_id = str(existing["file_id"] or "")
+        new_file_id = str(file_row["id"])
+        if old_file_id == new_file_id:
+            return get_storage_file(conn, actor=actor, storage_file_id=existing["id"]), None
+        new_mode = str(file_row["privacy_mode"] if "privacy_mode" in file_keys else "standard_plain").strip() or "standard_plain"
+        old_mode = str(existing["old_privacy_mode"] or "standard_plain").strip()
+        if (old_mode == "e2ee" or new_mode == "e2ee") and not replace_existing_password_confirmed:
+            return None, "覆寫 E2EE 檔案或變更加密方式需要重新輸入檔案密碼"
+        before = get_user_storage_summary(conn, owner_user_id)
+        old_size = int(existing["old_size_bytes"] or 0)
+        new_size = int(file_row["size_bytes"] or 0)
+        after_used = max(0, int(before.get("used_bytes") or 0) - old_size + new_size)
+        conn.execute(
+            """
+            UPDATE storage_files
+            SET file_id=?, display_name=?, is_trashed=0, trashed_at=NULL,
+                restored_at=NULL, trash_source=NULL, updated_at=?
+            WHERE id=? AND owner_user_id=?
+            """,
+            (new_file_id, display_name, now, existing["id"], owner_user_id),
+        )
+        conn.execute(
+            """
+            UPDATE storage_share_links
+            SET file_id=?
+            WHERE storage_file_id=? AND owner_user_id=? AND revoked_at IS NULL
+            """,
+            (new_file_id, existing["id"], owner_user_id),
+        )
+        conn.execute(
+            """
+            UPDATE album_files
+            SET file_id=?
+            WHERE storage_file_id=? AND deleted_at IS NULL
+            """,
+            (new_file_id, existing["id"]),
+        )
+        delta = new_size - old_size
+        if delta:
+            conn.execute(
+                """
+                INSERT INTO storage_quota_log (
+                    id, user_id, file_id, delta_bytes, before_used_bytes, after_used_bytes,
+                    source, reason, actor_user_id, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    uuid.uuid4().hex,
+                    owner_user_id,
+                    new_file_id,
+                    delta,
+                    int(before.get("used_bytes") or 0),
+                    after_used,
+                    str(source or "upload")[:50],
+                    "storage_file_replaced",
+                    int(actor["id"]),
+                    now,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO user_storage (user_id, quota_bytes, used_bytes, reserved_bytes, file_count, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET used_bytes=excluded.used_bytes, updated_at=excluded.updated_at
+                """,
+                (
+                    owner_user_id,
+                    int(before.get("quota_bytes") or 0),
+                    after_used,
+                    int(before.get("reserved_bytes") or 0),
+                    int(before.get("file_count") or 0),
+                    now,
+                ),
+            )
+        if old_file_id:
+            _purge_unreferenced_uploaded_files(conn, owner_user_id=owner_user_id, file_ids=[old_file_id], storage_root=storage_root, now=now)
+        return get_storage_file(conn, actor=actor, storage_file_id=existing["id"]), None
     storage_id = uuid.uuid4().hex
     before = get_user_storage_summary(conn, owner_user_id)
     after_used = int(before.get("used_bytes") or 0) + int(file_row["size_bytes"] or 0)

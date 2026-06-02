@@ -22,6 +22,8 @@ from services.storage.catalog import (
     restore_storage_file,
     restore_storage_trash,
     revoke_share_link,
+    storage_existing_file_for_path,
+    storage_replacement_password_required,
     sync_user_storage_summary,
     trash_cloud_file_to_storage,
     trash_storage_file,

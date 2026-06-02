@@ -1,3 +1,5 @@
+import json
+import mimetypes
 import os
 import shutil
 import tempfile
@@ -5,10 +7,12 @@ import threading
 import urllib.parse
 import uuid
 from datetime import datetime
+from pathlib import Path
 
 from flask import request
 
 from services.storage.cloud_drive import ensure_cloud_drive_attachment_schema, store_cloud_upload
+from services.storage.remote_downloads import DownloadedFile
 from services.storage.storage_albums import create_storage_file_entry, ensure_storage_album_schema
 from services.job_center import TERMINAL_JOB_STATUSES, ensure_job_center_schema
 from services.system.notifications import create_notification_if_enabled
@@ -42,6 +46,8 @@ def register_file_remote_download_routes(app, ctx):
     run_remote_download_task = ctx["run_remote_download_task"]
     remote_download_storage_path = ctx["remote_download_storage_path"]
     sync_remote_download_job = ctx.get("sync_remote_download_job", lambda *args, **kwargs: None)
+    queue_cloud_drive_copy_only_hls_if_needed = ctx.get("queue_cloud_drive_copy_only_hls_if_needed", lambda *args, **kwargs: None)
+    start_cloud_drive_copy_only_hls_worker = ctx.get("start_cloud_drive_copy_only_hls_worker", lambda *args, **kwargs: False)
 
     remote_download_tasks = ctx["remote_download_tasks"]
     remote_download_tasks_lock = ctx["remote_download_tasks_lock"]
@@ -87,6 +93,222 @@ def register_file_remote_download_routes(app, ctx):
                 "member_level": actor_value(actor, "member_level"),
                 "effective_level": actor_value(actor, "effective_level"),
             }
+
+    def _remote_download_job_for_task_id(task_id):
+        source_ref = f"remote_download:{str(task_id)}"
+        conn = get_db()
+        try:
+            ensure_job_center_schema(conn)
+            row = conn.execute(
+                """
+                SELECT *
+                FROM job_center_jobs
+                WHERE source_module='cloud_drive_remote_download'
+                  AND source_ref=?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (source_ref,),
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def _json_dict(raw):
+        if isinstance(raw, dict):
+            return raw
+        try:
+            parsed = json.loads(raw or "{}")
+        except Exception:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    def _remote_download_staging_task_dir(owner_user_id, task_id):
+        base = Path(os.environ.get("HACKME_BT_DOWNLOAD_STAGING_DIR") or Path(storage_root) / "_runtime" / "remote-downloads" / "transmission-staging").resolve()
+        task_dir = (base / f"user-{int(owner_user_id)}" / f"task-{str(task_id)}").resolve()
+        try:
+            task_dir.relative_to(base)
+        except ValueError:
+            return None
+        return task_dir
+
+    def _find_recoverable_staging_file(owner_user_id, task_id, expected_size=None):
+        task_dir = _remote_download_staging_task_dir(owner_user_id, task_id)
+        if not task_dir or not task_dir.exists() or not task_dir.is_dir():
+            return None
+        candidates = []
+        for path in task_dir.rglob("*"):
+            if not path.is_file():
+                continue
+            name = path.name.lower()
+            if name.endswith((".part", ".tmp", ".aria2")):
+                continue
+            try:
+                size = path.stat().st_size
+            except OSError:
+                continue
+            if size <= 0:
+                continue
+            if expected_size and int(expected_size or 0) > 0 and size != int(expected_size):
+                continue
+            candidates.append((size, path))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        return candidates[0][1]
+
+    def _task_recoverable_from_job(job, metadata=None):
+        metadata = metadata if isinstance(metadata, dict) else _json_dict((job or {}).get("metadata_json"))
+        if str((job or {}).get("status") or "") not in {"running", "queued"}:
+            return False
+        task_id = str(metadata.get("task_id") or "").strip()
+        owner_user_id = int((job or {}).get("owner_user_id") or 0)
+        if not task_id or not owner_user_id:
+            return False
+        if metadata.get("storage_file_id") or metadata.get("file_id"):
+            return False
+        return _find_recoverable_staging_file(owner_user_id, task_id, metadata.get("total_bytes")) is not None
+
+    def _recover_interrupted_remote_download(task_id, actor):
+        task_id = str(task_id or "").strip()
+        if not task_id:
+            return {"ok": False, "msg": "缺少下載任務 ID"}, 400
+        job = _remote_download_job_for_task_id(task_id)
+        actor_id = int(actor_value(actor, "id") or 0)
+        if job:
+            owner_user_id = int(job.get("owner_user_id") or 0)
+            if owner_user_id != actor_id:
+                return {"ok": False, "msg": "沒有下載任務權限"}, 403
+            metadata = _json_dict(job.get("metadata_json"))
+            result = _json_dict(job.get("result_json"))
+            merged = {**metadata, **result}
+        else:
+            owner_user_id = actor_id
+            staging_file = _find_recoverable_staging_file(owner_user_id, task_id)
+            if not staging_file:
+                return {"ok": False, "msg": "找不到下載任務或可恢復的 staging 檔案"}, 404
+            merged = {
+                "task_id": task_id,
+                "source_type": "torrent_url",
+                "filename": staging_file.name,
+                "loaded_bytes": staging_file.stat().st_size,
+                "total_bytes": staging_file.stat().st_size,
+            }
+            job = {"created_at": None}
+        if merged.get("storage_file_id"):
+            task = {
+                "id": task_id,
+                "kind": "remote_download",
+                "status": "completed",
+                "phase": "completed",
+                "filename": merged.get("filename") or "",
+                "owner_user_id": owner_user_id,
+                "loaded_bytes": merged.get("file_size_bytes") or merged.get("loaded_bytes"),
+                "total_bytes": merged.get("file_size_bytes") or merged.get("total_bytes"),
+                "progress_percent": 100,
+                "msg": "遠端下載已保存到雲端硬碟",
+                "file": merged.get("file") if isinstance(merged.get("file"), dict) else {},
+                "storage_file": merged.get("storage_file") if isinstance(merged.get("storage_file"), dict) else {"id": merged.get("storage_file_id")},
+                "updated_at": datetime.now().isoformat(),
+            }
+            sync_remote_download_job(task, force_event=True)
+            return {"ok": True, "task": task_snapshot(task), "msg": "遠端下載已保存到雲端硬碟"}, 200
+        staging_file = _find_recoverable_staging_file(owner_user_id, task_id, merged.get("total_bytes"))
+        if not staging_file:
+            return {"ok": False, "msg": "找不到可恢復的 staging 檔案"}, 404
+        filename = safe_public_filename(merged.get("filename") or staging_file.name or "remote-download.bin")
+        if filename.startswith("_") and staging_file.name:
+            filename = safe_public_filename(staging_file.name)
+        mimetype = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        privacy_mode = str(merged.get("privacy_mode") or "standard_plain").strip() or "standard_plain"
+        virtual_path = str(merged.get("virtual_path") or "").strip()
+        downloaded = DownloadedFile(path=str(staging_file), filename=filename, mimetype=mimetype, cleanup_dir=None)
+        file_storage = DownloadedFileStorage(downloaded)
+        conn = get_db()
+        try:
+            ensure_cloud_drive_attachment_schema(conn)
+            ensure_storage_album_schema(conn)
+            rule = get_member_level_rule(conn, actor_value(actor, "effective_level") or actor_value(actor, "member_level"))
+            upload_result, msg = store_cloud_upload(
+                conn,
+                actor=actor,
+                member_rule=rule,
+                storage_root=storage_root,
+                file_storage=file_storage,
+                privacy_mode=privacy_mode,
+                scan_now=True,
+                server_file_fernet=server_file_fernet,
+            )
+            if msg:
+                conn.rollback()
+                return {"ok": False, "msg": msg}, 400
+            file_row = conn.execute("SELECT * FROM uploaded_files WHERE id=?", (upload_result["file_id"],)).fetchone()
+            storage_path = remote_download_storage_path(filename, virtual_path)
+            storage_file, storage_msg = create_storage_file_entry(
+                conn,
+                actor=actor,
+                file_row=file_row,
+                virtual_path=storage_path,
+                display_name=filename,
+                source="remote_download_recovery",
+            )
+            if storage_msg:
+                conn.rollback()
+                return {"ok": False, "msg": storage_msg}, 400
+            create_notification_if_enabled(
+                conn,
+                user_id=owner_user_id,
+                type="cloud_drive_remote_download_completed",
+                title="BT 下載已恢復完成",
+                body=f"BT 下載「{filename}」已從中斷的 staging 檔恢復並保存到你的雲端硬碟。",
+                link="/drive",
+            )
+            pending_copy_only_hls = queue_cloud_drive_copy_only_hls_if_needed(conn, actor=actor, file_row=file_row)
+            conn.commit()
+            if pending_copy_only_hls:
+                start_cloud_drive_copy_only_hls_worker(
+                    pending_copy_only_hls,
+                    actor=actor,
+                    ip=get_client_ip(),
+                    ua=get_ua(),
+                )
+        except Exception as exc:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            return {"ok": False, "msg": f"遠端下載恢復失敗：{exc.__class__.__name__}"}, 500
+        finally:
+            file_storage.close()
+            conn.close()
+        task_dir = _remote_download_staging_task_dir(owner_user_id, task_id)
+        if task_dir:
+            shutil.rmtree(str(task_dir), ignore_errors=True)
+        task = {
+            "id": task_id,
+            "kind": "remote_download",
+            "source_type": merged.get("source_type") or "torrent_url",
+            "status": "completed",
+            "phase": "completed",
+            "filename": filename,
+            "url": merged.get("url") or "",
+            "owner_user_id": owner_user_id,
+            "loaded_bytes": upload_result.get("size_bytes"),
+            "total_bytes": upload_result.get("size_bytes"),
+            "progress_percent": 100,
+            "speed_bytes_per_sec": 0,
+            "msg": "遠端下載已從中斷狀態恢復並保存到雲端硬碟",
+            "file": {**upload_result, "filename": filename},
+            "storage_file": storage_file,
+            "updated_at": datetime.now().isoformat(),
+            "created_at": job.get("created_at"),
+        }
+        sync_remote_download_job(task, force_event=True)
+        try:
+            audit("CLOUD_DRIVE_REMOTE_DOWNLOAD_RECOVERED", get_client_ip(), user=actor_value(actor, "username"), success=True, ua=get_ua(), detail=f"task_id={task_id},file_id={upload_result['file_id']}")
+        except Exception:
+            pass
+        return {"ok": True, "task": task_snapshot(task), "file": {**upload_result, "filename": filename}, "storage_file": storage_file, "msg": "遠端下載已恢復並保存到雲端硬碟"}, 200
 
     def _dismiss_persisted_remote_download_job(task_id, actor, *, allow_non_terminal=False):
         source_ref = f"remote_download:{str(task_id)}"
@@ -312,10 +534,44 @@ def register_file_remote_download_routes(app, ctx):
             return err
         task = get_remote_download_task_for_status(str(task_id))
         if not task:
+            actor_id = int(actor_value(actor, "id") or 0)
+            staging_file = _find_recoverable_staging_file(actor_id, str(task_id))
+            if staging_file:
+                filename = safe_public_filename(staging_file.name or "remote-download.bin")
+                return json_resp({"ok": True, "task": {
+                    "id": str(task_id),
+                    "kind": "remote_download",
+                    "status": "running",
+                    "phase": "interrupted_saving",
+                    "filename": filename,
+                    "owner_user_id": actor_id,
+                    "loaded_bytes": staging_file.stat().st_size,
+                    "total_bytes": staging_file.stat().st_size,
+                    "progress_percent": 100,
+                    "speed_bytes_per_sec": 0,
+                    "msg": "下載已完成但保存被中斷，可恢復保存",
+                    "recoverable": True,
+                    "updated_at": datetime.now().isoformat(),
+                }})
             return json_resp({"ok": False, "msg": "找不到下載任務"}), 404
         if int(task.get("owner_user_id") or 0) != int(actor_value(actor, "id")):
             return json_resp({"ok": False, "msg": "沒有下載任務權限"}), 403
-        return json_resp({"ok": True, "task": task_snapshot(task)})
+        snapshot = task_snapshot(task)
+        if not snapshot.get("recoverable"):
+            job = _remote_download_job_for_task_id(str(task_id))
+            if job and int(job.get("owner_user_id") or 0) == int(actor_value(actor, "id")):
+                metadata = _json_dict(job.get("metadata_json"))
+                snapshot["recoverable"] = _task_recoverable_from_job(job, metadata)
+        return json_resp({"ok": True, "task": snapshot})
+
+    @app.route("/api/cloud-drive/remote-download/tasks/<task_id>/recover", methods=["POST"])
+    @require_csrf
+    def cloud_drive_remote_download_task_recover(task_id):
+        actor, err = actor_or_401()
+        if err:
+            return err
+        payload, status_code = _recover_interrupted_remote_download(task_id, actor)
+        return json_resp(payload), status_code
 
     @app.route("/api/cloud-drive/remote-download/tasks/<task_id>/pause", methods=["POST"])
     @require_csrf
