@@ -5194,10 +5194,10 @@
     .profile-summary {
       position: relative;
       display: grid;
-      grid-template-columns: 132px minmax(0, 1fr);
-      gap: 1.15rem;
+      grid-template-columns: minmax(150px, 180px) minmax(0, 1fr);
+      gap: clamp(1.25rem, 3vw, 2.4rem);
       align-items: center;
-      padding: 1rem 0 1.1rem;
+      padding: 1.25rem 0 1.35rem;
       border-bottom: 1px solid rgba(255,255,255,.08);
       overflow: hidden;
     }
@@ -5353,9 +5353,9 @@
       inline-size: var(--profile-avatar-custom-size);
       block-size: var(--profile-avatar-custom-size);
       min-inline-size: 76px;
-      max-inline-size: min(90vw, 230px);
+      max-inline-size: min(90vw, 260px);
       min-block-size: 76px;
-      max-block-size: min(90vw, 230px);
+      max-block-size: min(90vw, 260px);
       flex: 0 0 var(--profile-avatar-custom-size);
       border-radius: 50%;
       display: grid;
@@ -14776,25 +14776,25 @@
 }
 /* Profile homepage avatar sizing must affect the visible card, not only hidden edit controls. */
 #profile-pane-home .profile-summary {
-  grid-template-columns: max-content minmax(0, 1fr) !important;
+  grid-template-columns: minmax(120px, max-content) minmax(0, 1fr) !important;
   align-items: center !important;
   column-gap: clamp(1rem, 3vw, 2.4rem) !important;
 }
 
 #profile-pane-home #profile-home-avatar.profile-avatar-large {
-  width: var(--profile-avatar-custom-size, 55px) !important;
-  height: var(--profile-avatar-custom-size, 55px) !important;
-  inline-size: var(--profile-avatar-custom-size, 55px) !important;
-  block-size: var(--profile-avatar-custom-size, 55px) !important;
-  min-width: var(--profile-avatar-custom-size, 55px) !important;
-  min-height: var(--profile-avatar-custom-size, 55px) !important;
-  min-inline-size: var(--profile-avatar-custom-size, 55px) !important;
-  min-block-size: var(--profile-avatar-custom-size, 55px) !important;
-  max-width: var(--profile-avatar-custom-size, 55px) !important;
-  max-height: var(--profile-avatar-custom-size, 55px) !important;
-  max-inline-size: var(--profile-avatar-custom-size, 55px) !important;
-  max-block-size: var(--profile-avatar-custom-size, 55px) !important;
-  flex-basis: var(--profile-avatar-custom-size, 55px) !important;
+  width: var(--profile-avatar-custom-size, 140px) !important;
+  height: var(--profile-avatar-custom-size, 140px) !important;
+  inline-size: var(--profile-avatar-custom-size, 140px) !important;
+  block-size: var(--profile-avatar-custom-size, 140px) !important;
+  min-width: var(--profile-avatar-custom-size, 140px) !important;
+  min-height: var(--profile-avatar-custom-size, 140px) !important;
+  min-inline-size: var(--profile-avatar-custom-size, 140px) !important;
+  min-block-size: var(--profile-avatar-custom-size, 140px) !important;
+  max-width: var(--profile-avatar-custom-size, 140px) !important;
+  max-height: var(--profile-avatar-custom-size, 140px) !important;
+  max-inline-size: var(--profile-avatar-custom-size, 140px) !important;
+  max-block-size: var(--profile-avatar-custom-size, 140px) !important;
+  flex-basis: var(--profile-avatar-custom-size, 140px) !important;
 }
 
 #profile-pane-home #profile-home-avatar.profile-avatar-large .user-avatar-img,
@@ -14832,25 +14832,25 @@
 
 /* Final override: visible profile avatar size and layout must not be overridden by template classes. */
 #profile-pane-home .profile-summary {
-  grid-template-columns: max-content minmax(0, 1fr) !important;
+  grid-template-columns: minmax(120px, max-content) minmax(0, 1fr) !important;
   align-items: center !important;
   column-gap: clamp(1rem, 3vw, 2.4rem) !important;
 }
 
 #profile-pane-home #profile-home-avatar.profile-avatar-large {
-  width: var(--profile-avatar-custom-size, 55px) !important;
-  height: var(--profile-avatar-custom-size, 55px) !important;
-  inline-size: var(--profile-avatar-custom-size, 55px) !important;
-  block-size: var(--profile-avatar-custom-size, 55px) !important;
-  min-width: var(--profile-avatar-custom-size, 55px) !important;
-  min-height: var(--profile-avatar-custom-size, 55px) !important;
-  min-inline-size: var(--profile-avatar-custom-size, 55px) !important;
-  min-block-size: var(--profile-avatar-custom-size, 55px) !important;
-  max-width: var(--profile-avatar-custom-size, 55px) !important;
-  max-height: var(--profile-avatar-custom-size, 55px) !important;
-  max-inline-size: var(--profile-avatar-custom-size, 55px) !important;
-  max-block-size: var(--profile-avatar-custom-size, 55px) !important;
-  flex-basis: var(--profile-avatar-custom-size, 55px) !important;
+  width: var(--profile-avatar-custom-size, 140px) !important;
+  height: var(--profile-avatar-custom-size, 140px) !important;
+  inline-size: var(--profile-avatar-custom-size, 140px) !important;
+  block-size: var(--profile-avatar-custom-size, 140px) !important;
+  min-width: var(--profile-avatar-custom-size, 140px) !important;
+  min-height: var(--profile-avatar-custom-size, 140px) !important;
+  min-inline-size: var(--profile-avatar-custom-size, 140px) !important;
+  min-block-size: var(--profile-avatar-custom-size, 140px) !important;
+  max-width: var(--profile-avatar-custom-size, 140px) !important;
+  max-height: var(--profile-avatar-custom-size, 140px) !important;
+  max-inline-size: var(--profile-avatar-custom-size, 140px) !important;
+  max-block-size: var(--profile-avatar-custom-size, 140px) !important;
+  flex-basis: var(--profile-avatar-custom-size, 140px) !important;
 }
 
 #profile-pane-home #profile-home-avatar.profile-avatar-large .user-avatar-img,

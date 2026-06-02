@@ -27,7 +27,7 @@ const PROFILE_STYLE_DEFAULTS = {
   banner: "none",
   background_tone: "standard",
   avatar_frame: "soft_ring",
-  avatar_size: "55",
+  avatar_size: "140",
   name_font: "system",
   name_size: "large",
   sticker: "none",
@@ -37,7 +37,7 @@ const PROFILE_STYLE_ALLOWED = {
   banner: ["none", "aurora", "neon_grid", "paper", "night_sky", "terminal"],
   background_tone: ["soft", "standard", "bold"],
   avatar_frame: ["none", "soft_ring", "neon", "pixel", "botanical", "crown"],
-  avatar_size: ["30", "35", "40", "45", "50", "55", "60", "65", "70", "75", "80", "85", "90", "large", "xl", "hero"],
+  avatar_size: ["100", "105", "110", "115", "120", "125", "130", "135", "140", "145", "150", "155", "160", "165", "170", "175", "180", "185", "190", "195", "200", "205", "210", "215", "220", "large", "xl", "hero"],
   name_font: ["system", "rounded", "serif", "mono", "display"],
   name_size: ["normal", "large", "hero"],
   sticker: ["none", "sparkles", "star", "heart", "music", "game", "code", "crown"],
@@ -708,14 +708,17 @@ function profileChoice(value, allowed, fallback) {
 
 function profileAvatarSizeValue(value) {
   const legacy = {
-    large: "45",
-    xl: "55",
-    hero: "70",
+    large: "140",
+    xl: "180",
+    hero: "220",
   };
   const raw = String(value || "").trim().toLowerCase();
   const mapped = legacy[raw] || raw || PROFILE_STYLE_DEFAULTS.avatar_size;
-  const numeric = Math.round((Number(mapped) || Number(PROFILE_STYLE_DEFAULTS.avatar_size)) / 5) * 5;
-  return String(Math.max(30, Math.min(90, numeric)));
+  let numeric = Math.round((Number(mapped) || Number(PROFILE_STYLE_DEFAULTS.avatar_size)) / 5) * 5;
+  if (!legacy[raw] && numeric > 0 && numeric <= 90) {
+    numeric = Math.round((numeric * 2) / 5) * 5;
+  }
+  return String(Math.max(100, Math.min(220, numeric)));
 }
 
 function updateProfileAvatarSizeControl(value) {
@@ -1696,9 +1699,9 @@ function bindTargetUserOptionInputs() {
   });
 }
 (() => {
-  const MIN_PROFILE_AVATAR_SIZE = 30;
-  const MAX_PROFILE_AVATAR_SIZE = 90;
-  const DEFAULT_PROFILE_AVATAR_SIZE = 55;
+  const MIN_PROFILE_AVATAR_SIZE = 100;
+  const MAX_PROFILE_AVATAR_SIZE = 220;
+  const DEFAULT_PROFILE_AVATAR_SIZE = 140;
 
   function profileAvatarSizeInput() {
     return document.getElementById("profile-edit-avatar-size");

@@ -25,6 +25,9 @@ def test_profile_friends_panel_is_wired_as_user_module():
     assert 'id="profile-avatar-cloud-file"' in index_html
     assert 'id="profile-avatar-cloud-use"' in index_html
     assert 'id="profile-avatar-crop-zoom" min="0.5" max="6"' in index_html
+    assert 'id="profile-edit-avatar-size" min="100" max="220" step="5" value="140"' in index_html
+    assert 'data-profile-avatar-size="220">最大</button>' in index_html
+    assert '/styles.css?v=20260602-profile-avatar-large' in index_html
     assert 'id="profile-edit-display-timezone"' in index_html
     assert 'id="profile-quick-customize-card"' in index_html
     assert 'id="profile-appearance-save-btn"' in index_html
@@ -71,6 +74,9 @@ def test_profile_friends_panel_is_wired_as_user_module():
     assert "profile_accent" in profile_js
     assert "profile_density" in profile_js
     assert "profile_style: collectProfileStyleFromForm()" in profile_js
+    assert 'avatar_size: "140"' in profile_js
+    assert 'const MAX_PROFILE_AVATAR_SIZE = 220' in profile_js
+    assert 'numeric <= 90' in profile_js
     assert "function previewProfileAppearanceFromForm()" in profile_js
     assert "function applyProfilePresentation(profile)" in profile_js
     assert "setUserDisplayTimezone" in profile_js
@@ -93,6 +99,8 @@ def test_profile_friends_panel_is_wired_as_user_module():
     assert '.profile-avatar-cloud-row' in css
     assert ".profile-avatar-preview-frame" in css
     assert ".profile-summary.profile-template-creator" in css
+    assert "grid-template-columns: minmax(150px, 180px) minmax(0, 1fr);" in css
+    assert "var(--profile-avatar-custom-size, 140px)" in css
     assert ".profile-summary.profile-template-gallery" in css
     assert ".profile-summary.profile-accent-ocean" in css
     assert ".profile-summary.profile-accent-violet" in css

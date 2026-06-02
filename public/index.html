@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>hackme_web — 登入系統</title>
   <!-- Security headers via HTTP (set by server/Talisman) -->
-  <link rel="stylesheet" href="/styles.css?v=20260602-drive-file-action-text-fix" />
+  <link rel="stylesheet" href="/styles.css?v=20260602-profile-avatar-large" />
   <link rel="stylesheet" href="/experiments.css?v=20260517-plane-view-angle" />
   <link rel="stylesheet" href="/i18n-language-switcher.css?v=20260520-deep-audit" />
 </head>
@@ -514,14 +514,14 @@
             <label class="field profile-avatar-size-field">
               <span class="field-label-row">
                 <span>頭像大小</span>
-                <output id="profile-edit-avatar-size-value" for="profile-edit-avatar-size">55%</output>
+                <output id="profile-edit-avatar-size-value" for="profile-edit-avatar-size">140px</output>
               </span>
-              <input type="range" id="profile-edit-avatar-size" min="30" max="90" step="5" value="55" />
+              <input type="range" id="profile-edit-avatar-size" min="100" max="220" step="5" value="140" />
               <div class="profile-avatar-size-presets" aria-label="頭像大小快速選擇">
-                <button class="btn btn-sm" type="button" data-profile-avatar-size="40">小</button>
-                <button class="btn btn-sm" type="button" data-profile-avatar-size="55">中</button>
-                <button class="btn btn-sm" type="button" data-profile-avatar-size="70">大</button>
-                <button class="btn btn-sm" type="button" data-profile-avatar-size="90">最大</button>
+                <button class="btn btn-sm" type="button" data-profile-avatar-size="110">小</button>
+                <button class="btn btn-sm" type="button" data-profile-avatar-size="140">中</button>
+                <button class="btn btn-sm" type="button" data-profile-avatar-size="180">大</button>
+                <button class="btn btn-sm" type="button" data-profile-avatar-size="220">最大</button>
               </div>
               <small class="drive-card-sub">手機可拖曳或直接點大小按鈕；預覽會立刻套用到上方頭像。</small>
             </label>
