@@ -47,6 +47,7 @@ EXTRA_ACCOUNTS="${HACKME_DEV_EXTRA_ACCOUNTS:-}"
 PORT_CONFLICT_ACTION="${HACKME_DEV_PORT_CONFLICT_ACTION:-}"
 BTC_TRADE_AUTOSTART="${HACKME_DEV_BTC_TRADE_AUTOSTART:-0}"
 BACKTEST_PROBE_ON_STARTUP="${HACKME_DEV_BACKTEST_PROBE_ON_STARTUP:-0}"
+TRADING_BACKGROUND_DEV_READY="${HACKME_DEV_TRADING_BACKGROUND_DEV_READY:-0}"
 SERVER_RUNNER="${HACKME_DEV_SERVER_RUNNER:-gunicorn}"
 GUNICORN_WORKERS="${HACKME_DEV_GUNICORN_WORKERS:-auto}"
 GUNICORN_THREADS="${HACKME_DEV_GUNICORN_THREADS:-auto}"
@@ -423,6 +424,13 @@ Options:
   --backtest-probe-on-startup
                            Run the first-boot trading backtest capacity probe
                            in this temporary runtime
+  --trading-background-dev-ready
+                           In dev_ready mode, allow trading background jobs
+                           that mutate trading state: price refresh, matching,
+                           bot scan, liquidation, and interest accrual
+  --no-trading-background-dev-ready
+                           Keep dev_ready trading background jobs disabled
+                           except sitewide metrics refresh. Default
   --server-runner RUNNER    flask or gunicorn. Default: gunicorn
   --gunicorn-workers N      Default: auto when --server-runner gunicorn
                            auto means local capacity probe result when present;
@@ -899,6 +907,8 @@ normalize_runtime_options() {
   BTC_TRADE_AUTOSTART="$NORMALIZED_YES_NO"
   normalize_yes_no_value "$BACKTEST_PROBE_ON_STARTUP" "backtest probe on startup"
   BACKTEST_PROBE_ON_STARTUP="$NORMALIZED_YES_NO"
+  normalize_yes_no_value "$TRADING_BACKGROUND_DEV_READY" "trading background dev_ready"
+  TRADING_BACKGROUND_DEV_READY="$NORMALIZED_YES_NO"
 }
 
 append_unique_csv_value() {
@@ -1042,6 +1052,7 @@ print_resolved_config() {
   fi
   say "  idle_logout_minutes: ${SESSION_IDLE_TIMEOUT_MINUTES:-<profile default>}"
   say "  server_mode:         $SERVER_MODE"
+  say "  trading_bg_dev:      $TRADING_BACKGROUND_DEV_READY"
   say "  cloud_drive_root:    ${CLOUD_DRIVE_STORAGE_ROOT:-<runtime/storage>}"
   say "  cloud_drive_max_mb:  ${CLOUD_DRIVE_GLOBAL_CAPACITY_LIMIT_MB:-<default disk 95%>}"
   say "  max_content_mb:      ${MAX_CONTENT_MB:-<app default>}"
@@ -2489,6 +2500,9 @@ prompt_runtime_config() {
   prompt_yes_no "Enable security settings" "$SECURITY_SETTINGS_ENABLED" SECURITY_SETTINGS_ENABLED
   prompt_value "Idle logout countdown minutes (blank = selected security profile default, 0 = disabled)" "$SESSION_IDLE_TIMEOUT_MINUTES" SESSION_IDLE_TIMEOUT_MINUTES
   prompt_server_mode
+  if [[ "$SERVER_MODE" == "dev_ready" ]]; then
+    prompt_yes_no "Enable trading background jobs in dev_ready (mutates trading state)" "$TRADING_BACKGROUND_DEV_READY" TRADING_BACKGROUND_DEV_READY
+  fi
   prompt_requirements_from_features
   if [[ "$SERVER_MODE" == "test" || "$SERVER_MODE" == "internal_test" ]]; then
     prompt_value "Generated dev token TTL minutes" "$DEV_TOKEN_TTL_MINUTES" DEV_TOKEN_TTL_MINUTES
@@ -3317,6 +3331,14 @@ while [[ $# -gt 0 ]]; do
       BACKTEST_PROBE_ON_STARTUP=1
       shift
       ;;
+    --trading-background-dev-ready|--enable-trading-background-dev-ready)
+      TRADING_BACKGROUND_DEV_READY=1
+      shift
+      ;;
+    --no-trading-background-dev-ready|--disable-trading-background-dev-ready)
+      TRADING_BACKGROUND_DEV_READY=0
+      shift
+      ;;
     --server-runner)
       SERVER_RUNNER="${2:?missing server runner}"
       shift 2
@@ -3589,6 +3611,7 @@ export HACKME_DEV_EXTRA_ACCOUNTS="$EXTRA_ACCOUNTS"
 export HACKME_DEV_BTC_TRADE_AUTOSTART="$BTC_TRADE_AUTOSTART"
 export HACKME_DEV_BACKTEST_PROBE_ON_STARTUP="$BACKTEST_PROBE_ON_STARTUP"
 export HTML_LEARNING_TRADING_BACKTEST_PROBE_ON_STARTUP="$BACKTEST_PROBE_ON_STARTUP"
+export HACKME_DEV_TRADING_BACKGROUND_DEV_READY="$TRADING_BACKGROUND_DEV_READY"
 export HACKME_DEV_DEFAULT_ACCOUNT_PASSWORDS="$DEFAULT_ACCOUNT_PASSWORDS"
 export HACKME_DEV_SERVER_RUNNER="$SERVER_RUNNER"
 export HACKME_DEV_GUNICORN_WORKERS="$GUNICORN_WORKERS"
@@ -4037,7 +4060,8 @@ try:
         ("trading.margin_liquidation_enabled", "true"),
         ("trading.bot_auto_scan_enabled", "true"),
         ("trading.bot_audit_enabled", "true"),
-        ("trading.background_worker_dev_ready_enabled", "true"),
+        ("trading.background_worker_dev_ready_enabled", "true" if os.environ.get("HACKME_DEV_TRADING_BACKGROUND_DEV_READY", "0").strip().lower() in {"1", "true", "yes", "on", "y"} else "false"),
+        ("background_worker_dev_ready_enabled", "true" if os.environ.get("HACKME_DEV_TRADING_BACKGROUND_DEV_READY", "0").strip().lower() in {"1", "true", "yes", "on", "y"} else "false"),
         ("trading.price_degrade_pause_market_orders", "false"),
         ("trading.price_degrade_pause_bots", "false"),
         ("trading.price_degrade_pause_borrowing", "false"),
