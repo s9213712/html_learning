@@ -1965,6 +1965,7 @@ async function openVideoPublishFromDrive(fileId, options = {}) {
 }
 
 async function publishVideoFromDrive() {
+  syncVideoPublishStreamingModeForPrivacy();
   const button = $("video-publish-btn");
   const directFile = $("video-upload-file")?.files?.[0] || null;
   const coverFile = $("video-cover-file")?.files?.[0] || null;
@@ -2270,8 +2271,18 @@ function browserSupportsNativeHls(mediaType = "video") {
 
 function selectedVideoPublishStreamingModes() {
   const select = $("video-streaming-modes");
-  const modes = select ? Array.from(select.selectedOptions || []).map((option) => String(option.value || "")).filter(Boolean) : [];
-  return modes.length ? modes : ["direct"];
+  const mode = String(select?.value || "direct").trim();
+  if (["direct", "prepared_hls", "realtime_proxy"].includes(mode)) return [mode];
+  return ["direct"];
+}
+
+function syncVideoPublishStreamingModeForPrivacy() {
+  const privacyMode = String($("video-upload-privacy-mode")?.value || "standard_plain").trim();
+  const select = $("video-streaming-modes");
+  if (!select) return;
+  if (privacyMode === "server_encrypted" && select.value === "direct") {
+    select.value = "prepared_hls";
+  }
 }
 
 async function applyVideoPublishStreamingChoices(video, json, modes) {
@@ -5519,5 +5530,8 @@ document.addEventListener("click", (event) => {
 document.addEventListener("change", (event) => {
   if (event.target?.id === "video-publish-file") {
     applyVideoPublishDriveSelection(event.target.value || "");
+  }
+  if (event.target?.id === "video-upload-privacy-mode") {
+    syncVideoPublishStreamingModeForPrivacy();
   }
 });

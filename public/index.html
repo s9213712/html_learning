@@ -1461,13 +1461,13 @@
                 <div class="field-help">建議使用 16:9 圖片；不提供時影片首頁會使用影片首幀或音樂預設封面。</div>
               </div>
               <div class="field">
-                <label>串流方式（可多選）</label>
-                <select id="video-streaming-modes" multiple size="3">
+                <label>串流方式</label>
+                <select id="video-streaming-modes">
                   <option value="direct" selected>Direct 原檔播放（最低點數成本）</option>
-                  <option value="prepared_hls">預處理 HLS（最高點數，會產生衍生檔）</option>
-                  <option value="realtime_proxy">即時串流代理（即時計算成本）</option>
+                  <option value="realtime_proxy">Standard 即時轉封裝（即時計算成本）</option>
+                  <option value="prepared_hls">Premium HLS 預處理（最高相容性，會產生衍生檔）</option>
                 </select>
-                <div class="field-help">發布前先選服務方式；HLS 只有明確選取時才建立轉檔任務並產生額外衍生檔；Direct 不額外轉檔，即時串流不保存衍生檔。</div>
+                <div class="field-help">發布時先選一個主要服務方式；HLS 只有明確選取時才建立轉檔任務並產生額外衍生檔。發布後可在影片管理中再開啟多種觀看方式。</div>
               </div>
               <div class="field">
                 <label>上傳隱私</label>
@@ -7262,7 +7262,7 @@
 <script src="/js/games/chess.js?v=20260525-move-history-ply" defer></script>
 <script src="/js/38-games.js?v=20260602-rubiks-autosolve" defer></script>
 <script src="/js/42-experiments.js?v=20260528-experiments-bounded-motion" defer></script>
-  <script src="/js/39-videos.js?v=20260601-mobile-mse" defer></script>
+  <script src="/js/39-videos.js?v=20260602-publish-stream-select" defer></script>
 <script src="/js/40-auth-users.js?v=20260531-profile-settings-split" defer></script>
 <script src="/js/50-admin.js?v=20260531-feature-settings-live-sync" defer></script>
 <script src="/js/51-admin-server-mode-launch-check.js?v=20260526-server-mode-prelaunch" defer></script>

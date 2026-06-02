@@ -10,6 +10,7 @@ CLOUD_DRIVE_GLOBAL_CAPACITY_LIMIT_MB="${HACKME_DEV_CLOUD_DRIVE_GLOBAL_CAPACITY_L
 MAX_CONTENT_MB="${HACKME_DEV_MAX_CONTENT_MB:-${HTML_LEARNING_MAX_CONTENT_MB:-}}"
 RUN_ID="$(date +%Y%m%d_%H%M%S)"
 RUN_ROOT=""
+CUSTOM_RUNTIME_ROOT="${HACKME_DEV_RUNTIME_ROOT:-}"
 HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-5000}"
 TRUSTED_HOSTS="${HTML_LEARNING_TRUSTED_HOSTS:-}"
@@ -258,6 +259,11 @@ Options:
                            (8192 MB unless changed in root settings).
   --dry-run                Print resolved config and exit before copying/starting
   --run-root PATH          Use a fixed /tmp run root instead of auto-generating one
+  --runtime-root PATH,
+  --runtime-dir PATH       Use PATH as the runtime directory instead of the
+                           layout default. Also configurable with
+                           HACKME_DEV_RUNTIME_ROOT. The path may be relative to
+                           the current repo; it must not be the repo root.
   --in-place, --no-copy    Launch from the current repo; runtime still uses run-root
   --runtime-in-source,
   --source-runtime,
@@ -484,6 +490,38 @@ normalize_cloud_drive_options() {
   normalize_cloud_drive_capacity_limit
 }
 
+
+normalize_custom_runtime_root() {
+  if [[ -z "$CUSTOM_RUNTIME_ROOT" ]]; then
+    return 0
+  fi
+  local normalized
+  if ! normalized="$(python3 - "$CUSTOM_RUNTIME_ROOT" "$SOURCE_ROOT" <<'INNERPY'
+import sys
+from pathlib import Path
+
+raw = str(sys.argv[1] or "").strip()
+source = Path(sys.argv[2]).resolve()
+if not raw:
+    raise SystemExit(0)
+path = Path(raw).expanduser()
+if not path.is_absolute():
+    path = source / path
+path = path.resolve(strict=False)
+if path == source:
+    print("runtime root must not be the repository root", file=sys.stderr)
+    raise SystemExit(2)
+if path == source.parent:
+    print("runtime root must not be the repository parent directory", file=sys.stderr)
+    raise SystemExit(2)
+print(str(path))
+INNERPY
+)"; then
+    die "runtime root is unsafe or invalid: $CUSTOM_RUNTIME_ROOT"
+  fi
+  CUSTOM_RUNTIME_ROOT="$normalized"
+}
+
 normalize_max_content_option() {
   if [[ -z "$MAX_CONTENT_MB" ]]; then
     return 0
@@ -628,6 +666,7 @@ normalize_runtime_options() {
   DEV_TOKEN_FEATURES="$NORMALIZED_DEV_TOKEN_FEATURES"
   normalize_server_runner
   normalize_cloud_drive_options
+  normalize_custom_runtime_root
   normalize_max_content_option
   normalize_session_idle_timeout_option
   maybe_run_capacity_probe_for_gunicorn_defaults
@@ -735,18 +774,24 @@ append_csv_value() {
 print_resolved_config() {
   say "[dev-tmp] config:"
   say "  cli:                 $CLI_MODE"
+  local default_runtime_root=""
   if [[ "$RUNTIME_IN_SOURCE" == "1" ]]; then
     say "  run_root:            <not used; source runtime>"
     say "  launch_mode:         source runtime deployment"
-    say "  runtime_root:        $SOURCE_ROOT/runtime"
+    default_runtime_root="$SOURCE_ROOT/runtime"
   elif [[ "$IN_PLACE" == "1" ]]; then
     say "  run_root:            ${RUN_ROOT:-/tmp/hackme_web_dev_${RUN_ID}_$$}"
     say "  launch_mode:         in-place (no source copy; tmp runtime)"
-    say "  runtime_root:        ${RUN_ROOT:-/tmp/hackme_web_dev_${RUN_ID}_$$}/runtime"
+    default_runtime_root="${RUN_ROOT:-/tmp/hackme_web_dev_${RUN_ID}_$$}/runtime"
   else
     say "  run_root:            ${RUN_ROOT:-/tmp/hackme_web_dev_${RUN_ID}_$$}"
     say "  launch_mode:         tmp copy"
-    say "  runtime_root:        ${RUN_ROOT:-/tmp/hackme_web_dev_${RUN_ID}_$$}/hackme_web/runtime"
+    default_runtime_root="${RUN_ROOT:-/tmp/hackme_web_dev_${RUN_ID}_$$}/hackme_web/runtime"
+  fi
+  if [[ -n "$CUSTOM_RUNTIME_ROOT" ]]; then
+    say "  runtime_root:        $CUSTOM_RUNTIME_ROOT (custom; default would be $default_runtime_root)"
+  else
+    say "  runtime_root:        $default_runtime_root"
   fi
   say "  host:                $HOST"
   say "  port:                $PORT"
@@ -2012,6 +2057,7 @@ prompt_runtime_config() {
   if [[ "$RUNTIME_IN_SOURCE" != "1" ]]; then
     prompt_value "Tmp workspace/run root" "$default_run_root" RUN_ROOT
   fi
+  prompt_value "Runtime root override (blank = launch layout default)" "$CUSTOM_RUNTIME_ROOT" CUSTOM_RUNTIME_ROOT
   prompt_value "Cloud drive actual storage root (blank = runtime/storage)" "$CLOUD_DRIVE_STORAGE_ROOT" CLOUD_DRIVE_STORAGE_ROOT
   prompt_value "Cloud drive max occupancy (MB or 10G; blank = keep app default, -1 = disk 95%)" "$CLOUD_DRIVE_GLOBAL_CAPACITY_LIMIT_MB" CLOUD_DRIVE_GLOBAL_CAPACITY_LIMIT_MB
   prompt_value "Host" "$HOST" HOST
@@ -2933,6 +2979,10 @@ while [[ $# -gt 0 ]]; do
       RUN_ROOT="${2:?missing run root}"
       shift 2
       ;;
+    --runtime-root|--runtime-dir|--runtime-directory)
+      CUSTOM_RUNTIME_ROOT="${2:?missing runtime root}"
+      shift 2
+      ;;
     --in-place|--no-copy)
       IN_PLACE=1
       shift
@@ -3027,6 +3077,9 @@ else
   COPY_ROOT="$RUN_ROOT/hackme_web"
   RUNTIME_ROOT="$COPY_ROOT/runtime"
 fi
+if [[ -n "$CUSTOM_RUNTIME_ROOT" ]]; then
+  RUNTIME_ROOT="$CUSTOM_RUNTIME_ROOT"
+fi
 EFFECTIVE_STORAGE_ROOT="${CLOUD_DRIVE_STORAGE_ROOT:-$RUNTIME_ROOT/storage}"
 LOG_CAPTURE="$RUNTIME_ROOT/logs/server_direct.out"
 GUNICORN_ACCESS_LOG="$RUNTIME_ROOT/logs/gunicorn_access.log"
@@ -3067,6 +3120,7 @@ else
 fi
 
 export HACKME_RUNTIME_DIR="$RUNTIME_ROOT"
+export HACKME_DEV_RUNTIME_ROOT="$CUSTOM_RUNTIME_ROOT"
 export HTML_LEARNING_DB_DIR="$RUNTIME_ROOT/database"
 export HTML_LEARNING_LOG_DIR="$RUNTIME_ROOT/logs"
 export HTML_LEARNING_CHAT_DIR="$RUNTIME_ROOT/chats"
