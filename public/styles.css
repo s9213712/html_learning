@@ -14265,7 +14265,7 @@
   }
 }
 
-/* 20260531 drive file row icon-only actions */
+/* 20260602 drive file row text actions */
 #module-drive .drive-file-row > .drive-file-actions,
 #module-drive .storage-trash-inline .drive-file-actions,
 #module-drive .album-list .drive-file-actions,
@@ -14273,16 +14273,14 @@
 #module-drive #storage-album-list .drive-file-actions {
   display: flex !important;
   flex-direction: row !important;
-  flex-wrap: nowrap !important;
+  flex-wrap: wrap !important;
   align-items: center !important;
   justify-content: flex-start !important;
-  gap: .26rem !important;
+  gap: .32rem !important;
   min-width: 0 !important;
   max-width: 100% !important;
-  overflow-x: auto !important;
-  overflow-y: hidden !important;
-  padding-bottom: .08rem !important;
-  scrollbar-width: thin;
+  overflow: visible !important;
+  padding-bottom: 0 !important;
 }
 
 #module-drive .drive-file-row > .drive-file-actions :is(.btn, button)[data-drive-action],
@@ -14290,84 +14288,22 @@
 #module-drive .album-list .drive-file-actions :is(.btn, button)[data-drive-action],
 #module-drive #storage-trash-list .drive-file-actions :is(.btn, button)[data-drive-action],
 #module-drive #storage-album-list .drive-file-actions :is(.btn, button)[data-drive-action] {
-  width: 2rem !important;
-  min-width: 2rem !important;
-  max-width: 2rem !important;
-  height: 2rem !important;
+  width: auto !important;
+  min-width: 4.2rem !important;
+  max-width: 100% !important;
+  height: auto !important;
   min-height: 2rem !important;
-  padding: 0 !important;
-  border-radius: .7rem !important;
-  display: inline-grid !important;
-  place-items: center !important;
-  flex: 0 0 2rem !important;
-  font-size: .68rem !important;
-  line-height: 1 !important;
-  white-space: nowrap !important;
-}
-
-#module-drive .drive-file-actions :is(
-  [data-drive-action="add-cloud-to-album"],
-  [data-drive-action="add-storage-to-album"],
-  [data-drive-action="album-full-preview"],
-  [data-drive-action="album-preview-next"],
-  [data-drive-action="album-preview-prev"],
-  [data-drive-action="cancel-remote-download"],
-  [data-drive-action="cancel-resumable-upload"],
-  [data-drive-action="clear-drive-e2ee-session-passphrase"],
-  [data-drive-action="clear-storage-selection"],
-  [data-drive-action="close-album-detail"],
-  [data-drive-action="close-album-full-preview"],
-  [data-drive-action="close-album-viewer"],
-  [data-drive-action="close-preview"],
-  [data-drive-action="close-share-dialog"],
-  [data-drive-action="close-storage-upgrade"],
-  [data-drive-action="close-text-document-modal"],
-  [data-drive-action="copy-drive-share-link"],
-  [data-drive-action="create-share-link"],
-  [data-drive-action="create-text-document"],
-  [data-drive-action="delete-album"],
-  [data-drive-action="delete-cloud"],
-  [data-drive-action="delete-context-attachment"],
-  [data-drive-action="dismiss-transfer"],
-  [data-drive-action="download"],
-  [data-drive-action="download-storage"],
-  [data-drive-action="edit-text"],
-  [data-drive-action="folder-to-album"],
-  [data-drive-action="move-cloud-to-storage"],
-  [data-drive-action="move-storage-file"],
-  [data-drive-action="open-album"],
-  [data-drive-action="open-share-center"],
-  [data-drive-action="open-storage-folder"],
-  [data-drive-action="open-storage-upgrade"],
-  [data-drive-action="open-text-document-modal"],
-  [data-drive-action="pause-remote-download"],
-  [data-drive-action="preview"],
-  [data-drive-action="preview-cloud-file"],
-  [data-drive-action="publish-to-video"],
-  [data-drive-action="purchase-storage-upgrade"],
-  [data-drive-action="purge-storage"],
-  [data-drive-action="purge-storage-trash"],
-  [data-drive-action="refresh-albums"],
-  [data-drive-action="rename-storage-file"],
-  [data-drive-action="rename-storage-folder"],
-  [data-drive-action="restore-storage"],
-  [data-drive-action="restore-storage-trash"],
-  [data-drive-action="resume-remote-download"],
-  [data-drive-action="save-album-detail"],
-  [data-drive-action="save-text"],
-  [data-drive-action="select-storage-file"],
-  [data-drive-action="select-storage-folder"],
-  [data-drive-action="select-visible-storage"],
-  [data-drive-action="set-drive-e2ee-session-passphrase"],
-  [data-drive-action="share-album"],
-  [data-drive-action="share-cloud-file"],
-  [data-drive-action="share-storage-folder"],
-  [data-drive-action="smart-organize-albums"],
-  [data-drive-action="trash-selected-storage"],
-  [data-drive-action="trash-storage"],
-  [data-drive-action="trash-storage-folder"]
-) {
-  font-size: 0 !important;
+  padding: .36rem .55rem !important;
+  border-radius: .55rem !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  flex: 0 1 auto !important;
+  font-size: .72rem !important;
+  line-height: 1.2 !important;
+  white-space: normal !important;
+  overflow-wrap: anywhere !important;
+  text-align: center !important;
 }
 
 #module-drive .drive-file-actions :is(.btn, button)[data-drive-action]::before {
@@ -14485,13 +14421,13 @@
   content: "Ⅱ";
 }
 
-#module-drive .drive-card-heading > .drive-file-actions :is(.btn, button)[data-drive-action],
-#module-drive .drive-e2ee-session-card .drive-file-actions :is(.btn, button)[data-drive-action] {
-  font-size: inherit !important;
-}
-
 #module-drive .drive-card-heading > .drive-file-actions :is(.btn, button)[data-drive-action]::before,
-#module-drive .drive-e2ee-session-card .drive-file-actions :is(.btn, button)[data-drive-action]::before {
+#module-drive .drive-e2ee-session-card .drive-file-actions :is(.btn, button)[data-drive-action]::before,
+#module-drive .drive-file-row > .drive-file-actions :is(.btn, button)[data-drive-action]::before,
+#module-drive .storage-trash-inline .drive-file-actions :is(.btn, button)[data-drive-action]::before,
+#module-drive .album-list .drive-file-actions :is(.btn, button)[data-drive-action]::before,
+#module-drive #storage-trash-list .drive-file-actions :is(.btn, button)[data-drive-action]::before,
+#module-drive #storage-album-list .drive-file-actions :is(.btn, button)[data-drive-action]::before {
   content: none !important;
 }
 
