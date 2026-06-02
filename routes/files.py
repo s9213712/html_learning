@@ -64,6 +64,7 @@ from services.media.e2ee_streaming import cleanup_e2ee_stream_v2_assets
 from services.media.streaming import (
     cleanup_stream_asset,
     get_stream_status,
+    mark_stream_asset_processing,
     open_realtime_proxy_stream,
     parse_subtitle_shift_ms,
     realtime_proxy_availability,
@@ -164,6 +165,9 @@ def register_file_routes(app, deps):
     require_csrf_safe = deps["require_csrf_safe"]
     role_rank = deps.get("role_rank", lambda role: {"user": 0, "manager": 1, "super_admin": 2}.get(role or "user", 0))
     storage_root = deps.get("STORAGE_DIR", ".")
+    db_path = deps.get("DB_PATH")
+    log_dir = deps.get("LOG_DIR")
+    server_file_key_path = deps.get("SERVER_FILE_KEY_PATH")
     ffmpeg_bin = deps.get("FFMPEG_BIN", "ffmpeg")
     ffprobe_bin = deps.get("FFPROBE_BIN", "ffprobe")
     points_service = deps.get("points_service")
@@ -178,6 +182,142 @@ def register_file_routes(app, deps):
             if hls.get("removed") or e2ee.get("removed"):
                 cleaned.append({"file_id": file_id, "hls": hls, "e2ee": e2ee})
         return cleaned
+
+    _DIRECT_BROWSER_VIDEO_EXTENSIONS = {".mp4", ".m4v", ".webm", ".ogg", ".ogv"}
+
+    def _file_row_text(row, *keys):
+        for key in keys:
+            try:
+                value = row[key]
+            except Exception:
+                value = row.get(key) if hasattr(row, "get") else None
+            text = str(value or "").strip()
+            if text:
+                return text
+        return ""
+
+    def _cloud_drive_needs_copy_only_hls(file_row):
+        if not file_row or is_e2ee_file(file_row):
+            return False
+        try:
+            category, mime_type = preview_category(file_row)
+        except Exception:
+            category, mime_type = "", ""
+        if category != "video":
+            return False
+        name = _file_row_text(
+            file_row,
+            "original_filename_plain_for_public",
+            "original_filename",
+            "filename",
+            "id",
+        )
+        suffix = Path(name).suffix.lower()
+        if suffix in _DIRECT_BROWSER_VIDEO_EXTENSIONS:
+            return False
+        mime_type = str(mime_type or _file_row_text(file_row, "mimetype", "mime_type")).lower()
+        if not suffix and mime_type in {"video/mp4", "video/webm", "video/ogg"}:
+            return False
+        return True
+
+    def _queue_cloud_drive_copy_only_hls_if_needed(conn, *, actor, file_row):
+        if not _cloud_drive_needs_copy_only_hls(file_row):
+            return None
+        try:
+            current = get_stream_status(conn, file_row=file_row, include_segments=False)
+            if current and current.get("status") in {"ready", "processing"}:
+                return None
+            asset = mark_stream_asset_processing(
+                conn,
+                file_row=file_row,
+                error_message="雲端硬碟特殊影片正在建立原畫質 HLS；僅轉封裝，不壓縮。",
+            )
+            if asset and asset.get("status") == "unavailable":
+                return None
+            return {
+                "file_id": str(file_row["id"]),
+                "owner_user_id": int(file_row["owner_user_id"] or _actor_value(actor, "id") or 0),
+                "title": _file_row_text(file_row, "original_filename_plain_for_public", "original_filename", "filename") or str(file_row["id"]),
+            }
+        except Exception as exc:
+            try:
+                audit(
+                    "CLOUD_DRIVE_COPY_ONLY_HLS_QUEUE_FAILED",
+                    get_client_ip(),
+                    user=_actor_value(actor, "username", ""),
+                    success=False,
+                    ua=get_ua(),
+                    detail=f"file_id={_file_row_text(file_row, 'id')},error={str(exc)[:300]}",
+                )
+            except Exception:
+                pass
+            return None
+
+    def _start_cloud_drive_copy_only_hls_worker(pending, *, actor=None, ip="", ua=""):
+        if not pending or not db_path:
+            return False
+        try:
+            worker_path = Path(__file__).resolve().parents[1] / "scripts" / "media" / "hls_prepare_worker.py"
+            if not worker_path.exists():
+                raise FileNotFoundError(str(worker_path))
+            worker_log_dir = Path(log_dir or (Path(storage_root).parent / "logs"))
+            worker_log_dir.mkdir(parents=True, exist_ok=True)
+            log_path = worker_log_dir / "media_hls_worker.log"
+            cmd = [
+                sys.executable,
+                str(worker_path),
+                "--db-path",
+                str(db_path),
+                "--storage-root",
+                str(storage_root),
+                "--file-id",
+                str(pending.get("file_id") or ""),
+                "--video-id",
+                "0",
+                "--owner-user-id",
+                str(int(pending.get("owner_user_id") or 0)),
+                "--title",
+                str(pending.get("title") or ""),
+                "--ffmpeg-bin",
+                str(ffmpeg_bin),
+                "--ffprobe-bin",
+                str(ffprobe_bin),
+            ]
+            if server_file_key_path:
+                cmd.extend(["--server-file-key-path", str(server_file_key_path)])
+            env = os.environ.copy()
+            env.update({
+                "HACKME_MEDIA_HLS_COPY_FIRST": "1",
+                "HACKME_MEDIA_HLS_FORCE_COPY": "1",
+                "HACKME_MEDIA_HLS_COPY_FALLBACK_TRANSCODE": "0",
+                "HACKME_MEDIA_HLS_ORIGINAL_VARIANT_MODE": "always",
+                "HACKME_MEDIA_HLS_INCLUDE_ORIGINAL": "1",
+                "HACKME_MEDIA_HLS_QUALITY_HEIGHTS": "none",
+            })
+            with log_path.open("ab") as log_file:
+                subprocess.Popen(
+                    cmd,
+                    stdout=log_file,
+                    stderr=log_file,
+                    stdin=subprocess.DEVNULL,
+                    close_fds=True,
+                    start_new_session=True,
+                    env=env,
+                )
+            return True
+        except Exception as exc:
+            try:
+                audit(
+                    "CLOUD_DRIVE_COPY_ONLY_HLS_WORKER_LAUNCH_FAILED",
+                    ip or get_client_ip(),
+                    user=_actor_value(actor, "username", ""),
+                    success=False,
+                    ua=ua or get_ua(),
+                    detail=f"file_id={pending.get('file_id')},error={str(exc)[:300]}",
+                )
+            except Exception:
+                pass
+            return False
 
     def _actor_or_401():
         actor = get_current_user_ctx()
@@ -2323,7 +2463,15 @@ def register_file_routes(app, deps):
                 body=f"{source_label}「{downloaded.filename}」已保存到你的雲端硬碟。",
                 link="/drive",
             )
+            pending_copy_only_hls = _queue_cloud_drive_copy_only_hls_if_needed(conn, actor=actor, file_row=file_row)
             conn.commit()
+            if pending_copy_only_hls:
+                _start_cloud_drive_copy_only_hls_worker(
+                    pending_copy_only_hls,
+                    actor=actor,
+                    ip=task.get("ip") or "",
+                    ua=task.get("ua") or "",
+                )
             conn.close()
             conn = None
             audit("CLOUD_DRIVE_REMOTE_DOWNLOAD", task.get("ip") or "", user=actor["username"], success=True, ua=task.get("ua") or "", detail=f"file_id={upload_result['file_id']}")
@@ -3083,7 +3231,10 @@ def register_file_routes(app, deps):
             )
             row = conn.execute("SELECT * FROM cloud_resumable_upload_sessions WHERE session_id=?", (row["session_id"],)).fetchone()
             _sync_resumable_upload_job(conn, actor, row, status="succeeded", progress_percent=100, stage="completed", detail="分段上傳已保存到雲端硬碟", result=response_payload)
+            pending_copy_only_hls = _queue_cloud_drive_copy_only_hls_if_needed(conn, actor=actor, file_row=file_row)
             conn.commit()
+            if pending_copy_only_hls:
+                _start_cloud_drive_copy_only_hls_worker(pending_copy_only_hls, actor=actor)
             shutil.rmtree(row["temp_dir"], ignore_errors=True)
             audit("CLOUD_DRIVE_RESUMABLE_UPLOAD", get_client_ip(), user=actor["username"], success=True, ua=get_ua(), detail=f"session_id={row['session_id']},file_id={upload_result['file_id']}")
             return json_resp({"ok": True, **response_payload, "session": _serialize_resumable_session(row)})
@@ -3836,7 +3987,11 @@ def register_file_routes(app, deps):
                 job_type="cloud_drive.upload",
                 title_prefix="雲端硬碟上傳",
             )
+            file_row = conn.execute("SELECT * FROM uploaded_files WHERE id=?", (result["file_id"],)).fetchone()
+            pending_copy_only_hls = _queue_cloud_drive_copy_only_hls_if_needed(conn, actor=actor, file_row=file_row)
             conn.commit()
+            if pending_copy_only_hls:
+                _start_cloud_drive_copy_only_hls_worker(pending_copy_only_hls, actor=actor)
             audit("CLOUD_DRIVE_UPLOAD", get_client_ip(), user=actor["username"], success=True, ua=get_ua(), detail=f"file_id={result['file_id']}")
             return json_resp({"ok": True, "file": result, "attachment": attach_result})
         finally:

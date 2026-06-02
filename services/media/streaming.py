@@ -228,6 +228,16 @@ def _ffmpeg_copy_first_enabled():
     return str(raw).strip().lower() in {"1", "true", "yes", "on", "y"}
 
 
+def _ffmpeg_copy_fallback_transcode_enabled():
+    raw = os.environ.get("HACKME_MEDIA_HLS_COPY_FALLBACK_TRANSCODE", "1")
+    return str(raw).strip().lower() in {"1", "true", "yes", "on", "y"}
+
+
+def _ffmpeg_force_stream_copy_enabled():
+    raw = os.environ.get("HACKME_MEDIA_HLS_FORCE_COPY", "0")
+    return str(raw).strip().lower() in {"1", "true", "yes", "on", "y"}
+
+
 def _ffmpeg_max_video_height():
     return _bounded_env_int(
         "HACKME_MEDIA_FFMPEG_MAX_VIDEO_HEIGHT",
@@ -1261,6 +1271,8 @@ def _metadata_supports_stream_copy(metadata):
     if not _ffmpeg_copy_first_enabled():
         return False
     media_type = str((metadata or {}).get("media_type") or "")
+    if _ffmpeg_force_stream_copy_enabled() and media_type in {"audio", "video"}:
+        return True
     codec = str((metadata or {}).get("codec") or "").lower()
     codec_tag = str((metadata or {}).get("codec_tag") or "").lower()
     audio_codec = str((metadata or {}).get("audio_codec") or "").lower()
@@ -1279,6 +1291,8 @@ def _metadata_supports_video_stream_copy(metadata):
         return False
     if str((metadata or {}).get("media_type") or "") != "video":
         return False
+    if _ffmpeg_force_stream_copy_enabled():
+        return True
     codec = str((metadata or {}).get("codec") or "").lower()
     codec_tag = str((metadata or {}).get("codec_tag") or "").lower()
     return codec in {"h264", "avc1", "av1", "hevc", "h265"} or codec_tag in {"avc1", "av01", "hvc1", "hev1"}
@@ -1773,6 +1787,8 @@ def open_realtime_proxy_stream(
 def _should_use_external_hls_audio(metadata):
     if str((metadata or {}).get("media_type") or "") != "video":
         return False
+    if _ffmpeg_force_stream_copy_enabled():
+        return False
     audio_streams = _hls_audio_streams(metadata)
     if not audio_streams:
         return False
@@ -2024,7 +2040,7 @@ def _run_ffmpeg_hls(
     try:
         run_hls_command(cmd)
     except subprocess.CalledProcessError:
-        if copy_codecs:
+        if copy_codecs and _ffmpeg_copy_fallback_transcode_enabled():
             shutil.rmtree(variant_dir, ignore_errors=True)
             return _run_ffmpeg_hls(
                 source_path,
