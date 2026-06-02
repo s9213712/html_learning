@@ -28,6 +28,8 @@ MANAGER_PASSWORD="${MANAGER_PASSWORD:-admin}"
 TEST_PASSWORD="${TEST_PASSWORD:-test}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 REQUIREMENTS_FILE="${HACKME_DEV_REQUIREMENTS_FILE:-requirements.txt}"
+REQUIREMENTS_FILE_SET=0
+[[ -n "${HACKME_DEV_REQUIREMENTS_FILE:-}" ]] && REQUIREMENTS_FILE_SET=1
 FEATURE_MODE="${HACKME_DEV_FEATURE_MODE:-all}"
 FEATURE_LIST="${HACKME_DEV_FEATURES:-}"
 FEATURE_BUNDLES="${HACKME_DEV_FEATURE_BUNDLES:-${HACKME_DEV_FEATURE_PACKAGES:-}}"
@@ -870,6 +872,10 @@ normalize_runtime_options() {
   normalize_token_feature_selection "$DEV_TOKEN_FEATURES" || die "invalid generated dev token feature selection: $DEV_TOKEN_FEATURES"
   DEV_TOKEN_FEATURES="$NORMALIZED_DEV_TOKEN_FEATURES"
   normalize_server_runner
+  if [[ -n "$REQUIREMENTS_FILE" ]]; then
+    normalize_requirements_files "$REQUIREMENTS_FILE" || die "invalid requirements file selection: $REQUIREMENTS_FILE"
+    REQUIREMENTS_FILE="$NORMALIZED_REQUIREMENTS_FILES"
+  fi
   normalize_cloud_drive_options
   normalize_custom_runtime_root
   normalize_max_content_option
@@ -1049,7 +1055,7 @@ print_resolved_config() {
   fi
   say "  port_conflict:       $PORT_CONFLICT_ACTION"
   say "  skip_install:        $SKIP_INSTALL"
-  say "  requirements_file:  ${REQUIREMENTS_FILE:-<skip install>}"
+  say "  requirements_files: ${REQUIREMENTS_FILE:-<skip install>}"
   say "  foreground:          $FOREGROUND"
   say "  btc_trade_autostart: $BTC_TRADE_AUTOSTART"
   say "  backtest_probe:      $BACKTEST_PROBE_ON_STARTUP"
@@ -1072,41 +1078,151 @@ prompt_value() {
 
 requirements_file_description() {
   case "${1:-}" in
-    requirements-minimal.txt) echo "minimal Flask/runtime only; safest for low-resource smoke" ;;
-    requirements-games.txt) echo "game/puzzle runtime dependencies only; combine with minimal for app startup" ;;
+    requirements-minimal.txt) echo "minimal Flask/runtime startup layer; currently includes games because routes import them" ;;
+    requirements-games.txt) echo "game/puzzle dependencies only; redundant when minimal is selected today" ;;
     requirements-dev.txt) echo "developer/browser-test tooling only; combine manually when needed" ;;
     requirements-comfyui.txt) echo "external ComfyUI API integration notes/no-op layer" ;;
     requirements-hf.txt) echo "heavy local Hugging Face/Diffusers backend" ;;
-    requirements.txt) echo "default compatibility bundle: minimal + dev + comfyui" ;;
+    requirements.txt) echo "aggregate -r bundle: minimal + dev + comfyui; mostly references other files" ;;
     *) echo "custom requirements file" ;;
   esac
 }
 
+
+normalize_requirements_files() {
+  local raw="${1:-}"
+  raw="${raw//,/ }"
+  local token mapped
+  local result=()
+  local seen=" "
+  for token in $raw; do
+    case "${token,,}" in
+      1|default|compat|requirements.txt) mapped="requirements.txt" ;;
+      2|minimal|requirements-minimal.txt) mapped="requirements-minimal.txt" ;;
+      3|dev|requirements-dev.txt) mapped="requirements-dev.txt" ;;
+      4|comfyui|requirements-comfyui.txt) mapped="requirements-comfyui.txt" ;;
+      5|hf|huggingface|requirements-hf.txt) mapped="requirements-hf.txt" ;;
+      6|games|game|requirements-games.txt) mapped="requirements-games.txt" ;;
+      requirements*.txt) mapped="$token" ;;
+      *) return 1 ;;
+    esac
+    if [[ "$seen" != *" $mapped "* ]]; then
+      result+=("$mapped")
+      seen+="$mapped "
+    fi
+  done
+  [[ ${#result[@]} -gt 0 ]] || return 1
+  if [[ "$seen" == *" requirements-minimal.txt "* && "$seen" == *" requirements-games.txt "* ]]; then
+    local compact=()
+    for mapped in "${result[@]}"; do
+      [[ "$mapped" == "requirements-games.txt" ]] && continue
+      compact+=("$mapped")
+    done
+    result=("${compact[@]}")
+  fi
+  NORMALIZED_REQUIREMENTS_FILES="${result[*]}"
+}
+
+requirements_files_description() {
+  local file
+  local output=""
+  for file in $REQUIREMENTS_FILE; do
+    if [[ -n "$output" ]]; then
+      output+="; "
+    fi
+    output+="$file - $(requirements_file_description "$file")"
+  done
+  echo "$output"
+}
+
+
+feature_selection_text_for_requirements() {
+  printf '%s %s %s' "$FEATURE_MODE" "$FEATURE_BUNDLES" "$FEATURE_LIST"
+}
+
+recommend_requirements_for_feature_selection() {
+  local selected=" $(feature_selection_text_for_requirements) "
+  local recommended="requirements-minimal.txt"
+  if [[ "$FEATURE_MODE" == "all" || "$selected" == *"feature_comfyui_enabled"* || "$selected" == *" ai"* || "$selected" == *" full-user"* || "$selected" == *" qa-all"* ]]; then
+    recommended+=" requirements-comfyui.txt"
+  fi
+  if [[ "$selected" == *"feature_hf"* || "$selected" == *"huggingface"* || "$selected" == *"diffusers"* || "$selected" == *"local-ai"* || "$selected" == *"local_ai"* ]]; then
+    recommended+=" requirements-hf.txt"
+  fi
+  if [[ "$SERVER_MODE" == "test" || "$SERVER_MODE" == "internal_test" || "$selected" == *" qa"* || "$selected" == *"requirements-dev"* ]]; then
+    recommended+=" requirements-dev.txt"
+  fi
+  normalize_requirements_files "$recommended" || return 1
+  RECOMMENDED_REQUIREMENTS_FILES="$NORMALIZED_REQUIREMENTS_FILES"
+}
+
+prompt_requirements_from_features() {
+  local answer
+  local recommended_desc
+  if [[ "$SKIP_INSTALL" == "1" ]]; then
+    print_requirements_feature_guidance
+    return 0
+  fi
+  if [[ "$REQUIREMENTS_FILE_SET" == "1" ]]; then
+    print_requirements_feature_guidance
+    return 0
+  fi
+  recommend_requirements_for_feature_selection || return 0
+  recommended_desc="$RECOMMENDED_REQUIREMENTS_FILES"
+  say "Recommended dependency files from selected features: $recommended_desc"
+  local saved_requirements="$REQUIREMENTS_FILE"
+  REQUIREMENTS_FILE="$RECOMMENDED_REQUIREMENTS_FILES"
+  say "  $(requirements_files_description)"
+  REQUIREMENTS_FILE="$saved_requirements"
+  while true; do
+    printf 'Use recommended dependency files? [Y/n/custom]: '
+    if ! read -r answer; then
+      die "interactive setup was interrupted"
+    fi
+    case "${answer,,}" in
+      ""|y|yes)
+        REQUIREMENTS_FILE="$RECOMMENDED_REQUIREMENTS_FILES"
+        print_requirements_feature_guidance
+        return 0
+        ;;
+      n|no|custom|c)
+        prompt_requirements_file
+        print_requirements_feature_guidance
+        return 0
+        ;;
+      *)
+        if normalize_requirements_files "$answer"; then
+          REQUIREMENTS_FILE="$NORMALIZED_REQUIREMENTS_FILES"
+          print_requirements_feature_guidance
+          return 0
+        fi
+        say "Answer y, n/custom, or enter requirements choices such as 2 3."
+        ;;
+    esac
+  done
+}
+
 prompt_requirements_file() {
   local answer
-  say "Dependency requirements file:"
+  say "Dependency requirements file(s):"
   say "  1) requirements.txt         $(requirements_file_description requirements.txt)"
   say "  2) requirements-minimal.txt $(requirements_file_description requirements-minimal.txt)"
   say "  3) requirements-dev.txt     $(requirements_file_description requirements-dev.txt)"
   say "  4) requirements-comfyui.txt $(requirements_file_description requirements-comfyui.txt)"
   say "  5) requirements-hf.txt      $(requirements_file_description requirements-hf.txt)"
   say "  6) requirements-games.txt   $(requirements_file_description requirements-games.txt)"
+  say "     Multiple choices are allowed, e.g. 2 3 or 2,6. Note: 2 already includes 6 today."
   while true; do
-    printf 'Choose requirements file [%s]: ' "$REQUIREMENTS_FILE"
+    printf 'Choose requirements file(s) [%s]: ' "$REQUIREMENTS_FILE"
     if ! read -r answer; then
       die "interactive setup was interrupted"
     fi
     answer="${answer:-$REQUIREMENTS_FILE}"
-    case "${answer,,}" in
-      1|default|compat|requirements.txt) REQUIREMENTS_FILE="requirements.txt"; return 0 ;;
-      2|minimal|requirements-minimal.txt) REQUIREMENTS_FILE="requirements-minimal.txt"; return 0 ;;
-      3|dev|requirements-dev.txt) REQUIREMENTS_FILE="requirements-dev.txt"; return 0 ;;
-      4|comfyui|requirements-comfyui.txt) REQUIREMENTS_FILE="requirements-comfyui.txt"; return 0 ;;
-      5|hf|huggingface|requirements-hf.txt) REQUIREMENTS_FILE="requirements-hf.txt"; return 0 ;;
-      6|games|game|requirements-games.txt) REQUIREMENTS_FILE="requirements-games.txt"; return 0 ;;
-      requirements*.txt) REQUIREMENTS_FILE="$answer"; return 0 ;;
-      *) say "Please choose 1-5 or a requirements*.txt file." ;;
-    esac
+    if normalize_requirements_files "$answer"; then
+      REQUIREMENTS_FILE="$NORMALIZED_REQUIREMENTS_FILES"
+      return 0
+    fi
+    say "Please choose one or more values from 1-6, aliases, or requirements*.txt files. Example: 2 6"
   done
 }
 
@@ -1115,12 +1231,18 @@ print_requirements_feature_guidance() {
     say "Feature selection: --skip-install leaves dependencies unchanged, so all feature bundles are shown."
     return 0
   fi
-  say "Feature selection dependency baseline: $REQUIREMENTS_FILE - $(requirements_file_description "$REQUIREMENTS_FILE")"
-  case "$REQUIREMENTS_FILE" in
-    requirements-minimal.txt) say "  Heavy optional features such as local HF/Diffusers should stay disabled unless installed separately." ;;
-    requirements-games.txt) say "  Games-only dependencies are not a complete runtime install; use this only with an existing minimal environment." ;;
-    requirements-hf.txt) say "  HF/Diffusers features are available; external ComfyUI still uses its own server endpoint." ;;
-    requirements-dev.txt) say "  Dev tooling only is not a complete runtime install; enable feature bundles only if runtime deps already exist." ;;
+  say "Feature selection dependency baseline: $(requirements_files_description)"
+  case " $REQUIREMENTS_FILE " in
+    *" requirements-minimal.txt "*) say "  Heavy optional features such as local HF/Diffusers should stay disabled unless installed separately." ;;
+  esac
+  case " $REQUIREMENTS_FILE " in
+    *" requirements-games.txt "*) say "  Games dependencies are selected; minimal currently also includes this layer for startup compatibility." ;;
+  esac
+  case " $REQUIREMENTS_FILE " in
+    *" requirements-hf.txt "*) say "  HF/Diffusers features are available; external ComfyUI still uses its own server endpoint." ;;
+  esac
+  case " $REQUIREMENTS_FILE " in
+    *" requirements-dev.txt "*) say "  Dev tooling is selected; enable feature bundles only if runtime deps are also present." ;;
   esac
 }
 
@@ -2286,14 +2408,11 @@ prompt_runtime_config() {
   prompt_yes_no "Disable trusted-host checks for dev convenience" "$DISABLE_TRUSTED_HOSTS" DISABLE_TRUSTED_HOSTS
   prompt_server_runner
   prompt_yes_no "Skip dependency install / reuse existing environment" "$SKIP_INSTALL" SKIP_INSTALL
-  if [[ "$SKIP_INSTALL" != "1" ]]; then
-    prompt_requirements_file
-  fi
-  print_requirements_feature_guidance
   prompt_feature_settings
   prompt_yes_no "Enable security settings" "$SECURITY_SETTINGS_ENABLED" SECURITY_SETTINGS_ENABLED
   prompt_value "Idle logout countdown minutes (blank = selected security profile default, 0 = disabled)" "$SESSION_IDLE_TIMEOUT_MINUTES" SESSION_IDLE_TIMEOUT_MINUTES
   prompt_server_mode
+  prompt_requirements_from_features
   if [[ "$SERVER_MODE" == "test" || "$SERVER_MODE" == "internal_test" ]]; then
     prompt_value "Generated dev token TTL minutes" "$DEV_TOKEN_TTL_MINUTES" DEV_TOKEN_TTL_MINUTES
     prompt_token_feature_scope
@@ -2420,11 +2539,17 @@ resolve_python() {
   if [[ ! -x "$PYTHON_BIN" ]]; then
     die "failed to create tmp venv at $venv_dir"
   fi
-  local requirements_path="$COPY_ROOT/$REQUIREMENTS_FILE"
-  [[ -f "$requirements_path" ]] || die "requirements file not found in copied runtime: $REQUIREMENTS_FILE"
-  say "[dev-tmp] installing dependencies from $REQUIREMENTS_FILE - $(requirements_file_description "$REQUIREMENTS_FILE")"
+  local requirements_file
+  local requirements_path
+  normalize_requirements_files "$REQUIREMENTS_FILE" || die "invalid requirements file selection: $REQUIREMENTS_FILE"
+  REQUIREMENTS_FILE="$NORMALIZED_REQUIREMENTS_FILES"
   PIP_DISABLE_PIP_VERSION_CHECK=1 "$PYTHON_BIN" -m pip install --upgrade pip
-  PIP_DISABLE_PIP_VERSION_CHECK=1 "$PYTHON_BIN" -m pip install -r "$requirements_path"
+  for requirements_file in $REQUIREMENTS_FILE; do
+    requirements_path="$COPY_ROOT/$requirements_file"
+    [[ -f "$requirements_path" ]] || die "requirements file not found in copied runtime: $requirements_file"
+    say "[dev-tmp] installing dependencies from $requirements_file - $(requirements_file_description "$requirements_file")"
+    PIP_DISABLE_PIP_VERSION_CHECK=1 "$PYTHON_BIN" -m pip install -r "$requirements_path"
+  done
 }
 
 migrate_legacy_runtime_storage_to_cloud_drive_root() {
@@ -3228,6 +3353,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     --requirements-file)
       REQUIREMENTS_FILE="${2:?missing requirements file}"
+      REQUIREMENTS_FILE_SET=1
       shift 2
       ;;
     --foreground)
