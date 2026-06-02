@@ -14295,13 +14295,78 @@
   display: inline-grid !important;
   place-items: center !important;
   flex: 0 0 2rem !important;
-  font-size: 0 !important;
+  font-size: .68rem !important;
   line-height: 1 !important;
   white-space: nowrap !important;
 }
 
+#module-drive .drive-file-actions :is(
+  [data-drive-action="add-cloud-to-album"],
+  [data-drive-action="add-storage-to-album"],
+  [data-drive-action="album-full-preview"],
+  [data-drive-action="album-preview-next"],
+  [data-drive-action="album-preview-prev"],
+  [data-drive-action="cancel-remote-download"],
+  [data-drive-action="cancel-resumable-upload"],
+  [data-drive-action="clear-drive-e2ee-session-passphrase"],
+  [data-drive-action="clear-storage-selection"],
+  [data-drive-action="close-album-detail"],
+  [data-drive-action="close-album-full-preview"],
+  [data-drive-action="close-album-viewer"],
+  [data-drive-action="close-preview"],
+  [data-drive-action="close-share-dialog"],
+  [data-drive-action="close-storage-upgrade"],
+  [data-drive-action="close-text-document-modal"],
+  [data-drive-action="copy-drive-share-link"],
+  [data-drive-action="create-share-link"],
+  [data-drive-action="create-text-document"],
+  [data-drive-action="delete-album"],
+  [data-drive-action="delete-cloud"],
+  [data-drive-action="delete-context-attachment"],
+  [data-drive-action="dismiss-transfer"],
+  [data-drive-action="download"],
+  [data-drive-action="download-storage"],
+  [data-drive-action="edit-text"],
+  [data-drive-action="folder-to-album"],
+  [data-drive-action="move-cloud-to-storage"],
+  [data-drive-action="move-storage-file"],
+  [data-drive-action="open-album"],
+  [data-drive-action="open-share-center"],
+  [data-drive-action="open-storage-folder"],
+  [data-drive-action="open-storage-upgrade"],
+  [data-drive-action="open-text-document-modal"],
+  [data-drive-action="pause-remote-download"],
+  [data-drive-action="preview"],
+  [data-drive-action="preview-cloud-file"],
+  [data-drive-action="publish-to-video"],
+  [data-drive-action="purchase-storage-upgrade"],
+  [data-drive-action="purge-storage"],
+  [data-drive-action="purge-storage-trash"],
+  [data-drive-action="refresh-albums"],
+  [data-drive-action="rename-storage-file"],
+  [data-drive-action="rename-storage-folder"],
+  [data-drive-action="restore-storage"],
+  [data-drive-action="restore-storage-trash"],
+  [data-drive-action="resume-remote-download"],
+  [data-drive-action="save-album-detail"],
+  [data-drive-action="save-text"],
+  [data-drive-action="select-storage-file"],
+  [data-drive-action="select-storage-folder"],
+  [data-drive-action="select-visible-storage"],
+  [data-drive-action="set-drive-e2ee-session-passphrase"],
+  [data-drive-action="share-album"],
+  [data-drive-action="share-cloud-file"],
+  [data-drive-action="share-storage-folder"],
+  [data-drive-action="smart-organize-albums"],
+  [data-drive-action="trash-selected-storage"],
+  [data-drive-action="trash-storage"],
+  [data-drive-action="trash-storage-folder"]
+) {
+  font-size: 0 !important;
+}
+
 #module-drive .drive-file-actions :is(.btn, button)[data-drive-action]::before {
-  content: "•";
+  content: none;
   font-size: .98rem;
   font-weight: 800;
   line-height: 1;
@@ -14309,8 +14374,14 @@
 
 #module-drive .drive-file-actions [data-drive-action="preview"]::before,
 #module-drive .drive-file-actions [data-drive-action="preview-cloud-file"]::before,
+#module-drive .drive-file-actions [data-drive-action="album-full-preview"]::before,
 #module-drive .drive-file-actions [data-drive-action="open-album"]::before {
   content: "◎";
+}
+
+#module-drive .drive-file-actions [data-drive-action="edit-text"]::before,
+#module-drive .drive-file-actions [data-drive-action="save-text"]::before {
+  content: "✎";
 }
 
 #module-drive .drive-file-actions [data-drive-action="download"]::before,
@@ -14319,7 +14390,10 @@
 }
 
 #module-drive .drive-file-actions [data-drive-action="share-cloud-file"]::before,
-#module-drive .drive-file-actions [data-drive-action="share-storage-folder"]::before {
+#module-drive .drive-file-actions [data-drive-action="share-storage-folder"]::before,
+#module-drive .drive-file-actions [data-drive-action="share-album"]::before,
+#module-drive .drive-file-actions [data-drive-action="create-share-link"]::before,
+#module-drive .drive-file-actions [data-drive-action="copy-drive-share-link"]::before {
   content: "↗";
 }
 
@@ -14331,7 +14405,8 @@
 #module-drive .drive-file-actions [data-drive-action="move-storage-file"]::before,
 #module-drive .drive-file-actions [data-drive-action="move-cloud-to-storage"]::before,
 #module-drive .drive-file-actions [data-drive-action="select-storage-folder"]::before,
-#module-drive .drive-file-actions [data-drive-action="select-storage-file"]::before {
+#module-drive .drive-file-actions [data-drive-action="select-storage-file"]::before,
+#module-drive .drive-file-actions [data-drive-action="open-storage-folder"]::before {
   content: "⇄";
 }
 
@@ -14343,18 +14418,36 @@
 
 #module-drive .drive-file-actions [data-drive-action="delete-cloud"]::before,
 #module-drive .drive-file-actions [data-drive-action="delete-album"]::before,
+#module-drive .drive-file-actions [data-drive-action="delete-context-attachment"]::before,
 #module-drive .drive-file-actions [data-drive-action="purge-storage"]::before,
 #module-drive .drive-file-actions [data-drive-action="purge-storage-trash"]::before,
-#module-drive .drive-file-actions [data-drive-action="close-preview"]::before {
+#module-drive .drive-file-actions [data-drive-action="close-preview"]::before,
+#module-drive .drive-file-actions [data-drive-action="close-album-detail"]::before,
+#module-drive .drive-file-actions [data-drive-action="close-album-full-preview"]::before,
+#module-drive .drive-file-actions [data-drive-action="close-album-viewer"]::before,
+#module-drive .drive-file-actions [data-drive-action="close-share-dialog"]::before,
+#module-drive .drive-file-actions [data-drive-action="close-storage-upgrade"]::before,
+#module-drive .drive-file-actions [data-drive-action="close-text-document-modal"]::before,
+#module-drive .drive-file-actions [data-drive-action="clear-drive-e2ee-session-passphrase"]::before,
+#module-drive .drive-file-actions [data-drive-action="clear-storage-selection"]::before,
+#module-drive .drive-file-actions [data-drive-action="dismiss-transfer"]::before,
+#module-drive .drive-file-actions [data-drive-action="cancel-remote-download"]::before,
+#module-drive .drive-file-actions [data-drive-action="cancel-resumable-upload"]::before {
   content: "×";
 }
 
 #module-drive .drive-file-actions [data-drive-action="restore-storage"]::before,
-#module-drive .drive-file-actions [data-drive-action="restore-storage-trash"]::before {
+#module-drive .drive-file-actions [data-drive-action="restore-storage-trash"]::before,
+#module-drive .drive-file-actions [data-drive-action="refresh-albums"]::before,
+#module-drive .drive-file-actions [data-drive-action="resume-remote-download"]::before {
   content: "↺";
 }
 
-#module-drive .drive-file-actions [data-drive-action="add-storage-to-album"]::before {
+#module-drive .drive-file-actions [data-drive-action="add-storage-to-album"]::before,
+#module-drive .drive-file-actions [data-drive-action="add-cloud-to-album"]::before,
+#module-drive .drive-file-actions [data-drive-action="folder-to-album"]::before,
+#module-drive .drive-file-actions [data-drive-action="open-text-document-modal"]::before,
+#module-drive .drive-file-actions [data-drive-action="create-text-document"]::before {
   content: "+";
 }
 
@@ -14362,9 +14455,31 @@
   content: "▶";
 }
 
-#module-drive .drive-file-actions [data-drive-action="open-share-center"]::before {
+#module-drive .drive-file-actions [data-drive-action="open-share-center"]::before,
+#module-drive .drive-file-actions [data-drive-action="open-storage-upgrade"]::before,
+#module-drive .drive-file-actions [data-drive-action="purchase-storage-upgrade"]::before,
+#module-drive .drive-file-actions [data-drive-action="set-drive-e2ee-session-passphrase"]::before,
+#module-drive .drive-file-actions [data-drive-action="smart-organize-albums"]::before {
   content: "⚙";
 }
+
+#module-drive .drive-file-actions [data-drive-action="select-visible-storage"]::before,
+#module-drive .drive-file-actions [data-drive-action="save-album-detail"]::before {
+  content: "✓";
+}
+
+#module-drive .drive-file-actions [data-drive-action="album-preview-prev"]::before {
+  content: "‹";
+}
+
+#module-drive .drive-file-actions [data-drive-action="album-preview-next"]::before {
+  content: "›";
+}
+
+#module-drive .drive-file-actions [data-drive-action="pause-remote-download"]::before {
+  content: "Ⅱ";
+}
+
 .video-stream-debug-panel {
   margin-top: 0.75rem;
   width: 100%;
