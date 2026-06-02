@@ -3450,21 +3450,28 @@ def stream_playback_payload(conn, *, file_row, video_id, storage_root=None, ffpr
     if prepared_hls_available:
         variants = []
         audio_tracks = []
+        muxed_audio_present = False
         for variant in available_variants:
             name = str(variant.get("name") or "").strip()
             if not name:
                 continue
+            width = _safe_int(variant.get("width"), 0)
             height = _safe_int(variant.get("height"), 0)
             label = "原畫質" if name == "original" else (f"{height}p" if height else name)
             if name == "original" and height:
                 label = f"原畫質 {height}p"
+            codec_text = str(variant.get("codec") or "")
+            variant_has_muxed_audio = "mp4a" in hls_codec_string(width=width or 1, height=height or 1, codec=codec_text).lower()
+            if variant_has_muxed_audio:
+                muxed_audio_present = True
             variants.append({
                 "name": name,
                 "label": label,
-                "width": _safe_int(variant.get("width"), 0),
+                "width": width,
                 "height": height,
                 "bitrate": _safe_int(variant.get("bitrate"), 0),
-                "codec": str(variant.get("codec") or ""),
+                "codec": codec_text,
+                "has_muxed_audio": variant_has_muxed_audio,
                 "size_bytes": _safe_int(variant.get("segments_total_bytes"), 0),
                 "segments_total_bytes": _safe_int(variant.get("segments_total_bytes"), 0),
                 "source_size_bytes": _safe_int(status.get("source_size_bytes"), 0),
@@ -3488,6 +3495,22 @@ def stream_playback_payload(conn, *, file_row, video_id, storage_root=None, ffpr
             })
         default_quality = _preferred_playback_quality_name(variants)
         fallback_quality = _fallback_playback_quality_name(variants)
+        premium_policy = _premium_hls_profile_policy(status)
+        if not audio_tracks and muxed_audio_present:
+            audio_tracks.append({
+                "name": "muxed_audio",
+                "label": "內嵌音軌",
+                "language": "und",
+                "is_default": True,
+                "codec": "aac",
+                "bitrate": _safe_int(premium_policy.get("asset_audio_bitrate"), 0),
+                "stream_index": -1,
+                "size_bytes": 0,
+                "segments_total_bytes": 0,
+                "playlist_url": "",
+                "source": "muxed_hls_variant",
+                "selectable": False,
+            })
         payload["mode"] = "hls"
         payload["master_url"] = f"/api/videos/{int(video_id)}/hls/master.m3u8"
         payload["player_strategy"] = "native_hls_or_hlsjs"
@@ -3497,7 +3520,6 @@ def stream_playback_payload(conn, *, file_row, video_id, storage_root=None, ffpr
         payload["audio_tracks"] = audio_tracks
         payload["default_quality"] = default_quality
         payload["fallback_quality"] = fallback_quality
-        premium_policy = _premium_hls_profile_policy(status)
         payload["quality_policy"] = {
             "default_height": 720,
             "fallback_height": 480,

@@ -1532,9 +1532,14 @@ def register_video_routes(app, deps):
     def _apply_video_streaming_mode_policy(conn, payload, video_id):
         modes = _stored_video_streaming_modes(conn, video_id)
         mode_payload = _streaming_modes_payload(modes)
+        realtime_available = bool((payload or {}).get("realtime_proxy_url")) and bool(((payload or {}).get("realtime_proxy") or {}).get("available", True))
+        selectable_modes = list(mode_payload)
+        if realtime_available and "realtime_proxy" not in selectable_modes:
+            selectable_modes.append("realtime_proxy")
         payload["published_streaming_modes"] = mode_payload
         service_policy = payload.setdefault("service_policy", {})
-        service_policy["customer_selectable_modes"] = mode_payload
+        service_policy["customer_selectable_modes"] = selectable_modes
+        service_policy["fallback_modes"] = [mode for mode in selectable_modes if mode not in mode_payload]
         preferred = "prepared_hls" if "prepared_hls" in modes else "realtime_proxy"
         service_policy["default_mode"] = preferred
         service_policy["recommended_mode"] = preferred
@@ -3969,7 +3974,7 @@ def register_video_routes(app, deps):
             conn.close()
 
     @app.route("/api/videos/<int:video_id>/hls/master.m3u8", methods=["GET"])
-    @require_csrf
+    @require_csrf_safe
     def video_hls_master(video_id):
         actor = get_current_user_ctx()
         conn = get_db()
@@ -3992,7 +3997,7 @@ def register_video_routes(app, deps):
             conn.close()
 
     @app.route("/api/videos/<int:video_id>/hls/<variant>/playlist.m3u8", methods=["GET"])
-    @require_csrf
+    @require_csrf_safe
     def video_hls_variant_playlist(video_id, variant):
         actor = get_current_user_ctx()
         conn = get_db()
@@ -4018,7 +4023,7 @@ def register_video_routes(app, deps):
             conn.close()
 
     @app.route("/api/videos/<int:video_id>/hls/subtitles/<subtitle_name>.vtt", methods=["GET"])
-    @require_csrf
+    @require_csrf_safe
     def video_hls_subtitle(video_id, subtitle_name):
         actor = get_current_user_ctx()
         conn = get_db()
@@ -4087,7 +4092,7 @@ def register_video_routes(app, deps):
             conn.close()
 
     @app.route("/api/videos/<int:video_id>/hls/<variant>/<segment>", methods=["GET"])
-    @require_csrf
+    @require_csrf_safe
     def video_hls_segment(video_id, variant, segment):
         actor = get_current_user_ctx()
         conn = get_db()

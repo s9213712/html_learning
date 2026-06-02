@@ -2345,7 +2345,7 @@ function saveVideoSelectedServiceMode(video, mode) {
 }
 
 function selectedVideoAudioTrack(playback = {}) {
-  const tracks = videoPlaybackAudioTracks(playback);
+  const tracks = videoPlaybackAudioTracks(playback).filter((track) => track.selectable !== false && track.playlistUrl !== "");
   if (!tracks.length) return null;
   const select = $("video-audio-track-select");
   if (select) {
@@ -3644,6 +3644,8 @@ function videoPlaybackAudioTracks(playback = {}) {
       playlistUrl: String(track.playlist_url || track.url || ""),
       streamIndex: Number(track.stream_index ?? -1),
       isDefault: !!track.is_default,
+      selectable: track.selectable !== false,
+      source: String(track.source || ""),
     }));
 }
 
@@ -3810,7 +3812,7 @@ function renderVideoQualityControl(playback = {}) {
   const audioMarkup = audioTracks.length >= 2 ? `
       <label for="video-audio-track-select">選擇音軌</label>
       <select id="video-audio-track-select">
-        ${audioTracks.map((track, index) => `<option value="${index}"${index === defaultAudioIndex ? " selected" : ""}>${sanitize(track.label)}</option>`).join("")}
+        ${audioTracks.map((track, index) => `<option value="${index}" data-track-name="${sanitize(track.name)}"${index === defaultAudioIndex ? " selected" : ""}>${sanitize(track.label)}</option>`).join("")}
       </select>
     ` : "";
   const qualityMarkup = options.length >= 2 ? `
@@ -3837,7 +3839,7 @@ function renderVideoRealtimeProxyControl(playback = {}) {
     <div class="video-quality-control" id="video-realtime-proxy-control">
       <label for="video-audio-track-select">選擇音軌</label>
       <select id="video-audio-track-select">
-        ${audioTracks.map((track, index) => `<option value="${index}"${index === defaultAudioIndex ? " selected" : ""}>${sanitize(track.label)}</option>`).join("")}
+        ${audioTracks.map((track, index) => `<option value="${index}" data-track-name="${sanitize(track.name)}"${index === defaultAudioIndex ? " selected" : ""}>${sanitize(track.label)}</option>`).join("")}
       </select>
       <span class="drive-card-sub">Standard 即時轉封裝一次輸出選定音軌；多人同時觀看會消耗即時 CPU。</span>
     </div>
@@ -4063,8 +4065,9 @@ function applyVideoAudioTrackSelection(playback = {}) {
   const select = $("video-audio-track-select");
   if (!select || tracks.length < 2) return;
   const selected = Math.max(0, Math.min(tracks.length - 1, Number(select.value || 0)));
+  const chosen = tracks[selected];
+  const player = $("video-player");
   if (videoSelectedServiceMode(videoState.current, playback) === "realtime_proxy") {
-    const player = $("video-player");
     if (!player) return;
     const resumeAt = videoPlaybackResumeTime(player);
     const nextUrl = videoRealtimeProxyUrl(playback, resumeAt);
@@ -4082,15 +4085,45 @@ function applyVideoAudioTrackSelection(playback = {}) {
     setVideoPlaybackStatus(`音軌：${tracks[selected]?.label || "音軌"}。`, false);
     return;
   }
+  const chosenName = String(chosen?.name || "").toLowerCase();
+  const chosenLabel = String(chosen?.label || "").toLowerCase();
+  const chosenLanguage = String(chosen?.language || "").toLowerCase();
+  const chosenUrl = String(chosen?.playlistUrl || "").toLowerCase();
+  const chosenPath = (() => {
+    try {
+      return chosenUrl ? new URL(chosenUrl, window.location.origin).pathname.toLowerCase() : "";
+    } catch (_) {
+      return chosenUrl;
+    }
+  })();
+  const matchesChosenTrack = (track) => {
+    const name = String(track?.name || track?.label || "").toLowerCase();
+    const label = String(track?.label || track?.name || "").toLowerCase();
+    const lang = String(track?.lang || track?.language || "").toLowerCase();
+    const uri = String(track?.url || track?.uri || track?.attrs?.URI || track?.details?.url || "").toLowerCase();
+    return (chosenName && (name === chosenName || label === chosenName || uri.includes(`/${chosenName}/`) || uri.endsWith(`${chosenName}/playlist.m3u8`)))
+      || (chosenLabel && (name === chosenLabel || label === chosenLabel))
+      || (chosenPath && (uri === chosenPath || uri.endsWith(chosenPath) || uri.includes(chosenPath)))
+      || (chosenLanguage && chosenLanguage !== "und" && lang === chosenLanguage);
+  };
   if (videoState.currentHls && Array.isArray(videoState.currentHls.audioTracks)) {
-    const chosen = tracks[selected];
-    const index = videoState.currentHls.audioTracks.findIndex((track) => {
-      const name = String(track.name || track.label || "").toLowerCase();
-      const lang = String(track.lang || track.language || "").toLowerCase();
-      return name === chosen.label.toLowerCase() || lang === chosen.language.toLowerCase();
-    });
+    let index = videoState.currentHls.audioTracks.findIndex(matchesChosenTrack);
+    if (index < 0 && selected >= 0 && selected < videoState.currentHls.audioTracks.length) index = selected;
     if (index >= 0) {
       videoState.currentHls.audioTrack = index;
+      setVideoPlaybackStatus(`音軌：${chosen.label}。`, false);
+      return;
+    }
+  }
+  const nativeTracks = player?.audioTracks;
+  if (nativeTracks && typeof nativeTracks.length === "number") {
+    let matched = false;
+    for (let index = 0; index < nativeTracks.length; index += 1) {
+      const enabled = !!matchesChosenTrack(nativeTracks[index]);
+      nativeTracks[index].enabled = enabled;
+      matched = matched || enabled;
+    }
+    if (matched) {
       setVideoPlaybackStatus(`音軌：${chosen.label}。`, false);
       return;
     }
