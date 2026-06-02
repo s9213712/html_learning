@@ -2568,6 +2568,10 @@ async function loadSettings() {
   renderCloudDriveTransferLimits(s.cloud_drive_transfer_limits_json);
   if ($("s-remote-download-max-concurrent-global")) $("s-remote-download-max-concurrent-global").value = s.remote_download_max_concurrent_global ?? 1;
   if ($("s-remote-download-max-concurrent-per-user")) $("s-remote-download-max-concurrent-per-user").value = s.remote_download_max_concurrent_per_user ?? 1;
+  if ($("s-bt-download-backend")) $("s-bt-download-backend").value = s.bt_download_backend || "auto";
+  if ($("s-transmission-rpc-url")) $("s-transmission-rpc-url").value = s.transmission_rpc_url || "http://127.0.0.1:9091/transmission/rpc";
+  if ($("s-transmission-rpc-username")) $("s-transmission-rpc-username").value = s.transmission_rpc_username || "";
+  if ($("s-transmission-rpc-password")) $("s-transmission-rpc-password").value = s.transmission_rpc_password || "";
   if ($("s-storage-maintenance-auto-enabled")) $("s-storage-maintenance-auto-enabled").checked = !!s.storage_maintenance_auto_enabled;
   if ($("s-storage-maintenance-daily-time")) $("s-storage-maintenance-daily-time").value = s.storage_maintenance_daily_time || "04:00";
   if ($("s-storage-trash-retention-days")) $("s-storage-trash-retention-days").value = s.storage_trash_retention_days || 30;
@@ -4841,6 +4845,10 @@ async function saveSettings() {
     cloud_drive_transfer_limits_json: JSON.stringify(collectCloudDriveTransferLimits()),
     remote_download_max_concurrent_global: parseInt($("s-remote-download-max-concurrent-global")?.value || "1", 10) || 1,
     remote_download_max_concurrent_per_user: parseInt($("s-remote-download-max-concurrent-per-user")?.value || "1", 10) || 1,
+    bt_download_backend: ($("s-bt-download-backend")?.value || "auto"),
+    transmission_rpc_url: ($("s-transmission-rpc-url")?.value || "").trim(),
+    transmission_rpc_username: ($("s-transmission-rpc-username")?.value || "").trim(),
+    transmission_rpc_password: ($("s-transmission-rpc-password")?.value || "").trim(),
     storage_maintenance_auto_enabled: !!$("s-storage-maintenance-auto-enabled")?.checked,
     storage_maintenance_daily_time: $("s-storage-maintenance-daily-time")?.value || "04:00",
     storage_trash_retention_days: parseInt($("s-storage-trash-retention-days")?.value || "30"),

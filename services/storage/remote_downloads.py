@@ -1,4 +1,6 @@
+import base64
 import ipaddress
+import json
 import http.client
 import mimetypes
 import os
@@ -47,13 +49,50 @@ class DownloadedFile:
         return open(self.path, "rb")
 
 
+def _bt_backend_preference():
+    value = str(os.environ.get("HACKME_BT_BACKEND", "auto") or "auto").strip().lower()
+    if value in {"transmission", "transmission-rpc", "rpc"}:
+        return "transmission"
+    if value in {"aria2", "aria2c"}:
+        return "aria2"
+    return "auto"
+
+
+def _transmission_rpc_url():
+    return str(os.environ.get("HACKME_TRANSMISSION_RPC_URL", "http://127.0.0.1:9091/transmission/rpc") or "").strip()
+
+
+def _transmission_rpc_auth_header():
+    username = str(os.environ.get("HACKME_TRANSMISSION_RPC_USERNAME", "") or "")
+    password = str(os.environ.get("HACKME_TRANSMISSION_RPC_PASSWORD", "") or "")
+    if not username and not password:
+        return None
+    token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+    return f"Basic {token}"
+
+
+def transmission_rpc_available(*, timeout_seconds=2):
+    try:
+        _transmission_rpc_call("session-get", timeout_seconds=timeout_seconds)
+        return True
+    except Exception:
+        return False
+
+
 def remote_download_capabilities():
     aria2c = shutil.which("aria2c")
+    transmission_rpc = _transmission_rpc_url()
+    transmission_ok = transmission_rpc_available(timeout_seconds=1) if transmission_rpc else False
+    bt_available = bool(transmission_ok or aria2c)
     return {
         "direct_link": True,
-        "bt_magnet": bool(aria2c),
-        "bt_file": bool(aria2c),
+        "bt_magnet": bt_available,
+        "bt_file": bt_available,
+        "bt_backend": _bt_backend_preference(),
+        "bt_backend_active": "transmission" if transmission_ok else ("aria2" if aria2c else ""),
         "aria2c_path": aria2c or "",
+        "transmission_rpc_url": transmission_rpc,
+        "transmission_rpc_available": bool(transmission_ok),
     }
 
 
@@ -509,6 +548,206 @@ def _read_tail(path, *, max_lines=12, max_chars=1200):
         return ""
 
 
+def _transmission_rpc_call(method, arguments=None, *, timeout_seconds=30, session_id=None):
+    url = _transmission_rpc_url()
+    if not url:
+        raise RemoteDownloadError("Transmission RPC URL 未設定")
+    payload = {"method": method, "arguments": arguments or {}}
+    data = json.dumps(payload).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if session_id:
+        headers["X-Transmission-Session-Id"] = session_id
+    auth = _transmission_rpc_auth_header()
+    if auth:
+        headers["Authorization"] = auth
+    request = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+            body = response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        if exc.code == 409:
+            new_session_id = exc.headers.get("X-Transmission-Session-Id")
+            if new_session_id and not session_id:
+                return _transmission_rpc_call(method, arguments, timeout_seconds=timeout_seconds, session_id=new_session_id)
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8", errors="replace")[:300]
+        except Exception:
+            pass
+        raise RemoteDownloadError(f"Transmission RPC 回應 HTTP {exc.code}{(': ' + detail) if detail else ''}") from exc
+    except urllib.error.URLError as exc:
+        raise RemoteDownloadError(f"Transmission RPC 無法連線：{exc.reason}") from exc
+    try:
+        parsed = json.loads(body)
+    except Exception as exc:
+        raise RemoteDownloadError("Transmission RPC 回應不是 JSON") from exc
+    if parsed.get("result") != "success":
+        raise RemoteDownloadError(f"Transmission RPC 失敗：{parsed.get('result') or 'unknown'}")
+    return parsed.get("arguments") or {}
+
+
+def _transmission_failure_message(detail):
+    text = str(detail or "").strip()
+    if not text:
+        return "BT/magnet 下載失敗：Transmission 未提供錯誤細節"
+    return f"BT/magnet 下載失敗：Transmission：{text}"
+
+
+def _torrent_files_from_transmission(tmpdir):
+    files = []
+    root = Path(tmpdir)
+    for path in root.rglob("*"):
+        if not path.is_file() or path.name.endswith(".part"):
+            continue
+        try:
+            if path.stat().st_size <= 0:
+                continue
+        except OSError:
+            continue
+        files.append(str(path))
+    return files
+
+
+def _download_bt_with_transmission(source, *, source_label="BT/magnet", source_is_torrent_file=False, timeout_seconds=300, max_bytes=None, progress_callback=None, rate_limit_kb_per_sec=None, cancel_check=None):
+    tmpdir = tempfile.mkdtemp(prefix="hackme_bt_transmission_")
+    torrent_id = None
+    idle_timeout_seconds = _bt_idle_timeout_seconds(timeout_seconds)
+    absolute_timeout_seconds = _bt_absolute_timeout_seconds()
+    progress_interval_seconds = _bt_progress_interval_seconds()
+    try:
+        _check_remote_download_control(cancel_check)
+        add_args = {"download-dir": tmpdir, "paused": False}
+        if source_is_torrent_file:
+            with open(source, "rb") as fh:
+                add_args["metainfo"] = base64.b64encode(fh.read()).decode("ascii")
+        else:
+            add_args["filename"] = source
+        added = _transmission_rpc_call("torrent-add", add_args, timeout_seconds=min(30, max(5, int(timeout_seconds or 30))))
+        torrent = added.get("torrent-added") or added.get("torrent-duplicate") or {}
+        torrent_id = torrent.get("id")
+        if torrent_id is None:
+            raise RemoteDownloadError("Transmission 未回傳 torrent id")
+        if rate_limit_kb_per_sec:
+            _transmission_rpc_call(
+                "torrent-set",
+                {"ids": [torrent_id], "downloadLimited": True, "downloadLimit": int(rate_limit_kb_per_sec)},
+                timeout_seconds=10,
+            )
+        started = time.monotonic()
+        last_progress_bytes = 0
+        last_progress_ts = started
+        last_activity_bytes = 0
+        last_activity_ts = started
+        _emit_progress(progress_callback, phase="downloading", filename=source_label, loaded_bytes=0, total_bytes=max_bytes, speed_bytes_per_sec=0)
+        while True:
+            try:
+                _check_remote_download_control(cancel_check)
+            except (RemoteDownloadCancelled, RemoteDownloadPaused):
+                _transmission_rpc_call("torrent-remove", {"ids": [torrent_id], "delete-local-data": True}, timeout_seconds=10)
+                torrent_id = None
+                raise
+            now_ts = time.monotonic()
+            fields = ["id", "name", "status", "percentDone", "totalSize", "downloadedEver", "rateDownload", "error", "errorString", "files"]
+            info = _transmission_rpc_call("torrent-get", {"ids": [torrent_id], "fields": fields}, timeout_seconds=10)
+            torrents = info.get("torrents") or []
+            if not torrents:
+                raise RemoteDownloadError("Transmission 任務不存在")
+            item = torrents[0]
+            name = safe_public_filename(item.get("name") or source_label) or source_label
+            total_size = item.get("totalSize") or None
+            downloaded = int(item.get("downloadedEver") or _directory_downloaded_bytes(tmpdir))
+            if downloaded > last_activity_bytes:
+                last_activity_bytes = downloaded
+                last_activity_ts = now_ts
+            if item.get("error"):
+                raise RemoteDownloadError(_transmission_failure_message(item.get("errorString")))
+            if max_bytes is not None and downloaded > int(max_bytes):
+                _transmission_rpc_call("torrent-remove", {"ids": [torrent_id], "delete-local-data": True}, timeout_seconds=10)
+                torrent_id = None
+                raise RemoteDownloadError("BT 下載內容超過容量限制")
+            if absolute_timeout_seconds and now_ts - started > absolute_timeout_seconds:
+                _transmission_rpc_call("torrent-remove", {"ids": [torrent_id], "delete-local-data": True}, timeout_seconds=10)
+                torrent_id = None
+                raise RemoteDownloadError(f"BT 下載超過最長執行時間（{absolute_timeout_seconds} 秒），已停止。")
+            if idle_timeout_seconds and now_ts - last_activity_ts > idle_timeout_seconds:
+                _transmission_rpc_call("torrent-remove", {"ids": [torrent_id], "delete-local-data": True}, timeout_seconds=10)
+                torrent_id = None
+                raise RemoteDownloadError(f"BT 下載停滯逾時：已 {idle_timeout_seconds} 秒沒有下載進度。請確認做種/節點、tracker、DHT 與防火牆狀態。")
+            speed = int(item.get("rateDownload") or _progress_speed_bytes_per_sec(downloaded, last_progress_bytes, now_ts, last_progress_ts))
+            _emit_progress(progress_callback, phase="downloading", filename=name, loaded_bytes=downloaded, total_bytes=total_size, speed_bytes_per_sec=speed)
+            last_progress_bytes = downloaded
+            last_progress_ts = now_ts
+            if float(item.get("percentDone") or 0) >= 1.0:
+                break
+            time.sleep(progress_interval_seconds)
+        _check_remote_download_control(cancel_check)
+        _transmission_rpc_call("torrent-remove", {"ids": [torrent_id], "delete-local-data": False}, timeout_seconds=10)
+        torrent_id = None
+        files = _torrent_files_from_transmission(tmpdir)
+        if not files:
+            raise RemoteDownloadError("BT 下載沒有產生可保存的檔案")
+        if max_bytes is not None:
+            total_downloaded = sum(os.path.getsize(path) for path in files)
+            if total_downloaded > int(max_bytes):
+                raise RemoteDownloadError("BT 下載內容超過容量限制")
+        if len(files) == 1:
+            target = files[0]
+            filename = safe_public_filename(Path(target).name)
+            mimetype = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        else:
+            target = _zip_download_dir(tmpdir, files)
+            filename = "bt-download.zip"
+            mimetype = "application/zip"
+        try:
+            total = os.path.getsize(target)
+        except OSError:
+            total = None
+        _emit_progress(progress_callback, phase="downloaded", filename=filename, loaded_bytes=total, total_bytes=total, speed_bytes_per_sec=0)
+        return DownloadedFile(path=target, filename=filename, mimetype=mimetype, cleanup_dir=tmpdir)
+    except Exception:
+        if torrent_id is not None:
+            try:
+                _transmission_rpc_call("torrent-remove", {"ids": [torrent_id], "delete-local-data": True}, timeout_seconds=10)
+            except Exception:
+                pass
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        raise
+
+
+def _download_bt_with_preferred_backend(source, *, source_label="BT/magnet", source_is_torrent_file=False, timeout_seconds=300, max_bytes=None, progress_callback=None, rate_limit_kb_per_sec=None, exclude_trackers=None, cancel_check=None):
+    backend = _bt_backend_preference()
+    if backend in {"auto", "transmission"}:
+        try:
+            return _download_bt_with_transmission(
+                source,
+                source_label=source_label,
+                source_is_torrent_file=source_is_torrent_file,
+                timeout_seconds=timeout_seconds,
+                max_bytes=max_bytes,
+                progress_callback=progress_callback,
+                rate_limit_kb_per_sec=rate_limit_kb_per_sec,
+                cancel_check=cancel_check,
+            )
+        except (RemoteDownloadCancelled, RemoteDownloadPaused):
+            raise
+        except RemoteDownloadError as exc:
+            message = str(exc)
+            if backend == "transmission" or not shutil.which("aria2c"):
+                raise
+            if not (message.startswith("Transmission RPC") or "Transmission 未回傳 torrent id" in message):
+                raise
+    return _download_bt_with_aria2(
+        source,
+        source_label=source_label,
+        timeout_seconds=timeout_seconds,
+        max_bytes=max_bytes,
+        progress_callback=progress_callback,
+        rate_limit_kb_per_sec=rate_limit_kb_per_sec,
+        exclude_trackers=exclude_trackers,
+        cancel_check=cancel_check,
+    )
+
+
 def _aria2_failure_message(proc, log_path):
     log_tail = _read_tail(log_path)
     output_tail = _tail_lines((proc.stderr or "") + "\n" + (proc.stdout or ""))
@@ -681,9 +920,10 @@ def _download_bt_with_aria2(source, *, source_label="BT/magnet", timeout_seconds
 
 def download_magnet_with_aria2(url, *, timeout_seconds=300, max_bytes=None, progress_callback=None, rate_limit_kb_per_sec=None, cancel_check=None):
     tracker_report = validate_magnet_trackers(url)
-    return _download_bt_with_aria2(
+    return _download_bt_with_preferred_backend(
         url,
         source_label="BT/magnet",
+        source_is_torrent_file=False,
         timeout_seconds=timeout_seconds,
         max_bytes=max_bytes,
         progress_callback=progress_callback,
@@ -698,9 +938,10 @@ def download_torrent_file_with_aria2(torrent_path, *, display_name="BT 檔案", 
         raise RemoteDownloadError("找不到 BT 種子檔")
     _check_remote_download_control(cancel_check)
     tracker_report = validate_torrent_file_trackers(torrent_path)
-    return _download_bt_with_aria2(
+    return _download_bt_with_preferred_backend(
         torrent_path,
         source_label=display_name or "BT 檔案",
+        source_is_torrent_file=True,
         timeout_seconds=timeout_seconds,
         max_bytes=max_bytes,
         progress_callback=progress_callback,

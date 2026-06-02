@@ -3076,6 +3076,69 @@ def test_e2ee_key_endpoint_returns_only_recipient_key(tmp_path):
     assert "沒有可用的解密金鑰" in denied.get_json()["msg"]
 
 
+
+def test_remote_download_capabilities_reports_transmission_backend(monkeypatch):
+    from services.storage import remote_downloads
+
+    monkeypatch.setenv("HACKME_BT_BACKEND", "auto")
+    monkeypatch.setattr(remote_downloads.shutil, "which", lambda name: None)
+    monkeypatch.setattr(remote_downloads, "_transmission_rpc_call", lambda *args, **kwargs: {})
+
+    caps = remote_downloads.remote_download_capabilities()
+
+    assert caps["bt_magnet"] is True
+    assert caps["bt_file"] is True
+    assert caps["bt_backend"] == "auto"
+    assert caps["bt_backend_active"] == "transmission"
+    assert caps["transmission_rpc_available"] is True
+
+
+def test_remote_download_magnet_prefers_transmission_backend(tmp_path, monkeypatch):
+    from services.storage import remote_downloads
+
+    calls = []
+
+    def fake_rpc(method, arguments=None, **kwargs):
+        arguments = arguments or {}
+        calls.append((method, arguments))
+        if method == "torrent-add":
+            target = Path(arguments["download-dir"]) / "movie.mp4"
+            target.write_bytes(b"video")
+            return {"torrent-added": {"id": 7, "name": "movie.mp4"}}
+        if method == "torrent-get":
+            return {
+                "torrents": [{
+                    "id": 7,
+                    "name": "movie.mp4",
+                    "percentDone": 1,
+                    "totalSize": 5,
+                    "downloadedEver": 5,
+                    "rateDownload": 0,
+                    "error": 0,
+                    "errorString": "",
+                    "files": [],
+                }]
+            }
+        if method in {"torrent-remove", "torrent-set"}:
+            return {}
+        raise AssertionError(method)
+
+    monkeypatch.setenv("HACKME_BT_BACKEND", "auto")
+    monkeypatch.setattr(remote_downloads, "_transmission_rpc_call", fake_rpc)
+    monkeypatch.setattr(remote_downloads, "_bt_progress_interval_seconds", lambda: 0)
+    monkeypatch.setattr(remote_downloads.shutil, "which", lambda name: "/usr/bin/aria2c")
+
+    downloaded = remote_downloads.download_magnet_with_aria2(
+        "magnet:?xt=urn:btih:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        timeout_seconds=5,
+    )
+
+    assert downloaded.filename == "movie.mp4"
+    assert Path(downloaded.path).read_bytes() == b"video"
+    assert calls[0][0] == "torrent-add"
+    assert calls[0][1]["filename"].startswith("magnet:")
+    assert ("torrent-remove", {"ids": [7], "delete-local-data": False}) in calls
+
 def test_remote_download_capabilities_and_rejects_local_paths(tmp_path):
     db_path = tmp_path / "drive.db"
     storage_root = tmp_path / "storage"

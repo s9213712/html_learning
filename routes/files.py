@@ -1951,6 +1951,23 @@ def register_file_routes(app, deps):
                 for task in _REMOTE_DOWNLOAD_TASKS.values()
             )
 
+    def _configure_remote_download_backend_from_settings():
+        settings = get_system_settings() or {}
+        backend = str(settings.get("bt_download_backend") or os.environ.get("HACKME_BT_BACKEND") or "auto").strip().lower()
+        if backend not in {"auto", "transmission", "aria2"}:
+            backend = "auto"
+        os.environ["HACKME_BT_BACKEND"] = backend
+        mapping = {
+            "transmission_rpc_url": "HACKME_TRANSMISSION_RPC_URL",
+            "transmission_rpc_username": "HACKME_TRANSMISSION_RPC_USERNAME",
+            "transmission_rpc_password": "HACKME_TRANSMISSION_RPC_PASSWORD",
+        }
+        for setting_key, env_key in mapping.items():
+            raw = settings.get(setting_key)
+            if raw is None:
+                continue
+            os.environ[env_key] = str(raw or "")
+
     def _remote_download_concurrency_limits():
         settings = get_system_settings() or {}
 
@@ -2379,6 +2396,7 @@ def register_file_routes(app, deps):
             conn = None
 
             remote_rate_kb_per_sec = int(_actor_transfer_policy(actor).get("download_kb_per_sec") or 0)
+            _configure_remote_download_backend_from_settings()
             source_type = task.get("source_type") or "url"
             progress_callback = _remote_progress_updater(task_id)
             cancel_check = lambda: _remote_download_cancel_check(task_id)
@@ -2607,7 +2625,7 @@ def register_file_routes(app, deps):
         "is_manager": _is_manager,
         "json_resp": json_resp,
         "list_remote_download_tasks_for_actor": _list_remote_download_tasks_for_actor,
-        "remote_download_capabilities": lambda: remote_download_capabilities(),
+        "remote_download_capabilities": lambda: (_configure_remote_download_backend_from_settings(), remote_download_capabilities())[1],
         "remote_download_storage_path": _remote_download_storage_path,
         "remote_download_tasks": _REMOTE_DOWNLOAD_TASKS,
         "remote_download_tasks_lock": _REMOTE_DOWNLOAD_TASKS_LOCK,

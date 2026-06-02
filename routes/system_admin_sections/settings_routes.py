@@ -636,6 +636,19 @@ def register_system_admin_settings_routes(app, ctx):
             if not is_hhmm(data.get("snapshot_daily_time")):
                 return json_resp({"ok":False,"msg":"snapshot_daily_time 必須是 HH:MM"}), 400
             data["snapshot_daily_time"] = str(data.get("snapshot_daily_time")).strip()
+        if "bt_download_backend" in data:
+            backend = str(data.get("bt_download_backend") or "auto").strip().lower()
+            if backend not in {"auto", "transmission", "aria2"}:
+                return json_resp({"ok":False,"msg":"bt_download_backend 必須是 auto、transmission 或 aria2"}), 400
+            data["bt_download_backend"] = backend
+        if "transmission_rpc_url" in data:
+            rpc_url = str(data.get("transmission_rpc_url") or "").strip()
+            if rpc_url and not (rpc_url.startswith("http://") or rpc_url.startswith("https://")):
+                return json_resp({"ok":False,"msg":"transmission_rpc_url 必須是 http(s) RPC URL 或留空"}), 400
+            data["transmission_rpc_url"] = rpc_url
+        for key in {"transmission_rpc_username", "transmission_rpc_password"}:
+            if key in data:
+                data[key] = str(data.get(key) or "").strip()
         remote_download_ranges = {
             "remote_download_max_concurrent_global": (1, 64),
             "remote_download_max_concurrent_per_user": (1, 16),

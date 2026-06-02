@@ -5847,6 +5847,27 @@
                 <input type="number" id="s-remote-download-max-concurrent-per-user" min="1" max="16" step="1" value="1" />
                 <div class="field-hint">同一帳號同時跑的遠端下載任務數，避免單一用戶用 BT/aria2 佔滿 IO 與網路。</div>
               </div>
+              <div class="field">
+                <label>BT/magnet 下載後端</label>
+                <select id="s-bt-download-backend">
+                  <option value="auto">Auto：Transmission 優先，失敗改 aria2</option>
+                  <option value="transmission">Transmission RPC</option>
+                  <option value="aria2">aria2c</option>
+                </select>
+                <div class="field-hint">Direct link 仍用內建 HTTP/aria2 路徑；BT/magnet 建議 Transmission 管理長任務。</div>
+              </div>
+              <div class="field">
+                <label>Transmission RPC URL</label>
+                <input type="text" id="s-transmission-rpc-url" placeholder="http://127.0.0.1:9091/transmission/rpc" />
+              </div>
+              <div class="field">
+                <label>Transmission RPC 帳號</label>
+                <input type="text" id="s-transmission-rpc-username" autocomplete="off" />
+              </div>
+              <div class="field">
+                <label>Transmission RPC 密碼</label>
+                <input type="password" id="s-transmission-rpc-password" autocomplete="new-password" />
+              </div>
             </div>
             <div class="settings-option-grid billing-editor-grid" style="margin: .85rem 0;">
               <div class="field">
