@@ -45,6 +45,30 @@ python3 server.py
 - multipart guard 預設為 `HTML_LEARNING_MAX_FORM_MEMORY_KB=512` 與
   `HTML_LEARNING_MAX_FORM_PARTS=1000`，用來限制小表單記憶體與 parts 數量。
 
+### Environment variables
+
+`deploy/systemd/hackme-web.env.example` 是正式部署 env 的集中範本；部署者應把它安裝成
+`/etc/hackme_web/hackme-web.env` 並替換 secrets。常用分類如下。
+
+| 分類 | 環境變數 | 說明 |
+| --- | --- | --- |
+| TLS / proxy | `FORCE_HTTPS`, `SESSION_COOKIE_SECURE`, `USE_XFF`, `TRUSTED_PROXY_IPS`, `GUNICORN_FORWARDED_ALLOW_IPS` | Nginx TLS termination 與 proxy header 設定。 |
+| Host guard | `HTML_LEARNING_TRUSTED_HOSTS` | 正式 domain 白名單；公開部署不可留空。 |
+| Multipart guard | `HTML_LEARNING_MAX_FORM_MEMORY_KB`, `HTML_LEARNING_MAX_FORM_PARTS` | 小表單記憶體與 parts 數量限制。 |
+| Secrets | `SESSION_SECRET`, `CSRF_SECRET_KEY`, `ROOT_INTEGRITY_SIGNING_KEY`, `TURNSTILE_SECRET_KEY` | 必須替換；不要提交。 |
+| Runtime dirs | `HACKME_RUNTIME_DIR`, `HTML_LEARNING_DB_DIR`, `HTML_LEARNING_LOG_DIR`, `HTML_LEARNING_STORAGE_DIR`, `HTML_LEARNING_REPORTS_DIR` 等 | mutable runtime / DB / logs / storage 位置。 |
+| Bootstrap | `HTML_LEARNING_ROOT_PASSWORD`, `HTML_LEARNING_MANAGER_PASSWORD` | first boot 用；root 完成 bootstrap 後應 rotate/remove。 |
+| Gunicorn fallback bind | `HTML_LEARNING_HOST`, `HTML_LEARNING_PORT` | Flask fallback 與服務內部 bind 口徑；production Gunicorn 仍由 systemd service `ExecStart` 決定。 |
+| Backpressure | `HTML_LEARNING_BACKPRESSURE_THREAD_CAPACITY`, `HTML_LEARNING_BACKPRESSURE_NORMAL_LIMIT`, `HTML_LEARNING_BACKPRESSURE_HEAVY_LIMIT`, `HTML_LEARNING_BACKPRESSURE_ROOT_LIMIT`, `HTML_LEARNING_BACKPRESSURE_FAST_LANE_RESERVED`, `HTML_LEARNING_BACKPRESSURE_ROOT_PRIORITY_ENABLED` | app-level server busy / fast lane 初始值。 |
+| Remote download capacity | `HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL`, `HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_PER_USER` | Direct link / BT / magnet 外部下載 worker 的全站與單用戶併發預設；老硬體建議 `1/1`。 |
+| BT backend | `HACKME_BT_BACKEND` | `auto`, `transmission`, or `aria2`；fresh DB 預設值，root 前台保存後以 root 設定為準。 |
+| Transmission RPC | `HACKME_TRANSMISSION_RPC_URL`, `HACKME_TRANSMISSION_RPC_USERNAME`, `HACKME_TRANSMISSION_RPC_PASSWORD` | BT/magnet 使用 Transmission RPC 時的連線設定；詳見 [13_REMOTE_DOWNLOAD_TRANSMISSION.md](13_REMOTE_DOWNLOAD_TRANSMISSION.md)。 |
+| Startup | `HTML_LEARNING_BOOTSTRAP_POINTS_CHAIN` | 可選 first boot 行為。 |
+
+Remote download / BT backend env 是 fresh DB / first boot 預設。已存在站點若 root 前台已保存
+`BT/magnet 下載後端` 或 Transmission RPC 設定，runtime 會以 root system settings 為準；需要跨部署
+預先套用時，請同時更新 env 範本與 root 前台預設策略。
+
 Generated runtime files remain local and must not be committed:
 
 - `.env`
