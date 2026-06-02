@@ -2277,9 +2277,6 @@ prompt_runtime_config() {
   if [[ "$RUNTIME_IN_SOURCE" != "1" && !( "$IN_PLACE" == "1" && -n "$CUSTOM_RUNTIME_ROOT" ) ]]; then
     prompt_value "Tmp workspace/run root" "$default_run_root" RUN_ROOT
   fi
-  if [[ "$CUSTOM_RUNTIME_ROOT_PROMPTED" != "1" ]]; then
-    prompt_value "Custom runtime directory/path (blank = launch layout default)" "$CUSTOM_RUNTIME_ROOT" CUSTOM_RUNTIME_ROOT
-  fi
   prompt_value "Cloud drive actual storage root (blank = runtime/storage)" "$CLOUD_DRIVE_STORAGE_ROOT" CLOUD_DRIVE_STORAGE_ROOT
   prompt_value "Cloud drive max occupancy (MB or 10G; blank = keep app default, -1 = disk 95%)" "$CLOUD_DRIVE_GLOBAL_CAPACITY_LIMIT_MB" CLOUD_DRIVE_GLOBAL_CAPACITY_LIMIT_MB
   prompt_value "Host" "$HOST" HOST
