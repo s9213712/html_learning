@@ -91,6 +91,26 @@ def test_dev_launcher_copies_repo_to_tmp_and_bootstraps_dev_friendly_runtime():
     assert 'setsid "$PYTHON_BIN" server.py >"$LOG_CAPTURE" 2>&1 < /dev/null &' in script
 
 
+def test_dev_launcher_prints_transmission_access_credentials():
+    script = (ROOT / "test_for_develop.sh").read_text(encoding="utf-8")
+
+    assert "transmission_rpc_web_url()" in script
+    assert "print_transmission_access_summary()" in script
+    assert '[dev-tmp] transmission_rpc:      ${TRANSMISSION_RPC_URL:-<blank>}' in script
+    assert "[dev-tmp] transmission_web:      $(transmission_rpc_web_url)" in script
+    assert '[dev-tmp] transmission_user:     ${TRANSMISSION_RPC_USERNAME:-<blank>}' in script
+    assert '[dev-tmp] transmission_password: ${TRANSMISSION_RPC_PASSWORD:-<blank>}' in script
+    assert 'say "[dev-tmp] accounts:   root/${ROOT_PASSWORD} admin/${MANAGER_PASSWORD} test/${TEST_PASSWORD}"\nprint_transmission_access_summary' in script
+    assert script.count('say "[dev-tmp] accounts:   root/${ROOT_PASSWORD} admin/${MANAGER_PASSWORD} test/${TEST_PASSWORD}"') == 2
+
+
+def test_dev_launcher_shutdown_recognizes_custom_tmp_run_roots():
+    script = (ROOT / "test_for_develop.sh").read_text(encoding="utf-8")
+
+    assert "/tmp/*/hackme_web|/tmp/*/hackme_web/*" in script
+    assert "-o -path '/tmp/*/hackme_web/runtime/server.pid'" in script
+
+
 def test_dev_launcher_dry_run_resolves_cloud_drive_storage_options(tmp_path):
     storage_root = tmp_path / "drive-store"
 

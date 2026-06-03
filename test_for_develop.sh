@@ -2105,6 +2105,32 @@ print(parsed.port or (443 if parsed.scheme == "https" else 80))
 PY
 }
 
+transmission_rpc_web_url() {
+  local rpc_url="${TRANSMISSION_RPC_URL:-}"
+  case "$rpc_url" in
+    */rpc/)
+      printf '%s/web/\n' "${rpc_url%/rpc/}"
+      ;;
+    */rpc)
+      printf '%s/web/\n' "${rpc_url%/rpc}"
+      ;;
+    *)
+      printf '%s\n' "$rpc_url"
+      ;;
+  esac
+}
+
+print_transmission_access_summary() {
+  local backend="${BT_DOWNLOAD_BACKEND:-${HACKME_BT_BACKEND:-auto}}"
+  if [[ "$backend" != "transmission" && "$SETUP_TRANSMISSION_BACKEND" != "1" && "$TRANSMISSION_CONFIG_SET" != "1" ]]; then
+    return 0
+  fi
+  say "[dev-tmp] transmission_rpc:      ${TRANSMISSION_RPC_URL:-<blank>}"
+  say "[dev-tmp] transmission_web:      $(transmission_rpc_web_url)"
+  say "[dev-tmp] transmission_user:     ${TRANSMISSION_RPC_USERNAME:-<blank>}"
+  say "[dev-tmp] transmission_password: ${TRANSMISSION_RPC_PASSWORD:-<blank>}"
+}
+
 run_transmission_backend_setup_if_requested() {
   [[ "$SETUP_TRANSMISSION_BACKEND" == "1" ]] || return 0
   [[ -f "$TRANSMISSION_SETUP_SCRIPT" ]] || die "Transmission setup helper not found: $TRANSMISSION_SETUP_SCRIPT"
@@ -2180,6 +2206,7 @@ run_transmission_backend_setup_if_requested() {
   export HACKME_TRANSMISSION_RPC_PASSWORD="$TRANSMISSION_RPC_PASSWORD"
   export HACKME_BT_DOWNLOAD_STAGING_DIR="$BT_DOWNLOAD_STAGING_DIR"
   say "[dev-tmp] transmission: configured RPC $TRANSMISSION_RPC_URL, staging $BT_DOWNLOAD_STAGING_DIR"
+  print_transmission_access_summary
 }
 
 prompt_capacity_integer() {
@@ -3920,7 +3947,7 @@ is_dev_server_pid() {
       ;;
     *"gunicorn server:app"*|*"gunicorn"*"server:app"*|*"server.py"*)
       case "$cwd" in
-        "$SOURCE_ROOT"|"$SOURCE_ROOT"/*|/tmp/hackme_web_dev_*/hackme_web|/tmp/hackme_web_dev_*/hackme_web/*|/tmp/hackme_predeploy_capacity_*/profile_*/hackme_web|/tmp/hackme_predeploy_capacity_*/profile_*/hackme_web/*)
+        "$SOURCE_ROOT"|"$SOURCE_ROOT"/*|/tmp/*/hackme_web|/tmp/*/hackme_web/*|/tmp/hackme_predeploy_capacity_*/profile_*/hackme_web|/tmp/hackme_predeploy_capacity_*/profile_*/hackme_web/*)
           return 0
           ;;
       esac
@@ -4046,6 +4073,7 @@ collect_pid_file_pids() {
   done < <(find /tmp -maxdepth 5 \
     \( -path '/tmp/hackme_web_dev_*/runtime/server.pid' \
        -o -path '/tmp/hackme_web_dev_*/hackme_web/runtime/server.pid' \
+       -o -path '/tmp/*/hackme_web/runtime/server.pid' \
        -o -path '/tmp/hackme_predeploy_capacity_*/profile_*/hackme_web/runtime/server.pid' \) \
     -type f 2>/dev/null || true)
   for file in "${candidates[@]:-}"; do
@@ -5385,6 +5413,8 @@ if [[ "$FOREGROUND" == "1" ]]; then
   if [[ "$SERVER_RUNNER" == "flask" ]]; then
     say "[dev-tmp] warning:   Flask/Werkzeug direct server is debug-only; use gunicorn for uploads/HLS/load."
   fi
+  say "[dev-tmp] accounts:   root/${ROOT_PASSWORD} admin/${MANAGER_PASSWORD} test/${TEST_PASSWORD}"
+  print_transmission_access_summary
   print_generated_dev_tokens
   write_restart_shortcut_script
   if [[ "$SERVER_RUNNER" == "gunicorn" ]]; then
@@ -5473,6 +5503,7 @@ else
   say "[dev-tmp] url:       startup pending; inspect logs"
 fi
 say "[dev-tmp] accounts:   root/${ROOT_PASSWORD} admin/${MANAGER_PASSWORD} test/${TEST_PASSWORD}"
+print_transmission_access_summary
 if [[ "$FOREGROUND" == "1" ]]; then
   say "[dev-tmp] log:       foreground mode uses stdout/stderr"
 elif [[ "$SERVER_RUNNER" == "gunicorn" ]]; then
