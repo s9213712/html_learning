@@ -57,7 +57,10 @@ async function doLogin() {
       },
       body: JSON.stringify(loginPayload)
     });
-    const json = await res.json();
+    const json = await res.clone().json().catch(() => ({
+      ok: false,
+      msg: res.status === 503 ? "伺服器忙碌，請稍後再試" : `登入請求失敗（HTTP ${res.status || "?"}）`
+    }));
     if (!json.ok) {
       setCsrfToken(null);
       flash($("li-msg"), json.msg || "登入失敗", false);
