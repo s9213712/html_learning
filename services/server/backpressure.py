@@ -434,9 +434,13 @@ def classify_request_qos(path: str, method: str = "GET") -> str:
         return "health"
     if path.startswith("/js/") or path.startswith("/assets/") or path in {"/styles.css", "/experiments.css", "/i18n-language-switcher.css"}:
         return "static"
+    if path in AUTH_FAST_LANE_PATHS:
+        return "auth"
     if path in AUTH_EDGE_GUARD_PATHS or any(path == prefix or path.startswith(prefix) for prefix in AUTH_EDGE_GUARD_PREFIXES):
         return "auth"
     if path.startswith("/api/root/") or path.startswith("/api/admin/"):
+        return "management"
+    if path.startswith("/api/points/explorer") or path == "/api/points/transactions":
         return "management"
     if is_heavy_request_path(path, method):
         return "heavy"
