@@ -14,7 +14,8 @@ def test_playwright_acceptance_runner_uses_isolated_runtime_and_expected_checks(
     assert "playwright_platform_health_check.py" in text
     assert "playwright_deep_site_check.py" in text
     assert "/tmp/hackme_web_playwright_acceptance_" in text
-    assert "--runtime-root \"${RUNTIME_BASE}/platform\"" in text
+    assert "--runtime-root \"${RUNTIME_BASE}/platform_attempt_${attempt}\"" in text
+    assert "--runtime-root \"${RUNTIME_BASE}/deep_attempt_${attempt}\"" in text
     assert "RUN_DEEP_PLAYWRIGHT" in text
     assert "HTML_LEARNING_PORT=5000" not in text
 
@@ -91,7 +92,7 @@ def test_platform_health_auth_wait_and_screenshots_are_ci_tolerant():
     platform_script = (ROOT / "scripts" / "testing" / "playwright_platform_health_check.py").read_text(encoding="utf-8")
 
     assert "def wait_for_auth_app(page, *, timeout: int = 30000)" in deep_script
-    assert "screenshot capture failed" in platform_script
+    assert "skipped non-blocking screenshot capture" in platform_script
     assert "wait_for_auth_app(page)" in platform_script
 
 

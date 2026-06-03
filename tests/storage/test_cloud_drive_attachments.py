@@ -1209,10 +1209,10 @@ def test_streaming_preview_survives_file_unlink_after_first_chunk(tmp_path):
     }
     client = _build_app(db_path, storage_root, actor_box, settings=settings).test_client()
 
-    payload = b"A" * 12000 + b"B" * 12000
+    payload = b"%PDF-1.4\n" + b"A" * 12000 + b"\n%%EOF\n" + b"B" * 12000
     uploaded = client.post(
         "/api/cloud-drive/upload",
-        data={"file": (io.BytesIO(payload), "large.mp3", "audio/mpeg"), "privacy_mode": "standard_plain"},
+        data={"file": (io.BytesIO(payload), "large.pdf", "application/pdf"), "privacy_mode": "standard_plain"},
         content_type="multipart/form-data",
     )
     assert uploaded.status_code == 200
