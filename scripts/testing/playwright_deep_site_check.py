@@ -969,6 +969,18 @@ def check_video_share_journey(rec: Recorder, page) -> dict[str, Any]:
         shared_playback_body = shared_playback.get("body") or {}
         playback_mode = str(playback_body.get("mode") or playback_body.get("recommended_mode") or "").strip()
         shared_playback_mode = str(shared_playback_body.get("mode") or shared_playback_body.get("recommended_mode") or "").strip()
+
+        def realtime_or_direct_stream_url(body: dict[str, Any]) -> str:
+            realtime_proxy = body.get("realtime_proxy") if isinstance(body, dict) else {}
+            if not isinstance(realtime_proxy, dict):
+                realtime_proxy = {}
+            return str(
+                body.get("stream_url")
+                or body.get("realtime_proxy_url")
+                or realtime_proxy.get("url")
+                or ""
+            ).strip()
+
         hls_master_ok = (
             playback["status"] == 200
             and playback_mode == "hls"
@@ -978,8 +990,8 @@ def check_video_share_journey(rec: Recorder, page) -> dict[str, Any]:
         )
         direct_or_realtime_ok = (
             playback["status"] == 200
-            and playback_mode in {"direct", "realtime"}
-            and bool(playback_body.get("stream_url"))
+            and playback_mode in {"direct", "realtime", "realtime_proxy"}
+            and bool(realtime_or_direct_stream_url(playback_body))
             and not playback_body.get("master_url")
         )
         shared_hls_ok = (
@@ -997,8 +1009,8 @@ def check_video_share_journey(rec: Recorder, page) -> dict[str, Any]:
             not share_url
             or (
                 shared_playback["status"] == 200
-                and shared_playback_mode in {"direct", "realtime"}
-                and bool(shared_playback_body.get("stream_url"))
+                and shared_playback_mode in {"direct", "realtime", "realtime_proxy"}
+                and bool(realtime_or_direct_stream_url(shared_playback_body))
                 and not shared_playback_body.get("master_url")
             )
         )

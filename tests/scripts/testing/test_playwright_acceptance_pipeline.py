@@ -87,6 +87,16 @@ def test_deep_playwright_shared_video_uses_unlock_share_session():
     assert 'f"/api/videos/shared/{token}/playback{share_session_query}"' in script
 
 
+def test_deep_playwright_accepts_current_realtime_proxy_payload():
+    script = (ROOT / "scripts" / "testing" / "playwright_deep_site_check.py").read_text(encoding="utf-8")
+
+    assert "def realtime_or_direct_stream_url" in script
+    assert 'body.get("realtime_proxy_url")' in script
+    assert 'realtime_proxy.get("url")' in script
+    assert 'playback_mode in {"direct", "realtime", "realtime_proxy"}' in script
+    assert 'shared_playback_mode in {"direct", "realtime", "realtime_proxy"}' in script
+
+
 def test_platform_health_auth_wait_and_screenshots_are_ci_tolerant():
     deep_script = (ROOT / "scripts" / "testing" / "playwright_deep_site_check.py").read_text(encoding="utf-8")
     platform_script = (ROOT / "scripts" / "testing" / "playwright_platform_health_check.py").read_text(encoding="utf-8")
