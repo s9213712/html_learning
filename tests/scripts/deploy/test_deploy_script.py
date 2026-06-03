@@ -86,7 +86,8 @@ def test_dev_launcher_copies_repo_to_tmp_and_bootstraps_dev_friendly_runtime():
     assert '("trading.margin_liquidation_enabled", "true")' in script
     assert '("trading.bot_auto_scan_enabled", "true")' in script
     assert '("trading.bot_audit_enabled", "true")' in script
-    assert '("trading.background_worker_dev_ready_enabled", "true")' in script
+    assert '("trading.background_worker_dev_ready_enabled", "true" if os.environ.get("HACKME_DEV_TRADING_BACKGROUND_DEV_READY"' in script
+    assert '("background_worker_dev_ready_enabled", "true" if os.environ.get("HACKME_DEV_TRADING_BACKGROUND_DEV_READY"' in script
     assert 'setsid "$PYTHON_BIN" server.py >"$LOG_CAPTURE" 2>&1 < /dev/null &' in script
 
 
