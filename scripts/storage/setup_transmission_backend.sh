@@ -25,6 +25,7 @@ Options:
                            --rpc-authentication-required false.
   --allow-any-rpc-ip        Listen on 0.0.0.0 and allow RPC login from any IP.
                            Authentication remains required.
+  --no-install              Do not install missing transmission-daemon/acl packages.
   --no-restart              Do not restart transmission-daemon after writing settings.
   --no-systemd-override     Do not install the Type=simple systemd timeout workaround.
   -h, --help                Show this help.
@@ -67,6 +68,7 @@ rpc_authentication_required="true"
 allow_any_rpc_ip="0"
 restart_service="1"
 install_systemd_override="1"
+install_missing_packages="1"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -93,6 +95,7 @@ while [[ $# -gt 0 ]]; do
       rpc_whitelist="*.*.*.*"
       shift
       ;;
+    --no-install) install_missing_packages="0"; shift ;;
     --no-restart) restart_service="0"; shift ;;
     --no-systemd-override) install_systemd_override="0"; shift ;;
     -h|--help) show_usage; exit 0 ;;
@@ -102,6 +105,30 @@ done
 
 as_root
 need_cmd python3
+
+install_missing_transmission_packages() {
+  local packages=()
+  if ! command -v transmission-daemon >/dev/null 2>&1; then
+    packages+=(transmission-daemon)
+  fi
+  if ! command -v setfacl >/dev/null 2>&1; then
+    packages+=(acl)
+  fi
+  if [[ "${#packages[@]}" == "0" ]]; then
+    return 0
+  fi
+  [[ "$install_missing_packages" == "1" ]] || return 0
+  if command -v apt-get >/dev/null 2>&1; then
+    echo "[transmission-setup] installing missing package(s): ${packages[*]}"
+    DEBIAN_FRONTEND=noninteractive apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y "${packages[@]}"
+    return 0
+  fi
+  echo "[transmission-setup] missing package(s): ${packages[*]}; install them manually or use a Debian/Ubuntu host with apt-get" >&2
+  exit 1
+}
+
+install_missing_transmission_packages
 need_cmd systemctl
 need_cmd getent
 need_cmd usermod
@@ -111,6 +138,11 @@ need_cmd chmod
 if [[ -z "$storage_root" ]]; then
   echo "--storage-root is required unless HTML_LEARNING_STORAGE_DIR is set." >&2
   exit 1
+fi
+if [[ ! -f "$settings_file" ]]; then
+  echo "[transmission-setup] settings file not found yet; starting $service_name once to initialize it"
+  systemctl enable --now "$service_name" || true
+  sleep 2
 fi
 if [[ ! -f "$settings_file" ]]; then
   echo "Transmission settings file not found: $settings_file" >&2

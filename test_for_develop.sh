@@ -80,12 +80,21 @@ TRANSMISSION_SETUP_RPC_WHITELIST_ENABLED="${HACKME_DEV_TRANSMISSION_RPC_WHITELIS
 TRANSMISSION_SETUP_RPC_AUTHENTICATION_REQUIRED="${HACKME_DEV_TRANSMISSION_RPC_AUTHENTICATION_REQUIRED:-}"
 TRANSMISSION_SETUP_ALLOW_ANY_RPC_IP="${HACKME_DEV_TRANSMISSION_ALLOW_ANY_RPC_IP:-0}"
 BT_DOWNLOAD_STAGING_DIR="${HACKME_BT_DOWNLOAD_STAGING_DIR:-}"
+BT_DOWNLOAD_CONFIG_SET=0
+TRANSMISSION_CONFIG_SET=0
+REMOTE_DOWNLOAD_LIMITS_SET=0
+[[ -n "${HACKME_BT_BACKEND+x}" ]] && BT_DOWNLOAD_CONFIG_SET=1
+[[ -n "${HACKME_TRANSMISSION_RPC_URL+x}" || -n "${HACKME_TRANSMISSION_RPC_USERNAME+x}" || -n "${HACKME_TRANSMISSION_RPC_PASSWORD+x}" || -n "${HACKME_BT_DOWNLOAD_STAGING_DIR+x}" || -n "${HACKME_DEV_SETUP_TRANSMISSION_BACKEND+x}" || -n "${HACKME_DEV_TRANSMISSION_SETUP_SCRIPT+x}" || -n "${HACKME_DEV_TRANSMISSION_SERVICE+x}" || -n "${HACKME_DEV_TRANSMISSION_SETTINGS_FILE+x}" || -n "${HACKME_DEV_TRANSMISSION_RPC_BIND_ADDRESS+x}" || -n "${HACKME_DEV_TRANSMISSION_RPC_WHITELIST+x}" || -n "${HACKME_DEV_TRANSMISSION_RPC_WHITELIST_ENABLED+x}" || -n "${HACKME_DEV_TRANSMISSION_RPC_AUTHENTICATION_REQUIRED+x}" || -n "${HACKME_DEV_TRANSMISSION_ALLOW_ANY_RPC_IP+x}" ]] && TRANSMISSION_CONFIG_SET=1
+[[ -n "${HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL+x}" || -n "${HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_PER_USER+x}" ]] && REMOTE_DOWNLOAD_LIMITS_SET=1
 DRY_RUN=0
 BACKUP_RUNTIME=0
 BACKUP_ARCHIVE=""
 RESTORE_ARCHIVE=""
 RESET_RUNTIME=0
 DELETE_RUNTIME=0
+RUN_ROOT_SET=0
+RUNTIME_LAYOUT_SET=0
+RUNTIME_ROOT_SET=0
 RESTART_SCRIPT_FILE="${HACKME_DEV_RESTART_SCRIPT_FILE:-$SOURCE_ROOT/restart_develop_server.sh}"
 
 is_auto_capacity_value() {
@@ -110,6 +119,26 @@ append_arg_if_value() {
   [[ -n "$value" ]] || return 0
   local -n target_args="$target_var"
   target_args+=("$option" "$value")
+}
+
+runtime_maintenance_action_requested() {
+  [[ "$BACKUP_RUNTIME" == "1" || -n "$RESTORE_ARCHIVE" || "$RESET_RUNTIME" == "1" || "$DELETE_RUNTIME" == "1" ]]
+}
+
+normalize_runtime_maintenance_options() {
+  normalize_cloud_drive_options
+  normalize_custom_runtime_root
+  if [[ "$RUNTIME_LAYOUT_SET" == "0" && "$RUNTIME_ROOT_SET" == "0" && "$RUN_ROOT_SET" == "0" ]]; then
+    IN_PLACE=1
+    RUNTIME_IN_SOURCE=1
+  fi
+  normalize_yes_no_value "$IN_PLACE" "in-place"
+  IN_PLACE="$NORMALIZED_YES_NO"
+  normalize_yes_no_value "$RUNTIME_IN_SOURCE" "runtime in source"
+  RUNTIME_IN_SOURCE="$NORMALIZED_YES_NO"
+  if [[ "$RUNTIME_IN_SOURCE" == "1" ]]; then
+    IN_PLACE=1
+  fi
 }
 
 write_restart_shortcut_script() {
@@ -155,9 +184,25 @@ write_restart_shortcut_script() {
   append_arg_if_value restart_args --runtime-root "$CUSTOM_RUNTIME_ROOT"
   append_arg_if_value restart_args --transmission-rpc-username "$TRANSMISSION_RPC_USERNAME"
   append_arg_if_value restart_args --transmission-rpc-password "$TRANSMISSION_RPC_PASSWORD"
+  append_arg_if_value restart_args --transmission-setup-script "$TRANSMISSION_SETUP_SCRIPT"
+  append_arg_if_value restart_args --transmission-settings-file "$TRANSMISSION_SETUP_SETTINGS_FILE"
+  append_arg_if_value restart_args --transmission-service "$TRANSMISSION_SETUP_SERVICE"
+  append_arg_if_value restart_args --transmission-rpc-bind-address "$TRANSMISSION_SETUP_RPC_BIND_ADDRESS"
+  append_arg_if_value restart_args --transmission-rpc-whitelist "$TRANSMISSION_SETUP_RPC_WHITELIST"
+  append_arg_if_value restart_args --transmission-rpc-whitelist-enabled "$TRANSMISSION_SETUP_RPC_WHITELIST_ENABLED"
+  append_arg_if_value restart_args --transmission-rpc-authentication-required "$TRANSMISSION_SETUP_RPC_AUTHENTICATION_REQUIRED"
+  append_arg_if_value restart_args --bt-download-staging-dir "$BT_DOWNLOAD_STAGING_DIR"
   append_arg_if_value restart_args --remote-download-global "${HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL:-}"
   append_arg_if_value restart_args --remote-download-per-user "${HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_PER_USER:-}"
 
+  if [[ "$SETUP_TRANSMISSION_BACKEND" == "1" ]]; then
+    restart_args+=(--setup-transmission-backend)
+  else
+    restart_args+=(--no-setup-transmission-backend)
+  fi
+  if [[ "$TRANSMISSION_SETUP_ALLOW_ANY_RPC_IP" == "1" ]]; then
+    restart_args+=(--transmission-allow-any-rpc-ip)
+  fi
   restart_args+=(--no-capacity-probe --no-hls-slot-probe)
   if [[ "$DISABLE_TRUSTED_HOSTS" == "1" ]]; then
     restart_args+=(--allow-any-host)
@@ -206,7 +251,16 @@ write_restart_shortcut_script() {
     printf '%s\n' '#!/usr/bin/env bash'
     printf '%s\n' 'set -Eeuo pipefail'
     local env_name env_value
-    for env_name in       HTML_LEARNING_BACKPRESSURE_THREAD_CAPACITY       HACKME_MEDIA_HLS_MAX_CONCURRENT       HACKME_MEDIA_HLS_SERIALIZE_ALL       HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL       HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_PER_USER; do
+    local restart_env_names=(
+      HTML_LEARNING_BACKPRESSURE_THREAD_CAPACITY
+      HACKME_MEDIA_HLS_MAX_CONCURRENT
+      HACKME_MEDIA_HLS_SERIALIZE_ALL
+      HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL
+      HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_PER_USER
+      HACKME_BT_DOWNLOAD_STAGING_DIR
+      HACKME_DEV_TRANSMISSION_RPC_AUTHENTICATION_REQUIRED
+    )
+    for env_name in "${restart_env_names[@]}"; do
       env_value="${!env_name:-}"
       [[ -n "$env_value" ]] || continue
       printf 'export %s=%s\n' "$env_name" "$(shell_quote "$env_value")"
@@ -692,6 +746,11 @@ Options:
                            Configure daemon RPC to listen on 0.0.0.0 and allow
                            any source IP. Authentication is still required
                            unless --transmission-disable-rpc-auth is also set.
+  --bt-download-staging-dir PATH,
+  --transmission-download-dir PATH
+                           Directory hackme_web scans/imports from when using a
+                           manually configured Transmission daemon. Automatic
+                           setup fills this from the helper output.
   --remote-download-global N
   --remote-download-per-user N
                            Remote download global/per-user concurrency defaults
@@ -718,8 +777,10 @@ Options:
   --dry-run                Print resolved config and exit before copying/starting
   --backup [PATH]          Create a runtime-state backup archive and exit. If PATH
                            is omitted, writes under the runtime parent directory.
-                           Excludes storage/, venv/, pycache/, logs/, pid files,
-                           and temporary caches.
+                           PATH is the output archive or an existing output
+                           directory, not the runtime root; use --runtime-root
+                           to choose the runtime directory. Excludes storage/,
+                           venv/, pycache/, logs/, pid files, and temp caches.
   --restore PATH           Restore runtime state from a --backup archive and exit.
                            Existing runtime state is moved aside to a timestamped
                            .pre-restore-* directory before restore. Does not stop
@@ -921,6 +982,9 @@ normalize_hls_slot_probe_mode() {
 normalize_transmission_setup_mode() {
   normalize_yes_no_value "$SETUP_TRANSMISSION_BACKEND" "setup transmission backend"
   SETUP_TRANSMISSION_BACKEND="$NORMALIZED_YES_NO"
+  if [[ "$SETUP_TRANSMISSION_BACKEND" == "1" ]]; then
+    BT_DOWNLOAD_BACKEND="transmission"
+  fi
   normalize_yes_no_value "$TRANSMISSION_SETUP_ALLOW_ANY_RPC_IP" "allow any Transmission RPC IP"
   TRANSMISSION_SETUP_ALLOW_ANY_RPC_IP="$NORMALIZED_YES_NO"
 }
@@ -1482,6 +1546,11 @@ prompt_requirements_from_features() {
   fi
   recommend_requirements_for_feature_selection || return 0
   recommended_desc="$RECOMMENDED_REQUIREMENTS_FILES"
+  if [[ "$RECOMMENDED_REQUIREMENTS_FILES" == "$REQUIREMENTS_FILE" ]]; then
+    say "Recommended dependency files already selected: $RECOMMENDED_REQUIREMENTS_FILES"
+    print_requirements_feature_guidance
+    return 0
+  fi
   say "Recommended dependency files from selected features: $recommended_desc"
   local saved_requirements="$REQUIREMENTS_FILE"
   REQUIREMENTS_FILE="$RECOMMENDED_REQUIREMENTS_FILES"
@@ -1945,35 +2014,76 @@ prompt_bt_backend_choice() {
   done
 }
 
+prompt_transmission_link_mode() {
+  local answer
+  say "Transmission backend setup:"
+  say "  1) automatic - install/configure transmission-daemon now via sudo/root helper"
+  say "  2) manual    - I already configured Transmission; enter RPC URL, account, and staging/download dir"
+  say "  3) skip      - leave Transmission setup disabled for now"
+  while true; do
+    printf 'Choose Transmission setup mode [1]: '
+    if ! read -r answer; then
+      die "interactive setup was interrupted"
+    fi
+    answer="${answer:-1}"
+    case "${answer,,}" in
+      1|auto|automatic|install|setup)
+        SETUP_TRANSMISSION_BACKEND=1
+        BT_DOWNLOAD_BACKEND="transmission"
+        say "Transmission automatic setup will install/configure transmission-daemon via sudo/root when launch starts."
+        say "The helper will generate or apply RPC credentials and report the staging/download directory back to this script."
+        export HACKME_DEV_SETUP_TRANSMISSION_BACKEND="$SETUP_TRANSMISSION_BACKEND"
+        return 0
+        ;;
+      2|manual|custom|self|existing)
+        SETUP_TRANSMISSION_BACKEND=0
+        BT_DOWNLOAD_BACKEND="transmission"
+        prompt_value "Transmission RPC URL" "$TRANSMISSION_RPC_URL" TRANSMISSION_RPC_URL
+        prompt_value "Transmission RPC username (blank = no auth)" "$TRANSMISSION_RPC_USERNAME" TRANSMISSION_RPC_USERNAME
+        prompt_value "Transmission RPC password (blank = no auth)" "$TRANSMISSION_RPC_PASSWORD" TRANSMISSION_RPC_PASSWORD
+        while [[ -z "$BT_DOWNLOAD_STAGING_DIR" ]]; do
+          prompt_value "Transmission staging/download directory for hackme_web to read completed files" "$BT_DOWNLOAD_STAGING_DIR" BT_DOWNLOAD_STAGING_DIR
+          [[ -n "$BT_DOWNLOAD_STAGING_DIR" ]] || say "Please provide the directory that hackme_web should link/import from."
+        done
+        export HACKME_BT_DOWNLOAD_STAGING_DIR="$BT_DOWNLOAD_STAGING_DIR"
+        return 0
+        ;;
+      3|skip|none|no)
+        SETUP_TRANSMISSION_BACKEND=0
+        return 0
+        ;;
+      *)
+        say "Please choose 1, 2, or 3."
+        ;;
+    esac
+  done
+}
+
 prompt_remote_download_settings() {
-  local configure=0
   local default_global="${HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL:-1}"
   local default_per_user="${HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_PER_USER:-1}"
 
-  say "Remote download / BT settings can also be changed later from root system settings."
-  prompt_yes_no "Configure remote download / BT backend for this launch" 0 configure
-  if [[ "$configure" != "1" ]]; then
-    normalize_bt_download_backend
-    export HACKME_BT_BACKEND="$BT_DOWNLOAD_BACKEND"
-    export HACKME_TRANSMISSION_RPC_URL="$TRANSMISSION_RPC_URL"
-    [[ -n "$TRANSMISSION_RPC_USERNAME" ]] && export HACKME_TRANSMISSION_RPC_USERNAME="$TRANSMISSION_RPC_USERNAME"
-    [[ -n "$TRANSMISSION_RPC_PASSWORD" ]] && export HACKME_TRANSMISSION_RPC_PASSWORD="$TRANSMISSION_RPC_PASSWORD"
-    return 0
+  normalize_bt_download_backend
+  if [[ "$BT_DOWNLOAD_CONFIG_SET" == "1" || "$TRANSMISSION_CONFIG_SET" == "1" || "$REMOTE_DOWNLOAD_LIMITS_SET" == "1" ]]; then
+    say "[dev-tmp] remote download: using explicit env/CLI settings; skipping interactive backend prompts"
+  else
+    say "Remote download / BT settings can also be changed later from root system settings."
+    prompt_bt_backend_choice
+    if [[ "$BT_DOWNLOAD_BACKEND" == "transmission" ]]; then
+      prompt_transmission_link_mode
+    fi
   fi
 
-  prompt_bt_backend_choice
-  if [[ "$BT_DOWNLOAD_BACKEND" != "aria2" ]]; then
-    prompt_value "Transmission RPC URL" "$TRANSMISSION_RPC_URL" TRANSMISSION_RPC_URL
-    prompt_value "Transmission RPC username (blank = no auth)" "$TRANSMISSION_RPC_USERNAME" TRANSMISSION_RPC_USERNAME
-    prompt_value "Transmission RPC password (blank = no auth)" "$TRANSMISSION_RPC_PASSWORD" TRANSMISSION_RPC_PASSWORD
+  if [[ "$REMOTE_DOWNLOAD_LIMITS_SET" != "1" ]]; then
+    prompt_capacity_integer "Remote download global concurrency" "$default_global" HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL
+    prompt_capacity_integer "Remote download per-user concurrency" "$default_per_user" HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_PER_USER
   fi
-  prompt_capacity_integer "Remote download global concurrency" "$default_global" HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL
-  prompt_capacity_integer "Remote download per-user concurrency" "$default_per_user" HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_PER_USER
 
   export HACKME_BT_BACKEND="$BT_DOWNLOAD_BACKEND"
   export HACKME_TRANSMISSION_RPC_URL="$TRANSMISSION_RPC_URL"
   export HACKME_TRANSMISSION_RPC_USERNAME="$TRANSMISSION_RPC_USERNAME"
   export HACKME_TRANSMISSION_RPC_PASSWORD="$TRANSMISSION_RPC_PASSWORD"
+  export HACKME_BT_DOWNLOAD_STAGING_DIR="$BT_DOWNLOAD_STAGING_DIR"
   export HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL
   export HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_PER_USER
 }
@@ -2993,7 +3103,7 @@ prompt_server_runner() {
       prompt_capacity_probe_tier
     fi
     run_capacity_probe_for_defaults
-  elif [[ -f "$CAPACITY_DEFAULTS_FILE" ]]; then
+  elif [[ "$CAPACITY_SETTINGS_FINALIZED" != "1" && -f "$CAPACITY_DEFAULTS_FILE" ]]; then
     prompt_yes_no "Retest local capacity before launch (existing .hackme_capacity_defaults.env will be reused if no)" 0 run_capacity_probe
     if [[ "$run_capacity_probe" == "1" ]]; then
       CAPACITY_PROBE_MODE="force"
@@ -3002,7 +3112,7 @@ prompt_server_runner() {
       fi
       run_capacity_probe_for_defaults
     fi
-  elif gunicorn_capacity_auto_requested && [[ "$CAPACITY_PROBE_MODE" != "never" ]]; then
+  elif [[ "$CAPACITY_SETTINGS_FINALIZED" != "1" ]] && gunicorn_capacity_auto_requested && [[ "$CAPACITY_PROBE_MODE" != "never" ]]; then
     prompt_yes_no "No local capacity result found. Run capacity probe for auto settings now" 1 run_capacity_probe
     if [[ "$run_capacity_probe" == "1" ]]; then
       if [[ "$CAPACITY_PROBE_TIER" == "auto" ]]; then
@@ -3399,13 +3509,43 @@ runtime_archive_is_safe_path() {
   return 1
 }
 
+runtime_root_has_backup_state() {
+  [[ -d "$RUNTIME_ROOT" ]] || return 1
+  local item
+  for item in database chats anchors reports dev_tokens.json server.pid; do
+    if [[ -e "$RUNTIME_ROOT/$item" ]]; then
+      return 0
+    fi
+  done
+  find "$RUNTIME_ROOT" -mindepth 1 -maxdepth 2 \
+    ! -path "$RUNTIME_ROOT/storage" \
+    ! -path "$RUNTIME_ROOT/storage/*" \
+    ! -path "$RUNTIME_ROOT/venv" \
+    ! -path "$RUNTIME_ROOT/venv/*" \
+    ! -path "$RUNTIME_ROOT/logs" \
+    ! -path "$RUNTIME_ROOT/logs/*" \
+    ! -path "$RUNTIME_ROOT/pycache" \
+    ! -path "$RUNTIME_ROOT/pycache/*" \
+    ! -path "$RUNTIME_ROOT/tmp" \
+    ! -path "$RUNTIME_ROOT/tmp/*" \
+    ! -path "$RUNTIME_ROOT/temp" \
+    ! -path "$RUNTIME_ROOT/temp/*" \
+    -print -quit 2>/dev/null | grep -q .
+}
+
 backup_runtime_state() {
   local archive="$1"
   if [[ ! -d "$RUNTIME_ROOT" ]]; then
     die "runtime root does not exist; cannot backup: $RUNTIME_ROOT"
   fi
+  if ! runtime_root_has_backup_state; then
+    die "runtime root has no recognizable runtime state to backup: $RUNTIME_ROOT (pass --runtime-root PATH for the runtime directory; --backup PATH is the output archive or directory)"
+  fi
+  if [[ -n "$archive" && -d "$archive" ]]; then
+    archive="$archive/hackme_runtime_backup_${RUN_ID}.tar.gz"
+  fi
   [[ -n "$archive" ]] || archive="$(runtime_backup_default_archive)"
-  runtime_archive_is_safe_path "$archive" || die "backup archive must end with .tar.gz or .tgz: $archive"
+  runtime_archive_is_safe_path "$archive" || die "backup archive must end with .tar.gz or .tgz, or be an existing directory: $archive"
   if path_is_inside_runtime "$archive"; then
     die "backup archive must be outside runtime root: $archive"
   fi
@@ -4219,66 +4359,89 @@ while [[ $# -gt 0 ]]; do
       ;;
     --bt-backend|--bt-download-backend)
       BT_DOWNLOAD_BACKEND="${2:?missing BT backend}"
+      BT_DOWNLOAD_CONFIG_SET=1
       shift 2
       ;;
     --transmission-rpc-url)
       TRANSMISSION_RPC_URL="${2:?missing Transmission RPC URL}"
+      TRANSMISSION_CONFIG_SET=1
       shift 2
       ;;
     --transmission-rpc-username)
       TRANSMISSION_RPC_USERNAME="${2:?missing Transmission RPC username}"
+      TRANSMISSION_CONFIG_SET=1
       shift 2
       ;;
     --transmission-rpc-password)
       TRANSMISSION_RPC_PASSWORD="${2:?missing Transmission RPC password}"
+      TRANSMISSION_CONFIG_SET=1
       shift 2
       ;;
     --setup-transmission-backend|--configure-transmission-backend)
       SETUP_TRANSMISSION_BACKEND=1
+      TRANSMISSION_CONFIG_SET=1
+      BT_DOWNLOAD_CONFIG_SET=1
       shift
       ;;
     --no-setup-transmission-backend)
       SETUP_TRANSMISSION_BACKEND=0
+      TRANSMISSION_CONFIG_SET=1
       shift
       ;;
     --transmission-setup-script)
       TRANSMISSION_SETUP_SCRIPT="${2:?missing Transmission setup helper path}"
+      TRANSMISSION_CONFIG_SET=1
       shift 2
       ;;
     --transmission-settings-file)
       TRANSMISSION_SETUP_SETTINGS_FILE="${2:?missing Transmission settings file}"
+      TRANSMISSION_CONFIG_SET=1
       shift 2
       ;;
     --transmission-service)
       TRANSMISSION_SETUP_SERVICE="${2:?missing Transmission service name}"
+      TRANSMISSION_CONFIG_SET=1
       shift 2
       ;;
     --transmission-rpc-bind-address)
       TRANSMISSION_SETUP_RPC_BIND_ADDRESS="${2:?missing Transmission RPC bind address}"
+      TRANSMISSION_CONFIG_SET=1
       shift 2
       ;;
     --transmission-rpc-whitelist)
       TRANSMISSION_SETUP_RPC_WHITELIST="${2:?missing Transmission RPC whitelist}"
+      TRANSMISSION_CONFIG_SET=1
       shift 2
       ;;
     --transmission-rpc-whitelist-enabled)
       TRANSMISSION_SETUP_RPC_WHITELIST_ENABLED="${2:?missing Transmission RPC whitelist enabled value}"
+      TRANSMISSION_CONFIG_SET=1
       shift 2
       ;;
     --transmission-rpc-authentication-required)
       TRANSMISSION_SETUP_RPC_AUTHENTICATION_REQUIRED="${2:?missing Transmission RPC authentication required value}"
+      TRANSMISSION_CONFIG_SET=1
       shift 2
       ;;
     --transmission-disable-rpc-auth|--disable-transmission-rpc-auth|--transmission-no-rpc-auth)
       TRANSMISSION_SETUP_RPC_AUTHENTICATION_REQUIRED=false
+      TRANSMISSION_CONFIG_SET=1
       shift
       ;;
     --transmission-allow-any-rpc-ip|--allow-any-transmission-rpc-ip)
       TRANSMISSION_SETUP_ALLOW_ANY_RPC_IP=1
+      TRANSMISSION_CONFIG_SET=1
       shift
+      ;;
+    --bt-download-staging-dir|--transmission-download-dir|--transmission-staging-dir)
+      BT_DOWNLOAD_STAGING_DIR="${2:?missing BT download staging directory}"
+      TRANSMISSION_CONFIG_SET=1
+      export HACKME_BT_DOWNLOAD_STAGING_DIR="$BT_DOWNLOAD_STAGING_DIR"
+      shift 2
       ;;
     --remote-download-global|--remote-download-max-concurrent-global)
       HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL="${2:?missing remote download global concurrency}"
+      REMOTE_DOWNLOAD_LIMITS_SET=1
       export HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL
       HACKME_REMOTE_DOWNLOAD_LIMITS_PREFER_ENV=1
       export HACKME_REMOTE_DOWNLOAD_LIMITS_PREFER_ENV
@@ -4286,6 +4449,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     --remote-download-per-user|--remote-download-max-concurrent-per-user)
       HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_PER_USER="${2:?missing remote download per-user concurrency}"
+      REMOTE_DOWNLOAD_LIMITS_SET=1
       export HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_PER_USER
       HACKME_REMOTE_DOWNLOAD_LIMITS_PREFER_ENV=1
       export HACKME_REMOTE_DOWNLOAD_LIMITS_PREFER_ENV
@@ -4347,28 +4511,34 @@ while [[ $# -gt 0 ]]; do
       ;;
     --run-root)
       RUN_ROOT="${2:?missing run root}"
+      RUN_ROOT_SET=1
       shift 2
       ;;
     --runtime-root|--runtime-dir|--runtime-directory)
       CUSTOM_RUNTIME_ROOT="${2:?missing runtime root}"
+      RUNTIME_ROOT_SET=1
       shift 2
       ;;
     --in-place|--no-copy)
       IN_PLACE=1
+      RUNTIME_LAYOUT_SET=1
       shift
       ;;
     --runtime-in-source|--source-runtime|--deploy-in-place)
       IN_PLACE=1
       RUNTIME_IN_SOURCE=1
+      RUNTIME_LAYOUT_SET=1
       shift
       ;;
     --tmp-runtime)
       RUNTIME_IN_SOURCE=0
+      RUNTIME_LAYOUT_SET=1
       shift
       ;;
     --copy)
       IN_PLACE=0
       RUNTIME_IN_SOURCE=0
+      RUNTIME_LAYOUT_SET=1
       shift
       ;;
     --skip-install)
@@ -4432,13 +4602,17 @@ if [[ "$SHUTDOWN" == "1" ]]; then
   exit 0
 fi
 
-if [[ "$CLI_MODE" != "1" ]]; then
+if [[ "$CLI_MODE" != "1" ]] && ! runtime_maintenance_action_requested; then
   prompt_runtime_config
 fi
-normalize_runtime_options
-normalize_yes_no_value "$DISABLE_TRUSTED_HOSTS" "disable trusted hosts"
-DISABLE_TRUSTED_HOSTS="$NORMALIZED_YES_NO"
-finalize_trusted_hosts
+if runtime_maintenance_action_requested; then
+  normalize_runtime_maintenance_options
+else
+  normalize_runtime_options
+  normalize_yes_no_value "$DISABLE_TRUSTED_HOSTS" "disable trusted hosts"
+  DISABLE_TRUSTED_HOSTS="$NORMALIZED_YES_NO"
+  finalize_trusted_hosts
+fi
 
 RUN_ROOT="${RUN_ROOT:-/tmp/hackme_web_dev_${RUN_ID}_$$}"
 if [[ "$DRY_RUN" == "1" ]]; then
@@ -4586,6 +4760,7 @@ export HACKME_DEV_TRANSMISSION_SETTINGS_FILE="$TRANSMISSION_SETUP_SETTINGS_FILE"
 export HACKME_DEV_TRANSMISSION_RPC_BIND_ADDRESS="$TRANSMISSION_SETUP_RPC_BIND_ADDRESS"
 export HACKME_DEV_TRANSMISSION_RPC_WHITELIST="$TRANSMISSION_SETUP_RPC_WHITELIST"
 export HACKME_DEV_TRANSMISSION_RPC_WHITELIST_ENABLED="$TRANSMISSION_SETUP_RPC_WHITELIST_ENABLED"
+export HACKME_DEV_TRANSMISSION_RPC_AUTHENTICATION_REQUIRED="$TRANSMISSION_SETUP_RPC_AUTHENTICATION_REQUIRED"
 export HACKME_DEV_TRANSMISSION_ALLOW_ANY_RPC_IP="$TRANSMISSION_SETUP_ALLOW_ANY_RPC_IP"
 if [[ "$SERVER_RUNNER" == "flask" ]]; then
   export HACKME_ALLOW_DIRECT_SERVER=1
