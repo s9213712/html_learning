@@ -792,6 +792,11 @@ Options:
                            preserves storage/, venv/, and server-side secret/key
                            material such as .filekey, .fkey, .csrfkey,
                            .integrity_key, .chain_seed, cert.pem, and key.pem.
+                           Warning: cloud-drive DB/catalog rows are cleared, so
+                           preserved storage/ files become orphaned. If you keep
+                           the pre-reset database/catalog metadata and .filekey,
+                           server_encrypted files can be exported with
+                           scripts/admin/decrypt_server_files.py.
   --delete                 Delete selected runtime root and exit. Refuses to run
                            while that runtime is active. If storage/ is inside the
                            runtime root, it is moved to a timestamped
@@ -3672,6 +3677,8 @@ reset_runtime_state() {
   ensure_runtime_not_running "reset"
   say "[dev-tmp] reset:    runtime=$RUNTIME_ROOT"
   say "[dev-tmp] reset:    preserving storage/, venv/, and server-side secret/key files"
+  say "[dev-tmp] reset:    warning: database/catalog rows are cleared; preserved storage files may become orphaned"
+  say "[dev-tmp] reset:    server_encrypted exports need pre-reset DB metadata plus .filekey; see scripts/admin/decrypt_server_files.py"
   mkdir -p "$RUNTIME_ROOT"
   rm -rf \
     "$RUNTIME_ROOT/database" \

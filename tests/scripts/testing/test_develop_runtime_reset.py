@@ -15,6 +15,9 @@ def test_reset_help_documents_preserved_server_secret_material():
     text = SCRIPT.read_text(encoding="utf-8")
 
     assert "preserves storage/, venv/, and server-side secret/key" in text
+    assert "preserved storage/ files become orphaned" in text
+    assert "scripts/admin/decrypt_server_files.py" in text
+    assert "pre-reset database/catalog metadata and .filekey" in text
     for name in (
         ".filekey",
         ".fkey",
@@ -31,6 +34,9 @@ def test_reset_runtime_state_does_not_delete_server_secret_material():
     body = _reset_function_body()
 
     assert "preserving storage/, venv/, and server-side secret/key files" in body
+    assert "preserved storage files may become orphaned" in body
+    assert "server_encrypted exports need pre-reset DB metadata plus .filekey" in body
+    assert "scripts/admin/decrypt_server_files.py" in body
     for name in (
         ".filekey",
         ".fkey",
