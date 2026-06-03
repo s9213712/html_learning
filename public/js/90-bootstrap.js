@@ -1,9 +1,33 @@
+function bindAuthTabEvents() {
+  const tabLogin = $("tab-login");
+  const tabRegister = $("tab-register");
+  if (tabLogin && tabLogin.dataset.authTabBound !== "1") {
+    tabLogin.addEventListener("click", () => showTab("login"));
+    tabLogin.dataset.authTabBound = "1";
+  }
+  if (tabRegister && tabRegister.dataset.authTabBound !== "1") {
+    tabRegister.addEventListener("click", () => showTab("register"));
+    tabRegister.dataset.authTabBound = "1";
+  }
+}
+
+function bindAuthSubmitEvents() {
+  const liBtn = $("li-btn");
+  const regBtn = $("reg-btn");
+  if (liBtn && liBtn.dataset.authSubmitBound !== "1") {
+    liBtn.addEventListener("click", doLogin);
+    liBtn.dataset.authSubmitBound = "1";
+  }
+  if (regBtn && regBtn.dataset.authSubmitBound !== "1") {
+    regBtn.addEventListener("click", doRegister);
+    regBtn.dataset.authSubmitBound = "1";
+  }
+}
+
 function bindUiEvents() {
   if (typeof decorateSidebarMenu === "function") decorateSidebarMenu();
   if (typeof bindProfileFriendsControls === "function") bindProfileFriendsControls();
   if (typeof relocateSystemAdminSections === "function") relocateSystemAdminSections();
-  const tabLogin    = $("tab-login");
-  const tabRegister = $("tab-register");
   const tabModuleChat = $("tab-module-chat");
   const tabModuleProfile = $("tab-module-profile");
   const tabModuleAnnouncements = $("tab-module-announcements");
@@ -47,8 +71,6 @@ function bindUiEvents() {
   const tabNotices = $("tab-notices");
   const tabAppeals  = $("tab-appeals");
   const tabReports  = $("tab-reports");
-  const liBtn       = $("li-btn");
-  const regBtn      = $("reg-btn");
   const recoveryToggle = $("recovery-toggle");
   const resetRequestBtn = $("reset-request-btn");
   const resetConfirmBtn = $("reset-confirm-btn");
@@ -242,8 +264,7 @@ function bindUiEvents() {
   const adminAddOverlay = $("admin-add-overlay");
   const bugReportOverlay = $("bug-report-overlay");
 
-  if (tabLogin)    tabLogin.addEventListener("click",    () => showTab("login"));
-  if (tabRegister) tabRegister.addEventListener("click", () => showTab("register"));
+  bindAuthTabEvents();
   if (tabModuleChat) tabModuleChat.addEventListener("click", () => switchModuleTab("chat"));
   if (tabModuleProfile) tabModuleProfile.addEventListener("click", () => switchModuleTab("profile"));
   if (tabModuleAnnouncements) tabModuleAnnouncements.addEventListener("click", () => switchModuleTab("announcements"));
@@ -298,8 +319,7 @@ function bindUiEvents() {
     else if (typeof loadJobCenter === "function") loadJobCenter();
   });
   if (shareCenterRefreshBtn) shareCenterRefreshBtn.addEventListener("click", () => loadShareCenter());
-  if (liBtn)       liBtn.addEventListener("click",        doLogin);
-  if (regBtn)      regBtn.addEventListener("click",       doRegister);
+  bindAuthSubmitEvents();
   if (typeof bindRegisterFieldHelpers === "function") bindRegisterFieldHelpers();
   if (typeof bindAuthRecoveryControls === "function") bindAuthRecoveryControls();
   else {
@@ -667,6 +687,8 @@ $("reg-pw").addEventListener("keydown", (e) => {
 if (typeof bindAuthRecoveryControls === "function") bindAuthRecoveryControls();
 
 (async function init() {
+  bindAuthTabEvents();
+  bindAuthSubmitEvents();
   await loadSiteConfig();
   setupInactivityTracking();
   startServerConnectionMonitor();

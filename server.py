@@ -1694,7 +1694,6 @@ def start_daily_snapshot_worker(shutdown_event=None):
         get_system_settings=get_system_settings,
         save_settings=save_settings,
         audit=audit,
-        storage_root=STORAGE_DIR,
         shutdown_event=shutdown_event or SERVER_SHUTDOWN_EVENT,
     )
 
