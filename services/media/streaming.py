@@ -505,6 +505,16 @@ def direct_browser_playback_status(file_row, *, storage_root=None, ffprobe_bin="
     ext = _source_filename_ext(file_row)
     mime = _declared_or_guessed_mime(file_row)
     media_type = _file_media_type(file_row)
+    filename = str(_row_value(file_row, "original_filename_plain_for_public", "") or "").lower()
+    if media_type == "video" and any(token in filename for token in ("hevc", "h265", "h.265", "x265", "10bit", "10-bit")):
+        return {
+            "available": False,
+            "reason": "codec_or_track_not_browser_native",
+            "detail": "檔名顯示原始影片是 HEVC/H.265 或 10-bit，瀏覽器直接播放支援不穩定，請使用即時轉封裝或 HLS。",
+            "mime_type": mime,
+            "extension": ext,
+            "media_type": media_type,
+        }
     incompatible_exts = {".mkv", ".avi", ".ts", ".m2ts", ".mts", ".flv", ".wmv", ".ogv"}
     if ext in incompatible_exts:
         return {
