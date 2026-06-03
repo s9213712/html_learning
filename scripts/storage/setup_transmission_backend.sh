@@ -15,6 +15,12 @@ Options:
   --rpc-username USER       RPC username. Default: hackme_web
   --rpc-password PASS       RPC password. Default: generated random password
   --rpc-port PORT           RPC port. Default: 9091
+  --rpc-bind-address ADDR   RPC bind address. Default: 127.0.0.1
+  --rpc-whitelist LIST      RPC IP whitelist. Default: 127.0.0.1,::1
+  --rpc-whitelist-enabled VALUE
+                           Enable RPC IP whitelist: true/false. Default: true
+  --allow-any-rpc-ip        Listen on 0.0.0.0 and allow RPC login from any IP.
+                           Authentication remains required.
   --no-restart              Do not restart transmission-daemon after writing settings.
   --no-systemd-override     Do not install the Type=simple systemd timeout workaround.
   -h, --help                Show this help.
@@ -35,6 +41,13 @@ as_root() {
   fi
 }
 
+bool_is_false() {
+  case "${1,,}" in
+    0|false|no|n|off|disable|disabled) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 storage_root="${HTML_LEARNING_STORAGE_DIR:-}"
 settings_file="/etc/transmission-daemon/settings.json"
 service_name="transmission-daemon"
@@ -43,6 +56,10 @@ app_user="${SUDO_USER:-$(id -un)}"
 rpc_username="hackme_web"
 rpc_password=""
 rpc_port="9091"
+rpc_bind_address="127.0.0.1"
+rpc_whitelist="127.0.0.1,::1"
+rpc_whitelist_enabled="true"
+allow_any_rpc_ip="0"
 restart_service="1"
 install_systemd_override="1"
 
@@ -56,6 +73,16 @@ while [[ $# -gt 0 ]]; do
     --rpc-username) rpc_username="${2:?missing --rpc-username value}"; shift 2 ;;
     --rpc-password) rpc_password="${2:?missing --rpc-password value}"; shift 2 ;;
     --rpc-port) rpc_port="${2:?missing --rpc-port value}"; shift 2 ;;
+    --rpc-bind-address) rpc_bind_address="${2:?missing --rpc-bind-address value}"; shift 2 ;;
+    --rpc-whitelist) rpc_whitelist="${2:?missing --rpc-whitelist value}"; shift 2 ;;
+    --rpc-whitelist-enabled) rpc_whitelist_enabled="${2:?missing --rpc-whitelist-enabled value}"; shift 2 ;;
+    --allow-any-rpc-ip|--rpc-allow-any-ip)
+      allow_any_rpc_ip="1"
+      rpc_bind_address="0.0.0.0"
+      rpc_whitelist_enabled="false"
+      rpc_whitelist="*.*.*.*"
+      shift
+      ;;
     --no-restart) restart_service="0"; shift ;;
     --no-systemd-override) install_systemd_override="0"; shift ;;
     -h|--help) show_usage; exit 0 ;;
@@ -129,6 +156,8 @@ cat <<INFO
 [transmission-setup] app_user:          $app_user
 [transmission-setup] transmission_user: $transmission_user
 [transmission-setup] shared_group:      $shared_group
+[transmission-setup] rpc_bind_address:  $rpc_bind_address
+[transmission-setup] rpc_whitelist:     $(bool_is_false "$rpc_whitelist_enabled" && printf 'disabled (any IP)' || printf '%s' "$rpc_whitelist")
 [transmission-setup] download_dir:      $download_dir
 [transmission-setup] staging_dir:       $staging_dir
 INFO
@@ -192,27 +221,50 @@ OVERRIDE
   echo "[transmission-setup] installed systemd Type=simple override: ${override_dir}/hackme-web.conf"
 fi
 
-python3 - <<'PYSET' "$settings_file" "$download_dir" "$incomplete_dir" "$rpc_username" "$rpc_password" "$rpc_port"
+python3 - <<'PYSET' "$settings_file" "$download_dir" "$incomplete_dir" "$rpc_username" "$rpc_password" "$rpc_port" "$rpc_bind_address" "$rpc_whitelist_enabled" "$rpc_whitelist" "$allow_any_rpc_ip"
 import json
 import sys
 from pathlib import Path
+
+def parse_bool(raw, *, name):
+    value = str(raw or "").strip().lower()
+    if value in {"1", "true", "yes", "y", "on", "enable", "enabled"}:
+        return True
+    if value in {"0", "false", "no", "n", "off", "disable", "disabled"}:
+        return False
+    print(f"{name} must be true/false or 1/0: {raw}", file=sys.stderr)
+    raise SystemExit(2)
+
 settings_path = Path(sys.argv[1])
-download_dir, incomplete_dir, rpc_username, rpc_password, rpc_port = sys.argv[2:7]
+(
+    download_dir,
+    incomplete_dir,
+    rpc_username,
+    rpc_password,
+    rpc_port,
+    rpc_bind_address,
+    rpc_whitelist_enabled,
+    rpc_whitelist,
+    allow_any_rpc_ip,
+) = sys.argv[2:11]
+rpc_whitelist_enabled_bool = parse_bool(rpc_whitelist_enabled, name="rpc-whitelist-enabled")
 data = json.loads(settings_path.read_text(encoding='utf-8'))
 data.update({
     'download-dir': download_dir,
     'incomplete-dir': incomplete_dir,
     'incomplete-dir-enabled': True,
     'rpc-enabled': True,
-    'rpc-bind-address': '127.0.0.1',
+    'rpc-bind-address': rpc_bind_address,
     'rpc-port': int(rpc_port),
     'rpc-authentication-required': True,
     'rpc-username': rpc_username,
     'rpc-password': rpc_password,
-    'rpc-whitelist-enabled': True,
-    'rpc-whitelist': '127.0.0.1,::1',
+    'rpc-whitelist-enabled': rpc_whitelist_enabled_bool,
+    'rpc-whitelist': rpc_whitelist,
     'umask': 2,
 })
+if allow_any_rpc_ip == "1":
+    data['rpc-host-whitelist-enabled'] = False
 settings_path.write_text(json.dumps(data, indent=4, sort_keys=True) + '\n', encoding='utf-8')
 PYSET
 chown "$transmission_user":"$shared_group" "$settings_file"
@@ -233,6 +285,8 @@ Copy these values into hackme_web root system settings:
   Transmission RPC URL:        http://127.0.0.1:${rpc_port}/transmission/rpc
   Transmission RPC username:   ${rpc_username}
   Transmission RPC password:   ${rpc_password}
+  Transmission RPC bind:       ${rpc_bind_address}
+  Transmission RPC IP access:  $(bool_is_false "$rpc_whitelist_enabled" && printf 'any IP (whitelist disabled)' || printf 'whitelist %s' "$rpc_whitelist")
 
 Also set this env for app-side per-user/per-task staging:
   HACKME_BT_DOWNLOAD_STAGING_DIR=${staging_dir}
@@ -245,6 +299,9 @@ Important:
     re-login/restart to see the new ${shared_group} membership.
   - A systemd Type=simple drop-in may have been installed because some Ubuntu
     Transmission builds start correctly but never send READY=1 to Type=notify.
+  - If RPC bind is 0.0.0.0, hackme_web can still use the local RPC URL above;
+    remote clients should use http://<server-ip>:${rpc_port}/transmission/rpc.
+    Keep RPC behind LAN/VPN/firewall and keep authentication enabled.
   - Backup created before writing: ${backup_file}
 
 Quick RPC check:

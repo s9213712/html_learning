@@ -71,6 +71,54 @@ Remote download per-user concurrency [1]:
   --transmission-rpc-password PASS
 ```
 
+若要同時自動設定本機 Transmission daemon、修正 storage/staging 權限，使用既有 helper，不要手改
+`/etc/transmission-daemon/settings.json`：
+
+```bash
+./test_for_develop.sh --cli \
+  --bt-backend transmission \
+  --setup-transmission-backend \
+  --transmission-rpc-url http://127.0.0.1:9091/transmission/rpc \
+  --remote-download-global 1 \
+  --remote-download-per-user 1
+```
+
+`--setup-transmission-backend` 會呼叫
+`scripts/storage/setup_transmission_backend.sh`。這支 helper 會備份 Transmission
+`settings.json`、建立 `hackme-bt` 共用群組、設定 download/incomplete/staging 目錄權限、
+安裝必要 systemd override、重啟 `transmission-daemon`，並把產生的 RPC 帳密與
+`HACKME_BT_DOWNLOAD_STAGING_DIR` 回填到本次 dev launch。helper 輸出包含 RPC 密碼，
+因此 `test_for_develop.sh` 會把完整輸出寫入
+`runtime/logs/transmission_setup.out`，權限設為 `600`。
+
+如果需要自訂 daemon 位置：
+
+```bash
+./test_for_develop.sh --cli \
+  --setup-transmission-backend \
+  --transmission-settings-file /etc/transmission-daemon/settings.json \
+  --transmission-service transmission-daemon
+```
+
+若 QA 需要從其他機器連到同一台 Transmission RPC，可明確要求 helper
+把 daemon 聽在 `0.0.0.0`，並關閉 Transmission 的來源 IP whitelist：
+
+```bash
+./test_for_develop.sh --cli \
+  --setup-transmission-backend \
+  --transmission-allow-any-rpc-ip \
+  --bt-backend transmission \
+  --transmission-rpc-url http://127.0.0.1:9091/transmission/rpc
+```
+
+這只改 Transmission daemon 對外監聽與來源 IP 限制；RPC 仍會要求帳密。
+hackme_web 本機仍使用 `http://127.0.0.1:9091/transmission/rpc`，其他機器則用
+`http://<server-ip>:9091/transmission/rpc`。這個模式只適合 LAN/VPN/防火牆保護下的
+測試環境，不要把 `9091` 直接暴露到公網。
+
+注意：目前 helper 會將 RPC 設為需要認證；未提供 `--transmission-rpc-password`
+時會自動產生一組密碼，不是無密碼 RPC。
+
 互動式腳本只影響本次啟動匯出的 env。正式部署仍應把穩定值寫進 `/etc/hackme_web/hackme-web.env` 或在 root 前台保存。
 
 ## root 前台設定
@@ -197,6 +245,7 @@ systemctl status transmission-daemon --no-pager
 ## 安全建議
 
 - RPC 建議只允許本機 `127.0.0.1`。
-- 若 RPC 對 LAN 開放，必須啟用帳密。
+- 若 RPC 對 LAN 開放，必須啟用帳密，並用防火牆/VPN 限制來源。
+- `--transmission-allow-any-rpc-ip` 是 QA/staging 便利選項，不是 production 預設。
 - 不要把無認證的 `9091` 暴露到公網。
 - 老硬體先保持 `global=1`、`per_user=1`，確認 p95/p99 與磁碟 IO 穩定後再提高。

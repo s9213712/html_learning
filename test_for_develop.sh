@@ -70,6 +70,15 @@ BT_DOWNLOAD_BACKEND="${HACKME_BT_BACKEND:-auto}"
 TRANSMISSION_RPC_URL="${HACKME_TRANSMISSION_RPC_URL:-http://127.0.0.1:9091/transmission/rpc}"
 TRANSMISSION_RPC_USERNAME="${HACKME_TRANSMISSION_RPC_USERNAME:-}"
 TRANSMISSION_RPC_PASSWORD="${HACKME_TRANSMISSION_RPC_PASSWORD:-}"
+SETUP_TRANSMISSION_BACKEND="${HACKME_DEV_SETUP_TRANSMISSION_BACKEND:-0}"
+TRANSMISSION_SETUP_SCRIPT="${HACKME_DEV_TRANSMISSION_SETUP_SCRIPT:-$SOURCE_ROOT/scripts/storage/setup_transmission_backend.sh}"
+TRANSMISSION_SETUP_SERVICE="${HACKME_DEV_TRANSMISSION_SERVICE:-transmission-daemon}"
+TRANSMISSION_SETUP_SETTINGS_FILE="${HACKME_DEV_TRANSMISSION_SETTINGS_FILE:-/etc/transmission-daemon/settings.json}"
+TRANSMISSION_SETUP_RPC_BIND_ADDRESS="${HACKME_DEV_TRANSMISSION_RPC_BIND_ADDRESS:-}"
+TRANSMISSION_SETUP_RPC_WHITELIST="${HACKME_DEV_TRANSMISSION_RPC_WHITELIST:-}"
+TRANSMISSION_SETUP_RPC_WHITELIST_ENABLED="${HACKME_DEV_TRANSMISSION_RPC_WHITELIST_ENABLED:-}"
+TRANSMISSION_SETUP_ALLOW_ANY_RPC_IP="${HACKME_DEV_TRANSMISSION_ALLOW_ANY_RPC_IP:-0}"
+BT_DOWNLOAD_STAGING_DIR="${HACKME_BT_DOWNLOAD_STAGING_DIR:-}"
 DRY_RUN=0
 BACKUP_RUNTIME=0
 BACKUP_ARCHIVE=""
@@ -524,6 +533,32 @@ Options:
   --transmission-rpc-username USER
   --transmission-rpc-password PASS
                            Optional Transmission RPC credentials
+  --setup-transmission-backend
+                           Run scripts/storage/setup_transmission_backend.sh
+                           before app launch to configure daemon settings,
+                           shared storage permissions, and BT staging dir.
+                           Requires sudo/root; the helper remains the single
+                           source of truth for Transmission daemon setup.
+  --transmission-setup-script PATH
+                           Override setup helper path. Default:
+                           scripts/storage/setup_transmission_backend.sh
+  --transmission-settings-file PATH
+                           Transmission settings.json path passed to setup.
+                           Default: /etc/transmission-daemon/settings.json
+  --transmission-service NAME
+                           systemd service passed to setup. Default:
+                           transmission-daemon
+  --transmission-rpc-bind-address ADDR
+                           RPC bind address passed to setup helper. Default:
+                           helper default 127.0.0.1
+  --transmission-rpc-whitelist LIST
+                           RPC IP whitelist passed to setup helper. Default:
+                           helper default 127.0.0.1,::1
+  --transmission-rpc-whitelist-enabled VALUE
+                           Enable RPC IP whitelist in setup helper: true/false.
+  --transmission-allow-any-rpc-ip
+                           Configure daemon RPC to listen on 0.0.0.0 and allow
+                           any source IP. Authentication remains required.
   --remote-download-global N
   --remote-download-per-user N
                            Remote download global/per-user concurrency defaults
@@ -748,6 +783,13 @@ normalize_hls_slot_probe_mode() {
     on|yes|true|1) HLS_SLOT_PROBE_MODE="force" ;;
     off|no|false|0) HLS_SLOT_PROBE_MODE="never" ;;
   esac
+}
+
+normalize_transmission_setup_mode() {
+  normalize_yes_no_value "$SETUP_TRANSMISSION_BACKEND" "setup transmission backend"
+  SETUP_TRANSMISSION_BACKEND="$NORMALIZED_YES_NO"
+  normalize_yes_no_value "$TRANSMISSION_SETUP_ALLOW_ANY_RPC_IP" "allow any Transmission RPC IP"
+  TRANSMISSION_SETUP_ALLOW_ANY_RPC_IP="$NORMALIZED_YES_NO"
 }
 
 normalize_cloud_drive_capacity_limit() {
@@ -999,6 +1041,7 @@ normalize_runtime_options() {
   normalize_custom_runtime_root
   normalize_max_content_option
   normalize_session_idle_timeout_option
+  normalize_transmission_setup_mode
   maybe_run_capacity_probe_for_gunicorn_defaults
   resolve_auto_gunicorn_settings
   normalize_port_conflict_action
@@ -1170,6 +1213,10 @@ print_resolved_config() {
     say "  hls_slots:           max_concurrent=${HACKME_MEDIA_HLS_MAX_CONCURRENT:-<worker default 1>} serialize_all=${HACKME_MEDIA_HLS_SERIALIZE_ALL:-<worker default>} probe=$HLS_SLOT_PROBE_MODE"
     say "  remote_download:     global=${HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL:-<root/env default 1>} per_user=${HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_PER_USER:-<root/env default 1>}"
     say "  bt_backend:          ${BT_DOWNLOAD_BACKEND:-${HACKME_BT_BACKEND:-auto}} transmission_rpc=${TRANSMISSION_RPC_URL:-${HACKME_TRANSMISSION_RPC_URL:-http://127.0.0.1:9091/transmission/rpc}}"
+    say "  transmission_setup:  ${SETUP_TRANSMISSION_BACKEND:-0} helper=${TRANSMISSION_SETUP_SCRIPT:-scripts/storage/setup_transmission_backend.sh}"
+    say "  transmission_daemon: bind=${TRANSMISSION_SETUP_RPC_BIND_ADDRESS:-<helper default>} allow_any_ip=${TRANSMISSION_SETUP_ALLOW_ANY_RPC_IP:-0} whitelist=${TRANSMISSION_SETUP_RPC_WHITELIST:-<helper default>} whitelist_enabled=${TRANSMISSION_SETUP_RPC_WHITELIST_ENABLED:-<helper default>}"
+    say "  transmission_auth:   username=$([[ -n "$TRANSMISSION_RPC_USERNAME" ]] && printf configured || printf '<blank>') password=$([[ -n "$TRANSMISSION_RPC_PASSWORD" ]] && printf configured || printf '<blank>')"
+    say "  bt_staging_dir:      ${BT_DOWNLOAD_STAGING_DIR:-${HACKME_BT_DOWNLOAD_STAGING_DIR:-<system temp fallback>}}"
     if [[ -n "$HLS_SLOT_PROBE_REPORT_FILE" ]]; then
       say "  hls_slot_report:     $HLS_SLOT_PROBE_REPORT_FILE"
     fi
@@ -1796,6 +1843,97 @@ prompt_remote_download_settings() {
   export HACKME_TRANSMISSION_RPC_PASSWORD="$TRANSMISSION_RPC_PASSWORD"
   export HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL
   export HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_PER_USER
+}
+
+transmission_rpc_port_from_url() {
+  "$PYTHON_BIN" - "$TRANSMISSION_RPC_URL" <<'PY'
+import sys
+from urllib.parse import urlparse
+
+raw = str(sys.argv[1] or "").strip()
+parsed = urlparse(raw)
+if parsed.scheme not in {"http", "https"}:
+    print("Transmission RPC URL must be http(s)", file=sys.stderr)
+    raise SystemExit(2)
+if not parsed.hostname:
+    print("Transmission RPC URL must include a host", file=sys.stderr)
+    raise SystemExit(2)
+print(parsed.port or (443 if parsed.scheme == "https" else 80))
+PY
+}
+
+run_transmission_backend_setup_if_requested() {
+  [[ "$SETUP_TRANSMISSION_BACKEND" == "1" ]] || return 0
+  [[ -f "$TRANSMISSION_SETUP_SCRIPT" ]] || die "Transmission setup helper not found: $TRANSMISSION_SETUP_SCRIPT"
+  [[ -n "${RUNTIME_ROOT:-}" && -n "${EFFECTIVE_STORAGE_ROOT:-}" ]] || die "runtime/storage root must be resolved before Transmission setup"
+
+  local rpc_port
+  if ! rpc_port="$(transmission_rpc_port_from_url)"; then
+    die "invalid Transmission RPC URL: $TRANSMISSION_RPC_URL"
+  fi
+
+  local setup_log="$RUNTIME_ROOT/logs/transmission_setup.out"
+  local app_user="${SUDO_USER:-$(id -un)}"
+  local cmd=()
+  if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+    cmd=(bash "$TRANSMISSION_SETUP_SCRIPT")
+  else
+    command -v sudo >/dev/null 2>&1 || die "sudo is required for --setup-transmission-backend"
+    cmd=(sudo bash "$TRANSMISSION_SETUP_SCRIPT")
+  fi
+  local helper_args=(
+    --storage-root "$EFFECTIVE_STORAGE_ROOT"
+    --settings-file "$TRANSMISSION_SETUP_SETTINGS_FILE"
+    --service "$TRANSMISSION_SETUP_SERVICE"
+    --app-user "$app_user"
+    --rpc-port "$rpc_port"
+  )
+  if [[ -n "$TRANSMISSION_RPC_USERNAME" ]]; then
+    helper_args+=(--rpc-username "$TRANSMISSION_RPC_USERNAME")
+  fi
+  if [[ -n "$TRANSMISSION_RPC_PASSWORD" ]]; then
+    helper_args+=(--rpc-password "$TRANSMISSION_RPC_PASSWORD")
+  fi
+  if [[ -n "$TRANSMISSION_SETUP_RPC_BIND_ADDRESS" ]]; then
+    helper_args+=(--rpc-bind-address "$TRANSMISSION_SETUP_RPC_BIND_ADDRESS")
+  fi
+  if [[ -n "$TRANSMISSION_SETUP_RPC_WHITELIST" ]]; then
+    helper_args+=(--rpc-whitelist "$TRANSMISSION_SETUP_RPC_WHITELIST")
+  fi
+  if [[ -n "$TRANSMISSION_SETUP_RPC_WHITELIST_ENABLED" ]]; then
+    helper_args+=(--rpc-whitelist-enabled "$TRANSMISSION_SETUP_RPC_WHITELIST_ENABLED")
+  fi
+  if [[ "$TRANSMISSION_SETUP_ALLOW_ANY_RPC_IP" == "1" ]]; then
+    helper_args+=(--allow-any-rpc-ip)
+  fi
+
+  say "[dev-tmp] transmission: configuring daemon via existing helper"
+  say "[dev-tmp] transmission: log $setup_log"
+  touch "$setup_log"
+  chmod 600 "$setup_log" || true
+  if ! "${cmd[@]}" "${helper_args[@]}" >"$setup_log" 2>&1; then
+    tail -n 80 "$setup_log" >&2 || true
+    die "Transmission setup helper failed; see $setup_log"
+  fi
+  chmod 600 "$setup_log" || true
+
+  local helper_url helper_username helper_password helper_staging
+  helper_url="$(sed -n 's/^[[:space:]]*Transmission RPC URL:[[:space:]]*//p' "$setup_log" | tail -n 1)"
+  helper_username="$(sed -n 's/^[[:space:]]*Transmission RPC username:[[:space:]]*//p' "$setup_log" | tail -n 1)"
+  helper_password="$(sed -n 's/^[[:space:]]*Transmission RPC password:[[:space:]]*//p' "$setup_log" | tail -n 1)"
+  helper_staging="$(sed -n 's/^[[:space:]]*HACKME_BT_DOWNLOAD_STAGING_DIR=//p' "$setup_log" | tail -n 1)"
+  [[ -n "$helper_url" ]] && TRANSMISSION_RPC_URL="$helper_url"
+  [[ -n "$helper_username" ]] && TRANSMISSION_RPC_USERNAME="$helper_username"
+  [[ -n "$helper_password" ]] && TRANSMISSION_RPC_PASSWORD="$helper_password"
+  [[ -n "$helper_staging" ]] && BT_DOWNLOAD_STAGING_DIR="$helper_staging"
+  [[ -n "$BT_DOWNLOAD_STAGING_DIR" ]] || die "Transmission setup helper did not report HACKME_BT_DOWNLOAD_STAGING_DIR"
+
+  export HACKME_BT_BACKEND="$BT_DOWNLOAD_BACKEND"
+  export HACKME_TRANSMISSION_RPC_URL="$TRANSMISSION_RPC_URL"
+  export HACKME_TRANSMISSION_RPC_USERNAME="$TRANSMISSION_RPC_USERNAME"
+  export HACKME_TRANSMISSION_RPC_PASSWORD="$TRANSMISSION_RPC_PASSWORD"
+  export HACKME_BT_DOWNLOAD_STAGING_DIR="$BT_DOWNLOAD_STAGING_DIR"
+  say "[dev-tmp] transmission: configured RPC $TRANSMISSION_RPC_URL, staging $BT_DOWNLOAD_STAGING_DIR"
 }
 
 prompt_capacity_integer() {
@@ -3959,6 +4097,42 @@ while [[ $# -gt 0 ]]; do
       TRANSMISSION_RPC_PASSWORD="${2:?missing Transmission RPC password}"
       shift 2
       ;;
+    --setup-transmission-backend|--configure-transmission-backend)
+      SETUP_TRANSMISSION_BACKEND=1
+      shift
+      ;;
+    --no-setup-transmission-backend)
+      SETUP_TRANSMISSION_BACKEND=0
+      shift
+      ;;
+    --transmission-setup-script)
+      TRANSMISSION_SETUP_SCRIPT="${2:?missing Transmission setup helper path}"
+      shift 2
+      ;;
+    --transmission-settings-file)
+      TRANSMISSION_SETUP_SETTINGS_FILE="${2:?missing Transmission settings file}"
+      shift 2
+      ;;
+    --transmission-service)
+      TRANSMISSION_SETUP_SERVICE="${2:?missing Transmission service name}"
+      shift 2
+      ;;
+    --transmission-rpc-bind-address)
+      TRANSMISSION_SETUP_RPC_BIND_ADDRESS="${2:?missing Transmission RPC bind address}"
+      shift 2
+      ;;
+    --transmission-rpc-whitelist)
+      TRANSMISSION_SETUP_RPC_WHITELIST="${2:?missing Transmission RPC whitelist}"
+      shift 2
+      ;;
+    --transmission-rpc-whitelist-enabled)
+      TRANSMISSION_SETUP_RPC_WHITELIST_ENABLED="${2:?missing Transmission RPC whitelist enabled value}"
+      shift 2
+      ;;
+    --transmission-allow-any-rpc-ip|--allow-any-transmission-rpc-ip)
+      TRANSMISSION_SETUP_ALLOW_ANY_RPC_IP=1
+      shift
+      ;;
     --remote-download-global|--remote-download-max-concurrent-global)
       HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL="${2:?missing remote download global concurrency}"
       export HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL
@@ -4099,6 +4273,7 @@ export HACKME_BT_BACKEND="$BT_DOWNLOAD_BACKEND"
 export HACKME_TRANSMISSION_RPC_URL="$TRANSMISSION_RPC_URL"
 export HACKME_TRANSMISSION_RPC_USERNAME="$TRANSMISSION_RPC_USERNAME"
 export HACKME_TRANSMISSION_RPC_PASSWORD="$TRANSMISSION_RPC_PASSWORD"
+export HACKME_BT_DOWNLOAD_STAGING_DIR="$BT_DOWNLOAD_STAGING_DIR"
 if [[ "$CLI_MODE" == "1" || "$SHUTDOWN" == "1" || "$BACKUP_RUNTIME" == "1" || -n "$RESTORE_ARCHIVE" || "$RESET_RUNTIME" == "1" || "$DELETE_RUNTIME" == "1" ]]; then
   load_local_capacity_report_defaults || load_local_capacity_defaults
 fi
@@ -4184,6 +4359,7 @@ touch "$LOG_CAPTURE" "$GUNICORN_ACCESS_LOG" "$GUNICORN_ERROR_LOG"
 
 resolve_python
 migrate_legacy_runtime_storage_to_cloud_drive_root
+run_transmission_backend_setup_if_requested
 if [[ "$PYTHON_BIN" != "python3" ]]; then
   say "[dev-tmp] python:    $PYTHON_BIN"
 else
@@ -4205,6 +4381,7 @@ export HTML_LEARNING_CHAT_DIR="$RUNTIME_ROOT/chats"
 export HTML_LEARNING_ANCHOR_DIR="$RUNTIME_ROOT/anchors"
 export HTML_LEARNING_STORAGE_DIR="$EFFECTIVE_STORAGE_ROOT"
 export HTML_LEARNING_REPORTS_DIR="$RUNTIME_ROOT/reports"
+export HACKME_BT_DOWNLOAD_STAGING_DIR="$BT_DOWNLOAD_STAGING_DIR"
 export HTML_LEARNING_HOST="$HOST"
 export HTML_LEARNING_PORT="$PORT"
 if [[ "$DISABLE_TRUSTED_HOSTS" == "1" ]]; then
@@ -4254,6 +4431,14 @@ export HACKME_DEV_CAPACITY_PROBE_TIER="$CAPACITY_PROBE_TIER"
 export HACKME_DEV_CAPACITY_DEFAULTS_FILE="$CAPACITY_DEFAULTS_FILE"
 export HACKME_DEV_CLOUD_DRIVE_STORAGE_ROOT="$CLOUD_DRIVE_STORAGE_ROOT"
 export HACKME_DEV_CLOUD_DRIVE_GLOBAL_CAPACITY_LIMIT_MB="$CLOUD_DRIVE_GLOBAL_CAPACITY_LIMIT_MB"
+export HACKME_DEV_SETUP_TRANSMISSION_BACKEND="$SETUP_TRANSMISSION_BACKEND"
+export HACKME_DEV_TRANSMISSION_SETUP_SCRIPT="$TRANSMISSION_SETUP_SCRIPT"
+export HACKME_DEV_TRANSMISSION_SERVICE="$TRANSMISSION_SETUP_SERVICE"
+export HACKME_DEV_TRANSMISSION_SETTINGS_FILE="$TRANSMISSION_SETUP_SETTINGS_FILE"
+export HACKME_DEV_TRANSMISSION_RPC_BIND_ADDRESS="$TRANSMISSION_SETUP_RPC_BIND_ADDRESS"
+export HACKME_DEV_TRANSMISSION_RPC_WHITELIST="$TRANSMISSION_SETUP_RPC_WHITELIST"
+export HACKME_DEV_TRANSMISSION_RPC_WHITELIST_ENABLED="$TRANSMISSION_SETUP_RPC_WHITELIST_ENABLED"
+export HACKME_DEV_TRANSMISSION_ALLOW_ANY_RPC_IP="$TRANSMISSION_SETUP_ALLOW_ANY_RPC_IP"
 if [[ "$SERVER_RUNNER" == "flask" ]]; then
   export HACKME_ALLOW_DIRECT_SERVER=1
 fi
