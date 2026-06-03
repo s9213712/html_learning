@@ -5318,10 +5318,10 @@ function renderServerEnvDatabaseDetails(database = {}) {
   ].filter(Boolean).join(" · ");
   const rows = files.length ? files.map((item) => `
     <tr>
-      <td>${sanitize(item.label || "-")}</td>
-      <td>${sanitize(formatBytes(item.total_bytes || 0))}</td>
-      <td>${sanitize(formatBytes(item.database_bytes || 0))}</td>
-      <td>${sanitize(formatBytes((item.wal_bytes || 0) + (item.shm_bytes || 0)))}</td>
+      <td data-label="DB">${sanitize(item.label || "-")}</td>
+      <td data-label="合計">${sanitize(formatBytes(item.total_bytes || 0))}</td>
+      <td data-label="主檔">${sanitize(formatBytes(item.database_bytes || 0))}</td>
+      <td data-label="WAL/SHM">${sanitize(formatBytes((item.wal_bytes || 0) + (item.shm_bytes || 0)))}</td>
     </tr>
   `).join("") : '<tr><td colspan="4">尚未偵測到 DB 檔案</td></tr>';
   host.innerHTML = `
@@ -5352,15 +5352,15 @@ function renderServerEnvProcessList(resource = {}) {
     const commandSuffix = item.command_truncated ? " …" : "";
     return `
       <tr>
-        <td>${sanitize(String(item.pid || "-"))}</td>
-        <td>
+        <td data-label="PID">${sanitize(String(item.pid || "-"))}</td>
+        <td data-label="主程式 / 詳細命令">
           <strong>${sanitize(item.name || "-")}</strong>
           <div class="server-env-process-command">${sanitize(command || item.process_name || "-")}${sanitize(commandSuffix)}</div>
           <div class="drive-card-sub">comm=${sanitize(item.process_name || "-")} · ppid=${sanitize(String(item.ppid || "-"))}</div>
         </td>
-        <td>${sanitize(cpu)}</td>
-        <td>${sanitize(ram)}</td>
-        <td>${sanitize(sockets)}</td>
+        <td data-label="CPU">${sanitize(cpu)}</td>
+        <td data-label="RAM">${sanitize(ram)}</td>
+        <td data-label="Socket">${sanitize(sockets)}</td>
       </tr>
     `;
   }).join("") : '<tr><td colspan="5">尚未偵測到相關背景程式</td></tr>';
