@@ -1498,11 +1498,11 @@
               <div class="field">
                 <label>串流方式</label>
                 <select id="video-streaming-modes">
-                  <option value="direct" selected>Direct 原檔播放（最低點數成本）</option>
+                  <option value="direct" selected>不預先轉檔（Standard 即時串流）</option>
                   <option value="realtime_proxy">Standard 即時轉封裝（即時計算成本）</option>
                   <option value="prepared_hls">Premium HLS 預處理（最高相容性，會產生衍生檔）</option>
                 </select>
-                <div class="field-help">發布時先選一個主要服務方式；HLS 只有明確選取時才建立轉檔任務並產生額外衍生檔。發布後可在影片管理中再開啟多種觀看方式。</div>
+                <div class="field-help">發布時先選一個主要服務方式；MP4/WebM 預設不建立 HLS，MKV/AVI/MOV 會自動建議 HLS。發布後可在影片管理中再開啟多種觀看方式。</div>
               </div>
               <div class="field">
                 <label>上傳隱私</label>

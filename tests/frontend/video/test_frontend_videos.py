@@ -122,7 +122,18 @@ def test_video_platform_accepts_audio_media_in_ui():
     assert 'payload.visibility = "unlisted";' in videos_js
     assert "E2EE 影音對外觀看已改用" in videos_js
     assert "不需要知道原始 E2EE 密碼" in index_html
-    assert "上傳完成，伺服器端加密與掃描中；HLS 會在後台轉檔，進度可到任務中心查看" in videos_js
+    assert "上傳完成，伺服器端加密與掃描中；若有選 HLS 才會在後台轉檔" in videos_js
+    assert "不預先轉檔（Standard 即時串流）" in index_html
+    assert "MP4/WebM 預設不建立 HLS，MKV/AVI/MOV 會自動建議 HLS" in index_html
+    assert "function videoPublishShouldPreferPreparedHls" in videos_js
+    assert 'if (String(file?.privacy_mode || "").trim().toLowerCase() === "e2ee") return false;' in videos_js
+    assert '[".mkv", ".avi", ".mov", ".flv", ".wmv", ".ts", ".mts", ".m2ts"].includes(ext)' in videos_js
+    assert "syncVideoPublishStreamingModeForFile(videoPublishFileById(target));" in videos_js
+    publish_modes_fn = videos_js.split("function selectedVideoPublishStreamingModes", 1)[1].split("function syncVideoPublishStreamingModeForPrivacy", 1)[0]
+    assert 'if (mode === "prepared_hls") return ["prepared_hls"];' in publish_modes_fn
+    assert 'if (mode === "realtime_proxy") return ["realtime_proxy"];' in publish_modes_fn
+    assert 'return ["realtime_proxy"];' in publish_modes_fn
+    assert 'return ["prepared_hls", "realtime_proxy"];' not in publish_modes_fn
     assert 'share_wrapped_file_key_envelope' in videos_js
     assert 'share_expires_at' in videos_js
     assert 'share_max_views' in videos_js
@@ -189,7 +200,7 @@ def test_video_platform_uses_separate_watch_view_and_mobile_layout():
     assert '分享連結已撤銷' in videos_js
     assert 'videoShareStateSummary' in videos_js
     assert 'saveVideoShareSettings' in videos_js
-    assert '已改用直接串流' in videos_js
+    assert '已改用即時轉封裝' in videos_js
     assert 'id="video-playback-action"' in videos_js
     assert "@media (max-width: 720px)" in styles
     assert "#module-videos .admin-tools" in styles

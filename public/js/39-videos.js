@@ -1694,6 +1694,29 @@ function videoPublishMediaKind(file) {
   return "video";
 }
 
+function videoPublishFileExtension(name = "") {
+  const text = String(name || "").toLowerCase().trim();
+  const index = text.lastIndexOf(".");
+  return index >= 0 ? text.slice(index) : "";
+}
+
+function videoPublishShouldPreferPreparedHls(file) {
+  if (!file || videoPublishMediaKind(file) !== "video") return false;
+  if (String(file?.privacy_mode || "").trim().toLowerCase() === "e2ee") return false;
+  const name = videoDisplayName(file);
+  const ext = videoPublishFileExtension(name);
+  const mime = videoMime(file);
+  if (mime.includes("matroska") || mime.includes("x-msvideo") || mime.includes("quicktime")) return true;
+  if ([".mkv", ".avi", ".mov", ".flv", ".wmv", ".ts", ".mts", ".m2ts"].includes(ext)) return true;
+  return false;
+}
+
+function syncVideoPublishStreamingModeForFile(file) {
+  const select = $("video-streaming-modes");
+  if (!select || !file) return;
+  select.value = videoPublishShouldPreferPreparedHls(file) ? "prepared_hls" : "direct";
+}
+
 function videoPublishPreviewUrl(file) {
   if (String(file?.privacy_mode || "") === "e2ee") return "";
   const id = videoPublishFileId(file);
@@ -1726,6 +1749,7 @@ function applyVideoPublishDriveSelection(fileId, title = "") {
   if (titleInput && !titleInput.value.trim()) {
     titleInput.value = videoTitleFromFilename(title || videoDisplayName(videoPublishFileById(target)) || matched.textContent || "");
   }
+  syncVideoPublishStreamingModeForFile(videoPublishFileById(target));
   return true;
 }
 
@@ -2272,15 +2296,30 @@ function browserSupportsNativeHls(mediaType = "video") {
 function selectedVideoPublishStreamingModes() {
   const select = $("video-streaming-modes");
   const mode = String(select?.value || "prepared_hls").trim();
-  if (["prepared_hls", "realtime_proxy"].includes(mode)) return [mode];
-  return ["prepared_hls", "realtime_proxy"];
+  if (mode === "prepared_hls") return ["prepared_hls"];
+  if (mode === "realtime_proxy") return ["realtime_proxy"];
+  return ["realtime_proxy"];
 }
 
 function syncVideoPublishStreamingModeForPrivacy() {
   const privacyMode = String($("video-upload-privacy-mode")?.value || "standard_plain").trim();
   const select = $("video-streaming-modes");
   if (!select) return;
-  if (select.value === "direct") select.value = "prepared_hls";
+  const selectedFile = videoSelectedDriveFile();
+  if (selectedFile) {
+    syncVideoPublishStreamingModeForFile(selectedFile);
+    return;
+  }
+  const directFile = $("video-upload-file")?.files?.[0] || null;
+  if (directFile) {
+    syncVideoPublishStreamingModeForFile({
+      id: "",
+      original_filename_plain_for_public: directFile.name,
+      mime_type_plain_for_public: directFile.type,
+    });
+    return;
+  }
+  if (privacyMode === "e2ee" && select.value === "prepared_hls") select.value = "direct";
 }
 
 async function applyVideoPublishStreamingChoices(video, json, modes) {
@@ -5536,6 +5575,9 @@ document.addEventListener("click", (event) => {
 document.addEventListener("change", (event) => {
   if (event.target?.id === "video-publish-file") {
     applyVideoPublishDriveSelection(event.target.value || "");
+  }
+  if (event.target?.id === "video-upload-file") {
+    syncVideoPublishStreamingModeForPrivacy();
   }
   if (event.target?.id === "video-upload-privacy-mode") {
     syncVideoPublishStreamingModeForPrivacy();
