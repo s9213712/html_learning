@@ -309,6 +309,39 @@ def fetch_json(page, method: str, path: str, payload: dict[str, Any] | None = No
     )
 
 
+def fetch_json_direct(page, base_url: str, method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    cookies = page.context.cookies([base_url])
+    cookie_header = "; ".join(f"{item['name']}={item['value']}" for item in cookies)
+    csrf = next((item["value"] for item in cookies if item.get("name") == "csrf_token"), "")
+    body = b""
+    if payload is not None:
+        body = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        base_url.rstrip("/") + path,
+        data=body if payload is not None else None,
+        method=method,
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Cookie": cookie_header,
+            "X-CSRF-Token": csrf,
+        },
+    )
+    context = ssl._create_unverified_context()
+    try:
+        with urllib.request.urlopen(request, timeout=20, context=context) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+            parsed = json.loads(raw) if raw else {}
+            return {"status": int(response.status), "ok": 200 <= int(response.status) < 300, "body": parsed}
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="replace")
+        try:
+            parsed = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            parsed = {"raw": raw[:500]}
+        return {"status": int(exc.code), "ok": False, "body": parsed}
+
+
 def fetch_text(page, path: str) -> dict[str, Any]:
     return page.evaluate(
         """async path => {
@@ -587,7 +620,7 @@ def enable_required_features(page, base_url: str) -> None:
         "feature_videos_enabled",
     ]
     updates = {key: True for key in feature_keys}
-    result = fetch_json(page, "PUT", "/api/admin/features", updates)
+    result = fetch_json_direct(page, base_url, "PUT", "/api/admin/features", updates)
     if result["status"] != 200 or not result["body"].get("ok"):
         raise RuntimeError(f"feature enable failed: {result}")
     page.goto(base_url + "/", wait_until="domcontentloaded")
@@ -901,6 +934,185 @@ def check_drive_e2ee_journey(rec: Recorder, page) -> dict[str, Any]:
         "standard_file_id": (standard.get("body", {}).get("file") or {}).get("file_id"),
         "e2ee_file_id": (e2ee.get("body", {}).get("file") or {}).get("file_id"),
     }
+
+
+def select_all_visible_storage_files(page) -> int:
+    page.wait_for_selector("#module-drive.active input[data-storage-file-select]", timeout=8000)
+    boxes = page.locator("#module-drive.active input[data-storage-file-select]")
+    count = boxes.count()
+    for index in range(count):
+        boxes.nth(index).check()
+        page.wait_for_timeout(120)
+    return count
+
+
+def open_storage_browser_path(page, path: str) -> None:
+    switch_module(page, "drive")
+    page.evaluate(
+        """async path => {
+            if (typeof openStorageFolder !== 'function') throw new Error('openStorageFolder missing');
+            openStorageFolder(path);
+            if (typeof loadDriveDashboard === 'function') await loadDriveDashboard();
+        }""",
+        path,
+    )
+    page.wait_for_timeout(500)
+
+
+def storage_file_paths(page) -> list[str]:
+    files = fetch_json(page, "GET", "/api/storage/files")
+    body = files.get("body") or {}
+    return [str(item.get("virtual_path") or "") for item in (body.get("files") or [])]
+
+
+def invoke_drive_toolbar_action(page, action: str, *, prompt_value: str | None = None, confirm_value: bool = True) -> None:
+    page.evaluate(
+        """({action, promptValue, hasPrompt, confirmValue}) => {
+            const selector = `#module-drive.active .storage-browser-bulk-toolbar [data-drive-action="${action}"]`;
+            const button = document.querySelector(selector);
+            if (!button) throw new Error(`toolbar action missing: ${action}`);
+            if (button.disabled) throw new Error(`toolbar action disabled: ${action}`);
+            const originalPrompt = window.prompt;
+            const originalConfirm = window.confirm;
+            const originalAlert = window.alert;
+            window.__qaLastAlert = "";
+            if (hasPrompt) window.prompt = () => promptValue;
+            window.confirm = () => confirmValue;
+            window.alert = message => { window.__qaLastAlert = String(message || ""); };
+            try {
+                button.click();
+            } finally {
+                window.prompt = originalPrompt;
+                window.confirm = originalConfirm;
+                window.alert = originalAlert;
+            }
+        }""",
+        {
+            "action": action,
+            "promptValue": prompt_value or "",
+            "hasPrompt": prompt_value is not None,
+            "confirmValue": bool(confirm_value),
+        },
+    )
+
+
+def check_drive_bulk_selection_journey(rec: Recorder, page) -> None:
+    rec.add("drive_bulk_journey_start", True, "starting")
+    switch_module(page, "drive")
+    page.wait_for_selector("#module-drive.active #storage-refresh-btn", timeout=8000)
+    names = ["bulk-a.txt", "bulk-b.txt"]
+    uploads = []
+    for name in names:
+        uploads.append(fetch_multipart(
+            page,
+            "/api/storage/files",
+            {
+                "privacy_mode": "standard_plain",
+                "virtual_path": f"/QA/bulk/{name}",
+                "display_name": name,
+            },
+            [text_file(name, f"bulk qa payload for {name}")],
+        ))
+    upload_ok = all(item["status"] == 200 and (item.get("body") or {}).get("ok") for item in uploads)
+
+    page.set_viewport_size({"width": 1366, "height": 768})
+    open_storage_browser_path(page, "/QA/bulk")
+    selected_count = select_all_visible_storage_files(page)
+    toolbar = page.locator("#module-drive.active .storage-browser-bulk-toolbar")
+    toolbar_text = toolbar.inner_text(timeout=5000)
+    desktop_buttons_ok = all(
+        page.locator(f'#module-drive.active .storage-browser-bulk-toolbar [data-drive-action="{action}"]').is_enabled(timeout=2000)
+        for action in ["move-selected-storage", "share-selected-storage", "download-selected-storage", "delete-selected-storage"]
+    )
+    visible_text = page.locator("#module-drive.active").inner_text(timeout=5000)
+    rec.add(
+        "drive_bulk_selection_desktop_ui",
+        upload_ok and selected_count >= 2 and desktop_buttons_ok and "回收" not in visible_text and "垃圾桶" not in visible_text,
+        f"selected={selected_count}, toolbar={toolbar_text.replace(chr(10), ' ')[:160]}",
+        uploads=[item.get("body") for item in uploads],
+    )
+    check_ui_quality(rec, page, "drive_bulk_desktop")
+
+    page.set_viewport_size({"width": 390, "height": 844})
+    open_storage_browser_path(page, "/QA/bulk")
+    select_all_visible_storage_files(page)
+    mobile_buttons_ok = all(
+        page.locator(f'#module-drive.active .storage-browser-bulk-toolbar [data-drive-action="{action}"]').is_visible(timeout=2000)
+        for action in ["move-selected-storage", "share-selected-storage", "download-selected-storage", "delete-selected-storage"]
+    )
+    mobile_text = page.locator("#module-drive.active").inner_text(timeout=5000)
+    rec.add(
+        "drive_bulk_selection_mobile_ui",
+        mobile_buttons_ok and "回收" not in mobile_text and "垃圾桶" not in mobile_text,
+        f"buttons_visible={mobile_buttons_ok}",
+    )
+    check_ui_quality(rec, page, "drive_bulk_mobile", mobile=True)
+
+    page.set_viewport_size({"width": 1366, "height": 768})
+    open_storage_browser_path(page, "/QA/bulk")
+    select_all_visible_storage_files(page)
+    invoke_drive_toolbar_action(page, "move-selected-storage", prompt_value="/QA/bulk-moved")
+    page.wait_for_timeout(1500)
+    moved_paths = storage_file_paths(page)
+    expected_moved = [f"/QA/bulk-moved/{name}" for name in names]
+    rec.add(
+        "drive_bulk_move_desktop",
+        all(path in moved_paths for path in expected_moved),
+        f"expected={expected_moved}",
+        paths=moved_paths,
+    )
+
+    open_storage_browser_path(page, "/QA/bulk-moved")
+    select_all_visible_storage_files(page)
+    invoke_drive_toolbar_action(page, "share-selected-storage", prompt_value="QA bulk share")
+    page.wait_for_timeout(1800)
+    albums = fetch_json(page, "GET", "/api/storage/albums")
+    album_rows = (albums.get("body") or {}).get("albums") or []
+    bulk_album = next((album for album in album_rows if album.get("title") == "QA bulk share"), None)
+    rec.add(
+        "drive_bulk_share_desktop",
+        albums["status"] == 200 and bool(bulk_album) and bool((bulk_album or {}).get("share_link")),
+        f"album_id={(bulk_album or {}).get('id')}, share={bool((bulk_album or {}).get('share_link'))}",
+        album=bulk_album,
+    )
+
+    open_storage_browser_path(page, "/QA/bulk-moved")
+    select_all_visible_storage_files(page)
+    invoke_drive_toolbar_action(page, "delete-selected-storage", confirm_value=True)
+    page.wait_for_timeout(1500)
+    active_paths = storage_file_paths(page)
+    trash = fetch_json(page, "GET", "/api/storage/trash")
+    trash_names = [str(item.get("display_name") or item.get("virtual_path") or "") for item in ((trash.get("body") or {}).get("files") or [])]
+    rec.add(
+        "drive_bulk_delete_desktop",
+        all(path not in active_paths for path in expected_moved) and all(name in trash_names for name in names),
+        f"active_remaining={any(path in active_paths for path in expected_moved)}, trash_names={trash_names[:8]}",
+        active_paths=active_paths,
+        trash=trash.get("body"),
+    )
+
+    download_names = ["bulk-download-a.txt", "bulk-download-b.txt"]
+    for name in download_names:
+        fetch_multipart(
+            page,
+            "/api/storage/files",
+            {
+                "privacy_mode": "standard_plain",
+                "virtual_path": f"/QA/bulk-download/{name}",
+                "display_name": name,
+            },
+            [text_file(name, f"bulk download qa payload for {name}")],
+        )
+    open_storage_browser_path(page, "/QA/bulk-download")
+    select_all_visible_storage_files(page)
+    with page.expect_download(timeout=8000) as download_info:
+        page.locator('#module-drive.active .storage-browser-bulk-toolbar [data-drive-action="download-selected-storage"]').click()
+    download = download_info.value
+    rec.add(
+        "drive_bulk_download_desktop",
+        download.suggested_filename in download_names,
+        f"suggested={download.suggested_filename}",
+    )
 
 
 def check_video_share_journey(rec: Recorder, page) -> dict[str, Any]:
@@ -1638,6 +1850,7 @@ def main() -> int:
     parser.add_argument("--runtime-root", default="")
     parser.add_argument("--keep-server", action="store_true")
     parser.add_argument("--headed", action="store_true")
+    parser.add_argument("--only-drive-bulk", action="store_true", help="Run only the Cloud Drive bulk-selection Playwright journey after login and feature setup.")
     parser.add_argument("--max-chess-human-moves", type=int, default=40)
     parser.add_argument("--interactive-comfyui", action="store_true", help="Prompt for optional live ComfyUI/Civitai settings before running live checks.")
     parser.add_argument("--comfyui-api-url", default=os.environ.get("PLAYWRIGHT_COMFYUI_API_URL", "").strip(), help="Optional remote ComfyUI URL. Must be http(s)://host:port.")
@@ -1699,37 +1912,42 @@ def main() -> int:
             rec.guard("protected_comfyui_editor_requires_login", unauth_editor)
             rec.guard("ui_login_root", lambda: login(page, base_url))
             rec.guard("enable_required_features", lambda: enable_required_features(page, base_url))
-            rec.guard("optional_comfyui_settings", lambda: apply_optional_comfyui_settings(rec, page, optional_comfyui))
-            rec.guard("api_surface", lambda: check_api_surface(rec, page))
-            rec.guard("auth_registration_journey", lambda: check_auth_registration_journey(rec, browser, base_url, page))
-            rec.guard("admin_member_management_journey", lambda: check_admin_member_management(rec, page))
-            rec.guard("forum_journey", lambda: check_forum_journey(rec, page))
-            rec.guard("drive_e2ee_journey", lambda: check_drive_e2ee_journey(rec, page))
-            rec.guard("video_share_journey", lambda: check_video_share_journey(rec, page))
-            rec.guard("games_journey", lambda: check_games_journey(rec, page))
-            rec.guard("economy_trading_journey", lambda: check_economy_trading_journey(rec, page, base_url))
-            rec.guard("launch_security_journey", lambda: check_launch_security_journey(rec, page))
-            rec.guard("comfyui_workflow_builder_journey", lambda: check_comfyui_workflow_builder_flow(rec, page))
-            page.close()
+            if args.only_drive_bulk:
+                rec.guard("drive_bulk_selection_journey", lambda: check_drive_bulk_selection_journey(rec, page))
+                page.close()
+            else:
+                rec.guard("optional_comfyui_settings", lambda: apply_optional_comfyui_settings(rec, page, optional_comfyui))
+                rec.guard("api_surface", lambda: check_api_surface(rec, page))
+                rec.guard("auth_registration_journey", lambda: check_auth_registration_journey(rec, browser, base_url, page))
+                rec.guard("admin_member_management_journey", lambda: check_admin_member_management(rec, page))
+                rec.guard("forum_journey", lambda: check_forum_journey(rec, page))
+                rec.guard("drive_e2ee_journey", lambda: check_drive_e2ee_journey(rec, page))
+                rec.guard("drive_bulk_selection_journey", lambda: check_drive_bulk_selection_journey(rec, page))
+                rec.guard("video_share_journey", lambda: check_video_share_journey(rec, page))
+                rec.guard("games_journey", lambda: check_games_journey(rec, page))
+                rec.guard("economy_trading_journey", lambda: check_economy_trading_journey(rec, page, base_url))
+                rec.guard("launch_security_journey", lambda: check_launch_security_journey(rec, page))
+                rec.guard("comfyui_workflow_builder_journey", lambda: check_comfyui_workflow_builder_flow(rec, page))
+                page.close()
 
-            desktop_page = new_page({"width": 1366, "height": 768})
-            rec.guard("module_tabs_desktop", lambda: check_module_tabs(rec, desktop_page, base_url, {"width": 1366, "height": 768}))
-            desktop_page.close()
+                desktop_page = new_page({"width": 1366, "height": 768})
+                rec.guard("module_tabs_desktop", lambda: check_module_tabs(rec, desktop_page, base_url, {"width": 1366, "height": 768}))
+                desktop_page.close()
 
-            mobile_page = new_page({"width": 390, "height": 844})
-            rec.guard("module_tabs_mobile", lambda: check_module_tabs(rec, mobile_page, base_url, {"width": 390, "height": 844}))
-            mobile_page.close()
+                mobile_page = new_page({"width": 390, "height": 844})
+                rec.guard("module_tabs_mobile", lambda: check_module_tabs(rec, mobile_page, base_url, {"width": 390, "height": 844}))
+                mobile_page.close()
 
-            editor_page = new_page({"width": 1366, "height": 768})
-            rec.guard("comfyui_editor", lambda: check_comfyui_editor(rec, editor_page, base_url))
-            editor_page.close()
+                editor_page = new_page({"width": 1366, "height": 768})
+                rec.guard("comfyui_editor", lambda: check_comfyui_editor(rec, editor_page, base_url))
+                editor_page.close()
 
-            api_page = new_page({"width": 1366, "height": 768})
-            api_page.goto(base_url + "/", wait_until="domcontentloaded")
-            rec.guard("comfyui_live_connection_optional", lambda: check_live_comfyui_connection(rec, api_page, optional_comfyui))
-            rec.guard("civitai_search", lambda: check_civitai_live_search(rec, api_page, optional_comfyui))
-            chess_summary = rec.guard("play_chess_exp4", lambda: play_exp4_chess(rec, api_page, args.max_chess_human_moves)) or {}
-            api_page.close()
+                api_page = new_page({"width": 1366, "height": 768})
+                api_page.goto(base_url + "/", wait_until="domcontentloaded")
+                rec.guard("comfyui_live_connection_optional", lambda: check_live_comfyui_connection(rec, api_page, optional_comfyui))
+                rec.guard("civitai_search", lambda: check_civitai_live_search(rec, api_page, optional_comfyui))
+                chess_summary = rec.guard("play_chess_exp4", lambda: play_exp4_chess(rec, api_page, args.max_chess_human_moves)) or {}
+                api_page.close()
             browser.close()
     finally:
         if server.poll() is None and not args.keep_server:

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>hackme_web — 登入系統</title>
   <!-- Security headers via HTTP (set by server/Talisman) -->
-  <link rel="stylesheet" href="/styles.css?v=20260602-profile-avatar-large" />
+  <link rel="stylesheet" href="/styles.css?v=20260603-drive-bulk-actions" />
   <link rel="stylesheet" href="/experiments.css?v=20260517-plane-view-angle" />
   <link rel="stylesheet" href="/i18n-language-switcher.css?v=20260520-deep-audit" />
 </head>
@@ -1189,7 +1189,7 @@
             <div class="drive-card-heading">
               <div>
                 <div class="drive-card-title">雲端硬碟政策與維護</div>
-                <div class="drive-card-sub">掃描、回收筒、下載政策與每日維護都在雲端硬碟管理頁調整。</div>
+                <div class="drive-card-sub">掃描、刪除保留、下載政策與每日維護都在雲端硬碟管理頁調整。</div>
               </div>
               <button class="btn btn-primary btn-sm" type="button" data-settings-save-action>儲存雲端設定</button>
             </div>
@@ -1285,7 +1285,7 @@
           <div class="drive-card-heading">
             <div>
               <div class="drive-card-title">資料夾與檔案</div>
-              <div class="drive-card-sub" id="storage-selection-label">上傳、下載、整理與回收都在這裡處理。</div>
+              <div class="drive-card-sub" id="storage-selection-label">上傳、下載、整理與刪除都在這裡處理。</div>
             </div>
             <div class="drive-file-actions">
               <button class="btn btn-sm" id="storage-folder-create-btn" type="button">+ 資料夾</button>
@@ -1309,7 +1309,7 @@
           <details class="drive-collapsible-panel storage-trash-inline">
             <summary>
               <span>
-                <span class="drive-card-title">回收筒</span>
+                <span class="drive-card-title">已刪除檔案</span>
                 <span class="drive-card-sub">還原或永久移除已刪除檔案。</span>
               </span>
             </summary>
@@ -6587,18 +6587,18 @@
               <summary>
                 <div>
                   <div class="drive-card-title">Storage Maintenance</div>
-                  <div class="drive-card-sub">每日 quota 同步與回收筒清理。</div>
+                  <div class="drive-card-sub">每日 quota 同步與已刪除檔案清理。</div>
                 </div>
               </summary>
               <div class="drive-collapsible-body">
             <div class="settings-option-grid">
-              <div class="field"><label><input type="checkbox" id="s-storage-maintenance-auto-enabled" /> 每日自動同步 quota / 清理回收筒</label></div>
+              <div class="field"><label><input type="checkbox" id="s-storage-maintenance-auto-enabled" /> 每日自動同步 quota / 清理已刪除檔案</label></div>
               <div class="field">
                 <label>每日執行時間</label>
                 <input type="time" id="s-storage-maintenance-daily-time" />
               </div>
               <div class="field">
-                <label>回收筒保留天數</label>
+                <label>已刪除檔案保留天數</label>
                 <input type="number" id="s-storage-trash-retention-days" min="0" max="3650" />
               </div>
             </div>
@@ -7327,15 +7327,15 @@
 </div>
 
 <script src="/js/00-core.js?v=20260531-modal-close-audit" defer></script>
-<script src="/js/05-i18n.js?v=20260519-vae-builtin" defer></script>
-<script src="/js/01-root-quick-settings.js?v=20260531-quick-settings-no-full" defer></script>
+<script src="/js/05-i18n.js?v=20260603-drive-bulk-actions" defer></script>
+<script src="/js/01-root-quick-settings.js?v=20260603-drive-bulk-actions" defer></script>
 <script src="/js/10-users.js?v=20260525-governance-finish" defer></script>
 <script src="/js/20-chat.js?v=20260525-chat-emoji-insert" defer></script>
 <script src="/js/25-community.js?v=20260518-inline-media" defer></script>
 <script src="/js/30-appeals.js?v=20260428-forum-pages" defer></script>
 <script src="/js/32-notifications.js?v=20260523-dispute-reply-action" defer></script>
 <script src="/js/34-markdown-editor.js?v=20260518-inline-media" defer></script>
-<script src="/js/35-drive.js?v=20260603-audio-track-native" defer></script>
+<script src="/js/35-drive.js?v=20260603-drive-bulk-actions" defer></script>
   <script src="/js/35-drive-preview-share.js?v=20260507-drive-preview-share-split" defer></script>
 <!-- cache marker retained for template-import regression: /js/36-comfyui.js?v=20260509-comfyui-template-embeddings -->
 <script src="/js/36-comfyui.js?v=20260529-comfyui-gguf-disabled-cleanup" defer></script>

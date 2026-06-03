@@ -67,7 +67,7 @@ const ROOT_MODULE_QUICK_SETTINGS = {
       { id: "s-feature-storage-albums-enabled", label: "開放相簿" },
       { id: "s-cloud-drive-global-capacity-limit-mb", label: "全站容量上限 MB" },
       { id: "s-storage-maintenance-auto-enabled", label: "每日自動維護" },
-      { id: "s-storage-trash-retention-days", label: "回收筒保留天數" },
+      { id: "s-storage-trash-retention-days", label: "已刪除檔案保留天數" },
       { id: "s-cd-require-scan-before-download", label: "下載前要求掃描", save: "drivePolicy" },
       { id: "s-cd-block-unclean-downloads", label: "阻擋未掃描乾淨下載", save: "drivePolicy" },
     ],
@@ -80,7 +80,7 @@ const ROOT_MODULE_QUICK_SETTINGS = {
       { id: "s-feature-storage-albums-enabled", label: "開放相簿" },
       { id: "s-feature-privacy-uploads-enabled", label: "開放雲端硬碟 / E2EE" },
       { id: "s-cloud-drive-global-capacity-limit-mb", label: "全站容量上限 MB" },
-      { id: "s-storage-trash-retention-days", label: "回收筒保留天數" },
+      { id: "s-storage-trash-retention-days", label: "已刪除檔案保留天數" },
     ],
   },
   videos: {

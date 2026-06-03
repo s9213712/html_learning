@@ -31,7 +31,7 @@ def test_cloud_drive_preview_ui_is_wired():
     assert "function shouldOpenDriveFullscreen(fileId" in drive_js
     assert "function isDriveMobilePreviewViewport()" in drive_js
     assert 'window.matchMedia("(max-width: 720px)")' in drive_js
-    assert "if (!options.inlinePreview && isDriveMobilePreviewViewport()) return true;" in drive_js
+    assert "if (isDriveMobilePreviewViewport() && !options.forceFullscreen) return false;" in drive_js
     auth_js = (ROOT / "public" / "js" / "40-auth-users.js").read_text(encoding="utf-8")
     assert "promptDriveGlobalE2eePassphraseOnLogin" not in auth_js
     assert "promptDriveGlobalE2eePassphraseOnLogin" not in drive_js
@@ -332,6 +332,41 @@ def test_filemanager_and_albummanager_ui_are_wired():
     assert "全用戶容量上限" in admin_js
 
 
+def test_storage_browser_bulk_selection_actions_are_wired():
+    index_html = (ROOT / "public" / "index.html").read_text(encoding="utf-8")
+    drive_js = (ROOT / "public" / "js" / "35-drive.js").read_text(encoding="utf-8")
+    styles_css = (ROOT / "public" / "styles.css").read_text(encoding="utf-8")
+    i18n_js = (ROOT / "public" / "js" / "05-i18n.js").read_text(encoding="utf-8")
+    quick_settings_js = (ROOT / "public" / "js" / "01-root-quick-settings.js").read_text(encoding="utf-8")
+
+    assert 'data-drive-action="move-selected-storage"' in drive_js
+    assert 'data-drive-action="share-selected-storage"' in drive_js
+    assert 'data-drive-action="download-selected-storage"' in drive_js
+    assert 'data-drive-action="delete-selected-storage"' in drive_js
+    assert "async function moveSelectedStorageItems()" in drive_js
+    assert "async function shareSelectedStorageItems()" in drive_js
+    assert "async function downloadSelectedStorageItems()" in drive_js
+    assert "async function deleteSelectedStorageItems()" in drive_js
+    assert "function selectedStorageFilesForShareOrDownload()" in drive_js
+    assert 'storageAction("/storage/folders/trash", "POST", { path })' in drive_js
+    assert 'storageAction("/storage/folders/trash", "DELETE"' not in drive_js
+    assert 'storageAction("/storage/albums", "POST", {' in drive_js
+    assert 'storageAction(`/storage/albums/${encodeURIComponent(albumId)}/files`, "POST", { storage_file_id: file.id })' in drive_js
+    assert "triggerBrowserDownload(`${API}/storage/files/${encodeURIComponent(file.id)}/download`, storageFileDisplayName(file));" in drive_js
+    assert "回收" not in drive_js
+    assert "垃圾桶" not in drive_js
+    assert "回收" not in index_html
+    assert "垃圾桶" not in index_html
+    assert "回收" not in i18n_js
+    assert "垃圾桶" not in i18n_js
+    assert "回收" not in quick_settings_js
+    assert "垃圾桶" not in quick_settings_js
+    assert '[data-drive-action="move-selected-storage"]::before' in styles_css
+    assert '[data-drive-action="share-selected-storage"]::before' in styles_css
+    assert '[data-drive-action="download-selected-storage"]::before' in styles_css
+    assert '[data-drive-action="delete-selected-storage"]::before' in styles_css
+
+
 def test_album_viewer_has_dedicated_module():
     index_html = (ROOT / "public" / "index.html").read_text(encoding="utf-8")
     drive_js = ((ROOT / "public" / "js" / "35-drive.js").read_text(encoding="utf-8") + "\n" + (ROOT / "public" / "js" / "35-drive-preview-share.js").read_text(encoding="utf-8"))
@@ -340,6 +375,8 @@ def test_album_viewer_has_dedicated_module():
         (ROOT / "public" / "js" / "50-admin.js").read_text(encoding="utf-8")
         + "\n"
         + (ROOT / "public" / "js" / "51-admin-server-mode-launch-check.js").read_text(encoding="utf-8")
+        + "\n"
+        + (ROOT / "public" / "js" / "53-admin-storage-economy.js").read_text(encoding="utf-8")
     )
     bootstrap_js = (ROOT / "public" / "js" / "90-bootstrap.js").read_text(encoding="utf-8")
 
@@ -579,7 +616,7 @@ def test_cloud_drive_toolbar_buttons_wrap_on_mobile():
     index_html = (ROOT / "public" / "index.html").read_text(encoding="utf-8")
     css = (ROOT / "public" / "styles.css").read_text(encoding="utf-8")
 
-    assert '/styles.css?v=20260602-drive-file-action-text-fix' in index_html
+    assert '/styles.css?v=20260603-drive-bulk-actions' in index_html
     assert 'data-drive-action="open-text-document-modal">新增文檔</button>' in index_html
     assert 'data-drive-action="set-drive-e2ee-session-passphrase">套用到本次瀏覽器</button>' in index_html
     assert 'data-drive-action="clear-drive-e2ee-session-passphrase">清除</button>' in index_html
@@ -721,7 +758,7 @@ def test_cloud_drive_e2ee_download_decrypts_in_browser():
     assert "DRIVE_E2EE_PREVIEW_DECRYPT_FAILED" in drive_js
     assert "正在使用最近輸入過的 E2EE 密碼嘗試預覽" in drive_js
     assert "等待 E2EE 密碼並在瀏覽器解密中" not in drive_js
-    assert "const passphrase = await getDriveE2eeSessionPassphrase(fileId, promptText, { force: true });" in drive_js
+    assert "const passphrase = await getDriveE2eeSessionPassphrase(fileId, promptText, { force: true, allowPrompt: true });" in drive_js
     assert "const decrypted = await decryptDriveE2eeBlob(blob, keyJson.e2ee, passphrase);" in drive_js
     assert "rememberDriveE2eeSessionPassphrase(fileId, passphrase);" in drive_js
     assert "if (!getDriveE2eeSessionPassphraseCandidates(file.file_id).length) throw err;" in drive_js

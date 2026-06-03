@@ -4280,7 +4280,10 @@
       background: transparent;
       color: var(--accent2);
       cursor: pointer;
-      padding: .1rem .2rem;
+      min-width: 2.75rem;
+      min-height: 2rem;
+      padding: .2rem .4rem;
+      border-radius: 6px;
       font: inherit;
     }
 
@@ -14326,12 +14329,14 @@
 }
 
 #module-drive .drive-file-actions [data-drive-action="download"]::before,
-#module-drive .drive-file-actions [data-drive-action="download-storage"]::before {
+#module-drive .drive-file-actions [data-drive-action="download-storage"]::before,
+#module-drive .drive-file-actions [data-drive-action="download-selected-storage"]::before {
   content: "↓";
 }
 
 #module-drive .drive-file-actions [data-drive-action="share-cloud-file"]::before,
 #module-drive .drive-file-actions [data-drive-action="share-storage-folder"]::before,
+#module-drive .drive-file-actions [data-drive-action="share-selected-storage"]::before,
 #module-drive .drive-file-actions [data-drive-action="share-album"]::before,
 #module-drive .drive-file-actions [data-drive-action="create-share-link"]::before,
 #module-drive .drive-file-actions [data-drive-action="copy-drive-share-link"]::before {
@@ -14344,6 +14349,7 @@
 }
 
 #module-drive .drive-file-actions [data-drive-action="move-storage-file"]::before,
+#module-drive .drive-file-actions [data-drive-action="move-selected-storage"]::before,
 #module-drive .drive-file-actions [data-drive-action="move-cloud-to-storage"]::before,
 #module-drive .drive-file-actions [data-drive-action="select-storage-folder"]::before,
 #module-drive .drive-file-actions [data-drive-action="select-storage-file"]::before,
@@ -14353,6 +14359,7 @@
 
 #module-drive .drive-file-actions [data-drive-action="trash-storage"]::before,
 #module-drive .drive-file-actions [data-drive-action="trash-storage-folder"]::before,
+#module-drive .drive-file-actions [data-drive-action="delete-selected-storage"]::before,
 #module-drive .drive-file-actions [data-drive-action="trash-selected-storage"]::before {
   content: "⌫";
 }

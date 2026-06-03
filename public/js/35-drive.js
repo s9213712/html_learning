@@ -4789,6 +4789,55 @@ function storageSelectionCount() {
   return selectedStorageFileIds.size + selectedStorageFolderPaths.size;
 }
 
+function selectedStorageFiles() {
+  const byId = new Map((Array.isArray(storageFilesCache) ? storageFilesCache : [])
+    .map((file) => [String(file?.id || ""), file])
+    .filter(([id]) => Boolean(id)));
+  return Array.from(selectedStorageFileIds)
+    .map((id) => byId.get(String(id)) || { id, display_name: id, virtual_path: "" })
+    .filter((file) => file?.id);
+}
+
+function selectedStorageFolders() {
+  const byPath = new Map((Array.isArray(storageFoldersCache) ? storageFoldersCache : [])
+    .map((folder) => [normalizeStoragePath(folder?.virtual_path || ""), folder])
+    .filter(([path]) => path && path !== "/"));
+  return Array.from(selectedStorageFolderPaths)
+    .map((path) => {
+      const normalized = normalizeStoragePath(path);
+      return byPath.get(normalized) || { virtual_path: normalized, display_name: storageBaseName(normalized) };
+    })
+    .filter((folder) => normalizeStoragePath(folder?.virtual_path || "") !== "/");
+}
+
+function storageFileDisplayName(file) {
+  return file?.display_name || storageBaseName(file?.virtual_path || "") || file?.id || "file";
+}
+
+function storageFilePath(file) {
+  return normalizeStoragePath(file?.virtual_path || storageFileDisplayName(file));
+}
+
+function storageFileIsInsideFolder(file, folderPath) {
+  const filePath = storageFilePath(file);
+  const normalizedFolder = normalizeStoragePath(folderPath);
+  return Boolean(normalizedFolder && normalizedFolder !== "/" && filePath.startsWith(`${normalizedFolder}/`));
+}
+
+function storageFilesInSelectedFolders(folders = selectedStorageFolders()) {
+  const folderPaths = folders.map((folder) => normalizeStoragePath(folder?.virtual_path || "")).filter((path) => path && path !== "/");
+  if (!folderPaths.length) return [];
+  return (Array.isArray(storageFilesCache) ? storageFilesCache : [])
+    .filter((file) => folderPaths.some((folderPath) => storageFileIsInsideFolder(file, folderPath)));
+}
+
+function selectedStorageFilesForShareOrDownload() {
+  const byId = new Map();
+  selectedStorageFiles().forEach((file) => byId.set(String(file.id || ""), file));
+  storageFilesInSelectedFolders().forEach((file) => byId.set(String(file.id || ""), file));
+  return Array.from(byId.values()).filter((file) => file?.id);
+}
+
 function updateStorageSelectionLabel() {
   const label = $("storage-selection-label");
   if (!label) return;
@@ -4820,6 +4869,7 @@ function visibleStorageFolders() {
 function renderStorageBulkToolbar() {
   const count = storageSelectionCount();
   const visibleCount = visibleStorageFiles().length + visibleStorageFolders().length;
+  const disabled = count ? "" : " disabled";
   return `
     <div class="drive-file-row storage-browser-row storage-browser-bulk-toolbar">
       <div>
@@ -4829,7 +4879,10 @@ function renderStorageBulkToolbar() {
       <div class="drive-file-actions">
         <button class="btn btn-sm" type="button" data-drive-action="select-visible-storage">全選本層</button>
         <button class="btn btn-sm" type="button" data-drive-action="clear-storage-selection">清除選取</button>
-        <button class="btn btn-danger btn-sm" type="button" data-drive-action="trash-selected-storage"${count ? "" : " disabled"}>回收選取</button>
+        <button class="btn btn-sm" type="button" data-drive-action="move-selected-storage"${disabled}>移動</button>
+        <button class="btn btn-sm" type="button" data-drive-action="share-selected-storage"${disabled}>分享</button>
+        <button class="btn btn-sm" type="button" data-drive-action="download-selected-storage"${disabled}>下載</button>
+        <button class="btn btn-danger btn-sm" type="button" data-drive-action="delete-selected-storage"${disabled}>刪除</button>
       </div>
     </div>
   `;
@@ -4916,7 +4969,7 @@ function storageFileRows(files) {
         <button class="btn" type="button" data-drive-action="move-storage-file" data-storage-file-id="${sanitize(file.id)}" data-path="${sanitize(file.virtual_path || "")}">移動</button>
         <button class="btn" type="button" data-drive-action="download-storage" data-storage-file-id="${sanitize(file.id)}">下載</button>
         ${albumButton}
-        <button class="btn btn-danger" type="button" data-drive-action="trash-storage" data-storage-file-id="${sanitize(file.id)}">回收</button>
+        <button class="btn btn-danger" type="button" data-drive-action="trash-storage" data-storage-file-id="${sanitize(file.id)}">刪除</button>
       </div>
     </div>
   `;
@@ -4981,7 +5034,7 @@ function renderStorageTrash(files) {
   const list = $("storage-trash-list");
   if (!list) return;
   if (!Array.isArray(files) || !files.length) {
-    list.innerHTML = `<div class="drive-empty">回收筒是空的</div>`;
+    list.innerHTML = `<div class="drive-empty">沒有已刪除檔案</div>`;
     return;
   }
   list.innerHTML = files.map((file) => `
@@ -5040,7 +5093,7 @@ function renderStorageFeatureDisabled() {
   const message = "Storage / 相簿目前未啟用。請由 root 到設定 > 功能開關，至少一起開啟「隱私分級上傳 / E2EE」與「Storage / 相簿」。";
   if ($("storage-selection-label")) $("storage-selection-label").textContent = message;
   if ($("storage-browser-list")) $("storage-browser-list").innerHTML = `<div class="drive-empty">${sanitize(message)}</div>`;
-  if ($("storage-trash-list")) $("storage-trash-list").innerHTML = `<div class="drive-empty">Storage 未啟用，因此沒有可顯示的垃圾桶內容。</div>`;
+  if ($("storage-trash-list")) $("storage-trash-list").innerHTML = `<div class="drive-empty">Storage 未啟用，因此沒有可顯示的已刪除檔案。</div>`;
   if ($("album-list")) $("album-list").innerHTML = `<div class="drive-empty">${sanitize(message)}</div>`;
   if ($("album-gallery-list")) $("album-gallery-list").innerHTML = `<div class="drive-empty">${sanitize(message)}</div>`;
   closeAlbumDetail();
@@ -5112,19 +5165,133 @@ function clearStorageSelection() {
 }
 
 async function trashSelectedStorageItems() {
+  return deleteSelectedStorageItems();
+}
+
+async function deleteSelectedStorageItems() {
   const fileIds = Array.from(selectedStorageFileIds).filter(Boolean);
   const folderPaths = Array.from(selectedStorageFolderPaths).filter(Boolean);
   const total = fileIds.length + folderPaths.length;
   if (!total) return;
-  if (!window.confirm(`回收已選取的 ${total} 個檔案/資料夾？`)) return;
+  if (!window.confirm(`刪除已選取的 ${total} 個檔案/資料夾？可在已刪除檔案中還原。`)) return;
   try {
-    for (const path of folderPaths) await storageAction("/storage/folders/trash", "DELETE", { path });
+    for (const path of folderPaths) await storageAction("/storage/folders/trash", "POST", { path });
     for (const id of fileIds) await storageAction(`/storage/files/${encodeURIComponent(id)}`, "DELETE");
     clearStorageSelection();
     await loadDriveDashboard();
   } catch (err) {
-    alert(err.message || "批次回收失敗");
+    alert(err.message || "批次刪除失敗");
   }
+}
+
+async function moveSelectedStorageItems() {
+  const folders = selectedStorageFolders();
+  const selectedFolderPaths = folders.map((folder) => normalizeStoragePath(folder?.virtual_path || "")).filter(Boolean);
+  const files = selectedStorageFiles()
+    .filter((file) => !selectedFolderPaths.some((folderPath) => storageFileIsInsideFolder(file, folderPath)));
+  const total = files.length + folders.length;
+  if (!total) return;
+  const requested = window.prompt("移動已選取項目到資料夾", currentStoragePath || "/");
+  if (requested === null) return;
+  const targetFolder = requested && requested.startsWith("/")
+    ? normalizeStoragePath(requested)
+    : joinStoragePath(currentStoragePath, requested || "");
+  if (!targetFolder.trim()) {
+    alert("請輸入目標資料夾");
+    return;
+  }
+  try {
+    for (const folder of folders) {
+      const oldPath = normalizeStoragePath(folder?.virtual_path || "");
+      if (!oldPath || oldPath === "/") continue;
+      if (targetFolder === oldPath || targetFolder.startsWith(`${oldPath}/`)) {
+        throw new Error(`不能將資料夾「${oldPath}」移到自己或子資料夾內`);
+      }
+      const newPath = joinStoragePath(targetFolder, storageBaseName(oldPath) || "folder");
+      if (newPath !== oldPath) {
+        await storageAction("/storage/folders/move", "PUT", { old_path: oldPath, new_path: newPath });
+      }
+    }
+    for (const file of files) {
+      const id = String(file?.id || "");
+      if (!id) continue;
+      const newPath = joinStoragePath(targetFolder, storageFileDisplayName(file));
+      await storageAction(`/storage/files/${encodeURIComponent(id)}/organize`, "PUT", { virtual_path: newPath });
+    }
+    clearStorageSelection();
+    currentStoragePath = targetFolder;
+    await loadDriveDashboard();
+  } catch (err) {
+    alert(err.message || "批次移動失敗");
+  }
+}
+
+async function shareSelectedStorageItems() {
+  const files = selectedStorageFilesForShareOrDownload();
+  const folders = selectedStorageFolders();
+  if (!files.length && folders.length === 1) {
+    const folder = folders[0];
+    return shareStorageFolder(folder.virtual_path || "", folder.display_name || storageBaseName(folder.virtual_path || ""));
+  }
+  if (!files.length) {
+    alert("選取的資料夾目前沒有可分享的檔案");
+    return;
+  }
+  if (files.length === 1 && !folders.length) {
+    const file = files[0];
+    if (!file.file_id) {
+      alert("這個檔案目前無法建立分享");
+      return;
+    }
+    return openDriveShareDialogAfterDecrypt(file.file_id, storageFileDisplayName(file), file.id);
+  }
+  const defaultTitle = currentStoragePath && currentStoragePath !== "/"
+    ? `${storageBaseName(currentStoragePath)} 批次分享`
+    : "雲端硬碟批次分享";
+  const title = window.prompt("批次分享名稱", defaultTitle);
+  if (title === null) return;
+  const cleanTitle = title.trim();
+  if (!cleanTitle) {
+    alert("分享名稱不可為空");
+    return;
+  }
+  try {
+    const albumJson = await storageAction("/storage/albums", "POST", {
+      title: cleanTitle,
+      description: `由雲端硬碟批次選取 ${files.length} 個檔案建立`,
+      visibility: "private"
+    });
+    const albumId = albumJson.album?.id || "";
+    if (!albumId) throw new Error("相簿建立失敗");
+    for (const file of files) {
+      await storageAction(`/storage/albums/${encodeURIComponent(albumId)}/files`, "POST", { storage_file_id: file.id });
+    }
+    selectedAlbumId = albumId;
+    selectedAlbumViewerId = albumId;
+    clearStorageSelection();
+    if (typeof shareAlbum === "function") {
+      await shareAlbum(albumId);
+    } else {
+      await loadDriveDashboard();
+      await loadAlbumGallery();
+    }
+  } catch (err) {
+    alert(err.message || "批次分享建立失敗");
+  }
+}
+
+async function downloadSelectedStorageItems() {
+  const files = selectedStorageFilesForShareOrDownload();
+  if (!files.length) {
+    alert("選取的資料夾目前沒有可下載的檔案");
+    return;
+  }
+  if (files.length > 5 && !window.confirm(`將分別下載 ${files.length} 個檔案，瀏覽器可能會詢問是否允許多檔下載。`)) return;
+  files.forEach((file, index) => {
+    window.setTimeout(() => {
+      triggerBrowserDownload(`${API}/storage/files/${encodeURIComponent(file.id)}/download`, storageFileDisplayName(file));
+    }, index * 350);
+  });
 }
 
 async function organizeSelectedStorageFile() {
@@ -5250,7 +5417,7 @@ async function moveStorageFolder() {
 
 async function trashStorageFolder(path) {
   const folderPath = normalizeStoragePath(path);
-  if (!window.confirm(`將資料夾「${folderPath}」與其中檔案移到垃圾桶？`)) return;
+  if (!window.confirm(`刪除資料夾「${folderPath}」與其中檔案？可在已刪除檔案中還原。`)) return;
   try {
     await storageAction("/storage/folders/trash", "POST", { path: folderPath });
     if (currentStoragePath === folderPath || currentStoragePath.startsWith(`${folderPath}/`)) {
@@ -5731,7 +5898,7 @@ async function restoreStorageFile(id) {
 }
 
 async function purgeStorageFile(id) {
-  if (!window.confirm("永久刪除此垃圾桶項目並釋放容量？對應的雲端硬碟檔案與實體檔案也會刪除。")) return;
+  if (!window.confirm("永久刪除此已刪除項目並釋放容量？對應的雲端硬碟檔案與實體檔案也會刪除。")) return;
   try {
     await storageAction(`/storage/files/${encodeURIComponent(id)}/purge`, "DELETE");
     await loadDriveDashboard();
@@ -5742,15 +5909,15 @@ async function restoreStorageTrash() {
   try {
     await storageAction("/storage/trash/restore", "POST");
     await loadDriveDashboard();
-  } catch (err) { alert(err.message || "還原垃圾桶失敗"); }
+  } catch (err) { alert(err.message || "還原已刪除檔案失敗"); }
 }
 
 async function purgeStorageTrash() {
-  if (!window.confirm("清空垃圾桶並釋放容量？垃圾桶內對應的雲端硬碟檔案與實體檔案也會刪除。")) return;
+  if (!window.confirm("清空已刪除檔案並釋放容量？其中對應的雲端硬碟檔案與實體檔案也會刪除。")) return;
   try {
     await storageAction("/storage/trash/purge", "DELETE");
     await loadDriveDashboard();
-  } catch (err) { alert(err.message || "清空垃圾桶失敗"); }
+  } catch (err) { alert(err.message || "清空已刪除檔案失敗"); }
 }
 
 async function downloadStorageFile(id) {
@@ -6007,6 +6174,10 @@ document.addEventListener("click", (event) => {
     if (action === "select-visible-storage") return selectVisibleStorageItems();
     if (action === "clear-storage-selection") return clearStorageSelection();
     if (action === "trash-selected-storage") return trashSelectedStorageItems();
+    if (action === "delete-selected-storage") return deleteSelectedStorageItems();
+    if (action === "move-selected-storage") return moveSelectedStorageItems();
+    if (action === "share-selected-storage") return shareSelectedStorageItems();
+    if (action === "download-selected-storage") return downloadSelectedStorageItems();
     if (action === "set-drive-e2ee-session-passphrase") return setDriveE2eeSessionPassphraseFromUi();
     if (action === "clear-drive-e2ee-session-passphrase") return clearDriveE2eeSessionPassphraseFromUi();
     if (action === "move-storage-file") return moveStorageFileFromRow(storageFileId, path);
