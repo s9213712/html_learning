@@ -16,8 +16,10 @@ def test_reset_help_documents_preserved_server_secret_material():
 
     assert "preserves storage/, venv/, and server-side secret/key" in text
     assert "preserved storage/ files become orphaned" in text
-    assert "scripts/admin/decrypt_server_files.py" in text
-    assert "pre-reset database/catalog metadata and .filekey" in text
+    assert "storage/.reset_orphan_recovery/reset_<timestamp>/" in text
+    assert "pre-reset database/catalog metadata" in text
+    assert "decrypt_server_files.py" in text
+    assert "restore_database_catalog_from_bundle.sh" in text
     for name in (
         ".filekey",
         ".fkey",
@@ -35,8 +37,8 @@ def test_reset_runtime_state_does_not_delete_server_secret_material():
 
     assert "preserving storage/, venv/, and server-side secret/key files" in body
     assert "preserved storage files may become orphaned" in body
-    assert "server_encrypted exports need pre-reset DB metadata plus .filekey" in body
-    assert "scripts/admin/decrypt_server_files.py" in body
+    assert "write_reset_orphan_recovery_bundle" in body
+    assert ".reset_orphan_recovery" in body
     for name in (
         ".filekey",
         ".fkey",
@@ -52,3 +54,38 @@ def test_reset_runtime_state_does_not_delete_server_secret_material():
 
     assert '"$RUNTIME_ROOT/storage"' not in body
     assert '"$RUNTIME_ROOT/venv"' not in body
+
+
+
+def test_reset_writes_orphan_recovery_bundle_with_export_material():
+    text = SCRIPT.read_text(encoding="utf-8")
+    start = text.index("write_reset_orphan_recovery_bundle() {")
+    end = text.index("reset_runtime_state() {", start)
+    body = text[start:end]
+
+    assert "$EFFECTIVE_STORAGE_ROOT/.reset_orphan_recovery" in body
+    assert "cp -a \"$RUNTIME_ROOT/database/.\"" in body
+    assert "scripts/admin/decrypt_server_files.py" in body
+    assert "README_SERVER_ENCRYPTED_RECOVERY.txt" in body
+    assert "restore_database_catalog_from_bundle.sh" in body
+    assert "database.before-orphan-catalog-restore" in body
+    assert "refusing: a server process appears to be running" in body
+    assert "--db \"$bundle_dir/database/database.db\"" in body
+    assert "--storage-root \"$EFFECTIVE_STORAGE_ROOT\"" in body
+    assert "--key-file \"$bundle_dir/runtime_secrets/.filekey\"" in body
+    assert "--confirm-plaintext-output" in body
+    assert "Strict E2EE files cannot be decrypted with .filekey" in body
+    assert "To import the pre-reset database/catalog metadata back after reset" in body
+    assert "It does not modify storage/." in body
+
+    for name in (
+        ".filekey",
+        ".fkey",
+        ".csrfkey",
+        ".integrity_key",
+        ".chain_seed",
+        ".server_mode_log_hmac_key",
+        "cert.pem",
+        "key.pem",
+    ):
+        assert name in body

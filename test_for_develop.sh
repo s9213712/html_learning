@@ -793,10 +793,13 @@ Options:
                            material such as .filekey, .fkey, .csrfkey,
                            .integrity_key, .chain_seed, cert.pem, and key.pem.
                            Warning: cloud-drive DB/catalog rows are cleared, so
-                           preserved storage/ files become orphaned. If you keep
-                           the pre-reset database/catalog metadata and .filekey,
-                           server_encrypted files can be exported with
-                           scripts/admin/decrypt_server_files.py.
+                           preserved storage/ files become orphaned. Before
+                           clearing state, --reset writes a recovery bundle under
+                           storage/.reset_orphan_recovery/reset_<timestamp>/
+                           with pre-reset database/catalog metadata, server
+                           secret/key material, decrypt_server_files.py, export
+                           instructions, and a restore_database_catalog_from_bundle.sh
+                           helper for importing catalog metadata back after reset.
   --delete                 Delete selected runtime root and exit. Refuses to run
                            while that runtime is active. If storage/ is inside the
                            runtime root, it is moved to a timestamped
@@ -3673,13 +3676,121 @@ ensure_runtime_not_running() {
   done
 }
 
+write_reset_orphan_recovery_bundle() {
+  local bundle_root bundle_dir secrets_dir scripts_dir readme_path
+  [[ -n "${EFFECTIVE_STORAGE_ROOT:-}" ]] || return 0
+  bundle_root="$EFFECTIVE_STORAGE_ROOT/.reset_orphan_recovery"
+  bundle_dir="$bundle_root/reset_${RUN_ID}"
+  if [[ -e "$bundle_dir" ]]; then
+    die "reset orphan recovery bundle already exists: $bundle_dir"
+  fi
+  mkdir -p "$bundle_dir" "$bundle_dir/database" "$bundle_dir/runtime_secrets" "$bundle_dir/scripts/admin"
+  chmod 700 "$bundle_dir" "$bundle_dir/runtime_secrets" 2>/dev/null || true
+
+  if [[ -d "$RUNTIME_ROOT/database" ]]; then
+    cp -a "$RUNTIME_ROOT/database/." "$bundle_dir/database/"
+  fi
+
+  local secret_name secret_path
+  for secret_name in \
+    .filekey \
+    .fkey \
+    .csrfkey \
+    .integrity_key \
+    .chain_seed \
+    .server_mode_log_hmac_key \
+    cert.pem \
+    key.pem \
+    integrity_manifest.json
+  do
+    secret_path="$RUNTIME_ROOT/$secret_name"
+    if [[ -e "$secret_path" ]]; then
+      cp -a "$secret_path" "$bundle_dir/runtime_secrets/$secret_name"
+    fi
+  done
+  chmod 600 "$bundle_dir/runtime_secrets"/* 2>/dev/null || true
+
+  if [[ -f "$SOURCE_ROOT/scripts/admin/decrypt_server_files.py" ]]; then
+    cp -a "$SOURCE_ROOT/scripts/admin/decrypt_server_files.py" "$bundle_dir/scripts/admin/decrypt_server_files.py"
+  fi
+
+  printf '%s\n' "$RUNTIME_ROOT" > "$bundle_dir/runtime_root.txt"
+  printf '%s\n' "$EFFECTIVE_STORAGE_ROOT" > "$bundle_dir/storage_root.txt"
+  cat > "$bundle_dir/restore_database_catalog_from_bundle.sh" <<EOF
+#!/usr/bin/env bash
+set -Eeuo pipefail
+BUNDLE_DIR=\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)
+RUNTIME_ROOT="$RUNTIME_ROOT"
+BUNDLE_DATABASE="$bundle_dir/database"
+TARGET_DATABASE="$RUNTIME_ROOT/database"
+STAMP=\$(date +%Y%m%d_%H%M%S)
+BACKUP_DATABASE="$RUNTIME_ROOT/database.before-orphan-catalog-restore-\$STAMP"
+
+if pgrep -af 'gunicorn|server:app' >/dev/null 2>&1; then
+  echo "[orphan-restore] refusing: a server process appears to be running. Stop it before restoring catalog metadata." >&2
+  exit 1
+fi
+if [[ ! -d "\$BUNDLE_DATABASE" ]]; then
+  echo "[orphan-restore] missing bundled database metadata: \$BUNDLE_DATABASE" >&2
+  exit 1
+fi
+mkdir -p "\$RUNTIME_ROOT"
+if [[ -e "\$TARGET_DATABASE" ]]; then
+  if [[ -e "\$BACKUP_DATABASE" ]]; then
+    echo "[orphan-restore] backup path already exists: \$BACKUP_DATABASE" >&2
+    exit 1
+  fi
+  mv "\$TARGET_DATABASE" "\$BACKUP_DATABASE"
+  echo "[orphan-restore] moved current database to \$BACKUP_DATABASE"
+fi
+mkdir -p "\$TARGET_DATABASE"
+cp -a "\$BUNDLE_DATABASE/." "\$TARGET_DATABASE/"
+echo "[orphan-restore] restored pre-reset database/catalog metadata to \$TARGET_DATABASE"
+echo "[orphan-restore] storage root remains: $EFFECTIVE_STORAGE_ROOT"
+echo "[orphan-restore] restart the server, then verify cloud-drive catalog before deleting \$BACKUP_DATABASE"
+EOF
+  chmod 700 "$bundle_dir/restore_database_catalog_from_bundle.sh" 2>/dev/null || true
+  cat > "$bundle_dir/README_SERVER_ENCRYPTED_RECOVERY.txt" <<EOF
+This folder was created by test_for_develop.sh --reset before runtime DB/catalog state was cleared.
+
+Purpose:
+- storage/ is preserved by --reset, so cloud-drive ciphertext files may remain as orphan files.
+- This bundle keeps the pre-reset database/catalog metadata and server-side keys needed to export server_encrypted files.
+- It also includes restore_database_catalog_from_bundle.sh to copy the pre-reset database/catalog metadata back into the runtime after reset.
+
+Important boundaries:
+- server_encrypted export needs runtime_secrets/.filekey plus the pre-reset database metadata in database/.
+- .fkey is not the server file encryption key; .filekey is used for server_encrypted files.
+- Strict E2EE files cannot be decrypted with .filekey. They need the user's E2EE passphrase/key material.
+- Plaintext export is sensitive. Choose an output directory outside the live storage root.
+
+Example from the repository root:
+PYTHONPATH=$SOURCE_ROOT $PYTHON_BIN scripts/admin/decrypt_server_files.py \\
+  --db "$bundle_dir/database/database.db" \\
+  --storage-root "$EFFECTIVE_STORAGE_ROOT" \\
+  --key-file "$bundle_dir/runtime_secrets/.filekey" \\
+  --output-dir /tmp/hackme_server_encrypted_plaintext_export \\
+  --confirm-plaintext-output
+
+A copy of decrypt_server_files.py is also stored at:
+$bundle_dir/scripts/admin/decrypt_server_files.py
+
+To import the pre-reset database/catalog metadata back after reset, stop the server and run:
+$bundle_dir/restore_database_catalog_from_bundle.sh
+
+That restore helper backs up the current runtime database/ first, then copies this bundle's database/ back. It does not modify storage/.
+EOF
+  say "[dev-tmp] reset:    orphan recovery bundle=$bundle_dir"
+}
+
 reset_runtime_state() {
   ensure_runtime_not_running "reset"
   say "[dev-tmp] reset:    runtime=$RUNTIME_ROOT"
   say "[dev-tmp] reset:    preserving storage/, venv/, and server-side secret/key files"
   say "[dev-tmp] reset:    warning: database/catalog rows are cleared; preserved storage files may become orphaned"
-  say "[dev-tmp] reset:    server_encrypted exports need pre-reset DB metadata plus .filekey; see scripts/admin/decrypt_server_files.py"
-  mkdir -p "$RUNTIME_ROOT"
+  say "[dev-tmp] reset:    creating storage/.reset_orphan_recovery bundle for server_encrypted export"
+  mkdir -p "$RUNTIME_ROOT" "$EFFECTIVE_STORAGE_ROOT"
+  write_reset_orphan_recovery_bundle
   rm -rf \
     "$RUNTIME_ROOT/database" \
     "$RUNTIME_ROOT/chats" \
