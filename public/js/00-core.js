@@ -1633,14 +1633,14 @@ async function notifyServerBusyResponse(response, payload = null) {
   showAppToast(String(message || SERVER_BUSY_USER_MESSAGE), false, { duration: 5200 });
 }
 
-function flash(el, text, ok) {
+function flash(el, text, ok, options = {}) {
   if (!el) return;
   el.textContent = text || "";
   el.className = text ? "msg show " + (ok ? "ok" : "err") : "msg";
   el.setAttribute("role", ok ? "status" : "alert");
   el.setAttribute("aria-live", ok ? "polite" : "assertive");
   el.setAttribute("aria-atomic", "true");
-  scheduleInlineMessageClear(el, text, ok);
+  scheduleInlineMessageClear(el, text, ok, options);
 }
 
 function uiPrefersReducedMotion() {

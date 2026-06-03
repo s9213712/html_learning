@@ -64,6 +64,16 @@ def _table_columns(conn, table):
         return set()
 
 
+def _table_exists(conn, table):
+    try:
+        return bool(conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+            (table,),
+        ).fetchone())
+    except Exception:
+        return False
+
+
 def _ensure_columns(conn, table, definitions):
     columns = _table_columns(conn, table)
     for column, ddl in definitions.items():
@@ -2964,6 +2974,10 @@ def run_video_hls_cold_cleanup(conn, *, storage_root, settings=None, now=None, d
         "items": [],
     }
     if not policy["enabled"]:
+        return result
+    if not (_table_exists(conn, "videos") and _table_exists(conn, "video_share_links")):
+        result["skipped"] += 1
+        result["reason"] = "video_schema_missing"
         return result
     rows = conn.execute(
         """

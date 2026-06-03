@@ -1069,14 +1069,13 @@ async function doRegister() {
     if (json.ok) {
       setCsrfToken(null);
       clearRegisterFieldErrors();
-      flash($("reg-msg"), "✓ " + sanitize(json.msg), true);
+      flash($("reg-msg"), "✓ " + sanitize(json.msg), true, { persistent: true });
       setTimeout(() => {
         $("reg-pw").value = "";
         $("reg-pw-confirm").value = "";
         $("reg-pw-hint").textContent = "";
         $("reg-pw-confirm-hint").textContent = "";
       }, 1500);
-      setTimeout(() => showTab("login"), 2000);
     } else {
       setCsrfToken(null);
       showRegisterError(json.msg || "註冊失敗", json.field || "");

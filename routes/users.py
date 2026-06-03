@@ -741,13 +741,30 @@ def register_user_routes(app, deps):
                 out.append(key)
         return out
 
+    def _profile_viewer_value(viewer, key, default=None):
+        if viewer is None:
+            return default
+        getter = getattr(viewer, "get", None)
+        if callable(getter):
+            try:
+                return getter(key, default)
+            except Exception:
+                pass
+        try:
+            return viewer[key]
+        except Exception:
+            return getattr(viewer, key, default)
+
     def _profile_payload_allows_public_account_fields(payload, viewer):
         if not payload:
             return False
-        owner = viewer and int(viewer.get("id") or -1) == int(payload.get("id") or -2)
+        owner = viewer and int(_profile_viewer_value(viewer, "id") or -1) == int(payload.get("id") or -2)
         if owner:
             return True
-        privileged = viewer and (viewer.get("username") == "root" or viewer.get("role") in {"manager", "super_admin"})
+        privileged = viewer and (
+            _profile_viewer_value(viewer, "username") == "root"
+            or _profile_viewer_value(viewer, "role") in {"manager", "super_admin"}
+        )
         if privileged:
             return True
         visibility = payload.get("profile_visibility") or "public"
@@ -763,7 +780,7 @@ def register_user_routes(app, deps):
         if not payload:
             return payload
         keys = _profile_public_account_field_keys(conn, payload.get("id"))
-        owner = viewer and int(viewer.get("id") or -1) == int(payload.get("id") or -2)
+        owner = viewer and int(_profile_viewer_value(viewer, "id") or -1) == int(payload.get("id") or -2)
         if owner:
             payload["profile_public_account_fields"] = keys
         payload["public_account_fields"] = {}
