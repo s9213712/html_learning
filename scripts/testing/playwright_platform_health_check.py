@@ -25,7 +25,7 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from playwright.sync_api import sync_playwright
 
@@ -971,7 +971,12 @@ def active_root_operations_overflow(page, section_id: str) -> dict[str, Any]:
     )
 
 
-def check_mobile_root_operations(rec: Recorder, page, base_url: str) -> None:
+def check_mobile_root_operations(
+    rec: Recorder,
+    page,
+    base_url: str,
+    record_browser_error: Callable[[str, str], None] | None = None,
+) -> None:
     pages = (
         ("health", "sec-server-health", "#server-health-summary .health-metric-card"),
         ("capacity", "sec-settings-backpressure", "#server-backpressure-chart"),
@@ -979,41 +984,49 @@ def check_mobile_root_operations(rec: Recorder, page, base_url: str) -> None:
     )
     results: dict[str, Any] = {}
     timing_snapshots: dict[str, Any] = {}
-    for width, height in ((390, 844), (768, 1024), (1366, 768)):
-        page.set_viewport_size({"width": width, "height": height})
-        page.goto(base_url + "/", wait_until="domcontentloaded")
-        wait_for_auth_app(page)
-        viewport_key = f"{width}x{height}"
-        results[viewport_key] = {}
-        for tab, section_id, ready_selector in pages:
-            if tab == "capacity":
-                switch_system_tab_and_wait(page, tab, section_id, ready_selector)
-                page.evaluate("() => typeof refreshBackpressureTraffic === 'function' && refreshBackpressureTraffic()")
-                page.wait_for_selector(ready_selector, state="visible", timeout=18000)
-            elif tab == "env":
-                switch_system_tab_and_wait(page, tab, section_id, ready_selector)
-                page.evaluate("() => typeof refreshSystemResourceBoard === 'function' && refreshSystemResourceBoard()")
-                page.wait_for_selector(ready_selector, state="visible", timeout=18000)
-            else:
-                switch_system_tab_and_wait(page, tab, section_id, ready_selector)
-            overflow = active_root_operations_overflow(page, section_id)
-            results[viewport_key][tab] = overflow
-            check_ui_quality(rec, page, f"root_operations_{tab}_{width}x{height}", mobile=width <= 640)
+    root_ctx = page.context.browser.new_context(ignore_https_errors=True, viewport={"width": 390, "height": 844})
+    root_page = root_ctx.new_page()
+    if record_browser_error is not None:
+        attach_browser_error_handlers(root_page, record_browser_error)
+    try:
+        login_with_retry(root_page, base_url)
+        for width, height in ((390, 844), (768, 1024), (1366, 768)):
+            root_page.set_viewport_size({"width": width, "height": height})
+            root_page.goto(base_url + "/", wait_until="domcontentloaded")
+            wait_for_auth_app(root_page)
+            viewport_key = f"{width}x{height}"
+            results[viewport_key] = {}
+            for tab, section_id, ready_selector in pages:
+                if tab == "capacity":
+                    switch_system_tab_and_wait(root_page, tab, section_id, ready_selector)
+                    root_page.evaluate("() => typeof refreshBackpressureTraffic === 'function' && refreshBackpressureTraffic()")
+                    root_page.wait_for_selector(ready_selector, state="visible", timeout=18000)
+                elif tab == "env":
+                    switch_system_tab_and_wait(root_page, tab, section_id, ready_selector)
+                    root_page.evaluate("() => typeof refreshSystemResourceBoard === 'function' && refreshSystemResourceBoard()")
+                    root_page.wait_for_selector(ready_selector, state="visible", timeout=18000)
+                else:
+                    switch_system_tab_and_wait(root_page, tab, section_id, ready_selector)
+                overflow = active_root_operations_overflow(root_page, section_id)
+                results[viewport_key][tab] = overflow
+                check_ui_quality(rec, root_page, f"root_operations_{tab}_{width}x{height}", mobile=width <= 640)
 
-        switch_system_tab_and_wait(
-            page,
-            "health",
-            "sec-server-health",
-            "#server-health-frontend-observability",
-            timeout=18000,
-        )
-        page.wait_for_function(
-            "() => (document.querySelector('#server-health-frontend-observability')?.innerText || '').includes('first-summary')",
-            timeout=18000,
-        )
-        timing_text = page.locator("#server-health-frontend-observability").inner_text(timeout=5000)
-        timing_store = page.evaluate("() => window.__hackmeRootAdminTimings || {}")
-        timing_snapshots[viewport_key] = {"text": timing_text, "store": timing_store}
+            switch_system_tab_and_wait(
+                root_page,
+                "health",
+                "sec-server-health",
+                "#server-health-frontend-observability",
+                timeout=18000,
+            )
+            root_page.wait_for_function(
+                "() => (document.querySelector('#server-health-frontend-observability')?.innerText || '').includes('first-summary')",
+                timeout=18000,
+            )
+            timing_text = root_page.locator("#server-health-frontend-observability").inner_text(timeout=5000)
+            timing_store = root_page.evaluate("() => window.__hackmeRootAdminTimings || {}")
+            timing_snapshots[viewport_key] = {"text": timing_text, "store": timing_store}
+    finally:
+        root_ctx.close()
 
     failures = []
     for viewport_key, tabs in results.items():
@@ -1150,7 +1163,7 @@ def main() -> int:
             rec.guard("share_management", lambda: check_share_management(rec, page, seed_summary["shares"]))
             rec.guard("trading_asset_overview", lambda: check_trading_asset_overview(rec, page, seed_summary["trading"]))
             rec.guard("mobile_platform_views", lambda: check_mobile_platform_views(rec, page, base_url))
-            rec.guard("mobile_root_operations", lambda: check_mobile_root_operations(rec, page, base_url))
+            rec.guard("mobile_root_operations", lambda: check_mobile_root_operations(rec, page, base_url, record_browser_error))
 
             screenshot_dir = runtime_root / "reports" / "qa" / "screenshots"
             screenshot_dir.mkdir(parents=True, exist_ok=True)
