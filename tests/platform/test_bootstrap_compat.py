@@ -295,7 +295,7 @@ def test_init_db_repairs_legacy_sessions_before_schema_replay(tmp_path, monkeypa
         "preset_id", "actor_user_id", "prompt", "negative_prompt", "params_json", "workflow_json",
         "output_refs_json", "status", "error", "created_at", "updated_at",
     } <= comfyui_workflow_run_cols
-    assert migration_versions == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30]
+    assert migration_versions == list(range(1, 32))
     assert set(default_users) == {"root", "admin", "test"}
 
     assert default_users["root"]["role"] == "super_admin"

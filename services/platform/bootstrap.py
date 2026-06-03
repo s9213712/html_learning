@@ -114,8 +114,9 @@ def _relax_default_password_gate_for_dev_defaults():
         or os.environ.get("SERVER_MODE")
         or "dev_ready"
     )
-    if str(mode).strip().lower() in {"dev_ready", "internal_test", "test", "superweak"}:
-        return True
+    dev_like_mode = str(mode).strip().lower() in {"dev_ready", "internal_test", "test", "superweak"}
+    if not dev_like_mode:
+        return False
     return _env_bool("HACKME_DEV_DEFAULT_ACCOUNT_PASSWORDS", False) or _env_bool(
         "HTML_LEARNING_ALLOW_DEFAULT_PASSWORDS", False
     )

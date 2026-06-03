@@ -52,8 +52,6 @@ def default_password_change_policy_disabled():
         return True
     security_enabled = _env_truthy("HACKME_DEV_SECURITY_ENABLED") or _env_truthy("HTML_LEARNING_SECURITY_ENABLED")
     dev_like_mode = _runtime_mode_from_env() in {"dev_ready", "internal_test", "test", "superweak"}
-    if dev_like_mode and not security_enabled:
-        return True
     default_passwords_allowed = _env_truthy("HACKME_DEV_DEFAULT_ACCOUNT_PASSWORDS") or _env_truthy(
         "HTML_LEARNING_ALLOW_DEFAULT_PASSWORDS"
     )
