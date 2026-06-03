@@ -789,7 +789,9 @@ Options:
   --reset                  Reset selected runtime state and exit. Refuses to run
                            while that runtime is active. Clears database/, chats/,
                            anchors/, reports/, logs/, dev token/cache/temp/pid files;
-                           preserves storage/ and venv/.
+                           preserves storage/, venv/, and server-side secret/key
+                           material such as .filekey, .fkey, .csrfkey,
+                           .integrity_key, .chain_seed, cert.pem, and key.pem.
   --delete                 Delete selected runtime root and exit. Refuses to run
                            while that runtime is active. If storage/ is inside the
                            runtime root, it is moved to a timestamped
@@ -3669,7 +3671,7 @@ ensure_runtime_not_running() {
 reset_runtime_state() {
   ensure_runtime_not_running "reset"
   say "[dev-tmp] reset:    runtime=$RUNTIME_ROOT"
-  say "[dev-tmp] reset:    preserving storage/ and venv/"
+  say "[dev-tmp] reset:    preserving storage/, venv/, and server-side secret/key files"
   mkdir -p "$RUNTIME_ROOT"
   rm -rf \
     "$RUNTIME_ROOT/database" \
