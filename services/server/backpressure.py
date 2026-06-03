@@ -32,6 +32,7 @@ HEALTH_FAST_LANE_PATHS = {
 
 AUTH_FAST_LANE_PATHS = {
     "/api/csrf-token",
+    "/api/login",
     "/api/me",
     "/api/site-config",
 }
@@ -321,7 +322,7 @@ def _auto_root_limit(thread_capacity: int, settings: dict | None = None) -> tupl
     configured = _env_int_or_none("HTML_LEARNING_BACKPRESSURE_ROOT_LIMIT", minimum=1, maximum=64)
     if configured:
         return configured, "env"
-    return 1, "auto"
+    return max(2, min(4, max(1, thread_capacity // 4))), "auto"
 
 
 def _resolve_gate_limits(settings: dict | None = None) -> dict:
@@ -946,16 +947,30 @@ def install_backpressure(app, settings_provider=None, root_priority_detector=Non
         if bool(limits.get("root_priority_enabled")) and is_root_priority_path(path):
             root_gate = state.get("root")
             detector = app.config.get("HACKME_BACKPRESSURE_ROOT_PRIORITY_DETECTOR")
-            root_lease = root_gate.acquire(count_reject=False) if hasattr(root_gate, "acquire") else None
-            if root_lease is not None:
+            is_root_priority = False
+            try:
+                is_root_priority = callable(detector) and bool(detector())
+            except Exception:
+                is_root_priority = False
+            if is_root_priority:
+                root_lease = root_gate.acquire(count_reject=False) if hasattr(root_gate, "acquire") else None
+                if root_lease is None:
+                    g._backpressure_traffic_label = "root"
+                    g._backpressure_rejected = True
+                    _record_backpressure_anomaly(app, {
+                        "event": "server_busy_rejected",
+                        "gate": "root",
+                        "status_code": 503,
+                        "retry_after": int(state.get("retry_after") or 2),
+                        "qos_class": getattr(g, "_hackme_qos_class", ""),
+                    })
+                    return _busy_response("root", int(state.get("retry_after") or 2))
                 try:
-                    if callable(detector) and bool(detector()):
-                        g._backpressure_lease = root_lease
-                        g._backpressure_traffic_label = root_lease.label
-                        return None
+                    g._backpressure_lease = root_lease
+                    g._backpressure_traffic_label = root_lease.label
+                    return None
                 except Exception:
-                    pass
-                root_lease.release()
+                    root_lease.release()
         gate = None
         if gate is None:
             gate = state.get("heavy") if is_heavy_request_path(path, request.method) else state.get("normal")

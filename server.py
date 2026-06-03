@@ -1309,6 +1309,8 @@ MANAGEMENT_PLANE_EXACT_PATHS = {
 
 def is_management_plane_request_path(path):
     path = str(path or "")
+    if path.startswith("/api/root/") or path.startswith("/api/admin/"):
+        return True
     if path in MANAGEMENT_PLANE_EXACT_PATHS:
         return True
     return any(path.startswith(prefix) for prefix in MANAGEMENT_PLANE_PATH_PREFIXES)

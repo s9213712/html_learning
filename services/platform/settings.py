@@ -353,6 +353,8 @@ def normalize_feature_key(feature_key):
     key = str(feature_key or "").strip()
     if not key:
         return ""
+    if key in DEFAULT_SETTINGS and key.startswith("feature_"):
+        return key
     if not key.startswith("feature_"):
         key = f"feature_{key.replace('_enabled', '')}_enabled"
     elif not key.endswith("_enabled"):

@@ -210,6 +210,10 @@ def test_backpressure_preserves_fast_lane_root_priority_and_heavy_limits():
     def me_probe():
         return jsonify({"ok": True, "username": "alice"})
 
+    @app.route("/api/login", methods=["POST"])
+    def login_probe():
+        return jsonify({"ok": True, "login": True})
+
     @app.route("/api/normal")
     def normal_probe():
         return jsonify({"ok": True})
@@ -243,6 +247,10 @@ def test_backpressure_preserves_fast_lane_root_priority_and_heavy_limits():
         assert me_lane.status_code == 200
         assert me_lane.get_json()["username"] == "alice"
 
+        login_lane = client.post("/api/login", json={"username": "root"})
+        assert login_lane.status_code == 200
+        assert login_lane.get_json()["login"] is True
+
         root_priority = client.get("/api/root/points/report")
         assert root_priority.status_code == 200
         assert root_priority.get_json()["root"] is True
@@ -251,6 +259,11 @@ def test_backpressure_preserves_fast_lane_root_priority_and_heavy_limits():
 
     heavy_lease = state["heavy"].acquire()
     try:
+        root_during_heavy = client.get("/api/root/points/report")
+        assert root_during_heavy.status_code == 200
+        assert root_during_heavy.headers["X-Hackme-Backpressure"] == "root"
+        assert root_during_heavy.get_json()["root"] is True
+
         blocked_heavy = client.post("/api/files/upload", data=b"abc")
         assert blocked_heavy.status_code == 503
         assert blocked_heavy.get_json()["gate"] == "heavy"
@@ -348,7 +361,7 @@ def test_backpressure_auto_uses_gunicorn_threads_from_argv(monkeypatch):
     assert state["limits"]["thread_capacity"] == 12
     assert state["limits"]["normal"] == 12
     assert state["limits"]["heavy"] == 6
-    assert state["limits"]["root"] == 1
+    assert state["limits"]["root"] == 3
     assert state["limits"]["fast_lane_reserved"] == 4
 
 
@@ -377,7 +390,7 @@ def test_backpressure_auto_keeps_small_gthread_workers_usable(monkeypatch):
     assert state["limits"]["thread_capacity"] == 6
     assert state["limits"]["normal"] == 6
     assert state["limits"]["heavy"] == 5
-    assert state["limits"]["root"] == 1
+    assert state["limits"]["root"] == 2
     assert state["limits"]["fast_lane_reserved"] == 1
 
 
@@ -403,7 +416,7 @@ def test_backpressure_auto_does_not_scale_with_large_cpu_count(monkeypatch):
     assert state["limits"]["thread_capacity"] == 8
     assert state["limits"]["normal"] == 8
     assert state["limits"]["heavy"] == 4
-    assert state["limits"]["root"] == 1
+    assert state["limits"]["root"] == 2
     assert state["limits"]["fast_lane_reserved"] == 1
 
 
