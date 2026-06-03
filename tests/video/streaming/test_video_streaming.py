@@ -292,6 +292,7 @@ def _fake_hls_package(
     video_only=False,
     audio_stream_index=None,
     progress_callback=None,
+    **_kwargs,
 ):
     variant_name = variant_name or ("audio" if media_type == "audio" else "original")
     variant_dir = Path(derivative_dir) / variant_name
@@ -821,24 +822,23 @@ def test_prepare_stream_asset_preserves_multi_audio_and_many_subtitles(tmp_path,
     playback = media_streaming.stream_playback_payload(conn, file_row=row, video_id=9)
     assert len(playback["audio_tracks"]) == 2
     assert any(item["is_forced"] for item in playback["subtitles"])
-    assert playback["service_policy"]["customer_selectable_modes"] == ["direct", "realtime_proxy", "prepared_hls"]
+    assert playback["service_policy"]["customer_selectable_modes"] == ["realtime_proxy", "prepared_hls"]
     assert playback["service_policy"]["fee_model"] == "basic_standard_premium"
     assert playback["service_policy"]["multi_track_recommended_mode"] == "prepared_hls"
     premium_policy = playback["service_policy"]["premium_hls_profile_policy"]
     assert premium_policy["current_profile"] == "full"
     assert [profile["id"] for profile in premium_policy["profiles"]] == ["full", "storage_saver", "mobile_saver"]
     assert premium_policy["profiles"][2]["relative_fee"] == "premium_lowest"
-    assert playback["streaming_options"][0]["fee_level"] == "lowest"
-    assert "bandwidth" in playback["streaming_options"][0]["cost_drivers"]
-    assert playback["streaming_options"][1]["mode"] == "realtime_proxy"
-    assert playback["streaming_options"][1]["available"] is False
-    assert playback["streaming_options"][1]["implementation_status"] == "disabled"
-    assert playback["streaming_options"][1]["billing_basis"] == "per_viewer_cpu"
-    assert playback["streaming_options"][2]["mode"] == "prepared_hls"
-    assert playback["streaming_options"][2]["fee_level"] == "highest"
-    assert playback["streaming_options"][2]["profile_policy"]["profiles"][1]["id"] == "storage_saver"
-    assert playback["streaming_options"][2]["media_support"]["multi_audio"] is True
-    assert playback["streaming_options"][2]["media_support"]["multi_subtitle"] is True
+    assert playback["streaming_options"][0]["mode"] == "realtime_proxy"
+    assert playback["streaming_options"][0]["fee_level"] == "middle"
+    assert playback["streaming_options"][0]["available"] is True
+    assert playback["streaming_options"][0]["implementation_status"] == "ready"
+    assert playback["streaming_options"][0]["billing_basis"] == "per_viewer_cpu"
+    assert playback["streaming_options"][1]["mode"] == "prepared_hls"
+    assert playback["streaming_options"][1]["fee_level"] == "highest"
+    assert playback["streaming_options"][1]["profile_policy"]["profiles"][1]["id"] == "storage_saver"
+    assert playback["streaming_options"][1]["media_support"]["multi_audio"] is True
+    assert playback["streaming_options"][1]["media_support"]["multi_subtitle"] is True
 
 
 def test_refresh_stream_subtitles_repairs_ready_asset_without_rebuilding_hls(tmp_path, monkeypatch):
@@ -1438,7 +1438,9 @@ def test_realtime_proxy_command_selects_audio_and_strips_non_media_tracks(tmp_pa
     assert cmd[cmd.index("-map_chapters") + 1] == "-1"
     assert "-sn" in cmd
     assert "-dn" in cmd
-    assert cmd[cmd.index("-c:v") + 1] == "copy"
+    assert cmd[cmd.index("-c:v") + 1] == "libx264"
+    assert cmd[cmd.index("-profile:v") + 1] == "baseline"
+    assert cmd[cmd.index("-pix_fmt") + 1] == "yuv420p"
     assert cmd[cmd.index("-c:a") + 1] == "aac"
     assert cmd[cmd.index("-b:a") + 1] == "160k"
     assert cmd[cmd.index("-ac") + 1] == "2"
@@ -1618,18 +1620,22 @@ def test_stream_playback_payload_discovers_realtime_proxy_audio_before_hls_ready
     _seed_uploaded_file(conn, storage_root, file_id="plain-mkv", owner_user_id=1, filename="movie.mkv", mime="video/x-matroska")
     row = conn.execute("SELECT * FROM uploaded_files WHERE id='plain-mkv'").fetchone()
     monkeypatch.setenv("HACKME_MEDIA_REALTIME_PROXY_ENABLED", "1")
-    monkeypatch.setattr(
-        media_streaming,
-        "realtime_proxy_audio_tracks_for_source",
-        lambda *_args, **_kwargs: [
-            {"name": "audio_01_jpn", "label": "Japanese", "language": "jpn", "is_default": True, "stream_index": 1, "codec": "eac3"},
-            {"name": "audio_02_eng", "label": "English", "language": "eng", "is_default": False, "stream_index": 2, "codec": "eac3"},
-        ],
-    )
+
+    def proxy_probe_payload(*_args, **_kwargs):
+        return {
+            "format": {"duration": "120", "bit_rate": "6000000"},
+            "streams": [
+                {"index": 0, "codec_type": "video", "codec_name": "h264", "width": 1280, "height": 720},
+                {"index": 1, "codec_type": "audio", "codec_name": "eac3", "channels": 6, "tags": {"language": "jpn"}, "disposition": {"default": 1}},
+                {"index": 2, "codec_type": "audio", "codec_name": "eac3", "channels": 6, "tags": {"language": "eng"}, "disposition": {"default": 0}},
+            ],
+        }
+
+    monkeypatch.setattr(media_streaming, "_run_probe", proxy_probe_payload)
 
     playback = media_streaming.stream_playback_payload(conn, file_row=row, video_id=77, storage_root=storage_root)
 
-    assert playback["mode"] == "direct"
+    assert playback["mode"] == "realtime_proxy"
     assert playback["realtime_proxy"]["available"] is True
     assert [track["name"] for track in playback["audio_tracks"]] == ["audio_01_jpn", "audio_02_eng"]
     assert all(track["source"] == "realtime_proxy_probe" for track in playback["audio_tracks"])
@@ -1771,7 +1777,7 @@ def test_video_playback_and_hls_routes_use_ready_stream_asset(tmp_path, monkeypa
     assert payload["stream_warning"] == ""
     assert payload["hls_js_url"] == "/js/hls.light.min.js?v=20260505-hlsjs"
     assert payload["master_url"].endswith(f"/api/videos/{video_id}/hls/master.m3u8")
-    assert payload["fallback_url"].endswith(f"/api/videos/{video_id}/stream")
+    assert payload["fallback_url"] == ""
     assert payload["variants"]
     assert all(int(item["size_bytes"]) > 0 for item in payload["variants"])
     assert all(int(item["segments_total_bytes"]) == int(item["size_bytes"]) for item in payload["variants"])
@@ -2170,6 +2176,7 @@ def test_shared_standard_video_playback_uses_shared_hls_and_stream_urls(tmp_path
             cloud_file_id="shared-video-1",
             title="Shared Movie",
             visibility="unlisted",
+            streaming_modes=["prepared_hls"],
             share_password="SharePass123",
             share_max_views=1,
         )
@@ -2203,9 +2210,12 @@ def test_shared_standard_video_playback_uses_shared_hls_and_stream_urls(tmp_path
     assert playback.status_code == 200
     payload = playback.get_json()
     assert payload["mode"] == "hls"
+    assert payload["published_streaming_modes"] == ["prepared_hls"]
+    assert payload["service_policy"]["customer_selectable_modes"] == ["prepared_hls", "realtime_proxy"]
+    assert payload["service_policy"]["fallback_modes"] == ["realtime_proxy"]
     assert payload["master_url"].startswith(f"/api/videos/shared/{token}/hls/master.m3u8")
-    assert payload["stream_url"].startswith(f"/api/videos/shared/{token}/stream")
-    assert payload["fallback_url"].startswith(f"/api/videos/shared/{token}/stream")
+    assert payload["stream_url"] == ""
+    assert payload["fallback_url"] == ""
     assert payload["subtitles"][0]["url"].startswith(f"/api/videos/shared/{token}/hls/subtitles/")
     assert "share_session=" in payload["subtitles"][0]["url"]
     assert payload["realtime_proxy_url"].startswith(f"/api/videos/shared/{token}/realtime-proxy")
@@ -2253,9 +2263,9 @@ def test_shared_standard_video_playback_uses_shared_hls_and_stream_urls(tmp_path
     assert init_segment.status_code == 200
     assert init_segment.mimetype == "video/mp4"
 
-    stream = viewer.get(payload["stream_url"])
-    assert stream.status_code == 200
-    assert stream.mimetype == "video/mp4"
+    stream = viewer.get(f"/api/videos/shared/{token}/stream{share_session}")
+    assert stream.status_code == 403
+    assert stream.get_json()["error"] == "direct_stream_disabled"
 
     subtitle_res = viewer.get(payload["subtitles"][0]["url"])
     assert subtitle_res.status_code == 200
@@ -2714,14 +2724,14 @@ def test_server_encrypted_video_stream_requires_prepared_hls_not_main_process_de
 
     owner_client = _build_app(db_path, storage_root, Fernet(Fernet.generate_key()), current_user=owner).test_client()
     direct = owner_client.get(f"/api/videos/{video['id']}/stream")
-    assert direct.status_code == 409
-    assert direct.get_json()["error"] == "server_encrypted_hls_required"
+    assert direct.status_code == 403
+    assert direct.get_json()["error"] == "direct_stream_disabled"
 
     token = video["share_url"].rsplit("/", 1)[-1]
     shared_client = _build_app(db_path, storage_root, Fernet(Fernet.generate_key()), current_user=None).test_client()
     shared = shared_client.get(f"/api/videos/shared/{token}/stream")
-    assert shared.status_code == 409
-    assert shared.get_json()["error"] == "server_encrypted_hls_required"
+    assert shared.status_code == 403
+    assert shared.get_json()["error"] == "direct_stream_disabled"
 
 
 def test_e2ee_stream_v2_bundle_upload_has_inline_size_guard(tmp_path, monkeypatch):
@@ -4255,7 +4265,7 @@ def test_shared_video_three_privacy_modes_complete_unlock_flow(tmp_path):
                 f"e2ee: expected e2ee_* playback mode, got {playback_json['mode']}"
             )
         else:
-            assert playback_json["mode"] in {"hls", "direct", "high_performance", "server_encrypted"}, (
+            assert playback_json["mode"] in {"hls", "realtime_proxy", "high_performance", "server_encrypted"}, (
                 f"{privacy_mode}: expected non-e2ee playback mode, got {playback_json['mode']}"
             )
 

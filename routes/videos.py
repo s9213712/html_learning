@@ -1549,6 +1549,13 @@ def register_video_routes(app, deps):
             payload["high_performance_streaming"] = False
         return payload
 
+    def _video_realtime_proxy_allowed(conn, video_id, file_row):
+        modes = _stored_video_streaming_modes(conn, video_id)
+        if "realtime_proxy" in modes:
+            return True
+        availability = realtime_proxy_availability(file_row)
+        return bool(availability.get("available"))
+
     def _parse_publish_request():
         if request.files or request.form:
             data = {
@@ -2725,11 +2732,10 @@ def register_video_routes(app, deps):
                 share_session_id=share_session_id,
                 counted_in_session=counted_in_session,
             )
-            modes = _stored_video_streaming_modes(conn, row["id"])
-            if "realtime_proxy" not in modes:
+            file_row = _load_stream_file(conn, file_id=row["cloud_file_id"])
+            if not _video_realtime_proxy_allowed(conn, row["id"], file_row):
                 conn.commit()
                 return json_resp({"ok": False, "msg": "即時轉封裝未啟用，請使用已啟用的串流方式。", "error": "realtime_proxy_disabled"}), 403
-            file_row = _load_stream_file(conn, file_id=row["cloud_file_id"])
             filename = file_row["original_filename_plain_for_public"] or row["title"] or "video.mp4"
             conn.commit()
             return _realtime_proxy_file_response(file_row, download_name=filename)
@@ -3960,10 +3966,9 @@ def register_video_routes(app, deps):
             video = get_video(conn, video_id, actor=actor, for_stream=True)
             if not video:
                 return json_resp({"ok": False, "msg": "找不到影片", "error": "not_found"}), 404
-            modes = _stored_video_streaming_modes(conn, video_id)
-            if "realtime_proxy" not in modes:
-                return json_resp({"ok": False, "msg": "即時轉封裝未啟用，請使用已啟用的串流方式。", "error": "realtime_proxy_disabled"}), 403
             row = _load_stream_file(conn, file_id=video["cloud_file_id"])
+            if not _video_realtime_proxy_allowed(conn, video_id, row):
+                return json_resp({"ok": False, "msg": "即時轉封裝未啟用，請使用已啟用的串流方式。", "error": "realtime_proxy_disabled"}), 403
             filename = row["original_filename_plain_for_public"] or video["title"] or "video.mp4"
             return _realtime_proxy_file_response(row, download_name=filename)
         except PermissionError as exc:

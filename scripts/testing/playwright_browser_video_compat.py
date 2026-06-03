@@ -277,9 +277,41 @@ def inspect_standard_controls(page) -> dict[str, Any]:
                 hasAudioSelect: !!audio,
                 audioOptions,
                 audioOptionCount: audioOptions.length,
+                selectedAudio: audio ? audio.value : '',
                 playerSrc: player ? (player.currentSrc || player.src || '') : '',
             };
         }"""
+    )
+
+
+def realtime_proxy_url_from_playback(page, explicit_share_session: str = "") -> dict[str, Any]:
+    return page.evaluate(
+        """async explicitShareSession => {
+            const token = JSON.parse(document.querySelector('#share-token')?.textContent || '""');
+            const audio = document.querySelector('#audio-track-select')?.value || '';
+            const suffix = explicitShareSession ? `?share_session=${encodeURIComponent(explicitShareSession)}` : '';
+            const res = await fetch(`/api/videos/shared/${encodeURIComponent(token)}/playback${suffix}`, {credentials: 'same-origin'});
+            const text = await res.text();
+            let body = null;
+            try { body = JSON.parse(text); } catch (err) { body = {raw: text.slice(0, 300)}; }
+            const raw = String(body?.realtime_proxy_url || body?.realtime_proxy?.url || '').trim();
+            if (!raw) {
+                return {ok: false, status: res.status, body, audio, reason: 'realtime_proxy_url_missing'};
+            }
+            const url = new URL(raw, window.location.origin);
+            if (explicitShareSession && !url.searchParams.has('share_session')) {
+                url.searchParams.set('share_session', explicitShareSession);
+            }
+            if (audio) url.searchParams.set('audio', audio);
+            return {
+                ok: res.ok,
+                status: res.status,
+                body,
+                audio,
+                url: `${url.pathname}${url.search}${url.hash}`,
+            };
+        }""",
+        explicit_share_session,
     )
 
 
@@ -319,7 +351,7 @@ def fetch_realtime_probe(page, player_src: str) -> dict[str, Any]:
     )
 
 
-def switch_to_standard_proxy(page) -> dict[str, Any]:
+def switch_to_standard_proxy(page, share_session_id: str = "") -> dict[str, Any]:
     before = inspect_standard_controls(page)
     if not before.get("hasRealtimeOption"):
         return {"ok": False, "before": before, "reason": "realtime_proxy_option_missing"}
@@ -331,32 +363,42 @@ def switch_to_standard_proxy(page) -> dict[str, Any]:
             page.select_option("#shared-service-mode-select", "realtime_proxy")
     page.wait_for_function(
         """() => {
+            const service = document.querySelector('#shared-service-mode-select');
             const player = document.querySelector('#shared-player');
             const src = player ? (player.currentSrc || player.src || '') : '';
-            return src.includes('/realtime-proxy');
+            return service?.value === 'realtime_proxy' && (src.includes('/realtime-proxy') || src.startsWith('blob:'));
         }""",
         timeout=30000,
     )
     page.wait_for_timeout(500)
     after = inspect_standard_controls(page)
+    descriptor = realtime_proxy_url_from_playback(page, share_session_id)
     audio_switched = False
     if int(after.get("audioOptionCount") or 0) >= 2:
         page.select_option("#audio-track-select", str(int(after["audioOptionCount"]) - 1))
         page.wait_for_function(
             """() => {
+                const service = document.querySelector('#shared-service-mode-select');
+                const audio = document.querySelector('#audio-track-select');
                 const player = document.querySelector('#shared-player');
                 const src = player ? (player.currentSrc || player.src || '') : '';
-                return src.includes('/realtime-proxy') && /[?&]audio=/.test(src);
+                return service?.value === 'realtime_proxy' && audio?.value && (src.includes('/realtime-proxy') || src.startsWith('blob:'));
             }""",
             timeout=30000,
         )
         page.wait_for_timeout(500)
+        descriptor = realtime_proxy_url_from_playback(page, share_session_id)
         audio_switched = True
     final_state = inspect_standard_controls(page)
-    proxy_fetch = fetch_realtime_probe(page, final_state.get("playerSrc") or "")
+    proxy_fetch = fetch_realtime_probe(page, descriptor.get("url") or final_state.get("playerSrc") or "")
     ok = (
         final_state.get("selectedService") == "realtime_proxy"
-        and "/realtime-proxy" in str(final_state.get("playerSrc") or "")
+        and (
+            "/realtime-proxy" in str(final_state.get("playerSrc") or "")
+            or str(final_state.get("playerSrc") or "").startswith("blob:")
+        )
+        and descriptor.get("ok") is True
+        and "/realtime-proxy" in str(descriptor.get("url") or "")
         and proxy_fetch.get("status") == 200
         and "video/mp4" in str(proxy_fetch.get("contentType") or "")
         and int(proxy_fetch.get("firstChunkBytes") or 0) > 0
@@ -367,6 +409,7 @@ def switch_to_standard_proxy(page) -> dict[str, Any]:
         "before": before,
         "after": after,
         "final": final_state,
+        "descriptor": descriptor,
         "audio_switched": audio_switched,
         "proxy_fetch": proxy_fetch,
     }
@@ -375,13 +418,15 @@ def switch_to_standard_proxy(page) -> dict[str, Any]:
 def check_shared_video_browser(browser_type, *, browser_name: str, base_url: str, share_url: str, headed: bool, mobile: bool) -> dict[str, Any]:
     errors: list[dict[str, str]] = []
     viewport = {"width": 390, "height": 844} if mobile else {"width": 1366, "height": 768}
-    browser = browser_type.launch(headless=not headed)
-    context = browser.new_context(ignore_https_errors=True, viewport=viewport)
-    page = context.new_page()
-    attach_error_handlers(page, errors, browser_name + ("_mobile" if mobile else "_desktop"))
+    browser = None
+    context = None
     label = browser_name + ("_mobile" if mobile else "_desktop")
     result: dict[str, Any] = {"browser": browser_name, "viewport": "mobile" if mobile else "desktop", "ok": False, "errors": errors}
     try:
+        browser = browser_type.launch(headless=not headed)
+        context = browser.new_context(ignore_https_errors=True, viewport=viewport)
+        page = context.new_page()
+        attach_error_handlers(page, errors, label)
         target = base_url + share_url if share_url.startswith("/") else share_url
         page.goto(target, wait_until="domcontentloaded", timeout=30000)
         page.wait_for_selector("#share-password-form:not(.hidden), #player-host:not(.hidden)", timeout=15000)
@@ -429,7 +474,7 @@ def check_shared_video_browser(browser_type, *, browser_name: str, base_url: str
                 }""",
                 master_url,
             )
-        standard = switch_to_standard_proxy(page)
+        standard = switch_to_standard_proxy(page, share_session_id)
         fatal_errors = [
             item
             for item in errors
@@ -452,8 +497,16 @@ def check_shared_video_browser(browser_type, *, browser_name: str, base_url: str
         result.update({"ok": False, "exception": f"{type(exc).__name__}: {exc}", "traceback": traceback.format_exc()})
         return result
     finally:
-        context.close()
-        browser.close()
+        if context is not None:
+            try:
+                context.close()
+            except Exception:
+                pass
+        if browser is not None:
+            try:
+                browser.close()
+            except Exception:
+                pass
 
 
 def write_outputs(runtime_root: Path, payload: dict[str, Any]) -> tuple[Path, Path]:
