@@ -86,6 +86,7 @@ BACKUP_ARCHIVE=""
 RESTORE_ARCHIVE=""
 RESET_RUNTIME=0
 DELETE_RUNTIME=0
+RESTART_SCRIPT_FILE="${HACKME_DEV_RESTART_SCRIPT_FILE:-$SOURCE_ROOT/restart_develop_server.sh}"
 
 is_auto_capacity_value() {
   local value="${1:-}"
@@ -96,6 +97,130 @@ is_auto_capacity_value() {
 gunicorn_capacity_auto_requested() {
   [[ "$SERVER_RUNNER" == "gunicorn" ]] || return 1
   is_auto_capacity_value "$GUNICORN_WORKERS" || is_auto_capacity_value "$GUNICORN_THREADS"
+}
+
+shell_quote() {
+  printf '%q' "$1"
+}
+
+append_arg_if_value() {
+  local target_var="$1"
+  local option="$2"
+  local value="$3"
+  [[ -n "$value" ]] || return 0
+  local -n target_args="$target_var"
+  target_args+=("$option" "$value")
+}
+
+write_restart_shortcut_script() {
+  local shortcut_path="${RESTART_SCRIPT_FILE:-}"
+  [[ -n "$shortcut_path" ]] || return 0
+  local launcher="$SOURCE_ROOT/test_for_develop.sh"
+  [[ -f "$launcher" ]] || return 0
+
+  local restart_args=(
+    --cli
+    --host "$HOST"
+    --port "$PORT"
+    --feature-mode "$FEATURE_MODE"
+    --server-mode "$SERVER_MODE"
+    --port-conflict "$PORT_CONFLICT_ACTION"
+    --server-runner "$SERVER_RUNNER"
+    --capacity-probe-tier "$CAPACITY_PROBE_TIER"
+    --bt-backend "$BT_DOWNLOAD_BACKEND"
+    --transmission-rpc-url "$TRANSMISSION_RPC_URL"
+    --security "$SECURITY_SETTINGS_ENABLED"
+    --session-idle-timeout-minutes "$SESSION_IDLE_TIMEOUT_MINUTES"
+    --token-ttl-minutes "$DEV_TOKEN_TTL_MINUTES"
+    --token-user "$DEV_TOKEN_USER"
+    --token-role "$DEV_TOKEN_ROLE"
+    --requirements-file "$REQUIREMENTS_FILE"
+    --root-password "$ROOT_PASSWORD"
+    --manager-password "$MANAGER_PASSWORD"
+    --test-password "$TEST_PASSWORD"
+  )
+
+  append_arg_if_value restart_args --trusted-hosts "$TRUSTED_HOSTS"
+  append_arg_if_value restart_args --public-host "$PUBLIC_HOST"
+  append_arg_if_value restart_args --feature-bundles "$FEATURE_BUNDLES"
+  append_arg_if_value restart_args --features "$FEATURE_LIST"
+  append_arg_if_value restart_args --token-features "$DEV_TOKEN_FEATURES"
+  append_arg_if_value restart_args --token-password "$DEV_TOKEN_PASSWORD"
+  append_arg_if_value restart_args --accounts "$EXTRA_ACCOUNTS"
+  append_arg_if_value restart_args --capacity-defaults-file "$CAPACITY_DEFAULTS_FILE"
+  append_arg_if_value restart_args --capacity-report-file "$CAPACITY_REPORT_DEFAULTS_FILE"
+  append_arg_if_value restart_args --cloud-drive-storage-root "$CLOUD_DRIVE_STORAGE_ROOT"
+  append_arg_if_value restart_args --cloud-drive-global-capacity-limit-mb "$CLOUD_DRIVE_GLOBAL_CAPACITY_LIMIT_MB"
+  append_arg_if_value restart_args --max-content-mb "$MAX_CONTENT_MB"
+  append_arg_if_value restart_args --runtime-root "$CUSTOM_RUNTIME_ROOT"
+  append_arg_if_value restart_args --transmission-rpc-username "$TRANSMISSION_RPC_USERNAME"
+  append_arg_if_value restart_args --transmission-rpc-password "$TRANSMISSION_RPC_PASSWORD"
+  append_arg_if_value restart_args --remote-download-global "${HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL:-}"
+  append_arg_if_value restart_args --remote-download-per-user "${HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_PER_USER:-}"
+
+  restart_args+=(--no-capacity-probe --no-hls-slot-probe)
+  if [[ "$DISABLE_TRUSTED_HOSTS" == "1" ]]; then
+    restart_args+=(--allow-any-host)
+  fi
+  if [[ "$RUNTIME_IN_SOURCE" == "1" ]]; then
+    restart_args+=(--runtime-in-source)
+  elif [[ "$IN_PLACE" == "1" ]]; then
+    restart_args+=(--in-place)
+  else
+    restart_args+=(--copy)
+  fi
+  if [[ "$SKIP_INSTALL" == "1" ]]; then
+    restart_args+=(--skip-install)
+  fi
+  if [[ "$FOREGROUND" == "1" ]]; then
+    restart_args+=(--foreground)
+  fi
+  if [[ "$BTC_TRADE_AUTOSTART" == "1" ]]; then
+    restart_args+=(--btc-trade-autostart)
+  else
+    restart_args+=(--no-btc-trade-autostart)
+  fi
+  if [[ "$BACKTEST_PROBE_ON_STARTUP" == "1" ]]; then
+    restart_args+=(--backtest-probe-on-startup)
+  fi
+  if [[ "$TRADING_BACKGROUND_DEV_READY" == "1" ]]; then
+    restart_args+=(--trading-background-dev-ready)
+  else
+    restart_args+=(--no-trading-background-dev-ready)
+  fi
+  if [[ "$SERVER_RUNNER" == "gunicorn" ]]; then
+    restart_args+=(
+      --gunicorn-workers "$GUNICORN_WORKERS"
+      --gunicorn-threads "$GUNICORN_THREADS"
+      --gunicorn-timeout "$GUNICORN_TIMEOUT"
+      --gunicorn-graceful-timeout "$GUNICORN_GRACEFUL_TIMEOUT"
+      --gunicorn-keep-alive "$GUNICORN_KEEP_ALIVE"
+      --gunicorn-backlog "$GUNICORN_BACKLOG"
+      --gunicorn-max-requests "$GUNICORN_MAX_REQUESTS"
+      --gunicorn-max-requests-jitter "$GUNICORN_MAX_REQUESTS_JITTER"
+    )
+  fi
+
+  mkdir -p "$(dirname "$shortcut_path")"
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf '%s\n' 'set -Eeuo pipefail'
+    local env_name env_value
+    for env_name in       HTML_LEARNING_BACKPRESSURE_THREAD_CAPACITY       HACKME_MEDIA_HLS_MAX_CONCURRENT       HACKME_MEDIA_HLS_SERIALIZE_ALL       HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL       HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_PER_USER; do
+      env_value="${!env_name:-}"
+      [[ -n "$env_value" ]] || continue
+      printf 'export %s=%s\n' "$env_name" "$(shell_quote "$env_value")"
+    done
+    printf 'cd %s\n' "$(shell_quote "$SOURCE_ROOT")"
+    printf 'exec %s' "$(shell_quote "$launcher")"
+    local arg
+    for arg in "${restart_args[@]}"; do
+      printf ' %s' "$(shell_quote "$arg")"
+    done
+    printf ' "$@"\n'
+  } > "$shortcut_path"
+  chmod 700 "$shortcut_path"
+  say "[dev-tmp] shortcut: $(cd "$(dirname "$shortcut_path")" && pwd -P)/$(basename "$shortcut_path")"
 }
 
 load_local_capacity_defaults() {
@@ -5086,6 +5211,7 @@ if [[ "$FOREGROUND" == "1" ]]; then
     say "[dev-tmp] warning:   Flask/Werkzeug direct server is debug-only; use gunicorn for uploads/HLS/load."
   fi
   print_generated_dev_tokens
+  write_restart_shortcut_script
   if [[ "$SERVER_RUNNER" == "gunicorn" ]]; then
     exec "$PYTHON_BIN" -m gunicorn "server:app" \
       --bind "${HOST}:${PORT}" \
@@ -5182,6 +5308,11 @@ else
   say "[dev-tmp] log:       $LOG_CAPTURE"
 fi
 print_generated_dev_tokens
+if [[ -n "$SERVER_URL" ]]; then
+  write_restart_shortcut_script
+else
+  say "[dev-tmp] shortcut: skipped until server startup succeeds"
+fi
 
 # BTC_trade autostart: kick the prediction pipeline off in the background
 # so the trading dashboard already has live BTC_trade signal data on first
