@@ -1986,11 +1986,13 @@ def register_file_routes(app, deps):
 
     def _remote_download_concurrency_limits():
         settings = get_system_settings() or {}
+        prefer_env = str(os.environ.get("HACKME_REMOTE_DOWNLOAD_LIMITS_PREFER_ENV", "")).strip().lower() in {"1", "true", "yes", "on"}
 
         def _limit_from_settings_or_env(setting_name, env_name, default_value):
-            raw = settings.get(setting_name)
+            env_raw = os.environ.get(env_name)
+            raw = env_raw if prefer_env and env_raw not in (None, "") else settings.get(setting_name)
             if raw in (None, ""):
-                raw = os.environ.get(env_name, default_value)
+                raw = env_raw if env_raw not in (None, "") else default_value
             try:
                 value = int(raw)
             except Exception:

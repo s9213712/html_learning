@@ -19,6 +19,10 @@ Options:
   --rpc-whitelist LIST      RPC IP whitelist. Default: 127.0.0.1,::1
   --rpc-whitelist-enabled VALUE
                            Enable RPC IP whitelist: true/false. Default: true
+  --rpc-authentication-required VALUE
+                           Require RPC/Web UI login: true/false. Default: true
+  --disable-rpc-auth       Development-only shortcut for
+                           --rpc-authentication-required false.
   --allow-any-rpc-ip        Listen on 0.0.0.0 and allow RPC login from any IP.
                            Authentication remains required.
   --no-restart              Do not restart transmission-daemon after writing settings.
@@ -59,6 +63,7 @@ rpc_port="9091"
 rpc_bind_address="127.0.0.1"
 rpc_whitelist="127.0.0.1,::1"
 rpc_whitelist_enabled="true"
+rpc_authentication_required="true"
 allow_any_rpc_ip="0"
 restart_service="1"
 install_systemd_override="1"
@@ -76,6 +81,11 @@ while [[ $# -gt 0 ]]; do
     --rpc-bind-address) rpc_bind_address="${2:?missing --rpc-bind-address value}"; shift 2 ;;
     --rpc-whitelist) rpc_whitelist="${2:?missing --rpc-whitelist value}"; shift 2 ;;
     --rpc-whitelist-enabled) rpc_whitelist_enabled="${2:?missing --rpc-whitelist-enabled value}"; shift 2 ;;
+    --rpc-authentication-required) rpc_authentication_required="${2:?missing --rpc-authentication-required value}"; shift 2 ;;
+    --disable-rpc-auth|--no-rpc-auth)
+      rpc_authentication_required="false"
+      shift
+      ;;
     --allow-any-rpc-ip|--rpc-allow-any-ip)
       allow_any_rpc_ip="1"
       rpc_bind_address="0.0.0.0"
@@ -158,6 +168,7 @@ cat <<INFO
 [transmission-setup] shared_group:      $shared_group
 [transmission-setup] rpc_bind_address:  $rpc_bind_address
 [transmission-setup] rpc_whitelist:     $(bool_is_false "$rpc_whitelist_enabled" && printf 'disabled (any IP)' || printf '%s' "$rpc_whitelist")
+[transmission-setup] rpc_auth:          $(bool_is_false "$rpc_authentication_required" && printf 'disabled (dev only)' || printf 'enabled')
 [transmission-setup] download_dir:      $download_dir
 [transmission-setup] staging_dir:       $staging_dir
 INFO
@@ -221,7 +232,7 @@ OVERRIDE
   echo "[transmission-setup] installed systemd Type=simple override: ${override_dir}/hackme-web.conf"
 fi
 
-python3 - <<'PYSET' "$settings_file" "$download_dir" "$incomplete_dir" "$rpc_username" "$rpc_password" "$rpc_port" "$rpc_bind_address" "$rpc_whitelist_enabled" "$rpc_whitelist" "$allow_any_rpc_ip"
+python3 - <<'PYSET' "$settings_file" "$download_dir" "$incomplete_dir" "$rpc_username" "$rpc_password" "$rpc_port" "$rpc_bind_address" "$rpc_whitelist_enabled" "$rpc_whitelist" "$allow_any_rpc_ip" "$rpc_authentication_required"
 import json
 import sys
 from pathlib import Path
@@ -247,7 +258,9 @@ settings_path = Path(sys.argv[1])
     rpc_whitelist,
     allow_any_rpc_ip,
 ) = sys.argv[2:11]
+rpc_authentication_required = sys.argv[11]
 rpc_whitelist_enabled_bool = parse_bool(rpc_whitelist_enabled, name="rpc-whitelist-enabled")
+rpc_authentication_required_bool = parse_bool(rpc_authentication_required, name="rpc-authentication-required")
 data = json.loads(settings_path.read_text(encoding='utf-8'))
 data.update({
     'download-dir': download_dir,
@@ -256,7 +269,7 @@ data.update({
     'rpc-enabled': True,
     'rpc-bind-address': rpc_bind_address,
     'rpc-port': int(rpc_port),
-    'rpc-authentication-required': True,
+    'rpc-authentication-required': rpc_authentication_required_bool,
     'rpc-username': rpc_username,
     'rpc-password': rpc_password,
     'rpc-whitelist-enabled': rpc_whitelist_enabled_bool,
@@ -287,6 +300,7 @@ Copy these values into hackme_web root system settings:
   Transmission RPC password:   ${rpc_password}
   Transmission RPC bind:       ${rpc_bind_address}
   Transmission RPC IP access:  $(bool_is_false "$rpc_whitelist_enabled" && printf 'any IP (whitelist disabled)' || printf 'whitelist %s' "$rpc_whitelist")
+  Transmission RPC auth:       $(bool_is_false "$rpc_authentication_required" && printf 'disabled (dev only)' || printf 'enabled')
 
 Also set this env for app-side per-user/per-task staging:
   HACKME_BT_DOWNLOAD_STAGING_DIR=${staging_dir}
@@ -301,9 +315,10 @@ Important:
     Transmission builds start correctly but never send READY=1 to Type=notify.
   - If RPC bind is 0.0.0.0, hackme_web can still use the local RPC URL above;
     remote clients should use http://<server-ip>:${rpc_port}/transmission/rpc.
-    Keep RPC behind LAN/VPN/firewall and keep authentication enabled.
+    Keep RPC behind LAN/VPN/firewall. Disable authentication only in a throwaway
+    local development network.
   - Backup created before writing: ${backup_file}
 
 Quick RPC check:
-  transmission-remote 127.0.0.1:${rpc_port} --auth '${rpc_username}:<password>' --session-info
+  $(bool_is_false "$rpc_authentication_required" && printf 'transmission-remote 127.0.0.1:%s --session-info' "$rpc_port" || printf "transmission-remote 127.0.0.1:%s --auth '%s:<password>' --session-info" "$rpc_port" "$rpc_username")
 RESULT

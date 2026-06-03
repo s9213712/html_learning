@@ -77,6 +77,7 @@ TRANSMISSION_SETUP_SETTINGS_FILE="${HACKME_DEV_TRANSMISSION_SETTINGS_FILE:-/etc/
 TRANSMISSION_SETUP_RPC_BIND_ADDRESS="${HACKME_DEV_TRANSMISSION_RPC_BIND_ADDRESS:-}"
 TRANSMISSION_SETUP_RPC_WHITELIST="${HACKME_DEV_TRANSMISSION_RPC_WHITELIST:-}"
 TRANSMISSION_SETUP_RPC_WHITELIST_ENABLED="${HACKME_DEV_TRANSMISSION_RPC_WHITELIST_ENABLED:-}"
+TRANSMISSION_SETUP_RPC_AUTHENTICATION_REQUIRED="${HACKME_DEV_TRANSMISSION_RPC_AUTHENTICATION_REQUIRED:-}"
 TRANSMISSION_SETUP_ALLOW_ANY_RPC_IP="${HACKME_DEV_TRANSMISSION_ALLOW_ANY_RPC_IP:-0}"
 BT_DOWNLOAD_STAGING_DIR="${HACKME_BT_DOWNLOAD_STAGING_DIR:-}"
 DRY_RUN=0
@@ -556,9 +557,16 @@ Options:
                            helper default 127.0.0.1,::1
   --transmission-rpc-whitelist-enabled VALUE
                            Enable RPC IP whitelist in setup helper: true/false.
+  --transmission-rpc-authentication-required VALUE
+                           Require Transmission RPC/Web UI login in setup
+                           helper: true/false.
+  --transmission-disable-rpc-auth
+                           Development-only: configure Transmission RPC/Web UI
+                           without login. Use only on an isolated local network.
   --transmission-allow-any-rpc-ip
                            Configure daemon RPC to listen on 0.0.0.0 and allow
-                           any source IP. Authentication remains required.
+                           any source IP. Authentication is still required
+                           unless --transmission-disable-rpc-auth is also set.
   --remote-download-global N
   --remote-download-per-user N
                            Remote download global/per-user concurrency defaults
@@ -1902,6 +1910,9 @@ run_transmission_backend_setup_if_requested() {
   fi
   if [[ -n "$TRANSMISSION_SETUP_RPC_WHITELIST_ENABLED" ]]; then
     helper_args+=(--rpc-whitelist-enabled "$TRANSMISSION_SETUP_RPC_WHITELIST_ENABLED")
+  fi
+  if [[ -n "$TRANSMISSION_SETUP_RPC_AUTHENTICATION_REQUIRED" ]]; then
+    helper_args+=(--rpc-authentication-required "$TRANSMISSION_SETUP_RPC_AUTHENTICATION_REQUIRED")
   fi
   if [[ "$TRANSMISSION_SETUP_ALLOW_ANY_RPC_IP" == "1" ]]; then
     helper_args+=(--allow-any-rpc-ip)
@@ -4129,6 +4140,14 @@ while [[ $# -gt 0 ]]; do
       TRANSMISSION_SETUP_RPC_WHITELIST_ENABLED="${2:?missing Transmission RPC whitelist enabled value}"
       shift 2
       ;;
+    --transmission-rpc-authentication-required)
+      TRANSMISSION_SETUP_RPC_AUTHENTICATION_REQUIRED="${2:?missing Transmission RPC authentication required value}"
+      shift 2
+      ;;
+    --transmission-disable-rpc-auth|--disable-transmission-rpc-auth|--transmission-no-rpc-auth)
+      TRANSMISSION_SETUP_RPC_AUTHENTICATION_REQUIRED=false
+      shift
+      ;;
     --transmission-allow-any-rpc-ip|--allow-any-transmission-rpc-ip)
       TRANSMISSION_SETUP_ALLOW_ANY_RPC_IP=1
       shift
@@ -4136,11 +4155,15 @@ while [[ $# -gt 0 ]]; do
     --remote-download-global|--remote-download-max-concurrent-global)
       HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL="${2:?missing remote download global concurrency}"
       export HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL
+      HACKME_REMOTE_DOWNLOAD_LIMITS_PREFER_ENV=1
+      export HACKME_REMOTE_DOWNLOAD_LIMITS_PREFER_ENV
       shift 2
       ;;
     --remote-download-per-user|--remote-download-max-concurrent-per-user)
       HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_PER_USER="${2:?missing remote download per-user concurrency}"
       export HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_PER_USER
+      HACKME_REMOTE_DOWNLOAD_LIMITS_PREFER_ENV=1
+      export HACKME_REMOTE_DOWNLOAD_LIMITS_PREFER_ENV
       shift 2
       ;;
     --capacity-defaults-file)

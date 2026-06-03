@@ -2,6 +2,7 @@ import gzip
 import io
 import json
 import os
+import shutil
 import sqlite3
 import threading
 import time
@@ -3135,9 +3136,68 @@ def test_remote_download_magnet_prefers_transmission_backend(tmp_path, monkeypat
 
     assert downloaded.filename == "movie.mp4"
     assert Path(downloaded.path).read_bytes() == b"video"
-    assert calls[0][0] == "torrent-add"
-    assert calls[0][1]["filename"].startswith("magnet:")
+    torrent_add = next(call for call in calls if call[0] == "torrent-add")
+    assert torrent_add[1]["filename"].startswith("magnet:")
     assert ("torrent-remove", {"ids": [7], "delete-local-data": False}) in calls
+
+
+def test_remote_download_transmission_stages_global_incomplete_file(tmp_path, monkeypatch):
+    from services.storage import remote_downloads
+
+    incomplete_dir = tmp_path / "transmission-incomplete"
+    incomplete_dir.mkdir()
+    calls = []
+
+    def fake_rpc(method, arguments=None, **kwargs):
+        arguments = arguments or {}
+        calls.append((method, arguments))
+        if method == "session-get":
+            return {"incomplete-dir-enabled": True, "incomplete-dir": str(incomplete_dir)}
+        if method == "torrent-add":
+            (incomplete_dir / "movie.mp4").write_bytes(b"video")
+            return {"torrent-added": {"id": 7, "name": "movie.mp4"}}
+        if method == "torrent-get":
+            download_dir = calls[1][1]["download-dir"]
+            return {
+                "torrents": [{
+                    "id": 7,
+                    "name": "movie.mp4",
+                    "status": 4,
+                    "percentDone": 1,
+                    "leftUntilDone": 0,
+                    "totalSize": 5,
+                    "downloadedEver": 5,
+                    "rateDownload": 0,
+                    "error": 0,
+                    "errorString": "",
+                    "downloadDir": download_dir,
+                    "files": [{"name": "movie.mp4", "length": 5, "bytesCompleted": 5}],
+                }]
+            }
+        if method in {"torrent-remove", "torrent-set"}:
+            return {}
+        raise AssertionError(method)
+
+    monkeypatch.setenv("HACKME_BT_BACKEND", "transmission")
+    monkeypatch.setenv("HACKME_BT_DOWNLOAD_STAGING_DIR", str(tmp_path / "staging"))
+    monkeypatch.setattr(remote_downloads, "_transmission_rpc_call", fake_rpc)
+    monkeypatch.setattr(remote_downloads, "_bt_progress_interval_seconds", lambda: 0)
+
+    downloaded = remote_downloads.download_magnet_with_aria2(
+        "magnet:?xt=urn:btih:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        timeout_seconds=5,
+        owner_user_id=1,
+        task_id="qa",
+    )
+
+    try:
+        assert downloaded.filename == "movie.mp4"
+        assert Path(downloaded.path).read_bytes() == b"video"
+        assert not (incomplete_dir / "movie.mp4").exists()
+        assert ("torrent-remove", {"ids": [7], "delete-local-data": False}) in calls
+    finally:
+        shutil.rmtree(downloaded.cleanup_dir, ignore_errors=True)
+
 
 def test_remote_download_capabilities_and_rejects_local_paths(tmp_path):
     db_path = tmp_path / "drive.db"
@@ -3706,7 +3766,16 @@ def test_remote_download_tasks_can_run_concurrently_per_user(tmp_path, monkeypat
     storage_root.mkdir()
     _init_db(db_path)
     actor_box = {"actor": _actor(1, "alice")}
-    client = _build_app(db_path, storage_root, actor_box).test_client()
+    client = _build_app(
+        db_path,
+        storage_root,
+        actor_box,
+        settings={
+            "storage_trash_retention_days": 30,
+            "remote_download_max_concurrent_global": 2,
+            "remote_download_max_concurrent_per_user": 2,
+        },
+    ).test_client()
 
     first_source = tmp_path / "first.txt"
     second_source = tmp_path / "second.txt"
@@ -3774,11 +3843,86 @@ def test_remote_download_tasks_can_run_concurrently_per_user(tmp_path, monkeypat
     assert final_second["storage_file"]["virtual_path"] == "/Downloads/second.txt"
 
 
+def test_remote_download_dev_env_override_beats_persisted_limits(tmp_path, monkeypatch):
+    db_path = tmp_path / "drive.db"
+    storage_root = tmp_path / "storage"
+    storage_root.mkdir()
+    _init_db(db_path)
+    monkeypatch.setenv("HACKME_REMOTE_DOWNLOAD_LIMITS_PREFER_ENV", "1")
+    monkeypatch.setenv("HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL", "2")
+    monkeypatch.setenv("HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_PER_USER", "2")
+    actor_box = {"actor": _actor(1, "alice")}
+    client = _build_app(
+        db_path,
+        storage_root,
+        actor_box,
+        settings={
+            "storage_trash_retention_days": 30,
+            "remote_download_max_concurrent_global": 1,
+            "remote_download_max_concurrent_per_user": 1,
+        },
+    ).test_client()
+
+    release_first = threading.Event()
+    first_started = threading.Event()
+    second_started = threading.Event()
+
+    class FakeDownloaded:
+        def __init__(self, filename):
+            path = tmp_path / filename
+            path.write_text(filename, encoding="utf-8")
+            self.path = str(path)
+            self.filename = filename
+            self.mimetype = "text/plain"
+            self.cleanup_dir = None
+
+    def fake_download(url, **kwargs):
+        filename = url.rsplit("/", 1)[-1]
+        if filename == "first.txt":
+            first_started.set()
+            assert release_first.wait(timeout=30)
+        if filename == "second.txt":
+            second_started.set()
+        return FakeDownloaded(filename)
+
+    monkeypatch.setattr("routes.files.download_remote_url", fake_download)
+    first = client.post(
+        "/api/cloud-drive/remote-download/tasks",
+        json={
+            "url": "https://93.184.216.34/first.txt",
+            "privacy_mode": "standard_plain",
+            "virtual_path": "/Downloads/first.txt",
+        },
+    )
+    second = client.post(
+        "/api/cloud-drive/remote-download/tasks",
+        json={
+            "url": "https://93.184.216.34/second.txt",
+            "privacy_mode": "standard_plain",
+            "virtual_path": "/Downloads/second.txt",
+        },
+    )
+    assert first.status_code == 202
+    assert second.status_code == 202
+    assert first_started.wait(timeout=10)
+    assert second_started.wait(timeout=10)
+
+    release_first.set()
+    task_ids = [first.get_json()["task"]["id"], second.get_json()["task"]["id"]]
+    for _ in range(600):
+        states = [client.get(f"/api/cloud-drive/remote-download/tasks/{task_id}").get_json()["task"]["status"] for task_id in task_ids]
+        if states == ["completed", "completed"]:
+            break
+        time.sleep(0.05)
+    assert states == ["completed", "completed"]
+
+
 def test_remote_download_third_task_waits_for_per_user_worker_limit(tmp_path, monkeypatch):
     db_path = tmp_path / "drive.db"
     storage_root = tmp_path / "storage"
     storage_root.mkdir()
     _init_db(db_path)
+    monkeypatch.setenv("HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL", "2")
     monkeypatch.setenv("HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_PER_USER", "2")
     actor_box = {"actor": _actor(1, "alice")}
     client = _build_app(db_path, storage_root, actor_box).test_client()

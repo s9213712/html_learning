@@ -75,6 +75,8 @@ let driveStorageUpgradeCatalog = [];
 let driveStorageUpgradeCanPurchase = false;
 let driveStorageUpgradeMessage = "";
 let driveRemoteDownloadCapabilities = { direct: true, bt_magnet: false, bt_file: false };
+let driveRemoteDownloadCapabilitiesRetryTimer = null;
+let driveRemoteDownloadCapabilitiesRetryCount = 0;
 let driveLatestQuota = null;
 let driveDashboardInFlight = null;
 let driveDashboardLoadedAt = 0;
@@ -85,6 +87,7 @@ const DRIVE_TRANSFER_COMPLETED_VISIBLE_MS = 6000;
 const DRIVE_TRANSFER_FAILED_VISIBLE_MS = 15000;
 const DRIVE_TASK_CENTER_LOCAL_MAX = 80;
 const DRIVE_REMOTE_STATUS_RETRY_LIMIT = 12;
+const DRIVE_REMOTE_CAPABILITY_RETRY_LIMIT = 4;
 const DRIVE_DASHBOARD_LAZY_REFRESH_MS = 10000;
 const DRIVE_RESUMABLE_UPLOAD_THRESHOLD_BYTES = 8 * 1024 * 1024;
 const DRIVE_RESUMABLE_UPLOAD_CHUNK_BYTES = 4 * 1024 * 1024;
@@ -2541,8 +2544,14 @@ async function loadRemoteDownloadCapabilities() {
         button.disabled = true;
         button.title = "BT 能力讀取失敗，請稍後重新整理";
       });
+      scheduleDriveRemoteDownloadCapabilitiesRetry(status, torrentButtons, json.msg || `HTTP ${res.status}`);
       return;
     }
+    if (driveRemoteDownloadCapabilitiesRetryTimer) {
+      clearTimeout(driveRemoteDownloadCapabilitiesRetryTimer);
+      driveRemoteDownloadCapabilitiesRetryTimer = null;
+    }
+    driveRemoteDownloadCapabilitiesRetryCount = 0;
     const caps = json.capabilities || {};
     driveRemoteDownloadCapabilities = {
       direct: true,
@@ -2570,7 +2579,26 @@ async function loadRemoteDownloadCapabilities() {
       button.disabled = true;
       button.title = "BT 能力檢查失敗，請稍後重新整理";
     });
+    scheduleDriveRemoteDownloadCapabilitiesRetry(status, torrentButtons, err?.message || "");
   }
+}
+
+function scheduleDriveRemoteDownloadCapabilitiesRetry(status, torrentButtons, reason = "") {
+  if (driveRemoteDownloadCapabilitiesRetryTimer || driveRemoteDownloadCapabilitiesRetryCount >= DRIVE_REMOTE_CAPABILITY_RETRY_LIMIT) return;
+  const delayMs = Math.min(8000, 1500 * (2 ** driveRemoteDownloadCapabilitiesRetryCount));
+  driveRemoteDownloadCapabilitiesRetryCount += 1;
+  if (status) {
+    const suffix = reason ? `（${reason}）` : "";
+    status.textContent = `BT 能力暫時讀取失敗${suffix}，將自動重試...`;
+  }
+  torrentButtons.forEach((button) => {
+    button.disabled = true;
+    button.title = "BT 能力暫時讀取失敗，正在自動重試";
+  });
+  driveRemoteDownloadCapabilitiesRetryTimer = setTimeout(() => {
+    driveRemoteDownloadCapabilitiesRetryTimer = null;
+    loadRemoteDownloadCapabilities();
+  }, delayMs);
 }
 
 function classifyRemoteDownloadInput(rawUrl, { torrentUrlsAsBt = false } = {}) {

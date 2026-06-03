@@ -636,14 +636,94 @@ def _torrent_files_from_transmission(tmpdir):
     return files
 
 
+def _transmission_completed_file_candidates(item, tmpdir, incomplete_dir=None):
+    files_meta = item.get("files") or []
+    roots = []
+    for raw_root in (item.get("downloadDir"), tmpdir, incomplete_dir):
+        if not raw_root:
+            continue
+        root = Path(str(raw_root)).expanduser()
+        if root not in roots:
+            roots.append(root)
+    candidates = []
+    seen = set()
+    torrent_name = str(item.get("name") or "").strip()
+    for meta in files_meta:
+        rel_name = str((meta or {}).get("name") or "").strip()
+        if not rel_name:
+            continue
+        length = int((meta or {}).get("length") or 0)
+        completed = int((meta or {}).get("bytesCompleted") or 0)
+        if length > 0 and completed < length:
+            continue
+        rel_path = Path(rel_name)
+        rel_candidates = [rel_path]
+        if torrent_name:
+            rel_candidates.append(Path(torrent_name) / rel_path)
+        if len(files_meta) == 1:
+            rel_candidates.append(Path(rel_path.name))
+        for root in roots:
+            for rel in rel_candidates:
+                path = (root / rel).resolve(strict=False)
+                key = str(path)
+                if key in seen:
+                    continue
+                seen.add(key)
+                if not path.is_file() or path.name.endswith(".part"):
+                    continue
+                try:
+                    if path.stat().st_size <= 0:
+                        continue
+                except OSError:
+                    continue
+                candidates.append(str(path))
+    return candidates
+
+
+def _stage_transmission_completed_files(candidates, tmpdir):
+    staged = []
+    root = Path(tmpdir).resolve(strict=False)
+    root.mkdir(parents=True, exist_ok=True)
+    for source in candidates:
+        src = Path(source).resolve(strict=False)
+        if not src.is_file():
+            continue
+        try:
+            src.relative_to(root)
+            staged.append(str(src))
+            continue
+        except ValueError:
+            pass
+        target = root / safe_public_filename(src.name)
+        if target.exists():
+            stem = target.stem
+            suffix = target.suffix
+            index = 2
+            while target.exists():
+                target = root / f"{stem}-{index}{suffix}"
+                index += 1
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src), str(target))
+        staged.append(str(target))
+    return staged
+
+
 def _download_bt_with_transmission(source, *, source_label="BT/magnet", source_is_torrent_file=False, timeout_seconds=300, max_bytes=None, progress_callback=None, rate_limit_kb_per_sec=None, cancel_check=None, owner_user_id=None, task_id=None):
     tmpdir = _make_bt_tempdir("hackme_bt_transmission_", owner_user_id=owner_user_id, task_id=task_id)
     torrent_id = None
     idle_timeout_seconds = _bt_idle_timeout_seconds(timeout_seconds)
     absolute_timeout_seconds = _bt_absolute_timeout_seconds()
     progress_interval_seconds = _bt_progress_interval_seconds()
+    session = {}
+    incomplete_dir = None
     try:
         _check_remote_download_control(cancel_check)
+        try:
+            session = _transmission_rpc_call("session-get", timeout_seconds=10)
+        except Exception:
+            session = {}
+        if session.get("incomplete-dir-enabled") and session.get("incomplete-dir"):
+            incomplete_dir = str(session.get("incomplete-dir"))
         add_args = {"download-dir": tmpdir, "paused": False}
         if source_is_torrent_file:
             with open(source, "rb") as fh:
@@ -675,7 +755,7 @@ def _download_bt_with_transmission(source, *, source_label="BT/magnet", source_i
                 torrent_id = None
                 raise
             now_ts = time.monotonic()
-            fields = ["id", "name", "status", "percentDone", "totalSize", "downloadedEver", "rateDownload", "eta", "error", "errorString", "files"]
+            fields = ["id", "name", "status", "percentDone", "totalSize", "downloadedEver", "rateDownload", "eta", "error", "errorString", "files", "downloadDir", "leftUntilDone", "isFinished"]
             info = _transmission_rpc_call("torrent-get", {"ids": [torrent_id], "fields": fields}, timeout_seconds=10)
             torrents = info.get("torrents") or []
             if not torrents:
@@ -721,12 +801,17 @@ def _download_bt_with_transmission(source, *, source_label="BT/magnet", source_i
             )
             last_progress_bytes = downloaded
             last_progress_ts = now_ts
-            if float(item.get("percentDone") or 0) >= 1.0:
+            completed_candidates = _transmission_completed_file_candidates(item, tmpdir, incomplete_dir)
+            left_until_done = int(item.get("leftUntilDone") or 0)
+            if float(item.get("percentDone") or 0) >= 1.0 and left_until_done <= 0 and (completed_candidates or _torrent_files_from_transmission(tmpdir)):
                 break
             time.sleep(progress_interval_seconds)
         _check_remote_download_control(cancel_check)
+        completed_candidates = _transmission_completed_file_candidates(item, tmpdir, incomplete_dir)
         _transmission_rpc_call("torrent-remove", {"ids": [torrent_id], "delete-local-data": False}, timeout_seconds=10)
         torrent_id = None
+        if completed_candidates:
+            _stage_transmission_completed_files(completed_candidates, tmpdir)
         files = _torrent_files_from_transmission(tmpdir)
         if not files:
             raise RemoteDownloadError("BT 下載沒有產生可保存的檔案")

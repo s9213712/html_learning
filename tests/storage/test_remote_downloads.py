@@ -481,6 +481,7 @@ def test_torrent_download_excludes_private_trackers(tmp_path, monkeypatch):
 
     monkeypatch.setattr("services.storage.remote_downloads.shutil.which", lambda name: "/usr/bin/aria2c")
     monkeypatch.setattr("services.storage.remote_downloads.subprocess.Popen", FakePopen)
+    monkeypatch.setenv("HACKME_BT_BACKEND", "aria2")
 
     downloaded = download_torrent_file_with_aria2(torrent)
     try:
