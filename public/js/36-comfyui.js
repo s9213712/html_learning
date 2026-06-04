@@ -280,6 +280,21 @@ function comfyuiStorageWarningText(payload = {}) {
   return `；儲存路徑警告：${warning.message || "模型位於較慢掛載路徑，建議移到 Linux native storage"}`;
 }
 
+function comfyuiDiffusersStatusText() {
+  return "HF / Diffusers 模式：使用 Hugging Face repo 生圖，不使用 ComfyUI server 模型清單；請確認 repo / variant 後送出。";
+}
+
+function comfyuiModelsStatusText(payload = {}) {
+  if (isComfyuiDiffusersMode()) return comfyuiDiffusersStatusText();
+  return `已連線 ${payload.comfyui_url || "ComfyUI"}${comfyuiBackendLabel(payload)}，模型 ${Number((payload.models || []).length)} 個，LoRA ${Number((payload.loras || []).length)} 個，Embedding ${Number((payload.embeddings || []).length)} 個，VAE ${Number((payload.vaes || []).length)} 個${comfyuiPaidApiStatusText(payload)}${comfyuiStorageWarningText(payload)}`;
+}
+
+function updateComfyuiStatusForActiveBackend() {
+  const status = $("comfyui-status");
+  if (!status || !isComfyuiDiffusersMode()) return;
+  status.textContent = comfyuiDiffusersStatusText();
+}
+
 function comfyuiConnectionModeLabel(mode = comfyuiConnectionMode) {
   const normalized = String(mode || "remote").trim().toLowerCase();
   if (normalized === "local") return "本地 ComfyUI";
@@ -1072,6 +1087,7 @@ function setComfyuiView(view, { persist = true } = {}) {
   updateComfyuiModeNote();
   updateComfyuiStartButton();
   updateComfyuiDiffusersUi();
+  updateComfyuiStatusForActiveBackend();
 }
 
 function bindComfyuiSubnav() {
@@ -3649,11 +3665,11 @@ async function loadComfyuiModels(options = {}) {
   if (!currentUser || !canAccessModule("comfyui")) return;
   const status = $("comfyui-status");
   if (!forceRefresh && comfyuiModelsLoaded && Date.now() - comfyuiModelsLastLoadedAt < COMFYUI_MODELS_CACHE_MS) {
-    if (status && comfyuiModelsLastStatusText) status.textContent = comfyuiModelsLastStatusText;
+    if (status) status.textContent = isComfyuiDiffusersMode() ? comfyuiDiffusersStatusText() : comfyuiModelsLastStatusText;
     return true;
   }
   if (!forceRefresh && comfyuiModelsLoadPromise) return comfyuiModelsLoadPromise;
-  if (status) status.textContent = "連線 ComfyUI 中...";
+  if (status) status.textContent = isComfyuiDiffusersMode() ? "檢查 HF / Diffusers 設定中..." : "連線 ComfyUI 中...";
   setComfyuiMessage("");
   comfyuiModelsLoadPromise = (async () => {
     await fetchCsrfToken();
@@ -3701,8 +3717,9 @@ async function loadComfyuiModels(options = {}) {
     });
     setComfyuiTabAvailability(true);
     comfyuiModelsLastLoadedAt = Date.now();
-    comfyuiModelsLastStatusText = `已連線 ${json.comfyui_url || "ComfyUI"}${comfyuiBackendLabel(json)}，模型 ${Number((json.models || []).length)} 個，LoRA ${Number((json.loras || []).length)} 個，Embedding ${Number((json.embeddings || []).length)} 個，VAE ${Number((json.vaes || []).length)} 個${comfyuiPaidApiStatusText(json)}${comfyuiStorageWarningText(json)}`;
-    if (status) status.textContent = comfyuiModelsLastStatusText;
+    const activeStatusText = comfyuiModelsStatusText(json);
+    if (!isComfyuiDiffusersMode()) comfyuiModelsLastStatusText = activeStatusText;
+    if (status) status.textContent = activeStatusText;
     return true;
   })();
   try {

@@ -65,7 +65,7 @@ def test_diffusers_js_preflights_huggingface_repo_before_generation():
 
 def test_diffusers_cache_busts_preflight_ui_assets():
     html = _read("public/index.html")
-    assert "/js/36-comfyui.js?v=20260604-hf-frontend-tab" in html
+    assert "/js/36-comfyui.js?v=20260604-hf-status-clean" in html
     assert "/js/36-comfyui-workflows.js?v=20260604-remote-workflow-shared-default" in html
 
 
@@ -87,6 +87,11 @@ def test_hf_and_comfyui_are_separate_frontend_generation_tabs():
     assert 'return backendUrl ? { backend_url: backendUrl } : {};' in comfyui_js
     assert 'backend_url=request.args.get("backend_url")' in runtime_routes
     assert 'backend_url=request_data.get("backend_url") or request_data.get("comfyui_backend_url")' in runtime_routes
+    assert 'function comfyuiDiffusersStatusText()' in comfyui_js
+    assert '不使用 ComfyUI server 模型清單' in comfyui_js
+    assert 'updateComfyuiStatusForActiveBackend();' in comfyui_js
+    assert 'isComfyuiDiffusersMode() ? comfyuiDiffusersStatusText() : comfyuiModelsLastStatusText' in comfyui_js
+    assert 'if (!isComfyuiDiffusersMode()) comfyuiModelsLastStatusText = activeStatusText;' in comfyui_js
 
 
 def test_comfyui_history_lists_and_reruns_workflow_runs():
