@@ -107,3 +107,12 @@ def test_image_picker_styles_are_responsive():
     assert ".comfyui-input-asset-card > .drive-file-actions" in css
     assert ".comfyui-template-field-card > .drive-file-actions" in css
     assert "@media (max-width: 860px)" in css
+
+
+def test_comfyui_model_load_does_not_warn_about_restored_lora_draft():
+    js = _read("public/js/36-comfyui.js")
+    restored_lora_prune = "restoreComfyuiDraft();\n    pruneUnsupportedComfyuiSelectedLoras"
+    assert "已保留已選 LoRA；提醒" in js
+    assert "setComfyuiMessage(`已加入 LoRA" in js
+    assert f"{restored_lora_prune}({{ notify: false }});" in js
+    assert f"{restored_lora_prune}({{ notify: true }});" not in js

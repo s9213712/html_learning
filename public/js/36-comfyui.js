@@ -3641,7 +3641,7 @@ async function loadComfyuiModels(options = {}) {
     fillComfyuiControlnetModelOptions();
     fillComfyuiControlnetPreprocessorOptions();
     restoreComfyuiDraft();
-    pruneUnsupportedComfyuiSelectedLoras({ notify: true });
+    pruneUnsupportedComfyuiSelectedLoras({ notify: false });
     updateComfyuiModeVisibility();
     updateComfyuiDiffusersUi();
     applyComfyuiRuntimeLimits(json);

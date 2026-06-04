@@ -65,7 +65,7 @@ def test_diffusers_js_preflights_huggingface_repo_before_generation():
 
 def test_diffusers_cache_busts_preflight_ui_assets():
     html = _read("public/index.html")
-    assert "/js/36-comfyui.js?v=20260604-comfyui-remote-timeout-logs" in html
+    assert "/js/36-comfyui.js?v=20260604-lora-draft-quiet" in html
     assert "/js/36-comfyui-workflows.js?v=20260604-remote-workflow-shared-default" in html
 
 
