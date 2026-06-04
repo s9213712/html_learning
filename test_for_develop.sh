@@ -125,6 +125,17 @@ runtime_maintenance_action_requested() {
   [[ "$BACKUP_RUNTIME" == "1" || -n "$RESTORE_ARCHIVE" || "$RESET_RUNTIME" == "1" || "$DELETE_RUNTIME" == "1" ]]
 }
 
+ensure_single_runtime_maintenance_action() {
+  local action_count=0
+  [[ "$BACKUP_RUNTIME" == "1" ]] && action_count=$((action_count + 1))
+  [[ -n "$RESTORE_ARCHIVE" ]] && action_count=$((action_count + 1))
+  [[ "$RESET_RUNTIME" == "1" ]] && action_count=$((action_count + 1))
+  [[ "$DELETE_RUNTIME" == "1" ]] && action_count=$((action_count + 1))
+  if (( action_count != 1 )); then
+    die "choose exactly one of --backup, --restore, --reset, or --delete"
+  fi
+}
+
 normalize_runtime_maintenance_options() {
   normalize_cloud_drive_options
   normalize_custom_runtime_root
@@ -775,36 +786,14 @@ Options:
                            upload QA. Blank keeps app/root setting default
                            (8192 MB unless changed in root settings).
   --dry-run                Print resolved config and exit before copying/starting
-  --backup [PATH]          Create a runtime-state backup archive and exit. If PATH
-                           is omitted, writes under the runtime parent directory.
-                           PATH is the output archive or an existing output
-                           directory, not the runtime root; use --runtime-root
-                           to choose the runtime directory. Excludes storage/,
-                           venv/, pycache/, logs/, pid files, and temp caches.
+  --backup [PATH]          Create a runtime-state backup archive and exit.
   --restore PATH           Restore runtime state from a --backup archive and exit.
-                           Existing runtime state is moved aside to a timestamped
-                           .pre-restore-* directory before restore. Does not stop
-                           a running server; run --stop first when restoring the
-                           active runtime.
-  --reset                  Reset selected runtime state and exit. Refuses to run
-                           while that runtime is active. Clears database/, chats/,
-                           anchors/, reports/, logs/, dev token/cache/temp/pid files;
-                           preserves storage/, venv/, and server-side secret/key
-                           material such as .filekey, .fkey, .csrfkey,
-                           .integrity_key, .chain_seed, cert.pem, and key.pem.
-                           Warning: cloud-drive DB/catalog rows are cleared, so
-                           preserved storage/ files become orphaned. Before
-                           clearing state, --reset writes a recovery bundle under
-                           storage/.reset_orphan_recovery/reset_<timestamp>/
-                           with pre-reset database/catalog metadata, server
-                           secret/key material, decrypt_server_files.py, export
-                           instructions, and a restore_database_catalog_from_bundle.sh
-                           helper for importing catalog metadata back after reset.
-  --delete                 Delete selected runtime root and exit. Refuses to run
-                           while that runtime is active. If storage/ is inside the
-                           runtime root, it is moved to a timestamped
-                           .storage-preserved-* sibling before deletion. External
-                           cloud-drive storage roots are never deleted.
+  --reset                  Reset runtime state, preserving keys and creating a
+                           storage/.reset_orphan_recovery bundle before clearing
+                           DB/catalog state. See the command catalog.
+  --delete                 Delete selected runtime root. Preserves internal storage
+                           by moving it aside; external storage roots are not deleted.
+  Command catalog:         docs/TEST_FOR_DEVELOP_COMMAND_CATALOG.md
   --run-root PATH          Use a fixed /tmp run root instead of auto-generating one
   --runtime-root PATH,
   --runtime-dir PATH       Use PATH as the runtime directory instead of the
@@ -3684,7 +3673,7 @@ write_reset_orphan_recovery_bundle() {
   if [[ -e "$bundle_dir" ]]; then
     die "reset orphan recovery bundle already exists: $bundle_dir"
   fi
-  mkdir -p "$bundle_dir" "$bundle_dir/database" "$bundle_dir/runtime_secrets" "$bundle_dir/scripts/admin"
+  mkdir -p "$bundle_dir" "$bundle_dir/database" "$bundle_dir/runtime_secrets" "$bundle_dir/scripts/admin" "$bundle_dir/orphaned_storage"
   chmod 700 "$bundle_dir" "$bundle_dir/runtime_secrets" 2>/dev/null || true
 
   if [[ -d "$RUNTIME_ROOT/database" ]]; then
@@ -3714,6 +3703,16 @@ write_reset_orphan_recovery_bundle() {
     cp -a "$SOURCE_ROOT/scripts/admin/decrypt_server_files.py" "$bundle_dir/scripts/admin/decrypt_server_files.py"
   fi
 
+  local storage_item storage_basename
+  shopt -s dotglob nullglob
+  for storage_item in "$EFFECTIVE_STORAGE_ROOT"/*; do
+    [[ -e "$storage_item" ]] || continue
+    storage_basename="$(basename "$storage_item")"
+    [[ "$storage_basename" == ".reset_orphan_recovery" ]] && continue
+    mv "$storage_item" "$bundle_dir/orphaned_storage/"
+  done
+  shopt -u dotglob nullglob
+
   printf '%s\n' "$RUNTIME_ROOT" > "$bundle_dir/runtime_root.txt"
   printf '%s\n' "$EFFECTIVE_STORAGE_ROOT" > "$bundle_dir/storage_root.txt"
   cat > "$bundle_dir/restore_database_catalog_from_bundle.sh" <<EOF
@@ -3722,9 +3721,17 @@ set -Eeuo pipefail
 BUNDLE_DIR=\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)
 RUNTIME_ROOT="$RUNTIME_ROOT"
 BUNDLE_DATABASE="$bundle_dir/database"
+BUNDLE_STORAGE="$bundle_dir/orphaned_storage"
 TARGET_DATABASE="$RUNTIME_ROOT/database"
+TARGET_STORAGE="$EFFECTIVE_STORAGE_ROOT"
 STAMP=\$(date +%Y%m%d_%H%M%S)
 BACKUP_DATABASE="$RUNTIME_ROOT/database.before-orphan-catalog-restore-\$STAMP"
+BACKUP_STORAGE="$bundle_dir/post_reset_storage_backup_\$STAMP"
+STAGED_DATABASE="$bundle_dir/.restore_database_stage_\$STAMP"
+cleanup_restore_stage() {
+  rm -rf "\$STAGED_DATABASE"
+}
+trap cleanup_restore_stage EXIT
 
 if pgrep -af 'gunicorn|server:app' >/dev/null 2>&1; then
   echo "[orphan-restore] refusing: a server process appears to be running. Stop it before restoring catalog metadata." >&2
@@ -3734,27 +3741,49 @@ if [[ ! -d "\$BUNDLE_DATABASE" ]]; then
   echo "[orphan-restore] missing bundled database metadata: \$BUNDLE_DATABASE" >&2
   exit 1
 fi
-mkdir -p "\$RUNTIME_ROOT"
+if [[ ! -d "\$BUNDLE_STORAGE" ]]; then
+  echo "[orphan-restore] missing bundled orphaned storage: \$BUNDLE_STORAGE" >&2
+  exit 1
+fi
+mkdir -p "\$RUNTIME_ROOT" "\$TARGET_STORAGE"
+if [[ -e "\$BACKUP_DATABASE" ]]; then
+  echo "[orphan-restore] backup path already exists: \$BACKUP_DATABASE" >&2
+  exit 1
+fi
+if [[ -e "\$STAGED_DATABASE" ]]; then
+  echo "[orphan-restore] stage path already exists: \$STAGED_DATABASE" >&2
+  exit 1
+fi
+mkdir -p "\$STAGED_DATABASE"
+cp -a "\$BUNDLE_DATABASE/." "\$STAGED_DATABASE/"
+mkdir -p "\$BACKUP_STORAGE"
+shopt -s dotglob nullglob
+for item in "\$TARGET_STORAGE"/*; do
+  [[ -e "\$item" ]] || continue
+  [[ "\$(basename "\$item")" == ".reset_orphan_recovery" ]] && continue
+  mv "\$item" "\$BACKUP_STORAGE/"
+done
+for item in "\$BUNDLE_STORAGE"/*; do
+  [[ -e "\$item" ]] || continue
+  mv "\$item" "\$TARGET_STORAGE/"
+done
+shopt -u dotglob nullglob
 if [[ -e "\$TARGET_DATABASE" ]]; then
-  if [[ -e "\$BACKUP_DATABASE" ]]; then
-    echo "[orphan-restore] backup path already exists: \$BACKUP_DATABASE" >&2
-    exit 1
-  fi
   mv "\$TARGET_DATABASE" "\$BACKUP_DATABASE"
   echo "[orphan-restore] moved current database to \$BACKUP_DATABASE"
 fi
-mkdir -p "\$TARGET_DATABASE"
-cp -a "\$BUNDLE_DATABASE/." "\$TARGET_DATABASE/"
-echo "[orphan-restore] restored pre-reset database/catalog metadata to \$TARGET_DATABASE"
-echo "[orphan-restore] storage root remains: $EFFECTIVE_STORAGE_ROOT"
-echo "[orphan-restore] restart the server, then verify cloud-drive catalog before deleting \$BACKUP_DATABASE"
+mv "\$STAGED_DATABASE" "\$TARGET_DATABASE"
+echo "[orphan-restore] restored staged pre-reset database/catalog metadata to \$TARGET_DATABASE"
+echo "[orphan-restore] restored orphaned storage contents to \$TARGET_STORAGE"
+echo "[orphan-restore] moved post-reset storage contents to \$BACKUP_STORAGE"
+echo "[orphan-restore] restart the server, then verify cloud-drive catalog before deleting \$BACKUP_DATABASE and \$BACKUP_STORAGE"
 EOF
   chmod 700 "$bundle_dir/restore_database_catalog_from_bundle.sh" 2>/dev/null || true
   cat > "$bundle_dir/README_SERVER_ENCRYPTED_RECOVERY.txt" <<EOF
 This folder was created by test_for_develop.sh --reset before runtime DB/catalog state was cleared.
 
 Purpose:
-- storage/ is preserved by --reset, so cloud-drive ciphertext files may remain as orphan files.
+- storage/ is preserved by --reset, but existing pre-reset storage contents are moved into orphaned_storage/ so the post-reset storage root starts clean.
 - This bundle keeps the pre-reset database/catalog metadata and server-side keys needed to export server_encrypted files.
 - It also includes restore_database_catalog_from_bundle.sh to copy the pre-reset database/catalog metadata back into the runtime after reset.
 
@@ -3767,7 +3796,7 @@ Important boundaries:
 Example from the repository root:
 PYTHONPATH=$SOURCE_ROOT $PYTHON_BIN scripts/admin/decrypt_server_files.py \\
   --db "$bundle_dir/database/database.db" \\
-  --storage-root "$EFFECTIVE_STORAGE_ROOT" \\
+  --storage-root "$bundle_dir/orphaned_storage" \\
   --key-file "$bundle_dir/runtime_secrets/.filekey" \\
   --output-dir /tmp/hackme_server_encrypted_plaintext_export \\
   --confirm-plaintext-output
@@ -3775,10 +3804,10 @@ PYTHONPATH=$SOURCE_ROOT $PYTHON_BIN scripts/admin/decrypt_server_files.py \\
 A copy of decrypt_server_files.py is also stored at:
 $bundle_dir/scripts/admin/decrypt_server_files.py
 
-To import the pre-reset database/catalog metadata back after reset, stop the server and run:
+To import the pre-reset database/catalog metadata and orphaned storage files back after reset, stop the server and run:
 $bundle_dir/restore_database_catalog_from_bundle.sh
 
-That restore helper backs up the current runtime database/ first, then copies this bundle's database/ back. It does not modify storage/.
+That restore helper first stages this bundle's database/ without modifying the current runtime database, moves current post-reset storage contents into a backup folder inside this bundle, moves orphaned_storage/ back, and only then swaps the staged database into place after backing up the current runtime database/.
 EOF
   say "[dev-tmp] reset:    orphan recovery bundle=$bundle_dir"
 }
@@ -3787,8 +3816,8 @@ reset_runtime_state() {
   ensure_runtime_not_running "reset"
   say "[dev-tmp] reset:    runtime=$RUNTIME_ROOT"
   say "[dev-tmp] reset:    preserving storage/, venv/, and server-side secret/key files"
-  say "[dev-tmp] reset:    warning: database/catalog rows are cleared; preserved storage files may become orphaned"
-  say "[dev-tmp] reset:    creating storage/.reset_orphan_recovery bundle for server_encrypted export"
+  say "[dev-tmp] reset:    warning: database/catalog rows are cleared; pre-reset storage files move to orphaned_storage/"
+  say "[dev-tmp] reset:    creating storage/.reset_orphan_recovery bundle for server_encrypted export/import"
   mkdir -p "$RUNTIME_ROOT" "$EFFECTIVE_STORAGE_ROOT"
   write_reset_orphan_recovery_bundle
   rm -rf \
@@ -4763,6 +4792,9 @@ else
 fi
 
 RUN_ROOT="${RUN_ROOT:-/tmp/hackme_web_dev_${RUN_ID}_$$}"
+if runtime_maintenance_action_requested; then
+  ensure_single_runtime_maintenance_action
+fi
 if [[ "$DRY_RUN" == "1" ]]; then
   print_resolved_config
   exit 0
@@ -4789,14 +4821,7 @@ GUNICORN_ERROR_LOG="$RUNTIME_ROOT/logs/gunicorn_error.log"
 PID_FILE="$RUNTIME_ROOT/server.pid"
 
 if [[ "$BACKUP_RUNTIME" == "1" || -n "$RESTORE_ARCHIVE" || "$RESET_RUNTIME" == "1" || "$DELETE_RUNTIME" == "1" ]]; then
-  action_count=0
-  [[ "$BACKUP_RUNTIME" == "1" ]] && action_count=$((action_count + 1))
-  [[ -n "$RESTORE_ARCHIVE" ]] && action_count=$((action_count + 1))
-  [[ "$RESET_RUNTIME" == "1" ]] && action_count=$((action_count + 1))
-  [[ "$DELETE_RUNTIME" == "1" ]] && action_count=$((action_count + 1))
-  if (( action_count != 1 )); then
-    die "choose exactly one of --backup, --restore, --reset, or --delete"
-  fi
+  ensure_single_runtime_maintenance_action
   if [[ "$BACKUP_RUNTIME" == "1" ]]; then
     backup_runtime_state "$BACKUP_ARCHIVE"
   elif [[ -n "$RESTORE_ARCHIVE" ]]; then
