@@ -65,9 +65,43 @@ def test_diffusers_js_preflights_huggingface_repo_before_generation():
 
 def test_diffusers_cache_busts_preflight_ui_assets():
     html = _read("public/index.html")
-    assert "/js/36-comfyui.js?v=20260604-hf-settings-fronttab" in html
+    assert "/js/36-comfyui.js?v=20260604-hf-frontend-tab" in html
     assert "/js/36-comfyui-workflows.js?v=20260604-remote-workflow-shared-default" in html
 
+
+
+
+def test_hf_and_comfyui_are_separate_frontend_generation_tabs():
+    html = _read("public/index.html")
+    comfyui_js = _read("public/js/36-comfyui.js")
+    runtime_routes = _read("routes/comfyui_sections/runtime_routes.py")
+
+    assert 'data-comfyui-view="generate">ComfyUI / GGUF</button>' in html
+    assert 'data-comfyui-view="hf">HF / Diffusers</button>' in html
+    assert 'id="comfyui-backend-title"' in html
+    assert 'let comfyuiActiveBackendFamily = "comfyui";' in comfyui_js
+    assert 'activeView === "hf" ? "hf" : "comfyui"' in comfyui_js
+    assert 'activeView === "hf" && panelView === "generate"' in comfyui_js
+    assert 'diffusers://frontend' in comfyui_js
+    assert 'query.set("backend_url", backendUrl);' in comfyui_js
+    assert 'return backendUrl ? { backend_url: backendUrl } : {};' in comfyui_js
+    assert 'backend_url=request.args.get("backend_url")' in runtime_routes
+    assert 'backend_url=request_data.get("backend_url") or request_data.get("comfyui_backend_url")' in runtime_routes
+
+
+def test_comfyui_history_lists_and_reruns_workflow_runs():
+    comfyui_js = _read("public/js/36-comfyui.js")
+    runtime_routes = _read("routes/comfyui_sections/runtime_routes.py")
+
+    assert '"id": f"workflow-{int(row[\'id\'])}",' in runtime_routes
+    assert '"history_source": "workflow"' in runtime_routes
+    assert "name='comfyui_workflow_runs'" in runtime_routes
+    assert 'JOIN comfyui_workflow_presets p ON p.id = r.preset_id' in runtime_routes
+    assert 'WHERE r.actor_user_id=?' in runtime_routes
+    assert 'items.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)' in runtime_routes
+    assert 'text.startsWith("workflow-")' in comfyui_js
+    assert 'historyItem?.history_source === "workflow"' in comfyui_js
+    assert 'API + `/comfyui/workflows/${encodeURIComponent(workflowPresetId)}/run`' in comfyui_js
 
 def test_hf_settings_tab_is_exposed_in_comfyui_frontend_settings():
     html = _read("public/index.html")

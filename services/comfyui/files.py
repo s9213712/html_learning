@@ -1,6 +1,7 @@
 """ComfyUI file upload/fetch/discard helpers."""
 
 import os
+import socket
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -134,8 +135,11 @@ def fetch_file(client, file_ref, *, error_cls, file_cls, accept="*/*", empty_lab
                 continue
             reason = getattr(exc, "reason", "") or getattr(exc, "msg", "") or ""
             raise error_cls(f"{empty_label}讀取失敗：HTTP {exc.code} {reason}".strip()) from exc
+        except (TimeoutError, socket.timeout) as exc:
+            raise error_cls(f"{empty_label}讀取逾時：遠端 ComfyUI 已產生檔案引用，但 /view 在逾時前沒有回傳檔案內容。請確認遠端 output 檔案存在、遠端磁碟/網路沒有卡住，或稍後重新整理預覽。") from exc
         except urllib.error.URLError as exc:
-            raise error_cls(f"{empty_label}讀取失敗：{getattr(exc, 'reason', exc)}") from exc
+            reason = getattr(exc, "reason", exc)
+            raise error_cls(f"{empty_label}讀取失敗：{reason}") from exc
     else:
         detail = _ref_description(normalized_ref)
         raise error_cls(

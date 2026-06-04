@@ -54,6 +54,7 @@ def register_comfyui_runtime_routes(app, ctx):
     _normalize_generation_payload = ctx["normalize_generation_payload"]
     _normalize_generation_timeout = ctx["normalize_generation_timeout"]
     _parse_generation_request = ctx["parse_generation_request"]
+    _parse_json_field = ctx.get("parse_json_field")
     _record_generation_history = ctx["record_generation_history"]
     _register_active_generation = ctx["register_active_generation"]
     _run_comfyui_generation_job = ctx["run_comfyui_generation_job"]
@@ -100,13 +101,26 @@ def register_comfyui_runtime_routes(app, ctx):
             return guessed or raw or "application/octet-stream"
         return raw
 
+    def _runtime_parse_json_field(value, fallback):
+        if callable(_parse_json_field):
+            return _parse_json_field(value, fallback)
+        if value in (None, ""):
+            return fallback
+        try:
+            import json
+
+            parsed = json.loads(value) if isinstance(value, str) else value
+        except Exception:
+            return fallback
+        return parsed if isinstance(parsed, type(fallback)) else fallback
+
     @app.route("/api/comfyui/status", methods=["GET"])
     @require_csrf_safe
     def comfyui_status():
         actor, err = _actor_or_401()
         if err:
             return err
-        binding = _comfyui_binding(actor)
+        binding = _comfyui_binding(actor, backend_url=request.args.get("backend_url"))
         active_client = _client_for_url(binding["url"])
         try:
             if hasattr(active_client, "health_check"):
@@ -196,7 +210,7 @@ def register_comfyui_runtime_routes(app, ctx):
         actor, err = _actor_or_401()
         if err:
             return err
-        binding = _comfyui_binding(actor)
+        binding = _comfyui_binding(actor, backend_url=request.args.get("backend_url"))
         active_client = _client_for_url(binding["url"])
         try:
             capabilities = active_client.get_capabilities() if hasattr(active_client, "get_capabilities") else {}
@@ -437,7 +451,7 @@ def register_comfyui_runtime_routes(app, ctx):
         params, msg = _normalize_generation_payload(request_data)
         if msg:
             return json_resp({"ok": False, "msg": msg}), 400
-        backend_binding = _comfyui_binding(actor)
+        backend_binding = _comfyui_binding(actor, backend_url=request_data.get("backend_url") or request_data.get("comfyui_backend_url"))
         active_client = _client_for_url(backend_binding["url"])
         try:
             params = _hydrate_generation_assets(actor, active_client, params, uploaded_assets)
@@ -594,6 +608,55 @@ def register_comfyui_runtime_routes(app, ctx):
         conn = get_db()
         try:
             items = _list_generation_history(conn, actor=actor, limit=COMFYUI_HISTORY_LIMIT)
+            has_workflow_tables = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='comfyui_workflow_runs'"
+            ).fetchone() and conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='comfyui_workflow_presets'"
+            ).fetchone()
+            workflow_rows = []
+            if has_workflow_tables:
+                workflow_rows = conn.execute(
+                    """
+                    SELECT r.id, r.preset_id, r.prompt, r.negative_prompt, r.params_json,
+                           r.output_refs_json, r.status, r.error, r.created_at, r.updated_at,
+                           p.title AS preset_title, p.purpose AS preset_purpose, p.visibility,
+                           p.owner_user_id AS preset_owner_user_id, p.is_official
+                    FROM comfyui_workflow_runs r
+                    JOIN comfyui_workflow_presets p ON p.id = r.preset_id
+                    WHERE r.actor_user_id=?
+                      AND (p.owner_user_id=? OR p.is_official=1 OR p.visibility='public')
+                    ORDER BY r.created_at DESC, r.id DESC
+                    LIMIT ?
+                    """,
+                    (int(actor.get("id") or 0), int(actor.get("id") or 0), int(COMFYUI_HISTORY_LIMIT)),
+                ).fetchall()
+            for row in workflow_rows:
+                params = _runtime_parse_json_field(row["params_json"], {})
+                output_refs = _runtime_parse_json_field(row["output_refs_json"], {})
+                prompt = row["prompt"] or params.get("prompt") or row["preset_title"] or ""
+                items.append({
+                    "id": f"workflow-{int(row['id'])}",
+                    "history_source": "workflow",
+                    "workflow_run_id": int(row["id"]),
+                    "preset_id": int(row["preset_id"]),
+                    "preset_title": row["preset_title"] or "Workflow",
+                    "generation_mode": params.get("generation_mode") or row["preset_purpose"] or "workflow",
+                    "created_at": row["created_at"],
+                    "updated_at": row["updated_at"],
+                    "payload": {
+                        **params,
+                        "prompt": prompt,
+                        "negative_prompt": row["negative_prompt"] or params.get("negative_prompt") or "",
+                        "model": params.get("model") or row["preset_title"] or "Workflow",
+                    },
+                    "input_assets": {},
+                    "controlnet": {},
+                    "result": output_refs,
+                    "status": row["status"] or "queued",
+                    "error": row["error"] or "",
+                })
+            items.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+            items = items[:COMFYUI_HISTORY_LIMIT]
         finally:
             conn.close()
         return json_resp({"ok": True, "history": items})

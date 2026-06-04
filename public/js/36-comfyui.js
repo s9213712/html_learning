@@ -27,6 +27,7 @@ let comfyuiAvailableEmbeddings = [];
 let comfyuiAvailableVaes = [];
 let comfyuiSelectedLoras = [];
 let comfyuiConnectionMode = "remote";
+let comfyuiActiveBackendFamily = "comfyui";
 let comfyuiLocalRuntimeActive = false;
 let comfyuiLocalStartPollTimer = null;
 let comfyuiCivitaiInspection = null;
@@ -224,12 +225,37 @@ function isComfyuiAvailableForNavigation() {
   return true;
 }
 
+function comfyuiEffectiveConnectionMode(modeOverride = null) {
+  if (modeOverride) {
+    const normalized = String(modeOverride || "remote").trim().toLowerCase();
+    return normalized === "local" || normalized === "diffusers" ? normalized : "remote";
+  }
+  if (comfyuiActiveBackendFamily === "hf") return "diffusers";
+  const normalized = String(comfyuiConnectionMode || "remote").trim().toLowerCase();
+  return normalized === "local" ? "local" : "remote";
+}
+
+function comfyuiFrontendBackendUrl() {
+  return comfyuiActiveBackendFamily === "hf" ? "diffusers://frontend" : "";
+}
+
+function syncComfyuiPrimaryConnectionModeFromResponse(json = {}) {
+  if (json && json.backend_scope === "custom") return;
+  const mode = String(json?.connection_mode || "").trim().toLowerCase();
+  if (mode === "local" || mode === "remote") comfyuiConnectionMode = mode;
+}
+
 function comfyuiRequestQuery() {
-  return "";
+  const backendUrl = comfyuiFrontendBackendUrl();
+  if (!backendUrl) return "";
+  const query = new URLSearchParams();
+  query.set("backend_url", backendUrl);
+  return `?${query.toString()}`;
 }
 
 function comfyuiRequestPayloadExtras() {
-  return {};
+  const backendUrl = comfyuiFrontendBackendUrl();
+  return backendUrl ? { backend_url: backendUrl } : {};
 }
 
 function comfyuiBackendLabel(payload = {}) {
@@ -273,11 +299,12 @@ function comfyuiConnectionModeDetail(mode = comfyuiConnectionMode) {
 }
 
 function updateComfyuiModeNote(modeOverride = null) {
-  const rawMode = String(modeOverride || comfyuiConnectionMode || "remote").trim().toLowerCase();
-  const normalizedMode = rawMode === "local" || rawMode === "diffusers" ? rawMode : "remote";
+  const normalizedMode = comfyuiEffectiveConnectionMode(modeOverride);
   const note = $("comfyui-mode-note");
   const badge = $("comfyui-mode-badge");
   const detail = $("comfyui-mode-detail");
+  const title = $("comfyui-backend-title");
+  if (title) title.textContent = normalizedMode === "diffusers" ? "HF / Diffusers" : "ComfyUI / GGUF";
   if (note) note.textContent = `目前模式：${comfyuiConnectionModeLabel(normalizedMode)}`;
   if (badge) {
     badge.textContent = normalizedMode === "local" ? "本地模式" : (normalizedMode === "diffusers" ? "Diffusers 模式" : "雲端 / 遠端模式");
@@ -299,7 +326,7 @@ function setComfyuiMessage(text, ok = true) {
 
 function setComfyuiIdleSuspend(reason, active, label) {
   if (typeof setInactivitySuspendState === "function") {
-    const backendLabel = comfyuiConnectionMode === "diffusers" ? "Diffusers" : "ComfyUI";
+    const backendLabel = isComfyuiDiffusersMode() ? "Diffusers" : "ComfyUI";
     setInactivitySuspendState(reason, !!active, label || `${backendLabel} 工作中`);
   }
 }
@@ -322,14 +349,14 @@ function setComfyuiBusy(busy) {
   if (refresh) refresh.disabled = !!busy;
   if (start) start.disabled = !!busy;
   if (stop) stop.disabled = !!busy;
-  setComfyuiIdleSuspend("comfyui_generate", !!busy, `${comfyuiConnectionMode === "diffusers" ? "Diffusers" : "ComfyUI"} 產圖中`);
+  setComfyuiIdleSuspend("comfyui_generate", !!busy, `${isComfyuiDiffusersMode() ? "Diffusers" : "ComfyUI"} 產圖中`);
 }
 
 function updateComfyuiStartButton() {
   const start = $("comfyui-start-btn");
   const stop = $("comfyui-stop-btn");
   const isRoot = currentUser === "root";
-  const localMode = comfyuiConnectionMode === "local";
+  const localMode = comfyuiEffectiveConnectionMode() === "local";
   const showLocalRuntimeStop = isRoot && localMode && (comfyuiServerAvailable === true || comfyuiLocalRuntimeActive);
   updateComfyuiModeNote();
   if (start) {
@@ -352,7 +379,7 @@ function stopComfyuiLocalStartPolling() {
 
 function scheduleComfyuiLocalStartPolling({ attemptsLeft = 120, delayMs = 5000 } = {}) {
   stopComfyuiLocalStartPolling();
-  if (comfyuiConnectionMode !== "local" || attemptsLeft <= 0) return;
+  if (comfyuiEffectiveConnectionMode() !== "local" || attemptsLeft <= 0) return;
   setComfyuiIdleSuspend("comfyui_start_local", true, "ComfyUI 啟動中");
   comfyuiLocalStartPollTimer = setTimeout(async () => {
     comfyuiLocalStartPollTimer = null;
@@ -482,7 +509,7 @@ function updateComfyuiPreviewCardForOutputKinds(kinds = null) {
   const normalized = comfyuiUniqueOutputKinds(Array.isArray(kinds) ? kinds : comfyuiCurrentPreviewOutputKinds());
   const effective = normalized.length ? normalized : ["image"];
   const label = comfyuiOutputKindsLabel(effective);
-  const backendLabel = comfyuiConnectionMode === "diffusers" ? "Diffusers" : "ComfyUI";
+  const backendLabel = isComfyuiDiffusersMode() ? "Diffusers" : "ComfyUI";
   const title = $("comfyui-preview-card-title");
   const sub = $("comfyui-preview-card-sub");
   if (title) title.textContent = `${label}結果`;
@@ -537,8 +564,8 @@ function comfyuiGenerationMode() {
   return syncComfyuiGenerationMode();
 }
 
-function isComfyuiDiffusersMode(mode = comfyuiConnectionMode) {
-  return String(mode || "").trim().toLowerCase() === "diffusers";
+function isComfyuiDiffusersMode(mode = null) {
+  return comfyuiEffectiveConnectionMode(mode) === "diffusers";
 }
 
 function normalizeComfyuiHuggingFaceRepoInput(value) {
@@ -996,11 +1023,11 @@ function renderComfyuiModelFamilyHints(values = []) {
 
 function normalizeComfyuiView(view) {
   const value = String(view || "").trim().toLowerCase();
-  return ["generate", "history", "workflow", "models", "settings"].includes(value) ? value : "generate";
+  return ["generate", "hf", "history", "workflow", "models", "settings"].includes(value) ? value : "generate";
 }
 
 function canManageComfyuiLocalModels(modeOverride = null) {
-  const mode = String(modeOverride || comfyuiConnectionMode || "remote").trim().toLowerCase();
+  const mode = comfyuiEffectiveConnectionMode(modeOverride);
   return currentUser === "root" && mode === "local";
 }
 
@@ -1012,13 +1039,15 @@ function setComfyuiView(view, { persist = true } = {}) {
   const modelsUnavailable = selected === "models" && (!canManageComfyuiLocalModels() || (modelTab && modelTab.hidden));
   const settingsUnavailable = selected === "settings" && currentUser !== "root";
   const activeView = (selected === "models" && modelsUnavailable) || settingsUnavailable ? "generate" : selected;
+  comfyuiActiveBackendFamily = activeView === "hf" ? "hf" : "comfyui";
   document.querySelectorAll("[data-comfyui-view]").forEach((button) => {
     const isActive = button.dataset.comfyuiView === activeView;
     button.classList.toggle("active", isActive);
     button.setAttribute("aria-selected", isActive ? "true" : "false");
   });
   document.querySelectorAll("[data-comfyui-view-panel]").forEach((panel) => {
-    const isActive = panel.dataset.comfyuiViewPanel === activeView;
+    const panelView = panel.dataset.comfyuiViewPanel;
+    const isActive = panelView === activeView || (activeView === "hf" && panelView === "generate");
     panel.hidden = !isActive;
     panel.classList.toggle("active", isActive);
   });
@@ -1040,6 +1069,9 @@ function setComfyuiView(view, { persist = true } = {}) {
   if (activeView === "settings" && typeof loadSettings === "function") {
     loadSettings();
   }
+  updateComfyuiModeNote();
+  updateComfyuiStartButton();
+  updateComfyuiDiffusersUi();
 }
 
 function bindComfyuiSubnav() {
@@ -2022,13 +2054,13 @@ function setComfyuiProgress({ visible = true, running = false, percent = 0, labe
   if (backendKind) comfyuiProgressBackendKind = String(backendKind).toLowerCase();
   const safePercent = Math.max(0, Math.min(100, Math.round(Number(percent) || 0)));
   if (bar) bar.style.width = `${safePercent}%`;
-  if (labelEl) labelEl.textContent = label || (comfyuiConnectionMode === "diffusers" ? "等待 Diffusers" : "等待 ComfyUI");
+  if (labelEl) labelEl.textContent = label || (isComfyuiDiffusersMode() ? "等待 Diffusers" : "等待 ComfyUI");
   if (percentEl) percentEl.textContent = `${safePercent}%`;
   if (detailEl) detailEl.textContent = detail || "";
   if (pythonLogEl && visible) {
     const shouldShowPythonLog = !!showPythonLog || comfyuiProgressPythonLogTail.length > 0;
     pythonLogEl.style.display = shouldShowPythonLog ? "" : "none";
-    const defaultPythonLogPlaceholder = (comfyuiProgressBackendKind === "diffusers" || comfyuiConnectionMode === "diffusers")
+    const defaultPythonLogPlaceholder = (comfyuiProgressBackendKind === "diffusers" || isComfyuiDiffusersMode())
       ? "Diffusers Python log 尚未輸出；下載、載入或推論訊息會顯示在這裡。"
       : "ComfyUI 後端沒有提供 Python log；若遠端 API 逾時，請檢查遠端 ComfyUI 的 /queue、/system_stats，或重啟遠端 ComfyUI。";
     pythonLogEl.textContent = comfyuiProgressPythonLogTail.length
@@ -2054,7 +2086,7 @@ function stopComfyuiProgress({ complete = false, error = "", label = "" } = {}) 
       showPythonLog: comfyuiProgressBackendKind === "diffusers"
     });
   } else if (error) {
-    const showDiffusersLog = comfyuiProgressBackendKind === "diffusers" || comfyuiConnectionMode === "diffusers";
+    const showDiffusersLog = comfyuiProgressBackendKind === "diffusers" || isComfyuiDiffusersMode();
     setComfyuiProgress({
       visible: true,
       running: false,
@@ -2095,15 +2127,15 @@ function startComfyuiProgress(timeoutSeconds = COMFYUI_GENERATION_TIMEOUT_SECOND
     label: "已送出產圖請求",
     detail: hasLimit ? `已等待 00:00 / 上限 ${formatComfyuiDuration(timeoutSeconds)}` : "已等待 00:00 / 不設最長等待上限",
     pythonLogTail: [],
-    backendKind: comfyuiConnectionMode === "diffusers" ? "diffusers" : "",
-    showPythonLog: comfyuiConnectionMode === "diffusers",
+    backendKind: isComfyuiDiffusersMode() ? "diffusers" : "",
+    showPythonLog: isComfyuiDiffusersMode(),
     pythonLogPlaceholder: "等待 Diffusers Python log..."
   });
 }
 
 function comfyuiBuildJobFailureMessage(job = {}) {
   const progress = job.progress || {};
-  const isDiffusersProgress = comfyuiConnectionMode === "diffusers" || String(progress.backend_kind || "").toLowerCase() === "diffusers";
+  const isDiffusersProgress = isComfyuiDiffusersMode() || String(progress.backend_kind || "").toLowerCase() === "diffusers";
   const parts = [
     job.error,
     progress.error_message,
@@ -2126,7 +2158,7 @@ function applyComfyuiJobProgress(progress = {}, timeoutSeconds = COMFYUI_GENERAT
   const elapsed = Math.max(0, Math.floor((Date.now() - comfyuiProgressStartedAt) / 1000));
   const percent = Math.max(0, Math.min(100, Math.round(Number(progress.percent) || 0)));
   const phase = String(progress.phase || "").toLowerCase();
-  const isDiffusersProgress = comfyuiConnectionMode === "diffusers" || String(progress.backend_kind || "").toLowerCase() === "diffusers";
+  const isDiffusersProgress = isComfyuiDiffusersMode() || String(progress.backend_kind || "").toLowerCase() === "diffusers";
   let label = isDiffusersProgress ? "等待 Diffusers" : "等待 ComfyUI";
   if (phase === "queued") label = "排隊中";
   else if (phase === "downloading") label = isDiffusersProgress ? "下載 Diffusers model" : "下載 Hugging Face 模型";
@@ -2329,7 +2361,7 @@ function updateComfyuiRootPanelVisibility(modeOverride = null) {
   const hint = $("comfyui-root-model-mode-hint");
   const modelsTab = document.querySelector('[data-comfyui-view="models"]');
   const settingsTab = document.querySelector('[data-comfyui-view="settings"]');
-  const mode = String(modeOverride || comfyuiConnectionMode || "remote").trim().toLowerCase();
+  const mode = comfyuiEffectiveConnectionMode(modeOverride);
   const localReady = mode === "local";
   const showLocalModels = canManageComfyuiLocalModels(mode);
   const canManageSettings = currentUser === "root";
@@ -3136,13 +3168,16 @@ async function loadComfyuiAlbums({ force = false } = {}) {
 }
 
 function comfyuiHistoryItemId(item) {
-  const id = Number(item?.id ?? item?.history_id ?? item?.historyId);
-  return Number.isFinite(id) && id > 0 ? id : 0;
+  const raw = item?.id ?? item?.history_id ?? item?.historyId;
+  const text = String(raw || "").trim();
+  if (text.startsWith("workflow-")) return text;
+  const id = Number(raw);
+  return Number.isFinite(id) && id > 0 ? String(id) : "";
 }
 
 function comfyuiHistoryItemById(historyId) {
-  const targetId = Number(historyId);
-  if (!Number.isFinite(targetId) || targetId <= 0) return null;
+  const targetId = String(historyId || "").trim();
+  if (!targetId) return null;
   return comfyuiHistoryItems.find((item) => comfyuiHistoryItemId(item) === targetId) || null;
 }
 
@@ -3172,14 +3207,17 @@ function renderComfyuiHistory() {
     const prompt = sanitize(String(payload?.prompt || "").slice(0, 140) || "（無提示詞）");
     const createdAt = sanitize(String(item?.created_at || "").replace("T", " ").slice(0, 16));
     const disabled = historyId ? "" : " disabled";
-    const idLabel = historyId ? `ID #${historyId}` : "ID 未取得";
+    const idLabel = item?.history_source === "workflow"
+      ? `Workflow run #${item.workflow_run_id || "-"}`
+      : (historyId ? `ID #${historyId}` : "ID 未取得");
+    const sourceLabel = item?.history_source === "workflow" ? ` · ${item.preset_title || "Workflow"}` : "";
     return `
       <div class="comfyui-history-item">
         <div class="comfyui-history-head">
           <strong>${sanitize(mode)}</strong>
           <span>${createdAt}</span>
         </div>
-        <div class="drive-card-sub">${sanitize(`${idLabel}${model}${controlLabel}`)}</div>
+        <div class="drive-card-sub">${sanitize(`${idLabel}${sourceLabel}${model}${controlLabel}`)}</div>
         <div class="comfyui-history-prompt">${prompt}</div>
         <div class="drive-card-sub">
           ${sanitize(`步數 ${payload.steps || "-"} · CFG ${payload.cfg || "-"} · Seed ${payload.seed ?? "random"} · 張數 ${payload.batch_size || 1}`)}
@@ -3193,7 +3231,7 @@ function renderComfyuiHistory() {
   }).join("");
   list.querySelectorAll("[data-comfyui-history-apply]").forEach((button) => {
     button.addEventListener("click", () => {
-      const historyId = Number(button.getAttribute("data-comfyui-history-apply") || 0);
+      const historyId = button.getAttribute("data-comfyui-history-apply") || "";
       applyComfyuiHistoryToForm(historyId).catch((err) => {
         setComfyuiHistoryActionMessage(err.message || "ComfyUI 歷史套回表單失敗", false);
       });
@@ -3201,7 +3239,7 @@ function renderComfyuiHistory() {
   });
   list.querySelectorAll("[data-comfyui-history-rerun]").forEach((button) => {
     button.addEventListener("click", () => {
-      const historyId = Number(button.getAttribute("data-comfyui-history-rerun") || 0);
+      const historyId = button.getAttribute("data-comfyui-history-rerun") || "";
       rerunComfyuiHistory(historyId).catch((err) => {
         setComfyuiHistoryActionMessage(err.message || "ComfyUI 歷史重跑失敗", false);
       });
@@ -3303,11 +3341,12 @@ async function applyComfyuiHistoryToForm(historyId) {
 }
 
 async function rerunComfyuiHistory(historyId) {
-  const targetId = Number(historyId);
-  if (!Number.isFinite(targetId) || targetId <= 0) {
+  const targetId = String(historyId || "").trim();
+  if (!targetId) {
     setComfyuiHistoryActionMessage("這筆 ComfyUI 歷史缺少可重跑 ID，請重新整理歷史。", false);
     return;
   }
+  const historyItem = comfyuiHistoryItemById(targetId);
   setComfyuiView("generate");
   await fetchCsrfToken({ force: true });
   setComfyuiBusy(true);
@@ -3316,7 +3355,10 @@ async function rerunComfyuiHistory(historyId) {
   const controller = new AbortController();
   comfyuiGenerateAbortController = controller;
   try {
-    const res = await apiFetch(API + `/comfyui/history/${encodeURIComponent(targetId)}/rerun`, {
+    const workflowPresetId = historyItem?.history_source === "workflow" ? Number(historyItem?.preset_id || 0) : 0;
+    const res = await apiFetch(workflowPresetId > 0
+      ? API + `/comfyui/workflows/${encodeURIComponent(workflowPresetId)}/run`
+      : API + `/comfyui/history/${encodeURIComponent(targetId)}/rerun`, {
       method: "POST",
       credentials: "same-origin",
       signal: controller.signal,
@@ -3346,7 +3388,9 @@ async function rerunComfyuiHistory(historyId) {
     stopComfyuiProgress({ complete: true });
     updateComfyuiResultButtons(!!images.length);
     loadComfyuiHistory().catch((err) => setComfyuiHistoryActionMessage(err?.message || "ComfyUI 歷史重新整理失敗", false));
-    setComfyuiMessage(`已重跑第 ${targetId} 筆 ComfyUI 歷史。`, true);
+    setComfyuiMessage(historyItem?.history_source === "workflow"
+      ? `已重跑 workflow run #${historyItem.workflow_run_id || targetId}。`
+      : `已重跑第 ${targetId} 筆 ComfyUI 歷史。`, true);
   } catch (err) {
     stopComfyuiProgress({ error: err.message || "ComfyUI 歷史重跑失敗" });
     setComfyuiMessage(err.message || "ComfyUI 歷史重跑失敗", false);
@@ -3621,9 +3665,9 @@ async function loadComfyuiModels(options = {}) {
       headers: { "X-CSRF-Token": getCsrfToken() || "" }
     });
     const json = await res.json().catch(() => ({}));
-    if (json.connection_mode) comfyuiConnectionMode = json.connection_mode;
+    syncComfyuiPrimaryConnectionModeFromResponse(json);
     if (!res.ok || !json.ok) throw new Error(json.msg || `ComfyUI 連線失敗（HTTP ${res.status}）`);
-    comfyuiConnectionMode = json.connection_mode || comfyuiConnectionMode || "remote";
+    syncComfyuiPrimaryConnectionModeFromResponse(json);
     fillComfyuiSelect("comfyui-model-select", json.models || [], "");
     comfyuiLoraDetails = json.lora_details && typeof json.lora_details === "object" ? json.lora_details : {};
     fillComfyuiLoraSelect(json.loras || []);
@@ -3669,9 +3713,10 @@ async function loadComfyuiModels(options = {}) {
     comfyuiLoraDetails = {};
     setComfyuiTabAvailability(false, err.message || "ComfyUI 伺服器未連線");
     if (status) status.textContent = "ComfyUI 未連線";
-    const startHint = comfyuiConnectionMode === "local"
+    const effectiveMode = comfyuiEffectiveConnectionMode();
+    const startHint = effectiveMode === "local"
       ? "。若使用本地模式，請先按「啟動 ComfyUI」。"
-      : (comfyuiConnectionMode === "diffusers" ? "。若使用 Diffusers 模式，請確認 root 已設定 Hugging Face repo 且後端已安裝 diffusers / torch。" : "");
+      : (effectiveMode === "diffusers" ? "。若使用 Diffusers 模式，請確認 root 已設定 Hugging Face repo 且後端已安裝 diffusers / torch。" : "");
     setComfyuiMessage((err.message || "ComfyUI 模型讀取失敗") + startHint, false);
     return false;
   } finally {
@@ -3693,19 +3738,19 @@ async function refreshComfyuiStatus({ switchAway = true } = {}) {
       headers: { "X-CSRF-Token": getCsrfToken() || "" }
     });
     const json = await res.json().catch(() => ({}));
-    if (json.connection_mode) comfyuiConnectionMode = json.connection_mode;
+    syncComfyuiPrimaryConnectionModeFromResponse(json);
     if (!res.ok || !json.ok) throw new Error(json.msg || `ComfyUI 狀態檢測失敗（HTTP ${res.status}）`);
-    comfyuiConnectionMode = json.connection_mode || comfyuiConnectionMode || "remote";
+    syncComfyuiPrimaryConnectionModeFromResponse(json);
     const available = !!json.available;
     const starting = !!json.starting;
-    comfyuiLocalRuntimeActive = comfyuiConnectionMode === "local" && (available || starting || !!json.local_runtime);
+    comfyuiLocalRuntimeActive = comfyuiEffectiveConnectionMode() === "local" && (available || starting || !!json.local_runtime);
     applyComfyuiRuntimeLimits(json);
     const detail = available
       ? `已偵測 ${json.comfyui_url || "ComfyUI"}${comfyuiBackendLabel(json)}${comfyuiPaidApiStatusText(json)}${comfyuiStorageWarningText(json)}`
       : (json.msg || `找不到 ${json.comfyui_url || "ComfyUI"} 伺服器`);
     setComfyuiTabAvailability(available, detail);
     if (available) stopComfyuiLocalStartPolling();
-    else if (starting && comfyuiConnectionMode === "local") scheduleComfyuiLocalStartPolling();
+    else if (starting && comfyuiEffectiveConnectionMode() === "local") scheduleComfyuiLocalStartPolling();
     else stopComfyuiLocalStartPolling();
     if (status) status.textContent = detail;
     if (!available) {
@@ -4128,9 +4173,10 @@ async function generateComfyuiImage() {
     setComfyuiMessage("正在重新檢查 ComfyUI 連線...", true);
     const available = await refreshComfyuiStatus({ switchAway: false });
     if (!available) {
-      const hint = comfyuiConnectionMode === "local"
+      const effectiveMode = comfyuiEffectiveConnectionMode();
+      const hint = effectiveMode === "local"
         ? "請先按「啟動 ComfyUI」，或確認已有其他使用者啟動服務。"
-        : (comfyuiConnectionMode === "diffusers"
+        : (effectiveMode === "diffusers"
           ? "Diffusers 後端尚未就緒，請確認 Hugging Face repo、token 與 Python 套件。"
           : "ComfyUI 伺服器未連線，無法產圖。");
       setComfyuiMessage(hint, false);

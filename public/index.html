@@ -2192,7 +2192,8 @@
     <div class="admin-tools" style="margin-top:.95rem;text-align:left;">
       <div class="mini-title">AI 產圖</div>
       <div class="comfyui-subnav" role="tablist" aria-label="AI 產圖功能分頁">
-        <button class="btn comfyui-subtab active" type="button" role="tab" aria-selected="true" data-comfyui-view="generate">生成</button>
+        <button class="btn comfyui-subtab active" type="button" role="tab" aria-selected="true" data-comfyui-view="generate">ComfyUI / GGUF</button>
+        <button class="btn comfyui-subtab" type="button" role="tab" aria-selected="false" data-comfyui-view="hf">HF / Diffusers</button>
         <button class="btn comfyui-subtab" type="button" role="tab" aria-selected="false" data-comfyui-view="history">歷史重跑</button>
         <button class="btn comfyui-subtab" type="button" role="tab" aria-selected="false" data-comfyui-view="workflow">Workflow</button>
         <button class="btn comfyui-subtab" type="button" role="tab" aria-selected="false" data-comfyui-view="models" hidden>模型管理</button>
@@ -2204,7 +2205,7 @@
           <div class="drive-card-heading">
             <div>
               <div class="drive-card-title comfyui-title-row">
-                <span>ComfyUI</span>
+                <span id="comfyui-backend-title">ComfyUI / GGUF</span>
                 <span class="comfyui-mode-badge" id="comfyui-mode-badge">模式讀取中</span>
               </div>
               <div class="drive-card-sub" id="comfyui-mode-note">目前模式：讀取中</div>
@@ -7350,7 +7351,7 @@
 <script src="/js/35-drive.js?v=20260604-storage-bulk-clarity" defer></script>
   <script src="/js/35-drive-preview-share.js?v=20260507-drive-preview-share-split" defer></script>
 <!-- cache marker retained for template-import regression: /js/36-comfyui.js?v=20260509-comfyui-template-embeddings -->
-<script src="/js/36-comfyui.js?v=20260604-hf-settings-fronttab" defer></script>
+<script src="/js/36-comfyui.js?v=20260604-hf-frontend-tab" defer></script>
 <script src="/js/36-comfyui-workflows.js?v=20260604-remote-workflow-shared-default" defer></script>
 <script src="/js/37-bug-report.js?v=20260502-device-feature" defer></script>
 <script src="/js/41-game-modules.js?v=20260601-rubiks-visible" defer></script>
@@ -7360,7 +7361,7 @@
 <script src="/js/42-experiments.js?v=20260528-experiments-bounded-motion" defer></script>
   <script src="/js/39-videos.js?v=20260603-video-audio-native" defer></script>
 <script src="/js/40-auth-users.js?v=20260531-profile-settings-split" defer></script>
-<script src="/js/50-admin.js?v=20260604-hf-settings-fronttab" defer></script>
+<script src="/js/50-admin.js?v=20260604-hf-frontend-tab" defer></script>
 <script src="/js/51-admin-server-mode-launch-check.js?v=20260526-server-mode-prelaunch" defer></script>
 <script src="/js/52-admin-trading.js?v=20260601-admin-trading-module" defer></script>
 <script src="/js/53-admin-storage-economy.js?v=20260602-transmission-test-status" defer></script>

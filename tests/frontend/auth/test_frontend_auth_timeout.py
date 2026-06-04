@@ -54,7 +54,7 @@ def test_comfyui_long_running_work_suspends_idle_logout():
     comfyui = ((ROOT / "public" / "js" / "36-comfyui.js").read_text(encoding="utf-8") + "\n" + (ROOT / "public" / "js" / "36-comfyui-workflows.js").read_text(encoding="utf-8"))
 
     assert 'function setComfyuiIdleSuspend(reason, active, label)' in comfyui
-    assert 'setComfyuiIdleSuspend("comfyui_generate", !!busy, `${comfyuiConnectionMode === "diffusers" ? "Diffusers" : "ComfyUI"} 產圖中`);' in comfyui
+    assert 'setComfyuiIdleSuspend("comfyui_generate", !!busy, `${isComfyuiDiffusersMode() ? "Diffusers" : "ComfyUI"} 產圖中`);' in comfyui
     assert 'setComfyuiIdleSuspend("comfyui_start_local", true, "ComfyUI 啟動中");' in comfyui
     assert 'setComfyuiIdleSuspend("comfyui_start_local", false, "ComfyUI 啟動中");' in comfyui
     assert 'setComfyuiIdleSuspend("comfyui_model_download", true, "ComfyUI 模型下載中");' in comfyui
@@ -69,7 +69,7 @@ def test_drive_transfers_suspend_idle_logout_and_guard_browser_upload_reload():
     assert "syncDriveTransferIdleSuspend();" in drive
     assert "function hasActiveDriveBrowserUpload()" in drive
     assert 'window.addEventListener("beforeunload", (event) => {' in drive
-    assert '["upload", "folder_upload"].includes(item.kind)' in drive
+    assert '["upload", "folder_upload", "resumable_upload"].includes(item.kind)' in drive
 
 
 def test_internal_test_login_token_is_hidden_outside_internal_test_mode():
