@@ -476,3 +476,14 @@ def test_sdpose_multi_person_exposes_required_group_photo_input():
     assert fields["node:694:draw_hands"]["input_type"] == "checkbox"
     assert fields["node:694:score_threshold"]["label"] == "姿態分數門檻"
     assert fields["node:692:batch_size"]["label"] == "姿態批次大小"
+
+
+def test_compare_workflows_use_checkpoint_builtin_vae():
+    for workflow_id in ("origin_compare_2checkpoints", "origin_multi_compare_checkpoints_test"):
+        workflow = _workflow(workflow_id)
+        manifest = _manifest(workflow_id)
+        serialized = json.dumps({"workflow": workflow, "manifest": manifest}, ensure_ascii=False)
+        assert "vae-ft-mse-840000-ema-pruned.safetensors" not in serialized
+        assert "11" not in workflow
+        assert not any(item.get("kind") == "vae" for item in manifest.get("required_models", []))
+        assert not (manifest.get("default_params", {}) or {}).get("vae")

@@ -39,4 +39,4 @@ def test_comfyui_stop_button_stays_visible_while_local_runtime_is_starting():
 
 def test_comfyui_static_asset_cache_busted_for_idle_retry_fix():
     index_html = _read("public/index.html")
-    assert "/js/36-comfyui.js?v=20260604-hf-frontend-tab" in index_html
+    assert "/js/36-comfyui.js?v=20260604-hf-gguf-workflow-split" in index_html

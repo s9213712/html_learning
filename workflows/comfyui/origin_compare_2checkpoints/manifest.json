@@ -4,7 +4,7 @@
     "allowlist_status": "allowlisted",
     "class_count": 7,
     "denied_classes": [],
-    "node_count": 12,
+    "node_count": 11,
     "source_format": "ui_graph",
     "source_path": "utility/compare/compare_2checkpoints.json",
     "structural_status": "pass",
@@ -29,7 +29,7 @@
     "seed": 591643929566303,
     "steps": 30,
     "upscale_model": "",
-    "vae": "vae-ft-mse-840000-ema-pruned.safetensors",
+    "vae": "",
     "width": 1920
   },
   "description": "Two-checkpoint comparison workflow converted from origin.",
@@ -43,10 +43,6 @@
   "required_custom_nodes": [],
   "required_loras": [],
   "required_models": [
-    {
-      "kind": "vae",
-      "name": "vae-ft-mse-840000-ema-pruned.safetensors"
-    },
     {
       "kind": "checkpoint",
       "name": "SDXL\\illustrious(IL)\\janxd系列\\JANKUTrainedNoobaiRouwei_v60.safetensors"
@@ -124,21 +120,6 @@
       {
         "collapsed_default": true,
         "fields": [
-          {
-            "category": "MODEL",
-            "class_type": "VAELoader",
-            "current_value": "vae-ft-mse-840000-ema-pruned.safetensors",
-            "id": "node:11:vae_name",
-            "input_name": "vae_name",
-            "input_type": "select",
-            "label": "VAE（共用VAE(option)）",
-            "lock_reason": "template_default_model",
-            "locked": true,
-            "node_id": "11",
-            "node_title": "共用VAE(option)",
-            "read_only": true,
-            "required": false
-          },
           {
             "category": "MODEL",
             "class_type": "CheckpointLoaderSimple",

@@ -27,7 +27,7 @@ def test_profile_friends_panel_is_wired_as_user_module():
     assert 'id="profile-avatar-crop-zoom" min="0.5" max="6"' in index_html
     assert 'id="profile-edit-avatar-size" min="100" max="220" step="5" value="140"' in index_html
     assert 'data-profile-avatar-size="220">最大</button>' in index_html
-    assert '/styles.css?v=20260603-drive-bulk-actions' in index_html
+    assert '/styles.css?v=20260604-comfyui-history-thumbs' in index_html
     assert 'id="profile-edit-display-timezone"' in index_html
     assert 'id="profile-quick-customize-card"' in index_html
     assert 'id="profile-appearance-save-btn"' in index_html

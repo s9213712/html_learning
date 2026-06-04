@@ -1004,6 +1004,18 @@ function comfyuiTemplateIsHiddenCompareSharedField(detail, field = {}) {
   return !!source && String(source.id || "") !== String(field?.id || "");
 }
 
+function comfyuiTemplateSharedPromptSourceField(detail, field = {}) {
+  if (comfyuiTemplatePromptSharingMode(detail) !== "shared" || !comfyuiTemplateIsPromptTextField(field)) return null;
+  const role = comfyuiTemplatePromptRole(field);
+  const fields = comfyuiTemplatePromptFieldsByRole(detail)[role] || [];
+  return fields[0] || null;
+}
+
+function comfyuiTemplateIsHiddenSharedPromptField(detail, field = {}) {
+  const source = comfyuiTemplateSharedPromptSourceField(detail, field);
+  return !!source && String(source.id || "") !== String(field?.id || "");
+}
+
 function comfyuiTemplateIsMultiCompareCheckpointField(detail, field = {}) {
   return comfyuiTemplateIsMultiCompareCheckpoints(detail)
     && field?.class_type === "CheckpointLoaderSimple"
@@ -1023,7 +1035,8 @@ function comfyuiTemplateIsHiddenUpscaleBreakpointField(detail, field = {}) {
 }
 
 function comfyuiTemplateIsHiddenField(detail, field = {}) {
-  return comfyuiTemplateIsHiddenCompareSharedField(detail, field)
+  return comfyuiTemplateIsHiddenSharedPromptField(detail, field)
+    || comfyuiTemplateIsHiddenCompareSharedField(detail, field)
     || comfyuiTemplateIsMultiCompareCheckpointField(detail, field)
     || comfyuiTemplateIsHiddenUpscaleBreakpointField(detail, field);
 }
@@ -1594,9 +1607,11 @@ function collectComfyuiTemplateUserInputs(detail) {
       if (comfyuiTemplateIsHiddenUpscaleBreakpointField(detail, field)) return;
       const binding = comfyuiTemplateFieldBinding(field, detail, ctx);
       if (COMFYUI_TEMPLATE_MEDIA_BINDING_KINDS.has(binding.kind) || binding.kind === "readonly") return;
-      const rawValue = comfyuiTemplateIsHiddenCompareSharedField(detail, field)
-        ? comfyuiTemplateCompareSharedRuntimeValue(detail, field)
-        : comfyuiTemplateRuntimeValue(binding, field);
+      const rawValue = comfyuiTemplateIsHiddenSharedPromptField(detail, field)
+        ? comfyuiTemplateSharedPromptValue(comfyuiTemplatePromptRole(field), detail)
+        : (comfyuiTemplateIsHiddenCompareSharedField(detail, field)
+          ? comfyuiTemplateCompareSharedRuntimeValue(detail, field)
+          : comfyuiTemplateRuntimeValue(binding, field));
       if (!userInputs[field.node_id]) userInputs[field.node_id] = {};
       userInputs[field.node_id][field.input_name] = normalizeComfyuiTemplateRuntimeValue(field, rawValue);
     });
@@ -2630,7 +2645,7 @@ function applyComfyuiWorkflowPresetDefaults(defaults = {}) {
   [
     ["comfyui-generation-mode", payload.generation_mode || "txt2img"],
     ["comfyui-model-select", payload.model || ""],
-    ["comfyui-vae-select", payload.vae || COMFYUI_VAE_BUILTIN],
+    ["comfyui-vae-select", COMFYUI_VAE_BUILTIN],
     ["comfyui-prompt", payload.prompt || ""],
     ["comfyui-negative-prompt", payload.negative_prompt || ""],
     ["comfyui-width", payload.width || comfyuiDefaultWidth],

@@ -744,13 +744,8 @@ function updateComfyuiGgufProfileSelection({ syncRepo = true } = {}) {
 function updateComfyuiDiffusersGgufOptions() {
   const panel = $("comfyui-diffusers-gguf-options");
   const input = $("comfyui-diffusers-gguf-base-repo");
-  const selected = comfyuiSelectedDiffusersVariantOption();
   const profile = comfyuiSelectedGgufProfile();
-  const isGguf = selected?.kind === "gguf";
-  if (panel) panel.style.display = (isComfyuiDiffusersMode() || isGguf || !!profile) ? "" : "none";
-  if (isGguf && input && !input.value) {
-    input.value = comfyuiDiffusersInspection?.data?.suggested_base_repo || "";
-  }
+  if (panel) panel.style.display = "none";
   if (profile && input && !input.value) {
     input.value = profile.base_repo || "";
   }
@@ -779,13 +774,14 @@ function renderComfyuiDiffusersInspection() {
     return;
   }
   const data = inspection.data || {};
-  const options = Array.isArray(data.variant_options) ? data.variant_options : [];
-  const hasGguf = options.some((option) => option?.kind === "gguf");
+  const allOptions = Array.isArray(data.variant_options) ? data.variant_options : [];
+  const options = allOptions.filter((option) => option?.kind !== "gguf");
+  const hasGguf = allOptions.some((option) => option?.kind === "gguf");
   const warnings = Array.isArray(data.warnings) ? data.warnings.filter(Boolean) : [];
   const modeText = data.supported_for_mode ? `支援 ${data.requested_mode || comfyuiGenerationMode()}` : `不支援 ${data.requested_mode || comfyuiGenerationMode()}`;
   if (options.length > 1) {
     variantSelect.disabled = false;
-    variantSelect.innerHTML = ['<option value="">請選擇精度版本（避免重複下載）</option>']
+    variantSelect.innerHTML = ['<option value="">請選擇 Diffusers 精度版本（避免重複下載）</option>']
       .concat(options.map((option) => `<option value="${sanitize(option.value || option.variant || "")}">${sanitize(comfyuiDiffusersVariantLabel(option))}</option>`))
       .join("");
   } else if (options.length === 1) {
@@ -796,8 +792,8 @@ function renderComfyuiDiffusersInspection() {
   updateComfyuiDiffusersGgufOptions();
   if (status) {
     const pipeline = data.pipeline_tag ? ` · pipeline=${data.pipeline_tag}` : "";
-    const variantNote = options.length > 1 ? " · 請選擇精度/GGUF 檔案" : "";
-    const ggufNote = hasGguf ? " · GGUF 會先下載所選檔案並自動判斷 Diffusers / ComfyUI-GGUF backend" : "";
+    const variantNote = options.length > 1 ? " · 請選擇 Diffusers 精度版本" : "";
+    const ggufNote = hasGguf ? " · 偵測到 GGUF 檔案；GGUF 請改到 Workflow 選官方 GGUF workflow，不在 HF 分頁直接執行。" : "";
     status.textContent = `${data.repo_id || inspection.repo || ""}：${modeText}${pipeline}${variantNote}${ggufNote}${warnings.length ? `。${warnings.join(" ")}` : ""}`;
   }
 }
@@ -3197,6 +3193,54 @@ function comfyuiHistoryItemById(historyId) {
   return comfyuiHistoryItems.find((item) => comfyuiHistoryItemId(item) === targetId) || null;
 }
 
+function comfyuiHistoryFirstImage(item = {}) {
+  const result = item?.result && typeof item.result === "object" ? item.result : {};
+  const images = Array.isArray(result.images) && result.images.length ? result.images : [result.image].filter(Boolean);
+  return images.find((image) => image && (image.data_url || image.preview_url || image.image_ref?.filename)) || null;
+}
+
+function comfyuiHistoryPreviewMarkup(item = {}) {
+  const image = comfyuiHistoryFirstImage(item);
+  if (!image) {
+    return '<div class="comfyui-history-thumb is-empty">無預覽</div>';
+  }
+  const src = image.preview_url || image.data_url || "";
+  const historyId = comfyuiHistoryItemId(item);
+  const label = item?.preset_title || item?.payload?.model || "ComfyUI 歷史預覽";
+  if (src) {
+    return `<div class="comfyui-history-thumb"><img src="${sanitize(src)}" alt="${sanitize(label)}" loading="lazy" /></div>`;
+  }
+  return `<div class="comfyui-history-thumb is-loading" data-comfyui-history-preview="${sanitize(historyId)}">讀取預覽中</div>`;
+}
+
+async function hydrateComfyuiHistoryPreviews() {
+  const targets = Array.from(document.querySelectorAll("[data-comfyui-history-preview]"));
+  if (!targets.length) return;
+  await fetchCsrfToken().catch(() => {});
+  for (const target of targets) {
+    const historyId = target.getAttribute("data-comfyui-history-preview") || "";
+    const item = comfyuiHistoryItemById(historyId);
+    const image = comfyuiHistoryFirstImage(item);
+    if (!image?.image_ref?.filename) {
+      target.textContent = "無預覽";
+      target.classList.remove("is-loading");
+      target.classList.add("is-empty");
+      continue;
+    }
+    try {
+      const hydrated = await hydrateComfyuiOutputImage(image);
+      const src = hydrated.preview_url || hydrated.data_url || "";
+      if (!src) throw new Error("預覽資料為空");
+      target.classList.remove("is-loading", "is-empty");
+      target.innerHTML = `<img src="${sanitize(src)}" alt="${sanitize(item?.preset_title || item?.payload?.model || "ComfyUI 歷史預覽")}" loading="lazy" />`;
+    } catch (err) {
+      target.textContent = err?.message || "預覽讀取失敗";
+      target.classList.remove("is-loading");
+      target.classList.add("is-empty");
+    }
+  }
+}
+
 function setComfyuiHistoryActionMessage(text, ok = true) {
   const status = $("comfyui-history-status");
   if (status && text) status.textContent = text;
@@ -3229,22 +3273,26 @@ function renderComfyuiHistory() {
     const sourceLabel = item?.history_source === "workflow" ? ` · ${item.preset_title || "Workflow"}` : "";
     return `
       <div class="comfyui-history-item">
-        <div class="comfyui-history-head">
-          <strong>${sanitize(mode)}</strong>
-          <span>${createdAt}</span>
-        </div>
-        <div class="drive-card-sub">${sanitize(`${idLabel}${sourceLabel}${model}${controlLabel}`)}</div>
-        <div class="comfyui-history-prompt">${prompt}</div>
-        <div class="drive-card-sub">
-          ${sanitize(`步數 ${payload.steps || "-"} · CFG ${payload.cfg || "-"} · Seed ${payload.seed ?? "random"} · 張數 ${payload.batch_size || 1}`)}
-        </div>
-        <div class="drive-file-actions" style="justify-content:flex-start;">
-          <button class="btn btn-sm" type="button" data-comfyui-history-apply="${historyId}"${disabled}>套回表單</button>
-          <button class="btn btn-sm" type="button" data-comfyui-history-rerun="${historyId}"${disabled}>一鍵重跑</button>
+        ${comfyuiHistoryPreviewMarkup(item)}
+        <div class="comfyui-history-body">
+          <div class="comfyui-history-head">
+            <strong>${sanitize(mode)}</strong>
+            <span>${createdAt}</span>
+          </div>
+          <div class="drive-card-sub">${sanitize(`${idLabel}${sourceLabel}${model}${controlLabel}`)}</div>
+          <div class="comfyui-history-prompt">${prompt}</div>
+          <div class="drive-card-sub">
+            ${sanitize(`步數 ${payload.steps || "-"} · CFG ${payload.cfg || "-"} · Seed ${payload.seed ?? "random"} · 張數 ${payload.batch_size || 1}`)}
+          </div>
+          <div class="drive-file-actions" style="justify-content:flex-start;">
+            <button class="btn btn-sm" type="button" data-comfyui-history-apply="${historyId}"${disabled}>套回表單</button>
+            <button class="btn btn-sm" type="button" data-comfyui-history-rerun="${historyId}"${disabled}>一鍵重跑</button>
+          </div>
         </div>
       </div>
     `;
   }).join("");
+  hydrateComfyuiHistoryPreviews().catch(() => {});
   list.querySelectorAll("[data-comfyui-history-apply]").forEach((button) => {
     button.addEventListener("click", () => {
       const historyId = button.getAttribute("data-comfyui-history-apply") || "";
@@ -3956,23 +4004,17 @@ function comfyuiPayload() {
   const mode = comfyuiGenerationMode();
   const diffusersRepo = normalizeComfyuiHuggingFaceRepoInput($("comfyui-diffusers-model-repo")?.value || "");
   const diffusersVariant = $("comfyui-diffusers-model-variant")?.value || "";
-  const ggufProfile = comfyuiSelectedGgufProfile();
-  const ggufVariant = comfyuiSelectedGgufVariant();
-  const profileRepo = ggufProfile?.repo_id || "";
-  const profileGgufFile = ggufVariant?.gguf_file || "";
-  const diffusersGgufFile = profileGgufFile || (diffusersVariant.startsWith("gguf::") ? diffusersVariant.slice("gguf::".length) : "");
-  const diffusersGgufBaseRepo = normalizeComfyuiHuggingFaceRepoInput($("comfyui-diffusers-gguf-base-repo")?.value || "");
   const diffusersMode = isComfyuiDiffusersMode();
-  const effectiveDiffusersRepo = diffusersMode && profileRepo ? profileRepo : diffusersRepo;
+  const effectiveDiffusersRepo = diffusersRepo;
   const payload = {
     generation_mode: mode,
     model: diffusersMode && effectiveDiffusersRepo ? effectiveDiffusersRepo : ($("comfyui-model-select")?.value || ""),
     diffusers_model_repo: diffusersMode ? effectiveDiffusersRepo : "",
-    diffusers_model_variant: diffusersMode && !diffusersGgufFile && !ggufProfile ? diffusersVariant : "",
-    diffusers_gguf_file: diffusersMode ? diffusersGgufFile : "",
-    diffusers_gguf_base_repo: diffusersMode && diffusersGgufFile ? (ggufProfile?.base_repo || diffusersGgufBaseRepo) : "",
-    diffusers_gguf_profile: diffusersMode && ggufProfile ? (ggufProfile.id || "") : "",
-    diffusers_gguf_variant: diffusersMode && ggufVariant ? (ggufVariant.id || "") : "",
+    diffusers_model_variant: diffusersMode ? diffusersVariant : "",
+    diffusers_gguf_file: "",
+    diffusers_gguf_base_repo: "",
+    diffusers_gguf_profile: "",
+    diffusers_gguf_variant: "",
     prompt: $("comfyui-prompt")?.value || "",
     negative_prompt: $("comfyui-negative-prompt")?.value || "",
     width: comfyuiNumberValue("comfyui-width", comfyuiDefaultWidth),
@@ -4040,9 +4082,9 @@ function comfyuiValidatePayloadForUi(payload) {
       if (!inspection.supported_for_mode) {
         return `這個 Hugging Face repo 不支援「${comfyuiReadableModeLabel(mode)}」，尚未開始下載。`;
       }
-      const variants = Array.isArray(inspection.variant_options) ? inspection.variant_options : [];
-      if (variants.length > 1 && !String(payload.diffusers_model_variant || payload.diffusers_gguf_file || "").trim()) {
-        return "這個 Hugging Face repo 有多個精度/GGUF 版本，請先選擇要下載/載入的版本。";
+      const variants = Array.isArray(inspection.variant_options) ? inspection.variant_options.filter((option) => option?.kind !== "gguf") : [];
+      if (variants.length > 1 && !String(payload.diffusers_model_variant || "").trim()) {
+        return "這個 Hugging Face repo 有多個 Diffusers 精度版本，請先選擇要下載/載入的版本。";
       }
     }
   }

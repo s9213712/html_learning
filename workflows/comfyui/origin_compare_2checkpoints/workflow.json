@@ -1,13 +1,4 @@
 {
-  "11": {
-    "_meta": {
-      "title": "共用VAE(option)"
-    },
-    "class_type": "VAELoader",
-    "inputs": {
-      "vae_name": "vae-ft-mse-840000-ema-pruned.safetensors"
-    }
-  },
   "17": {
     "class_type": "KSampler",
     "inputs": {

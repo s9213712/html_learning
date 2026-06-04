@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>hackme_web — 登入系統</title>
   <!-- Security headers via HTTP (set by server/Talisman) -->
-  <link rel="stylesheet" href="/styles.css?v=20260604-comfyui-prompt-sharing-layout" />
+  <link rel="stylesheet" href="/styles.css?v=20260604-comfyui-history-thumbs" />
   <link rel="stylesheet" href="/experiments.css?v=20260517-plane-view-angle" />
   <link rel="stylesheet" href="/i18n-language-switcher.css?v=20260520-deep-audit" />
 </head>
@@ -2246,24 +2246,8 @@
             <select id="comfyui-diffusers-model-variant" disabled>
               <option value="">檢查後選擇精度版本</option>
             </select>
-            <div class="field" id="comfyui-diffusers-gguf-options" style="display:none;margin-top:.5rem;">
-              <label>官方 GGUF Profile</label>
-              <select id="comfyui-diffusers-gguf-profile">
-                <option value="">不使用官方 GGUF</option>
-              </select>
-              <select id="comfyui-diffusers-gguf-variant">
-                <option value="">先選擇官方 GGUF profile</option>
-              </select>
-              <div class="drive-card-sub" id="comfyui-diffusers-gguf-profile-hint">官方 profile 會帶入對應 workflow、文字編碼器、VAE 與已驗證精度。</div>
-              <label>GGUF Base Diffusers Repo</label>
-              <input type="text" id="comfyui-diffusers-gguf-base-repo" placeholder="stabilityai/stable-diffusion-xl-base-1.0" autocomplete="off" />
-              <div class="drive-card-sub">GGUF 需選用官方已驗證 profile；不同模型會綁定自己的 CLIP / VAE / loader / workflow。ComfyUI-GGUF 原生 UNet 會自動改走 ComfyUI workflow；遠端 ComfyUI 需先把 profile companion models 放在對應模型目錄。</div>
-              <div id="comfyui-installed-gguf-list" class="drive-file-list" style="margin-top:.5rem;">
-                <div class="drive-empty">已安裝 GGUF 清單尚未讀取。</div>
-              </div>
-            </div>
-            <div class="drive-card-sub" id="comfyui-diffusers-repo-status">貼上 repo 後會先檢查支援模式與可下載精度版本。</div>
-            <div class="drive-card-sub">Diffusers 模式只支援 Hugging Face 模型頁「Use this model」內有 Diffusers 的 repo；可輸入 namespace/model 或模型頁網址，此欄會覆蓋 root 的預設 repo。</div>
+            <div class="drive-card-sub" id="comfyui-diffusers-repo-status">貼上 repo 後會先檢查支援模式與可下載 Diffusers 精度版本。</div>
+            <div class="drive-card-sub">HF / Diffusers 只支援 Hugging Face 模型頁「Use this model」內有 Diffusers 的 repo；GGUF 請到 Workflow 選官方 GGUF workflow。</div>
           </div>
           <div class="field">
             <label>模型</label>
@@ -5493,7 +5477,7 @@
               <div class="field">
                 <label>Hugging Face 快取根目錄</label>
                 <input type="text" id="s-comfyui-huggingface-cache-root" placeholder="/mnt/d" autocomplete="off" />
-                <div class="drive-card-sub">Diffusers/HF/GGUF 下載快取會放在此目錄的 <code>hub/</code> 底下；留空則使用 Python/Hugging Face 預設。</div>
+                <div class="drive-card-sub">HF / Diffusers 下載快取會放在此目錄的 <code>hub/</code> 底下；留空則使用 Python/Hugging Face 預設。</div>
               </div>
               <div class="field">
                 <label>Diffusers Device</label>
@@ -5544,7 +5528,7 @@
               </div>
               <div class="field">
                 <label><input type="checkbox" id="s-comfyui-diffusers-disable-xet" /> 停用 Hugging Face Xet 下載後端</label>
-                <div class="drive-card-sub">建議保持開啟。大型 GGUF 檔案使用 Xet 時可能只顯示部分進度或卡在 chunk 下載；關閉此選項可讓 root 測試 Hugging Face 預設傳輸。</div>
+                <div class="drive-card-sub">建議保持開啟。若 Hugging Face 傳輸後端造成進度異常或下載卡住，關閉此選項可讓 root 測試預設 HTTP 傳輸。</div>
               </div>
               <div style="font-size:.78rem;color:var(--muted);margin:.25rem 0 .75rem;">HF / Diffusers 目前支援文字生圖、圖生圖與局部重繪；影片、語音、放大、ControlNet、GGUF 與 ComfyUI workflow 仍走 ComfyUI / GGUF 後端。</div>
             </div>
@@ -7351,8 +7335,8 @@
 <script src="/js/35-drive.js?v=20260604-storage-bulk-clarity" defer></script>
   <script src="/js/35-drive-preview-share.js?v=20260507-drive-preview-share-split" defer></script>
 <!-- cache marker retained for template-import regression: /js/36-comfyui.js?v=20260509-comfyui-template-embeddings -->
-<script src="/js/36-comfyui.js?v=20260604-hf-status-clean" defer></script>
-<script src="/js/36-comfyui-workflows.js?v=20260604-remote-workflow-shared-default" defer></script>
+<script src="/js/36-comfyui.js?v=20260604-hf-gguf-workflow-split" defer></script>
+<script src="/js/36-comfyui-workflows.js?v=20260604-shared-fields-builtin-vae" defer></script>
 <script src="/js/37-bug-report.js?v=20260502-device-feature" defer></script>
 <script src="/js/41-game-modules.js?v=20260601-rubiks-visible" defer></script>
 <script src="/js/games/game-view-registry.js?v=20260513-legacy-modules" defer></script>

@@ -196,6 +196,9 @@ def test_compare_two_checkpoints_shares_sampler_params_except_checkpoint_models(
     assert "共同種子" in workflow_js
     assert "共同取樣器" in workflow_js
     assert "comfyuiTemplateIsHiddenCompareSharedField(detail, field)" in workflow_js
+    assert "function comfyuiTemplateIsHiddenSharedPromptField" in workflow_js
+    assert "comfyuiTemplateIsHiddenSharedPromptField(detail, field)" in workflow_js
+    assert "? comfyuiTemplateSharedPromptValue(comfyuiTemplatePromptRole(field), detail)" in workflow_js
     assert "? comfyuiTemplateCompareSharedRuntimeValue(detail, field)" in workflow_js
 
 
