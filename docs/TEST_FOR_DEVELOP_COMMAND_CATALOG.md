@@ -321,7 +321,9 @@ runtime_secrets/                         # copied key/secret material
 scripts/admin/decrypt_server_files.py    # decrypt/export helper copy
 orphaned_storage/                        # pre-reset storage contents moved here
 README_SERVER_ENCRYPTED_RECOVERY.txt
+export_server_encrypted_plaintext.sh
 restore_database_catalog_from_bundle.sh
+recovery_action.lock                     # created when one recovery path starts
 runtime_root.txt
 storage_root.txt
 ```
@@ -336,16 +338,14 @@ For `server_encrypted` files, `.filekey` plus ciphertext is the cryptographic
 minimum for decryption. For a complete export with filenames and file selection,
 use the pre-reset DB/catalog metadata in the recovery bundle.
 
-Example:
+Use the bundle wrapper so the recovery action is locked as soon as the action starts:
 
 ```bash
-PYTHONPATH=/home/s92137/hackme_web python3 scripts/admin/decrypt_server_files.py \
-  --db "/home/s92137/USB/storage/.reset_orphan_recovery/reset_<timestamp>/database/database.db" \
-  --storage-root "/home/s92137/USB/storage/.reset_orphan_recovery/reset_<timestamp>/orphaned_storage" \
-  --key-file "/home/s92137/USB/storage/.reset_orphan_recovery/reset_<timestamp>/runtime_secrets/.filekey" \
-  --output-dir /tmp/hackme_server_encrypted_plaintext_export \
-  --confirm-plaintext-output
+/home/s92137/USB/storage/.reset_orphan_recovery/reset_<timestamp>/export_server_encrypted_plaintext.sh \
+  /tmp/hackme_server_encrypted_plaintext_export
 ```
+
+When plaintext export starts, `recovery_action.lock` prevents DB/catalog restore from the same bundle.
 
 Strict E2EE files cannot be decrypted with `.filekey`; they require the user's
 E2EE passphrase/key material.
@@ -361,15 +361,17 @@ stop the server and run the bundle helper:
 
 The helper:
 
+- refuses if `recovery_action.lock` already records plaintext export
 - refuses to run if a server process appears active
 - stages the bundled `database/` first, before modifying the current runtime DB
 - backs up the current runtime `database/` to `database.before-orphan-catalog-restore-<timestamp>`
 - copies/stages the bundle DB instead of moving or deleting the bundle copy
+- writes `recovery_action.lock` before moving storage or replacing DB
 - moves current post-reset storage contents into `post_reset_storage_backup_<timestamp>` inside the bundle
 - moves `orphaned_storage/` contents back into the storage root
 - restores pre-reset `database/` metadata only after storage movement and DB staging succeed
 
-Verify the app and cloud-drive catalog before deleting the backup folders.
+When catalog restore starts, `recovery_action.lock` prevents plaintext export from the same bundle. Verify the app and cloud-drive catalog before deleting the backup folders.
 
 ## Delete
 

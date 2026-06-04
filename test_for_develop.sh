@@ -3715,10 +3715,57 @@ write_reset_orphan_recovery_bundle() {
 
   printf '%s\n' "$RUNTIME_ROOT" > "$bundle_dir/runtime_root.txt"
   printf '%s\n' "$EFFECTIVE_STORAGE_ROOT" > "$bundle_dir/storage_root.txt"
+  cat > "$bundle_dir/export_server_encrypted_plaintext.sh" <<EOF
+#!/usr/bin/env bash
+set -Eeuo pipefail
+BUNDLE_DIR=\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)
+ACTION_LOCK="\$BUNDLE_DIR/recovery_action.lock"
+SOURCE_ROOT="$SOURCE_ROOT"
+PYTHON_BIN="$PYTHON_BIN"
+BUNDLE_DATABASE="$bundle_dir/database"
+BUNDLE_STORAGE="$bundle_dir/orphaned_storage"
+BUNDLE_KEY="$bundle_dir/runtime_secrets/.filekey"
+OUTPUT_DIR="\${1:-}"
+
+if [[ -e "\$ACTION_LOCK" ]]; then
+  echo "[orphan-export] refusing: recovery action already selected: \$(cat "\$ACTION_LOCK")" >&2
+  exit 1
+fi
+if [[ -z "\$OUTPUT_DIR" ]]; then
+  printf 'Plaintext output directory: '
+  if ! read -r OUTPUT_DIR; then
+    echo "[orphan-export] interrupted" >&2
+    exit 1
+  fi
+fi
+if [[ -z "\$OUTPUT_DIR" ]]; then
+  echo "[orphan-export] output directory is required" >&2
+  exit 1
+fi
+resolved_output=\$(mkdir -p "\$OUTPUT_DIR" && cd "\$OUTPUT_DIR" && pwd)
+case "\$resolved_output" in
+  "\$BUNDLE_DIR"|"\$BUNDLE_DIR"/*|"$EFFECTIVE_STORAGE_ROOT"|"$EFFECTIVE_STORAGE_ROOT"/*)
+    echo "[orphan-export] refusing: plaintext output must be outside the recovery bundle and live storage root" >&2
+    exit 1
+    ;;
+esac
+printf 'plaintext_export\nstatus=started\noutput_dir=%s\nat=%s\n' "\$resolved_output" "\$(date -Is)" > "\$ACTION_LOCK"
+chmod 600 "\$ACTION_LOCK" 2>/dev/null || true
+echo "[orphan-export] recovery action locked to plaintext export; catalog restore is now refused."
+PYTHONPATH="\$SOURCE_ROOT" "\$PYTHON_BIN" "\$SOURCE_ROOT/scripts/admin/decrypt_server_files.py" \\
+  --db "\$BUNDLE_DATABASE/database.db" \\
+  --storage-root "\$BUNDLE_STORAGE" \\
+  --key-file "\$BUNDLE_KEY" \\
+  --output-dir "\$resolved_output" \\
+  --confirm-plaintext-output
+printf 'status=completed\ncompleted_at=%s\n' "\$(date -Is)" >> "\$ACTION_LOCK"
+EOF
+  chmod 700 "$bundle_dir/export_server_encrypted_plaintext.sh" 2>/dev/null || true
   cat > "$bundle_dir/restore_database_catalog_from_bundle.sh" <<EOF
 #!/usr/bin/env bash
 set -Eeuo pipefail
 BUNDLE_DIR=\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)
+ACTION_LOCK="\$BUNDLE_DIR/recovery_action.lock"
 RUNTIME_ROOT="$RUNTIME_ROOT"
 BUNDLE_DATABASE="$bundle_dir/database"
 BUNDLE_STORAGE="$bundle_dir/orphaned_storage"
@@ -3733,6 +3780,10 @@ cleanup_restore_stage() {
 }
 trap cleanup_restore_stage EXIT
 
+if [[ -e "\$ACTION_LOCK" ]]; then
+  echo "[orphan-restore] refusing: recovery action already selected: \$(cat "\$ACTION_LOCK")" >&2
+  exit 1
+fi
 if pgrep -af 'gunicorn|server:app' >/dev/null 2>&1; then
   echo "[orphan-restore] refusing: a server process appears to be running. Stop it before restoring catalog metadata." >&2
   exit 1
@@ -3756,6 +3807,14 @@ if [[ -e "\$STAGED_DATABASE" ]]; then
 fi
 mkdir -p "\$STAGED_DATABASE"
 cp -a "\$BUNDLE_DATABASE/." "\$STAGED_DATABASE/"
+printf 'catalog_restore
+status=started
+backup_database=%s
+backup_storage=%s
+at=%s
+' "\$BACKUP_DATABASE" "\$BACKUP_STORAGE" "\$(date -Is)" > "\$ACTION_LOCK"
+chmod 600 "\$ACTION_LOCK" 2>/dev/null || true
+echo "[orphan-restore] recovery action locked to catalog restore; plaintext export is now refused."
 mkdir -p "\$BACKUP_STORAGE"
 shopt -s dotglob nullglob
 for item in "\$TARGET_STORAGE"/*; do
@@ -3773,9 +3832,11 @@ if [[ -e "\$TARGET_DATABASE" ]]; then
   echo "[orphan-restore] moved current database to \$BACKUP_DATABASE"
 fi
 mv "\$STAGED_DATABASE" "\$TARGET_DATABASE"
+printf 'status=completed\ncompleted_at=%s\n' "\$(date -Is)" >> "\$ACTION_LOCK"
 echo "[orphan-restore] restored staged pre-reset database/catalog metadata to \$TARGET_DATABASE"
 echo "[orphan-restore] restored orphaned storage contents to \$TARGET_STORAGE"
 echo "[orphan-restore] moved post-reset storage contents to \$BACKUP_STORAGE"
+echo "[orphan-restore] recovery action locked to catalog restore; plaintext export is now refused."
 echo "[orphan-restore] restart the server, then verify cloud-drive catalog before deleting \$BACKUP_DATABASE and \$BACKUP_STORAGE"
 EOF
   chmod 700 "$bundle_dir/restore_database_catalog_from_bundle.sh" 2>/dev/null || true
@@ -3784,8 +3845,8 @@ This folder was created by test_for_develop.sh --reset before runtime DB/catalog
 
 Purpose:
 - storage/ is preserved by --reset, but existing pre-reset storage contents are moved into orphaned_storage/ so the post-reset storage root starts clean.
-- This bundle keeps the pre-reset database/catalog metadata and server-side keys needed to export server_encrypted files.
-- It also includes restore_database_catalog_from_bundle.sh to copy the pre-reset database/catalog metadata back into the runtime after reset.
+- This bundle keeps the pre-reset database/catalog metadata and server-side keys needed to handle server_encrypted files.
+- Choose exactly one recovery action. When either helper starts, recovery_action.lock prevents running the other path.
 
 Important boundaries:
 - server_encrypted export needs runtime_secrets/.filekey plus the pre-reset database metadata in database/.
@@ -3793,23 +3854,58 @@ Important boundaries:
 - Strict E2EE files cannot be decrypted with .filekey. They need the user's E2EE passphrase/key material.
 - Plaintext export is sensitive. Choose an output directory outside the live storage root.
 
-Example from the repository root:
-PYTHONPATH=$SOURCE_ROOT $PYTHON_BIN scripts/admin/decrypt_server_files.py \\
-  --db "$bundle_dir/database/database.db" \\
-  --storage-root "$bundle_dir/orphaned_storage" \\
-  --key-file "$bundle_dir/runtime_secrets/.filekey" \\
-  --output-dir /tmp/hackme_server_encrypted_plaintext_export \\
-  --confirm-plaintext-output
+Option 1: decrypt server_encrypted files to a plaintext folder:
+$bundle_dir/export_server_encrypted_plaintext.sh /tmp/hackme_server_encrypted_plaintext_export
 
-A copy of decrypt_server_files.py is also stored at:
-$bundle_dir/scripts/admin/decrypt_server_files.py
-
-To import the pre-reset database/catalog metadata and orphaned storage files back after reset, stop the server and run:
+Option 2: import the pre-reset database/catalog metadata and orphaned encrypted storage files back after reset:
 $bundle_dir/restore_database_catalog_from_bundle.sh
 
-That restore helper first stages this bundle's database/ without modifying the current runtime database, moves current post-reset storage contents into a backup folder inside this bundle, moves orphaned_storage/ back, and only then swaps the staged database into place after backing up the current runtime database/.
+The plaintext export helper uses this bundle's database/, orphaned_storage/, runtime_secrets/.filekey, and scripts/admin/decrypt_server_files.py. It locks out catalog restore before decryption starts.
+
+The restore helper first stages this bundle's database/ without modifying the current runtime database, locks out plaintext export, moves current post-reset storage contents into a backup folder inside this bundle, moves orphaned_storage/ back, and only then swaps the staged database into place after backing up the current runtime database/.
 EOF
+  RESET_ORPHAN_RECOVERY_BUNDLE="$bundle_dir"
   say "[dev-tmp] reset:    orphan recovery bundle=$bundle_dir"
+}
+
+prompt_reset_recovery_action() {
+  local bundle_dir="$1"
+  local choice output_dir
+  [[ -n "$bundle_dir" && -d "$bundle_dir" ]] || return 0
+  if [[ ! -t 0 || ! -t 1 ]]; then
+    say "[dev-tmp] reset:    recovery action not selected in non-interactive mode"
+    say "[dev-tmp] reset:    choose exactly one helper later:"
+    say "[dev-tmp] reset:      1) $bundle_dir/export_server_encrypted_plaintext.sh <output-dir>"
+    say "[dev-tmp] reset:      2) $bundle_dir/restore_database_catalog_from_bundle.sh"
+    return 0
+  fi
+  say "[dev-tmp] reset recovery action (choose exactly one; the other will be locked out):"
+  say "  1) decrypt server_encrypted files to a specified plaintext folder"
+  say "  2) move encrypted files back to storage and restore DB/catalog metadata"
+  while true; do
+    printf 'Choose reset recovery action [1/2/skip]: '
+    if ! read -r choice; then
+      die "reset recovery action prompt was interrupted"
+    fi
+    case "${choice,,}" in
+      1|decrypt|export|plaintext)
+        prompt_value "Plaintext output directory" "/tmp/hackme_server_encrypted_plaintext_export" output_dir
+        "$bundle_dir/export_server_encrypted_plaintext.sh" "$output_dir"
+        return 0
+        ;;
+      2|restore|repair|db|catalog)
+        "$bundle_dir/restore_database_catalog_from_bundle.sh"
+        return 0
+        ;;
+      ""|skip|later|no)
+        say "[dev-tmp] reset:    no recovery action selected now; use exactly one bundle helper later"
+        return 0
+        ;;
+      *)
+        say "Please choose 1, 2, or skip."
+        ;;
+    esac
+  done
 }
 
 reset_runtime_state() {
@@ -3820,6 +3916,7 @@ reset_runtime_state() {
   say "[dev-tmp] reset:    creating storage/.reset_orphan_recovery bundle for server_encrypted export/import"
   mkdir -p "$RUNTIME_ROOT" "$EFFECTIVE_STORAGE_ROOT"
   write_reset_orphan_recovery_bundle
+  local reset_recovery_bundle="$RESET_ORPHAN_RECOVERY_BUNDLE"
   rm -rf \
     "$RUNTIME_ROOT/database" \
     "$RUNTIME_ROOT/chats" \
@@ -3834,6 +3931,7 @@ reset_runtime_state() {
   find "$RUNTIME_ROOT" -maxdepth 1 \( -name '*.sock' -o -name '*.lock' \) -type f -delete 2>/dev/null || true
   mkdir -p "$RUNTIME_ROOT/database" "$RUNTIME_ROOT/logs" "$RUNTIME_ROOT/chats" "$RUNTIME_ROOT/anchors" "$RUNTIME_ROOT/reports"
   say "[dev-tmp] reset:    completed"
+  prompt_reset_recovery_action "$reset_recovery_bundle"
 }
 
 runtime_storage_inside_runtime() {

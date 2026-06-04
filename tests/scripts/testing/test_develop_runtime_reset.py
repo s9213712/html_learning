@@ -22,7 +22,9 @@ def test_reset_help_documents_preserved_server_secret_material():
     assert "storage/.reset_orphan_recovery/reset_<timestamp>/" in text
     assert "pre-reset DB/catalog metadata" in text
     assert "decrypt_server_files.py" in text
+    assert "export_server_encrypted_plaintext.sh" in text
     assert "restore_database_catalog_from_bundle.sh" in text
+    assert "recovery_action.lock" in text
     assert "stages the bundled `database/` first" in text
     assert "copies/stages the bundle DB instead of moving or deleting the bundle copy" in text
     assert "moves current post-reset storage contents into `post_reset_storage_backup_<timestamp>`" in text
@@ -77,23 +79,33 @@ def test_reset_writes_orphan_recovery_bundle_with_export_material():
     assert "orphaned_storage" in body
     assert "mv \"$storage_item\" \"$bundle_dir/orphaned_storage/\"" in body
     assert ".reset_orphan_recovery" in body
+    assert "export_server_encrypted_plaintext.sh" in body
     assert "restore_database_catalog_from_bundle.sh" in body
+    assert "recovery_action.lock" in body
+    assert "recovery action already selected" in body
+    assert "recovery action locked to plaintext export" in body
+    assert "recovery action locked to catalog restore" in body
+    assert "status=started" in body
+    assert "status=completed" in body
     assert "database.before-orphan-catalog-restore" in body
     assert "STAGED_DATABASE" in body
     assert r'cp -a "\$BUNDLE_DATABASE/." "\$STAGED_DATABASE/"' in body
     assert r'mv "\$STAGED_DATABASE" "\$TARGET_DATABASE"' in body
     assert "refusing: a server process appears to be running" in body
-    assert "--db \"$bundle_dir/database/database.db\"" in body
-    assert "--storage-root \"$bundle_dir/orphaned_storage\"" in body
-    assert "--key-file \"$bundle_dir/runtime_secrets/.filekey\"" in body
+    assert r'--db "\$BUNDLE_DATABASE/database.db"' in body
+    assert r'--storage-root "\$BUNDLE_STORAGE"' in body
+    assert r'--key-file "\$BUNDLE_KEY"' in body
     assert "--confirm-plaintext-output" in body
     assert "Strict E2EE files cannot be decrypted with .filekey" in body
-    assert "To import the pre-reset database/catalog metadata and orphaned storage files back after reset" in body
-    assert "orphaned storage files back after reset" in body
+    assert "Option 1: decrypt server_encrypted files to a plaintext folder" in body
+    assert "Option 2: import the pre-reset database/catalog metadata and orphaned encrypted storage files back after reset" in body
     assert "post_reset_storage_backup" in body
     assert "restored staged pre-reset database/catalog metadata" in body
     assert "restored orphaned storage contents" in body
     assert "post-reset storage root starts clean" in body
+    assert "prompt_reset_recovery_action" in text
+    assert "choose exactly one helper later" in text
+    assert "Choose reset recovery action [1/2/skip]" in text
 
     for name in (
         ".filekey",
