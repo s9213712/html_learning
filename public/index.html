@@ -5443,38 +5443,50 @@
             <details class="drive-collapsible-panel settings-collapse" id="sec-settings-comfyui">
               <summary>
                 <div>
-                  <div class="drive-card-title">ComfyUI 連線與模型</div>
-                  <div class="drive-card-sub">可選本地啟動腳本或遠端 API，並設定預設尺寸與 batch 上限。</div>
+                  <div class="drive-card-title">AI 後端與模型來源</div>
+                  <div class="drive-card-sub">ComfyUI / GGUF 管理本地或遠端執行後端；HF 管理 Hugging Face 與 Diffusers 模型來源。</div>
                 </div>
               </summary>
               <div class="drive-collapsible-body">
             <div class="field">
-              <label>連線模式</label>
-              <select id="s-comfyui-connection-mode">
-                <option value="remote">遠端 ComfyUI API</option>
-                <option value="local">本地 ComfyUI 資料夾與啟動腳本</option>
-                <option value="diffusers">Hugging Face Diffusers（純 Python）</option>
+              <label>設定頁籤</label>
+              <div class="drive-file-actions" style="justify-content:flex-start;gap:.45rem;flex-wrap:wrap;">
+                <button class="btn btn-sm comfyui-backend-family-tab active" type="button" data-comfyui-settings-family="comfyui" aria-selected="true">ComfyUI / GGUF</button>
+                <button class="btn btn-sm comfyui-backend-family-tab" type="button" data-comfyui-settings-family="hf" aria-selected="false">HF</button>
+              </div>
+              <select id="s-comfyui-connection-mode" hidden aria-hidden="true">
+                <option value="remote">remote</option>
+                <option value="local">local</option>
+                <option value="diffusers">diffusers</option>
               </select>
-              <div class="drive-card-sub">主生圖 backend 依這裡切換。Civitai API Key 只用在 root 的模型下載區，不參與上方產圖連線。</div>
+              <div class="drive-card-sub">兩組設定彼此獨立；切換頁籤只改變正在編輯的表單，不會停用另一組。ComfyUI / GGUF 決定本地或遠端執行後端，HF 只管理 Hugging Face / Diffusers。</div>
             </div>
-            <div id="comfyui-remote-settings">
+            <div class="field" data-comfyui-settings-family-panel="comfyui">
+              <label>ComfyUI / GGUF 執行方式</label>
+              <select id="s-comfyui-comfyui-backend-mode">
+                <option value="remote">連線遠端 ComfyUI API</option>
+                <option value="local">使用本地 ComfyUI 資料夾與啟動腳本</option>
+              </select>
+              <div class="drive-card-sub">GGUF / workflow 仍由 ComfyUI 後端處理；遠端模式只呼叫 API，本地模式才會使用本站啟動腳本與本地模型下載設定。</div>
+            </div>
+            <div id="comfyui-remote-settings" data-comfyui-settings-family-panel="comfyui">
               <div class="field">
                 <label>遠端 API 位址</label>
                 <input type="url" id="s-comfyui-remote-api-url" placeholder="http://192.168.18.19:8188" />
               </div>
               <div style="font-size:.78rem;color:var(--muted);margin:.25rem 0 .75rem;">遠端模式只透過 ComfyUI API 產圖；丟棄預覽只會清掉網頁預覽，不會刪除遠端 output 原始檔，也不提供本地模型下載。</div>
             </div>
-            <div id="comfyui-diffusers-settings" style="display:none;">
+            <div id="comfyui-diffusers-settings" data-comfyui-settings-family-panel="hf" style="display:none;">
               <div class="field">
-                <label>Hugging Face Model Repo</label>
+                <label>HF Model Repo</label>
                 <input type="text" id="s-comfyui-diffusers-model-repo" placeholder="dhead/waiIllustriousSDXL_v150" autocomplete="off" />
-                <div class="drive-card-sub">填 Hugging Face repo id。Diffusers 會用 Python 直接下載/快取並推論，不經過 ComfyUI server。</div>
+                <div class="drive-card-sub">填 Hugging Face repo id。HF / Diffusers 會用 Python 直接下載、快取並推論，不經過 ComfyUI server。</div>
               </div>
               <div class="field">
                 <label>Hugging Face API Token</label>
                 <input type="password" id="s-comfyui-huggingface-api-token" placeholder="私有或 gated 模型才需要；留空代表不變更" autocomplete="off" />
                 <div class="drive-card-sub" id="comfyui-huggingface-api-token-state">尚未讀取 Hugging Face token 狀態。</div>
-                <div class="drive-card-sub">建議用 read 或 fine-grained token。也可用環境變數 <code>HF_TOKEN</code> / <code>COMFYUI_HUGGINGFACE_API_TOKEN</code> 提供。</div>
+                <div class="drive-card-sub">建議用 read 或 fine-grained token。也可用環境變數 <code>HF_TOKEN</code> 提供。</div>
                 <label style="margin-top:.35rem;"><input type="checkbox" id="s-comfyui-huggingface-api-token-clear" /> 清除已儲存的 Hugging Face API Token</label>
               </div>
               <div class="field">
@@ -5519,7 +5531,7 @@
               </div>
               <div class="field">
                 <label><input type="checkbox" id="s-comfyui-allow-in-process-diffusers" /> 我接受在 Flask 主程序內載入 Diffusers 模型的 RAM / VRAM / CPU 風險</label>
-                <div class="drive-card-sub">未勾選時，Diffusers 模式只會檢查 repo；真正推論會被阻擋，建議改用外部 ComfyUI local / remote backend。</div>
+                <div class="drive-card-sub">未勾選時，Diffusers 模式只會檢查 repo；真正推論會被阻擋，建議改用 ComfyUI / GGUF 的本地或遠端後端。</div>
               </div>
               <div class="field">
                 <label><input type="checkbox" id="s-comfyui-diffusers-low-cpu-mem-usage" /> Diffusers low_cpu_mem_usage</label>
@@ -5533,9 +5545,9 @@
                 <label><input type="checkbox" id="s-comfyui-diffusers-disable-xet" /> 停用 Hugging Face Xet 下載後端</label>
                 <div class="drive-card-sub">建議保持開啟。大型 GGUF 檔案使用 Xet 時可能只顯示部分進度或卡在 chunk 下載；關閉此選項可讓 root 測試 Hugging Face 預設傳輸。</div>
               </div>
-              <div style="font-size:.78rem;color:var(--muted);margin:.25rem 0 .75rem;">目前支援文字生圖、圖生圖與局部重繪；影片、語音、放大、ControlNet 與 ComfyUI workflow 仍走 ComfyUI 後端。</div>
+              <div style="font-size:.78rem;color:var(--muted);margin:.25rem 0 .75rem;">HF / Diffusers 目前支援文字生圖、圖生圖與局部重繪；影片、語音、放大、ControlNet、GGUF 與 ComfyUI workflow 仍走 ComfyUI / GGUF 後端。</div>
             </div>
-            <div id="comfyui-local-settings" style="display:none;">
+            <div id="comfyui-local-settings" data-comfyui-settings-family-panel="comfyui" style="display:none;">
               <div class="field">
                 <label>本地 ComfyUI 資料夾</label>
                 <input type="text" id="s-comfyui-base-dir" placeholder="/opt/comfyui-portable" />
@@ -7338,8 +7350,8 @@
 <script src="/js/35-drive.js?v=20260604-storage-bulk-clarity" defer></script>
   <script src="/js/35-drive-preview-share.js?v=20260507-drive-preview-share-split" defer></script>
 <!-- cache marker retained for template-import regression: /js/36-comfyui.js?v=20260509-comfyui-template-embeddings -->
-<script src="/js/36-comfyui.js?v=20260529-comfyui-gguf-disabled-cleanup" defer></script>
-<script src="/js/36-comfyui-workflows.js?v=20260604-prompt-sharing-layout" defer></script>
+<script src="/js/36-comfyui.js?v=20260604-comfyui-remote-timeout-logs" defer></script>
+<script src="/js/36-comfyui-workflows.js?v=20260604-remote-workflow-shared-default" defer></script>
 <script src="/js/37-bug-report.js?v=20260502-device-feature" defer></script>
 <script src="/js/41-game-modules.js?v=20260601-rubiks-visible" defer></script>
 <script src="/js/games/game-view-registry.js?v=20260513-legacy-modules" defer></script>

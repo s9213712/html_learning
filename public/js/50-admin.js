@@ -2154,8 +2154,36 @@ async function saveMemberLevelRule(level) {
 
 // Server mode / launch-check handlers are implemented in 51-admin-server-mode-launch-check.js.
 
+let currentComfyuiSettingsFamily = "comfyui";
+
+function getComfyuiSettingsFamily() {
+  const active = document.querySelector("[data-comfyui-settings-family].active");
+  const family = currentComfyuiSettingsFamily || active?.dataset?.comfyuiSettingsFamily || "comfyui";
+  return family === "hf" ? "hf" : "comfyui";
+}
+
+function setComfyuiSettingsFamily(family) {
+  currentComfyuiSettingsFamily = family === "hf" ? "hf" : "comfyui";
+  updateComfyuiConnectionModeFields();
+}
+
+function setComfyuiBackendMode(mode) {
+  const backendMode = mode === "local" ? "local" : "remote";
+  const backendModeSelect = $("s-comfyui-comfyui-backend-mode");
+  const modeSelect = $("s-comfyui-connection-mode");
+  if (backendModeSelect) backendModeSelect.value = backendMode;
+  if (modeSelect) modeSelect.value = backendMode;
+  updateComfyuiConnectionModeFields();
+}
+
 function updateComfyuiConnectionModeFields() {
-  const mode = $("s-comfyui-connection-mode")?.value || "remote";
+  const modeSelect = $("s-comfyui-connection-mode");
+  const backendModeSelect = $("s-comfyui-comfyui-backend-mode");
+  let mode = modeSelect?.value || backendModeSelect?.value || "remote";
+  if (!["remote", "local"].includes(mode)) mode = backendModeSelect?.value === "local" ? "local" : "remote";
+  if (modeSelect && modeSelect.value !== mode) modeSelect.value = mode;
+  const settingsFamily = getComfyuiSettingsFamily();
+  const backendMode = mode === "local" ? "local" : "remote";
   const localBox = $("comfyui-local-settings");
   const remoteBox = $("comfyui-remote-settings");
   const diffusersBox = $("comfyui-diffusers-settings");
@@ -2186,30 +2214,40 @@ function updateComfyuiConnectionModeFields() {
     "s-comfyui-local-cache-lru",
     "s-comfyui-local-reserve-vram-gb",
   ];
-  if (localBox) localBox.style.display = mode === "local" ? "" : "none";
-  if (remoteBox) remoteBox.style.display = mode === "remote" ? "" : "none";
-  if (diffusersBox) diffusersBox.style.display = mode === "diffusers" ? "" : "none";
-  if (civitaiBox) civitaiBox.style.display = mode === "local" ? "" : "none";
+  if (backendModeSelect && backendModeSelect.value !== backendMode) backendModeSelect.value = backendMode;
+  document.querySelectorAll("[data-comfyui-settings-family]").forEach((button) => {
+    const active = button.dataset.comfyuiSettingsFamily === settingsFamily;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", active ? "true" : "false");
+  });
+  document.querySelectorAll("[data-comfyui-settings-family-panel]").forEach((panel) => {
+    const family = panel.dataset.comfyuiSettingsFamilyPanel;
+    panel.style.display = family === settingsFamily ? "" : "none";
+  });
+  if (localBox) localBox.style.display = mode === "local" && settingsFamily === "comfyui" ? "" : "none";
+  if (remoteBox) remoteBox.style.display = mode === "remote" && settingsFamily === "comfyui" ? "" : "none";
+  if (diffusersBox) diffusersBox.style.display = settingsFamily === "hf" ? "" : "none";
+  if (civitaiBox) civitaiBox.style.display = mode === "local" && settingsFamily === "comfyui" ? "" : "none";
   if (civitaiInput) civitaiInput.disabled = mode !== "local";
-  if (hfTokenInput) hfTokenInput.disabled = mode !== "diffusers";
-  if (hfTokenClear) hfTokenClear.disabled = mode !== "diffusers";
-  if (allowInProcessDiffusers) allowInProcessDiffusers.disabled = mode !== "diffusers";
-  if (lowCpuMemUsage) lowCpuMemUsage.disabled = mode !== "diffusers";
-  if (cudaFallbackToCpu) cudaFallbackToCpu.disabled = mode !== "diffusers";
-  if (keepDownloadedModels) keepDownloadedModels.disabled = mode !== "diffusers";
-  if (disableXet) disableXet.disabled = mode !== "diffusers";
-  if (deviceMap) deviceMap.disabled = mode !== "diffusers";
+  if (hfTokenInput) hfTokenInput.disabled = settingsFamily !== "hf";
+  if (hfTokenClear) hfTokenClear.disabled = settingsFamily !== "hf";
+  if (allowInProcessDiffusers) allowInProcessDiffusers.disabled = settingsFamily !== "hf";
+  if (lowCpuMemUsage) lowCpuMemUsage.disabled = settingsFamily !== "hf";
+  if (cudaFallbackToCpu) cudaFallbackToCpu.disabled = settingsFamily !== "hf";
+  if (keepDownloadedModels) keepDownloadedModels.disabled = settingsFamily !== "hf";
+  if (disableXet) disableXet.disabled = settingsFamily !== "hf";
+  if (deviceMap) deviceMap.disabled = settingsFamily !== "hf";
   localPerformanceFields.forEach((id) => {
     const input = $(id);
     if (input) input.disabled = mode !== "local";
   });
   const status = $("comfyui-test-connection-status");
   if (status && !status.dataset.userTouched) {
-    status.textContent = mode === "local"
-      ? "本地模式會測試本地 API；若產圖時 API 未啟動，後端會嘗試執行啟動腳本。"
-      : (mode === "diffusers"
-        ? "Diffusers 模式會檢查 Hugging Face repo 與 Python 套件；只有勾選主程序資源風險確認後才允許直接推論。"
-        : "遠端模式只負責呼叫指定 API 生圖，無法透過 API 把模型下載回本站的本地 ComfyUI，所以會隱藏本地模型下載與 Civitai API Key。");
+    status.textContent = settingsFamily === "hf"
+      ? "HF 頁籤會檢查 Hugging Face repo 與 Python / Diffusers 套件；只有勾選主程序資源風險確認後才允許直接推論，切換到這裡不會停用 ComfyUI / GGUF 設定。"
+      : (mode === "local"
+        ? "本地模式會測試本地 API；若產圖時 API 未啟動，後端會嘗試執行啟動腳本。"
+        : "ComfyUI / GGUF 遠端模式只負責呼叫指定 API 生圖，無法透過 API 把模型下載回本站的本地 ComfyUI，所以會隱藏本地模型下載與 Civitai API Key。");
     status.style.color = "var(--muted)";
   }
   if (typeof updateComfyuiRootPanelVisibility === "function") updateComfyuiRootPanelVisibility(mode);
@@ -4747,7 +4785,8 @@ async function saveSettings() {
   await fetchCsrfToken({ force: true });
   const csrf = getCsrfToken();
   const captchaMode = $("s-captcha-mode")?.value || "none";
-  const comfyuiMode = $("s-comfyui-connection-mode")?.value || "remote";
+  const rawComfyuiMode = $("s-comfyui-comfyui-backend-mode")?.value || $("s-comfyui-connection-mode")?.value || "remote";
+  const comfyuiMode = rawComfyuiMode === "local" ? "local" : "remote";
   const payload = {
     maintenance_mode: !!$("s-maintenance-mode")?.checked,
     audit_chain_enabled: !!$("s-audit-chain-enabled")?.checked,
@@ -4999,7 +5038,9 @@ async function saveSettings() {
 async function testComfyuiConnection() {
   const status = $("comfyui-test-connection-status");
   const button = $("comfyui-test-connection-btn");
-  const mode = $("s-comfyui-connection-mode")?.value || "remote";
+  const settingsFamily = typeof getComfyuiSettingsFamily === "function" ? getComfyuiSettingsFamily() : "comfyui";
+  const backendMode = $("s-comfyui-connection-mode")?.value === "local" ? "local" : "remote";
+  const mode = settingsFamily === "hf" ? "diffusers" : backendMode;
   const host = ($("s-comfyui-api-host")?.value || "localhost").trim();
   const port = parseInt($("s-comfyui-api-port")?.value || "8192", 10);
   const apiUrl = ($("s-comfyui-remote-api-url")?.value || DEFAULT_COMFYUI_REMOTE_API_URL).trim();
@@ -5045,6 +5086,7 @@ async function testComfyuiConnection() {
         ? `；啟動腳本${script.exists ? "存在" : "缺失"}${script.syntax_ok === false ? "，語法檢查失敗" : (script.syntax_ok === true ? "，語法正常" : "")}`
         : "";
       const autostart = json.autostart || {};
+      const dependencyHint = mode === "diffusers" && json.dependency_install_hint ? `；${json.dependency_install_hint}` : "";
       const startupLogTail = Array.isArray((json.local_runtime || {}).startup_log_tail)
         ? json.local_runtime.startup_log_tail.filter(Boolean)
         : (Array.isArray(autostart.start?.startup_log_tail) ? autostart.start.startup_log_tail.filter(Boolean) : []);
@@ -5060,7 +5102,7 @@ async function testComfyuiConnection() {
         status.textContent = `啟動中：${json.msg || "ComfyUI 正在初始化"}（${json.comfyui_url || targetLabel}）${scriptText}${autostartText}`;
         status.style.color = "#f5b544";
       } else {
-        status.textContent = `連線失敗：${json.msg || "ComfyUI 沒有回應"}（${json.comfyui_url || targetLabel}）${scriptText}${autostartText}`;
+        status.textContent = `連線失敗：${json.msg || (mode === "diffusers" ? "HF / Diffusers 環境不可用" : "ComfyUI 沒有回應")}（${json.comfyui_url || targetLabel}）${scriptText}${autostartText}${dependencyHint}`;
         status.style.color = "#ff4f6d";
       }
     }

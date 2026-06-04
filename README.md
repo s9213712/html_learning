@@ -35,8 +35,11 @@ QoS 分類、app-level edge burst guard、抗 DoS 最後防線與 reverse-proxy 
 影音直接串流、即時轉封裝、預處理 HLS 三種客戶服務層與費率差異、X-Accel
 送檔 offload、Standard 即時轉封裝的同機併發控制，以及 Premium HLS worker sizing / profile matrix 見
 [docs/video/VIDEO_STREAMING_SERVICE_TIERS.md](docs/video/VIDEO_STREAMING_SERVICE_TIERS.md)。
-ComfyUI GGUF 只能走官方建檔 profile；新增 profile、遠端實測、已安裝 GGUF
-清單與多精度選單流程見
+ComfyUI / GGUF 與 HF / Diffusers 是兩組不同設定：ComfyUI / GGUF
+只負責本地或遠端 ComfyUI 執行後端，HF / Diffusers 只負責 Hugging Face
+模型來源與純 Python 推論設定；切到 HF 設定頁不會停用或覆寫
+ComfyUI / GGUF 的遠端/本地設定。ComfyUI GGUF 只能走官方建檔 profile；
+新增 profile、遠端實測、已安裝 GGUF 清單與多精度選單流程見
 [docs/AGENTS/skills/hackme-gguf-profile/SKILL.md](docs/AGENTS/skills/hackme-gguf-profile/SKILL.md)。
 
 ## First-Time Deployer Route

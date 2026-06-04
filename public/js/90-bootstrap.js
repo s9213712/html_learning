@@ -589,6 +589,10 @@ function bindUiEvents() {
   if (comfyuiTestConnectionBtn) comfyuiTestConnectionBtn.addEventListener("click", testComfyuiConnection);
   if ($("s-captcha-mode")) $("s-captcha-mode").addEventListener("change", updateCaptchaModeFields);
   if ($("s-comfyui-connection-mode")) $("s-comfyui-connection-mode").addEventListener("change", updateComfyuiConnectionModeFields);
+  if ($("s-comfyui-comfyui-backend-mode")) $("s-comfyui-comfyui-backend-mode").addEventListener("change", (event) => setComfyuiBackendMode(event.target.value));
+  document.querySelectorAll("[data-comfyui-settings-family]").forEach((button) => {
+    button.addEventListener("click", () => setComfyuiSettingsFamily(button.dataset.comfyuiSettingsFamily || "comfyui"));
+  });
   if ($("s-server-backpressure-mode")) $("s-server-backpressure-mode").addEventListener("change", updateBackpressureModeFields);
   if (typeof bindSettingsAssistants === "function") bindSettingsAssistants();
   if (cloudDrivePolicySave) cloudDrivePolicySave.addEventListener("click", saveCloudDriveAdminPolicy);

@@ -821,9 +821,12 @@ def register_comfyui_workflow_routes(app, ctx):
                 runtime_dependency_row["required_controlnets_json"] = "[]"
                 runtime_dependency_row["required_custom_nodes_json"] = "[]"
             dependency_status, dependency_msg = assert_workflow_dependencies_or_error(active_client, runtime_dependency_row)
-            if dependency_msg:
-                stage = "unknown_node" if dependency_status.get("missing_nodes") else "missing_model"
-                return json_resp({"ok": False, "msg": dependency_msg, "stage": stage, "dependency_status": dependency_status}), 409
+            if dependency_msg and dependency_status.get("missing_nodes"):
+                return json_resp({"ok": False, "msg": dependency_msg, "stage": "unknown_node", "dependency_status": dependency_status}), 409
+
+            # Model, LoRA, and ControlNet availability may change after user_inputs
+            # replace template defaults. Let the strict run gate validate the final
+            # patched workflow instead of blocking on stale official defaults.
 
             # 5-gate enforcement before any job is created — failed gates
             # never produce a job_id so the user gets immediate feedback
@@ -872,6 +875,13 @@ def register_comfyui_workflow_routes(app, ctx):
                         "audit_detail": exc.audit_detail,
                     }), exc.http_status
                 workflow_json = gate_result.workflow
+                final_dependency_row = dict(row)
+                final_dependency_row["workflow_json"] = json.dumps(workflow_json or {}, ensure_ascii=False, sort_keys=True)
+                final_dependency_row["required_models_json"] = "[]"
+                final_dependency_row["required_loras_json"] = "[]"
+                final_dependency_row["required_controlnets_json"] = "[]"
+                final_dependency_row["required_custom_nodes_json"] = "[]"
+                dependency_status = workflow_dependency_status(active_client, final_dependency_row)
                 audit(
                     "COMFYUI_TEMPLATE_RUN_GATE_PASS",
                     get_client_ip(),
@@ -892,6 +902,25 @@ def register_comfyui_workflow_routes(app, ctx):
                     workflow_json,
                     client=active_client,
                 )
+                final_dependency_row = dict(row)
+                final_dependency_row["workflow_json"] = json.dumps(workflow_json or {}, ensure_ascii=False, sort_keys=True)
+                final_dependency_row["required_models_json"] = "[]"
+                final_dependency_row["required_loras_json"] = "[]"
+                final_dependency_row["required_controlnets_json"] = "[]"
+                final_dependency_row["required_custom_nodes_json"] = "[]"
+                final_dependency_status, final_dependency_msg = assert_workflow_dependencies_or_error(
+                    active_client,
+                    final_dependency_row,
+                )
+                if final_dependency_msg:
+                    dependency_status = final_dependency_status
+                    stage = "unknown_node" if final_dependency_status.get("missing_nodes") else "missing_model"
+                    return json_resp({
+                        "ok": False,
+                        "msg": final_dependency_msg,
+                        "stage": stage,
+                        "dependency_status": final_dependency_status,
+                    }), 409
 
             prompt_extra_data = {}
             if comfyui_paid_api_policy:

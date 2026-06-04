@@ -263,8 +263,6 @@ def _apply_user_inputs(
                     f"node {node_id}.{input_name} 是受保護欄位 (LoadImage / LoadImageMask / LoadVideo)，"
                     f"不允許透過 user_inputs 覆蓋；必須走 image_field_assignments"
                 )
-            if (class_type, input_name) in _TEMPLATE_LOCKED_MODEL_FIELDS:
-                continue
             field_obj = next(
                 (
                     f
@@ -343,12 +341,9 @@ def run_workflow_through_gates(
                 "blockers": capability.blockers,
             },
         )
-    if capability.missing_models:
-        stage, msg = template_errors.gate2_models_msg(capability.missing_models)
-        raise RunGateFailure(
-            gate=2, stage=stage, msg=msg,
-            audit_detail={"missing_models": capability.missing_models},
-        )
+    # Missing model names can be fixed by user_inputs on editable model fields.
+    # Defer this failure until after Gate 5 applies those overrides and rewrites
+    # remote/local model aliases. Unsupported nodes still fail immediately.
 
     # ----- Gate 3: enforce allowlist --------------------------------------
     try:

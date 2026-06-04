@@ -83,6 +83,9 @@ def test_template_locked_model_requirements_keep_customer_edit_action():
     assert 'data-comfyui-template-model-edit' in workflow_js
     assert 'data-comfyui-template-model-reset' in workflow_js
     assert 'editableLockedModel: true' in workflow_js
+    assert 'comfyuiTemplateSelectCurrentValue' in workflow_js
+    assert '目前遠端未列出' in workflow_js
+    assert '若此欄原本是 refiner，也可用同一個 checkpoint 跳過 refiner 專用模型' in workflow_js
     assert 'classType === "CLIPVisionLoader"' in workflow_js
     assert "CLIP Vision 模型" in workflow_js
 

@@ -65,8 +65,8 @@ def test_diffusers_js_preflights_huggingface_repo_before_generation():
 
 def test_diffusers_cache_busts_preflight_ui_assets():
     html = _read("public/index.html")
-    assert "/js/36-comfyui.js?v=20260529-comfyui-gguf-disabled-cleanup" in html
-    assert "/js/36-comfyui-workflows.js?v=20260520-embedding-empty-hide" in html
+    assert "/js/36-comfyui.js?v=20260604-comfyui-remote-timeout-logs" in html
+    assert "/js/36-comfyui-workflows.js?v=20260604-remote-workflow-shared-default" in html
 
 
 def test_diffusers_generation_progress_surfaces_huggingface_download_bytes():
@@ -83,6 +83,9 @@ def test_diffusers_generation_progress_surfaces_huggingface_download_bytes():
     assert "Diffusers Python log" in html
     assert "showPythonLog" in js
     assert "Diffusers Python log 尚未輸出" in js
+    assert "ComfyUI 後端沒有提供 Python log" in js
+    assert "遠端/本地 ComfyUI 沒有回傳即時 logs" in js
+    assert "/queue、/system_stats" in js
     assert "comfyuiBuildJobFailureMessage" in js
     assert "progress.bytes_written" in js
     assert "progress.total_bytes" in js

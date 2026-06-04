@@ -27,6 +27,9 @@ def test_reset_help_documents_preserved_server_secret_material():
     assert "recovery_action.lock" in text
     assert "stages the bundled `database/` first" in text
     assert "copies/stages the bundle DB instead of moving or deleting the bundle copy" in text
+    assert "owner user no longer exists are reassigned to root" in text
+    assert "--privacy-mode e2ee" in text
+    assert "--prompt-e2ee-passphrase" in text
     assert "moves current post-reset storage contents into `post_reset_storage_backup_<timestamp>`" in text
     assert "moves `orphaned_storage/` contents back into the storage root" in text
     for name in (
@@ -89,6 +92,13 @@ def test_reset_writes_orphan_recovery_bundle_with_export_material():
     assert "status=completed" in body
     assert "database.before-orphan-catalog-restore" in body
     assert "STAGED_DATABASE" in body
+    assert "repair_missing_file_catalog_owners" in body
+    assert "username=char(114,111,111,116)" in body
+    assert "owner no longer exists to root user id" in body
+    assert "for table in uploaded_files storage_files storage_folders storage_share_links cloud_file_refs encrypted_file_keys album_files albums album_share_links" in body
+    assert 'root_id=\\$(sqlite3 "\\$db"' in body
+    assert '"\\$(sqlite3 "\\$db"' in body
+    assert 'UPDATE \\$table SET owner_user_id=\\$root_id' in body
     assert r'cp -a "\$BUNDLE_DATABASE/." "\$STAGED_DATABASE/"' in body
     assert r'mv "\$STAGED_DATABASE" "\$TARGET_DATABASE"' in body
     assert "refusing: a server process appears to be running" in body
@@ -97,6 +107,11 @@ def test_reset_writes_orphan_recovery_bundle_with_export_material():
     assert r'--key-file "\$BUNDLE_KEY"' in body
     assert "--confirm-plaintext-output" in body
     assert "Strict E2EE files cannot be decrypted with .filekey" in body
+    assert "E2EE ciphertext and metadata are also preserved" in body
+    assert "--privacy-mode e2ee" in body
+    assert "--prompt-e2ee-passphrase" in body
+    assert "hackme_e2ee_plaintext_export" in body
+    assert "Original file owners are preserved" in body
     assert "Option 1: decrypt server_encrypted files to a plaintext folder" in body
     assert "Option 2: import the pre-reset database/catalog metadata and orphaned encrypted storage files back after reset" in body
     assert "post_reset_storage_backup" in body

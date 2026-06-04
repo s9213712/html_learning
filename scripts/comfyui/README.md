@@ -13,6 +13,18 @@ This folder holds ComfyUI-specific live probes and helper tooling.
 - [generation_probe_dependencies.md](generation_probe_dependencies.md): remote runtime package/model dependency checklist and standard commands
 - [generation_probe_requirements.txt](generation_probe_requirements.txt): pip requirements for the isolated WSL dependency target used by the standalone probes
 
+## App Backend Split
+
+In the root app settings, `ComfyUI / GGUF` and `HF` are separate tabs. The
+ComfyUI / GGUF tab chooses whether generation uses a remote ComfyUI API or a
+local ComfyUI folder/start script. The HF tab edits Hugging Face / Diffusers
+repo, token, cache, dtype/device, and in-process risk controls. Switching to
+HF does not disable or overwrite the ComfyUI / GGUF backend choice.
+
+If the HF test connection reports missing Python packages, install the app HF
+runtime with `requirements-hf.txt` through `test_for_develop.sh`, or install the
+standalone probe dependency target with `generation_probe_requirements.txt`.
+
 Example external-machine checks:
 
 Do not put Hugging Face tokens in `generation_probe_config.example.json` or

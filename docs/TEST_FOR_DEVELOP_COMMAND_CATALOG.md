@@ -173,6 +173,35 @@ and intentionally excludes git metadata.
 | `--requirements-file PATH` | Install selected requirements file. Common choices: `requirements-minimal.txt`, `requirements-dev.txt`, `requirements-games.txt`, `requirements-comfyui.txt`, `requirements-hf.txt`, `requirements.txt`. |
 | `--foreground` | Run in foreground instead of nohup/background mode. |
 
+### AI Backend Dependencies
+
+ComfyUI / GGUF and HF / Diffusers are configured as separate operator surfaces.
+ComfyUI / GGUF selects the execution backend (`remote` API or `local` startup
+script). HF / Diffusers keeps Hugging Face repo, token, cache, dtype, device,
+and in-process runtime risk settings. Opening or saving HF fields should not
+turn off the ComfyUI / GGUF remote/local backend.
+
+Dependency selection follows that split:
+
+```text
+requirements-comfyui.txt  # external/local ComfyUI integration layer
+requirements-hf.txt       # heavy local Hugging Face / Diffusers runtime
+```
+
+If the HF test-connection button reports missing Diffusers Python packages,
+rerun the launcher and select the HF dependency bundle:
+
+```bash
+./test_for_develop.sh --requirements-file requirements-hf.txt
+```
+
+For standalone HF/GGUF probes outside the app runtime, install the probe helper
+requirements instead:
+
+```bash
+python3 -m pip install -r scripts/comfyui/generation_probe_requirements.txt
+```
+
 ### Maintenance Commands
 
 | Option | Purpose |
@@ -345,10 +374,22 @@ Use the bundle wrapper so the recovery action is locked as soon as the action st
   /tmp/hackme_server_encrypted_plaintext_export
 ```
 
-When plaintext export starts, `recovery_action.lock` prevents DB/catalog restore from the same bundle.
+When plaintext export starts, `recovery_action.lock` prevents DB/catalog restore from the same bundle. The encrypted files, DB metadata, and bundled scripts remain in the recovery bundle.
 
 Strict E2EE files cannot be decrypted with `.filekey`; they require the user's
-E2EE passphrase/key material.
+E2EE passphrase/key material. After choosing plaintext export, keep the bundle and run the included script when the user passphrase is available:
+
+```bash
+PYTHONPATH=/home/s92137/hackme_web \
+  /home/s92137/USB/venv/bin/python3 \
+  /home/s92137/USB/storage/.reset_orphan_recovery/reset_<timestamp>/scripts/admin/decrypt_server_files.py \
+  --db /home/s92137/USB/storage/.reset_orphan_recovery/reset_<timestamp>/database/database.db \
+  --storage-root /home/s92137/USB/storage/.reset_orphan_recovery/reset_<timestamp>/orphaned_storage \
+  --privacy-mode e2ee \
+  --prompt-e2ee-passphrase \
+  --output-dir /tmp/hackme_e2ee_plaintext_export \
+  --confirm-plaintext-output
+```
 
 ### Import Catalog And Files Back
 
@@ -366,12 +407,17 @@ The helper:
 - stages the bundled `database/` first, before modifying the current runtime DB
 - backs up the current runtime `database/` to `database.before-orphan-catalog-restore-<timestamp>`
 - copies/stages the bundle DB instead of moving or deleting the bundle copy
+- preserves original file owners where possible; file catalog rows whose owner user no longer exists are reassigned to root
 - writes `recovery_action.lock` before moving storage or replacing DB
 - moves current post-reset storage contents into `post_reset_storage_backup_<timestamp>` inside the bundle
 - moves `orphaned_storage/` contents back into the storage root
 - restores pre-reset `database/` metadata only after storage movement and DB staging succeed
 
-When catalog restore starts, `recovery_action.lock` prevents plaintext export from the same bundle. Verify the app and cloud-drive catalog before deleting the backup folders.
+When catalog restore starts, `recovery_action.lock` prevents plaintext export from the same bundle. This is intentional: root must not both obtain plaintext export and then restore the same encrypted catalog back into service from one reset bundle.
+
+If a catalog row references a user that no longer exists in the pre-reset database, the restore helper reassigns that file/catalog owner to root instead of dropping the file. Existing owners are preserved when they still exist.
+
+Verify the app and cloud-drive catalog before deleting the backup folders.
 
 ## Delete
 

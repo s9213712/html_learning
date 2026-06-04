@@ -2028,9 +2028,12 @@ function setComfyuiProgress({ visible = true, running = false, percent = 0, labe
   if (pythonLogEl && visible) {
     const shouldShowPythonLog = !!showPythonLog || comfyuiProgressPythonLogTail.length > 0;
     pythonLogEl.style.display = shouldShowPythonLog ? "" : "none";
+    const defaultPythonLogPlaceholder = (comfyuiProgressBackendKind === "diffusers" || comfyuiConnectionMode === "diffusers")
+      ? "Diffusers Python log 尚未輸出；下載、載入或推論訊息會顯示在這裡。"
+      : "ComfyUI 後端沒有提供 Python log；若遠端 API 逾時，請檢查遠端 ComfyUI 的 /queue、/system_stats，或重啟遠端 ComfyUI。";
     pythonLogEl.textContent = comfyuiProgressPythonLogTail.length
       ? comfyuiProgressPythonLogTail.join("\n")
-      : (pythonLogPlaceholder || "Diffusers Python log 尚未輸出；下載、載入或推論訊息會顯示在這裡。");
+      : (pythonLogPlaceholder || defaultPythonLogPlaceholder);
     pythonLogEl.scrollTop = pythonLogEl.scrollHeight;
   }
 }
@@ -2058,9 +2061,11 @@ function stopComfyuiProgress({ complete = false, error = "", label = "" } = {}) 
       percent: 100,
       label: label || "產圖失敗",
       detail: error,
-      backendKind: showDiffusersLog ? "diffusers" : "",
-      showPythonLog: showDiffusersLog,
-      pythonLogPlaceholder: "Diffusers Python log 尚未輸出；請看上方失敗原因。"
+      backendKind: showDiffusersLog ? "diffusers" : (comfyuiConnectionMode || "comfyui"),
+      showPythonLog: true,
+      pythonLogPlaceholder: showDiffusersLog
+        ? "Diffusers Python log 尚未輸出；請看上方失敗原因。"
+        : "遠端/本地 ComfyUI 沒有回傳即時 logs；若顯示連線逾時，請直接檢查遠端 ComfyUI API、queue 或重啟 ComfyUI。"
     });
   } else {
     setComfyuiProgress({ visible: false });
@@ -2161,11 +2166,11 @@ function applyComfyuiJobProgress(progress = {}, timeoutSeconds = COMFYUI_GENERAT
     label,
     detail,
     pythonLogTail: Array.isArray(progress.python_log_tail) ? progress.python_log_tail : null,
-    backendKind: isDiffusersProgress ? "diffusers" : "",
-    showPythonLog: isDiffusersProgress,
-    pythonLogPlaceholder: phase === "error"
-      ? "Diffusers Python log 尚未輸出；請看上方失敗原因。"
-      : "等待 Diffusers Python log..."
+    backendKind: isDiffusersProgress ? "diffusers" : (comfyuiConnectionMode || "comfyui"),
+    showPythonLog: isDiffusersProgress || phase === "error" || phase === "backend_unresponsive",
+    pythonLogPlaceholder: isDiffusersProgress
+      ? (phase === "error" ? "Diffusers Python log 尚未輸出；請看上方失敗原因。" : "等待 Diffusers Python log...")
+      : "遠端/本地 ComfyUI 未回傳即時 logs；若長時間無回應，請檢查遠端 /queue、/system_stats 或重啟 ComfyUI。"
   });
 }
 

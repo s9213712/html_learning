@@ -3807,6 +3807,32 @@ if [[ -e "\$STAGED_DATABASE" ]]; then
 fi
 mkdir -p "\$STAGED_DATABASE"
 cp -a "\$BUNDLE_DATABASE/." "\$STAGED_DATABASE/"
+repair_missing_file_catalog_owners() {
+  local db="\$STAGED_DATABASE/database.db"
+  [[ -f "\$db" ]] || return 0
+  if ! command -v sqlite3 >/dev/null 2>&1; then
+    echo "[orphan-restore] sqlite3 is required to repair missing file owners" >&2
+    exit 1
+  fi
+  local root_id
+  root_id=\$(sqlite3 "\$db" "SELECT id FROM users WHERE username=char(114,111,111,116) ORDER BY id LIMIT 1;" 2>/dev/null || true)
+  if [[ -z "\$root_id" ]]; then
+    echo "[orphan-restore] refusing: staged database has no root user for missing-owner fallback" >&2
+    exit 1
+  fi
+  local table
+  for table in uploaded_files storage_files storage_folders storage_share_links cloud_file_refs encrypted_file_keys album_files albums album_share_links; do
+    if [[ "\$(sqlite3 "\$db" "SELECT 1 FROM sqlite_master WHERE type=char(116,97,98,108,101) AND name='\$table' LIMIT 1;" 2>/dev/null || true)" != "1" ]]; then
+      continue
+    fi
+    if ! sqlite3 "\$db" "PRAGMA table_info(\$table);" | awk -F'|' '\$2 == "owner_user_id" { found=1 } END { exit found ? 0 : 1 }'; then
+      continue
+    fi
+    sqlite3 "\$db" "UPDATE \$table SET owner_user_id=\$root_id WHERE owner_user_id IS NOT NULL AND owner_user_id NOT IN (SELECT id FROM users);"
+  done
+  echo "[orphan-restore] reassigned file catalog rows whose owner no longer exists to root user id \$root_id"
+}
+repair_missing_file_catalog_owners
 printf 'catalog_restore
 status=started
 backup_database=%s
@@ -3845,24 +3871,34 @@ This folder was created by test_for_develop.sh --reset before runtime DB/catalog
 
 Purpose:
 - storage/ is preserved by --reset, but existing pre-reset storage contents are moved into orphaned_storage/ so the post-reset storage root starts clean.
-- This bundle keeps the pre-reset database/catalog metadata and server-side keys needed to handle server_encrypted files.
+- This bundle keeps the pre-reset database/catalog metadata, encrypted files, and server-side keys needed to handle server_encrypted files. E2EE ciphertext and metadata are also preserved so they can be unlocked later with the user passphrase.
+- If catalog restore finds file rows owned by users that no longer exist, those rows are reassigned to root.
 - Choose exactly one recovery action. When either helper starts, recovery_action.lock prevents running the other path.
 
 Important boundaries:
 - server_encrypted export needs runtime_secrets/.filekey plus the pre-reset database metadata in database/.
 - .fkey is not the server file encryption key; .filekey is used for server_encrypted files.
-- Strict E2EE files cannot be decrypted with .filekey. They need the user's E2EE passphrase/key material.
+- Strict E2EE files cannot be decrypted with .filekey. They need the user's E2EE passphrase/key material; encrypted files and metadata remain in this bundle after plaintext export.
 - Plaintext export is sensitive. Choose an output directory outside the live storage root.
 
 Option 1: decrypt server_encrypted files to a plaintext folder:
 $bundle_dir/export_server_encrypted_plaintext.sh /tmp/hackme_server_encrypted_plaintext_export
 
-Option 2: import the pre-reset database/catalog metadata and orphaned encrypted storage files back after reset:
+E2EE files are not decrypted by .filekey. After choosing plaintext export, keep this bundle. When the user passphrase is available, run the included script against the preserved ciphertext and metadata:
+PYTHONPATH="$SOURCE_ROOT" "$PYTHON_BIN" "$bundle_dir/scripts/admin/decrypt_server_files.py" \\
+  --db "$bundle_dir/database/database.db" \\
+  --storage-root "$bundle_dir/orphaned_storage" \\
+  --privacy-mode e2ee \
+  --prompt-e2ee-passphrase \
+  --output-dir /tmp/hackme_e2ee_plaintext_export \
+  --confirm-plaintext-output
+
+Option 2: import the pre-reset database/catalog metadata and orphaned encrypted storage files back after reset. Original file owners are preserved; if an owner user no longer exists, the row is reassigned to root:
 $bundle_dir/restore_database_catalog_from_bundle.sh
 
 The plaintext export helper uses this bundle's database/, orphaned_storage/, runtime_secrets/.filekey, and scripts/admin/decrypt_server_files.py. It locks out catalog restore before decryption starts.
 
-The restore helper first stages this bundle's database/ without modifying the current runtime database, locks out plaintext export, moves current post-reset storage contents into a backup folder inside this bundle, moves orphaned_storage/ back, and only then swaps the staged database into place after backing up the current runtime database/.
+The restore helper first stages this bundle's database/ without modifying the current runtime database, repairs missing file owners to root, locks out plaintext export, moves current post-reset storage contents into a backup folder inside this bundle, moves orphaned_storage/ back, and only then swaps the staged database into place after backing up the current runtime database/.
 EOF
   RESET_ORPHAN_RECOVERY_BUNDLE="$bundle_dir"
   say "[dev-tmp] reset:    orphan recovery bundle=$bundle_dir"
@@ -5244,13 +5280,11 @@ if session_idle_timeout_override:
     feature_updates["session_idle_timeout_minutes"] = int(session_idle_timeout_override)
 feature_updates.update({
     "server_timezone": os.environ.get("HACKME_DEV_SERVER_TIMEZONE") or os.environ.get("TZ") or "Asia/Taipei",
-    # Dev default: assume root has the Windows-portable ComfyUI bundle
-    # mounted under WSL at /mnt/d/share/ComfyUI_windows_portable and uses
-    # run_in_linux.sh as the entrypoint. Switch to local mode so the dev
-    # runtime calls the locally-launched ComfyUI on 127.0.0.1 by default.
-    "comfyui_connection_mode": "local",
-    "comfyui_base_dir": "/mnt/d/share/ComfyUI_windows_portable",
-    "comfyui_local_start_script": "run_in_linux.sh",
+    # Dev default: keep ComfyUI in remote mode unless a local override is explicit.
+    "comfyui_connection_mode": os.environ.get("HACKME_DEV_COMFYUI_CONNECTION_MODE") or "remote",
+    "comfyui_remote_api_url": os.environ.get("HACKME_DEV_COMFYUI_REMOTE_API_URL") or os.environ.get("COMFYUI_API_URL") or "http://192.168.18.18:8188",
+    "comfyui_base_dir": os.environ.get("HACKME_DEV_COMFYUI_BASE_DIR") or "",
+    "comfyui_local_start_script": os.environ.get("HACKME_DEV_COMFYUI_LOCAL_START_SCRIPT") or "",
 })
 cloud_drive_setting_updates = {}
 cloud_drive_storage_root = str(os.environ.get("HACKME_DEV_CLOUD_DRIVE_STORAGE_ROOT", "") or "").strip()

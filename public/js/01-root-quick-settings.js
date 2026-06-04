@@ -139,7 +139,7 @@ const ROOT_MODULE_QUICK_SETTINGS = {
     fields: [
       { id: "s-feature-comfyui-enabled", label: "開放 AI 產圖" },
       { id: "s-module-comfyui-min-role", label: "最低可用角色" },
-      { id: "s-comfyui-connection-mode", label: "連線模式" },
+      { id: "s-comfyui-comfyui-backend-mode", label: "ComfyUI / GGUF 執行方式" },
       { id: "s-comfyui-remote-api-url", label: "遠端 API 位址", visibleWhen: { id: "s-comfyui-connection-mode", value: "remote" } },
       { id: "s-comfyui-base-dir", label: "本地 ComfyUI 資料夾", visibleWhen: { id: "s-comfyui-connection-mode", value: "local" } },
       { id: "s-comfyui-local-start-script", label: "本地啟動腳本", visibleWhen: { id: "s-comfyui-connection-mode", value: "local" } },

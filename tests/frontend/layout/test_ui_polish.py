@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -55,7 +56,13 @@ def test_status_messages_do_not_create_duplicate_button_feedback():
     js_files = list((ROOT / "public" / "js").rglob("*.js"))
     all_js = "\n".join(path.read_text(encoding="utf-8") for path in js_files)
 
-    flash_body = core_js.split("function flash(el, text, ok) {", 1)[1].split("\n}\n\nfunction uiPrefersReducedMotion", 1)[0]
+    flash_match = re.search(
+        r"function\s+flash\s*\([^)]*\)\s*\{(?P<body>.*?)\n\}\n\nfunction\s+uiPrefersReducedMotion",
+        core_js,
+        re.S,
+    )
+    assert flash_match, "flash() helper should remain next to uiPrefersReducedMotion()"
+    flash_body = flash_match.group("body")
     assert "showActionFeedback" not in flash_body
     assert "announceInlineMessage" not in flash_body
     assert 'el.setAttribute("role", ok ? "status" : "alert");' in flash_body

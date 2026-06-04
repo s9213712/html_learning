@@ -160,7 +160,7 @@ def test_seed_after_generation_mode_is_available_for_generate_and_templates():
     assert "setComfyuiSeedAfterGenerateMode(select.value)" in workflow_js
 
 
-def test_template_prompts_ask_before_global_sharing_multiple_fields():
+def test_template_prompts_default_to_shared_for_multiple_fields():
     workflow_js = _read("public/js/36-comfyui-workflows.js")
     css = _read("public/styles.css")
 
@@ -169,8 +169,12 @@ def test_template_prompts_ask_before_global_sharing_multiple_fields():
     assert "function renderComfyuiTemplatePromptSharingControl" in workflow_js
     assert 'data-comfyui-template-prompt-sharing="1"' in workflow_js
     assert "請先選擇是否全域共用提示詞" in workflow_js
+    assert '? \"shared\" : \"independent\"' in workflow_js
+    assert ': "shared";' in workflow_js
     assert "syncComfyuiTemplateSharedPromptFields" in workflow_js
     assert 'data-comfyui-template-prompt-role="${sanitize(binding.promptRole)}"' in workflow_js
+    assert '["prompt", "tags", "caption"].includes(inputName)' in workflow_js
+    assert 'inputName === "string_b"' in workflow_js
     assert 'class="comfyui-template-prompt-sharing-text"' in workflow_js
     assert ".comfyui-template-prompt-sharing" in css
     assert "display: flex;" in css

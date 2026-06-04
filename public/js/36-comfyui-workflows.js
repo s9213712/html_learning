@@ -551,7 +551,7 @@ async function loadComfyuiSelectedTemplateDetail(presetId, { silent = false, app
   comfyuiSelectedTemplateDetail = json.preset || null;
   resetComfyuiMultiCompareState(comfyuiSelectedTemplateDetail);
   resetComfyuiUpscaleBreakpointState(comfyuiSelectedTemplateDetail);
-  comfyuiTemplatePromptShareMode = comfyuiTemplateNeedsPromptSharingChoice(comfyuiSelectedTemplateDetail) ? "ask" : "independent";
+  comfyuiTemplatePromptShareMode = comfyuiTemplateNeedsPromptSharingChoice(comfyuiSelectedTemplateDetail) ? "shared" : "independent";
   if (applyDefaults) {
     applyComfyuiWorkflowPresetDefaults(comfyuiSelectedTemplateDetail?.default_params || {});
   }
@@ -1122,6 +1122,9 @@ function comfyuiTemplateSelectOptions(targetId, field = {}) {
       disabled: !!disabled,
     });
   };
+  const current = field?.current_value !== undefined && field?.current_value !== null
+    ? String(field.current_value || "")
+    : "";
   if (target && target.options && target.options.length) {
     Array.from(target.options).forEach((option) => {
       addOption(
@@ -1130,17 +1133,37 @@ function comfyuiTemplateSelectOptions(targetId, field = {}) {
         option.disabled
       );
     });
-    if (field?.current_value !== undefined && field?.current_value !== null) {
-      addOption(field.current_value, field.current_value, false);
+    if (current && !seen.has(current)) {
+      addOption(current, `${current}（目前遠端未列出）`, true);
     }
   } else if (Array.isArray(field?.constraints?.options)) {
     field.constraints.options.forEach((value) => {
       addOption(value, value, false);
     });
-  } else if (field?.current_value !== undefined && field?.current_value !== null) {
-    addOption(field.current_value, field.current_value, false);
+    if (current && !seen.has(current)) addOption(current, current, false);
+  } else if (current) {
+    addOption(current, current, false);
   }
   return options;
+}
+
+function comfyuiTemplateSelectCurrentValue(targetId, field = {}, options = []) {
+  const current = String(field?.current_value ?? "");
+  if (current && options.some((option) => option.value === current && !option.disabled)) return current;
+  const fallback = options.find((option) => option.value && !option.disabled)?.value || "";
+  if (targetId === "comfyui-model-select" && field?.class_type === "CheckpointLoaderSimple" && fallback) return fallback;
+  if (targetId === "comfyui-vae-select" && fallback) return fallback;
+  return current;
+}
+
+function comfyuiTemplateSelectFallbackHint(targetId, field = {}, current = "") {
+  const original = String(field?.current_value ?? "").trim();
+  const replacement = String(current || "").trim();
+  if (!original || !replacement || original === replacement) return "";
+  if (targetId === "comfyui-model-select" && field?.class_type === "CheckpointLoaderSimple") {
+    return `模板預設 ${original} 目前不存在；已改用遠端可用大模型 ${replacement}。若此欄原本是 refiner，也可用同一個 checkpoint 跳過 refiner 專用模型。`;
+  }
+  return "";
 }
 
 function comfyuiTemplateLoraSelectOptions(field = {}) {
@@ -1251,15 +1274,23 @@ function updateComfyuiTemplateLoraStrength(nodeId, fieldName, rawValue) {
 }
 
 function comfyuiTemplateIsPromptTextField(field = {}) {
-  return ["CLIPTextEncode", "CLIPTextEncodeFlux"].includes(String(field?.class_type || ""))
-    && String(field?.input_name || "") === "text";
+  const classType = String(field?.class_type || "");
+  const inputName = String(field?.input_name || "").trim().toLowerCase();
+  if (["CLIPTextEncode", "CLIPTextEncodeFlux"].includes(classType) && inputName === "text") return true;
+  if (String(field?.category || "").toUpperCase() !== "TEXT") return false;
+  const labelText = `${field?.label || ""} ${field?.node_title || ""}`.toLowerCase();
+  if (["prompt", "tags", "caption"].includes(inputName)) return true;
+  if (inputName === "string_b" && /prompt|tag|text|positive|negative|提示詞|正向|負面/i.test(labelText)) return true;
+  return false;
 }
 
 function comfyuiTemplatePromptRole(field = {}, fallbackIndex = 0) {
   if (!comfyuiTemplateIsPromptTextField(field)) return "";
+  const inputName = String(field?.input_name || "").trim().toLowerCase();
   const text = `${field?.label || ""} ${field?.node_title || ""} ${field?.current_value || ""}`.toLowerCase();
   if (text.includes("negative") || text.includes("負") || text.includes("low quality") || text.includes("worst quality") || text.includes("bad anatomy") || text.includes("blurry")) return "negative";
   if (text.includes("positive") || text.includes("正")) return "positive";
+  if (["prompt", "tags", "caption", "string_b"].includes(inputName)) return "positive";
   return fallbackIndex === 0 ? "positive" : "negative";
 }
 
@@ -1287,7 +1318,7 @@ function comfyuiTemplatePromptSharingMode(detail = comfyuiSelectedTemplateDetail
   if (!comfyuiTemplateNeedsPromptSharingChoice(detail)) return "independent";
   return ["ask", "shared", "independent"].includes(comfyuiTemplatePromptShareMode)
     ? comfyuiTemplatePromptShareMode
-    : "ask";
+    : "shared";
 }
 
 function comfyuiTemplatePromptFieldDirectValue(field = {}) {
@@ -2087,13 +2118,15 @@ function renderComfyuiTemplateField(field, detail, ctx) {
   }
   if (field?.input_type === "select") {
     const options = comfyuiTemplateSelectOptions(binding.targetId, field);
-    const current = String(value !== undefined && value !== null ? value : (field?.current_value || ""));
+    const current = comfyuiTemplateSelectCurrentValue(binding.targetId, field, options);
+    const fallbackHint = comfyuiTemplateSelectFallbackHint(binding.targetId, field, current);
     return `
       <div class="${cardClass}">
         <label for="tmpl-${sanitize(field.id || "")}">${sanitize(fieldLabel)}</label>
         <select id="tmpl-${sanitize(field.id || "")}" data-comfyui-template-target="${sanitize(binding.targetId)}"${promptRoleAttr}>
           ${options.map((option) => `<option value="${sanitize(option.value)}"${option.value === current ? " selected" : ""}${option.disabled ? ' disabled="disabled"' : ""}>${sanitize(option.label)}</option>`).join("")}
         </select>
+        ${fallbackHint ? `<div class="comfyui-template-direct-hint">${sanitize(fallbackHint)}</div>` : ""}
       </div>
     `;
   }

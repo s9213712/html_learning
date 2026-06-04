@@ -97,6 +97,9 @@ def register_comfyui_admin_routes(app, ctx):
                         })
                     except ComfyUIError as exc2:
                         exc = exc2
+            dependency_install_hint = None
+            if isinstance(endpoint, dict) and endpoint.get("mode") == "diffusers" and "Python 套件" in str(exc):
+                dependency_install_hint = "請用 ./test_for_develop.sh 選 requirements-hf.txt / requirements-comfyui.txt 補齊 HF / Diffusers 依賴；或執行 python3 -m pip install -r scripts/comfyui/generation_probe_requirements.txt。"
             runtime = (
                 local_comfyui_runtime_status((endpoint or {}).get("port"))
                 if isinstance(endpoint, dict) and endpoint.get("mode") == "local"
@@ -121,6 +124,7 @@ def register_comfyui_admin_routes(app, ctx):
                 "local_script": local_script_status,
                 "autostart": autostart,
                 "local_runtime": runtime,
+                "dependency_install_hint": dependency_install_hint,
             })
 
     @app.route("/api/root/comfyui/local-start-template", methods=["GET"])

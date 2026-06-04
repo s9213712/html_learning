@@ -190,10 +190,10 @@ def test_save_audio_filename_prefix_is_system_rewritten_not_required():
     assert result.workflow["107"]["inputs"]["quality"] == "V0"
 
 
-def test_locked_model_loader_fields_are_not_required_or_overridden():
+def test_locked_model_loader_fields_are_optional_but_can_be_overridden():
     workflow = {
-        "61": {"class_type": "CLIPLoader", "inputs": {"clip_name": "qwen_3_06b_base.safetensors"}},
-        "62": {"class_type": "VAELoader", "inputs": {"vae_name": "anime_vae.safetensors"}},
+        "61": {"class_type": "CLIPLoader", "inputs": {"clip_name": "missing_clip.safetensors"}},
+        "62": {"class_type": "VAELoader", "inputs": {"vae_name": "missing_vae.safetensors"}},
         "64": {"class_type": "EmptyLatentImage", "inputs": {"width": 1024, "height": 1024, "batch_size": 1}},
         "65": {"class_type": "CLIPTextEncode", "inputs": {"text": "low quality", "clip": ["61", 0]}},
         "66": {
@@ -212,7 +212,7 @@ def test_locked_model_loader_fields_are_not_required_or_overridden():
             },
         },
         "67": {"class_type": "CLIPTextEncode", "inputs": {"text": "anime", "clip": ["61", 0]}},
-        "68": {"class_type": "UNETLoader", "inputs": {"unet_name": "anima-preview2.safetensors"}},
+        "68": {"class_type": "UNETLoader", "inputs": {"unet_name": "missing_unet.safetensors"}},
         "69": {"class_type": "VAEDecode", "inputs": {"samples": ["66", 0], "vae": ["62", 0]}},
         "70": {"class_type": "SaveImage", "inputs": {"filename_prefix": "ComfyUI", "images": ["69", 0]}},
     }
@@ -225,13 +225,13 @@ def test_locked_model_loader_fields_are_not_required_or_overridden():
     result = run_workflow_through_gates(
         raw_workflow=workflow,
         user_inputs={
-            "61": {"clip_name": "wrong_clip.safetensors"},
-            "62": {"vae_name": "wrong_vae.safetensors"},
+            "61": {"clip_name": "qwen_3_06b_base.safetensors"},
+            "62": {"vae_name": "anime_vae.safetensors"},
             "64": {"width": 1024, "height": 1024, "batch_size": 1},
             "65": {"text": "low quality"},
             "66": {"seed": 42, "steps": 30, "cfg": 4, "denoise": 1, "sampler_name": "euler", "scheduler": "normal"},
             "67": {"text": "anime"},
-            "68": {"unet_name": "wrong_unet.safetensors"},
+            "68": {"unet_name": "anima-preview2.safetensors"},
         },
         image_field_assignments={},
         actor={"id": 1, "username": "alice"},
@@ -299,7 +299,7 @@ def test_gate2_capability_unsupported_blocks():
     with pytest.raises(RunGateFailure) as excinfo:
         run_workflow_through_gates(
             raw_workflow=TXT2IMG,
-            user_inputs={},
+            user_inputs=_full_user_inputs(),
             image_field_assignments={},
             actor={"id": 1},
             user_id=1,
@@ -312,8 +312,8 @@ def test_gate2_capability_unsupported_blocks():
     assert excinfo.value.stage == "gate2_capability"
 
 
-def test_gate2_missing_models_blocks():
-    """Class supported but model file not on disk → Gate 2 model fail."""
+def test_gate2_missing_models_blocks_after_user_inputs_are_applied():
+    """Class supported but final model file not on disk → Gate 2 model fail."""
     no_model_client = _stub_client(
         classes={
             "CheckpointLoaderSimple", "EmptyLatentImage", "CLIPTextEncode",
@@ -324,7 +324,7 @@ def test_gate2_missing_models_blocks():
     with pytest.raises(RunGateFailure) as excinfo:
         run_workflow_through_gates(
             raw_workflow=TXT2IMG,
-            user_inputs={},
+            user_inputs=_full_user_inputs(),
             image_field_assignments={},
             actor={"id": 1},
             user_id=1,

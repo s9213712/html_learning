@@ -522,7 +522,7 @@ class DiffusersClient:
             raise ComfyUIError(
                 "Diffusers 模式需要先安裝 Python 套件："
                 + ", ".join(missing)
-                + "。建議同時安裝 transformers、accelerate、safetensors。"
+                + "。請用 ./test_for_develop.sh 選 requirements-hf.txt / requirements-comfyui.txt 補齊，或執行 python3 -m pip install -r scripts/comfyui/generation_probe_requirements.txt。"
             )
 
     def _ensure_gguf_dependencies(self):

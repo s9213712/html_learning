@@ -8,10 +8,11 @@ the detailed boundary and conflict rules.
 
 ## Runtime Reset
 
-Runtime reset is a destructive cleanup tool for returning the live server to a
-minimal runnable state.
+Runtime reset is a destructive cleanup tool for returning the server to a
+minimal runnable state. There are two operational paths and they intentionally
+have different key-handling boundaries.
 
-It does:
+The in-app/admin runtime reset path does:
 
 - create a `pre_reset` server snapshot first
 - clear resettable application tables such as forum, chat, DM, storage, album,
@@ -20,24 +21,39 @@ It does:
   `runtime/chats/`
 - reset PointsChain live tables through `PointsLedgerService.reset_runtime_chain`
 - reset the secure audit chain through `reset_audit_chain_with_event`
-- remove local deployment-generated secrets and manifests:
-  - `runtime/.chain_seed`
-  - `runtime/.csrfkey`
-  - `runtime/.filekey`
-  - `runtime/.fkey`
-  - `.fley`
-  - `runtime/.integrity_key`
-  - `runtime/integrity_manifest.json`
-  - `runtime/cert.pem`
-  - `runtime/key.pem`
+- rotate/remove deployment-generated secrets and manifests according to the
+  production reset implementation
 - switch the server back to management-only feature defaults
 - return `requires_restart: true`
+
+The development launcher path, `test_for_develop.sh --reset`, is different: it
+preserves server-side key material such as `.filekey`, `.fkey`, `.csrfkey`,
+`.integrity_key`, `.chain_seed`, TLS key/cert files, and
+`integrity_manifest.json`. Before clearing DB/catalog state it moves existing
+storage contents into `storage/.reset_orphan_recovery/reset_<timestamp>/` with
+pre-reset DB metadata, copied admin decrypt helper scripts, runtime secrets, and
+an `orphaned_storage/` folder. This keeps the post-reset storage root clean
+while still allowing exactly one recovery action later.
+
+The reset recovery bundle offers two mutually exclusive helpers:
+
+- `export_server_encrypted_plaintext.sh <output-dir>` exports decrypted
+  `server_encrypted` files using the bundled DB metadata and server-side keys.
+  Strict E2EE files still require the user's passphrase and the bundled
+  `scripts/admin/decrypt_server_files.py --privacy-mode e2ee` helper.
+- `restore_database_catalog_from_bundle.sh` imports the pre-reset catalog and
+  moves encrypted files back into place. Original owners are preserved when the
+  user still exists; missing-owner catalog rows are reassigned to root.
+
+Once either helper starts, `recovery_action.lock` prevents using the other helper
+from the same bundle. This avoids a root operator both obtaining plaintext and
+then restoring the same encrypted catalog back into service.
 
 It does not delete the `pre_reset` snapshot. That snapshot is the recovery point
 if reset was triggered accidentally.
 
-After reset, restart the server. The next boot regenerates the local secrets and
-TLS certificate/key files.
+After reset, restart the server and verify the selected recovery path before
+removing bundle backups.
 
 ## Server Snapshot / Restore
 
@@ -98,10 +114,10 @@ ledger.
   verification fails, safe mode must prepare a branch/governance recovery plan.
 - Reset may create a pre-reset server snapshot, but reset itself intentionally
   creates a fresh PointsChain and audit chain.
-- Runtime reset still clears local runtime secrets and generated manifests.
-  Snapshot restore and runtime reset therefore have different boundaries:
-  snapshot restore replays the captured runtime secrets, while reset deletes
-  them and expects regeneration or reinjection on next boot.
+- Snapshot restore and runtime reset have different boundaries: snapshot restore
+  replays captured runtime secrets, while reset follows the key policy of the
+  selected path. The development launcher `--reset` preserves server-side key
+  material so server-encrypted orphan recovery remains possible.
 
 These boundaries prevent a server snapshot from silently becoming a financial
 ledger rewrite tool, and prevent wallet balances from being trusted without

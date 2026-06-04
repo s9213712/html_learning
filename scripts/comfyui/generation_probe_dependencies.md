@@ -19,6 +19,13 @@ Reports must only record `hf_token_supplied: true/false`.
 
 ## Python Packages
 
+The app runtime and the standalone probe runtime are different install targets.
+For the web app's HF / Diffusers backend, use `requirements-hf.txt` through
+`test_for_develop.sh` or the deployment environment. For copied standalone
+probes, use `generation_probe_requirements.txt` with `--target`/`PYTHONPATH` as
+shown below. Do not assume a successful probe dependency install changes the
+web app's virtualenv.
+
 WSL path for HF Diffusers and GGUF inspect/download:
 
 ```bash
