@@ -65,8 +65,21 @@ def test_diffusers_js_preflights_huggingface_repo_before_generation():
 
 def test_diffusers_cache_busts_preflight_ui_assets():
     html = _read("public/index.html")
-    assert "/js/36-comfyui.js?v=20260604-lora-draft-quiet" in html
+    assert "/js/36-comfyui.js?v=20260604-hf-settings-fronttab" in html
     assert "/js/36-comfyui-workflows.js?v=20260604-remote-workflow-shared-default" in html
+
+
+def test_hf_settings_tab_is_exposed_in_comfyui_frontend_settings():
+    html = _read("public/index.html")
+    admin_js = _read("public/js/50-admin.js")
+
+    assert 'id="comfyui-settings-slot"' in html
+    assert 'data-comfyui-view="settings" hidden>AI 後端設定</button>' in html
+    assert "ComfyUI / GGUF 與 HF 是兩組獨立設定" in html
+    assert '["sec-settings-comfyui", "comfyui-settings-slot"]' in admin_js
+    assert 'sectionId === "sec-settings-comfyui"' in admin_js
+    assert 'section.open = true;' in admin_js
+    assert 'data-comfyui-settings-family="hf"' in html
 
 
 def test_diffusers_generation_progress_surfaces_huggingface_download_bytes():

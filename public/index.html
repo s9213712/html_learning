@@ -2196,7 +2196,7 @@
         <button class="btn comfyui-subtab" type="button" role="tab" aria-selected="false" data-comfyui-view="history">歷史重跑</button>
         <button class="btn comfyui-subtab" type="button" role="tab" aria-selected="false" data-comfyui-view="workflow">Workflow</button>
         <button class="btn comfyui-subtab" type="button" role="tab" aria-selected="false" data-comfyui-view="models" hidden>模型管理</button>
-        <button class="btn comfyui-subtab" type="button" role="tab" aria-selected="false" data-comfyui-view="settings" hidden>系統設定</button>
+        <button class="btn comfyui-subtab" type="button" role="tab" aria-selected="false" data-comfyui-view="settings" hidden>AI 後端設定</button>
       </div>
       <div class="comfyui-subview active" id="comfyui-view-generate" data-comfyui-view-panel="generate" role="tabpanel">
       <div class="comfyui-layout">
@@ -2840,7 +2840,7 @@
           <div class="drive-card-heading">
             <div>
               <div class="drive-card-title">AI 產圖系統設定</div>
-              <div class="drive-card-sub">ComfyUI 連線模式、Diffusers、本地啟動與預設產圖參數都在這裡調整。</div>
+              <div class="drive-card-sub">ComfyUI / GGUF 與 HF 是兩組獨立設定；切換頁籤只改正在編輯的表單，不會停用另一組。</div>
             </div>
             <button class="btn btn-primary btn-sm" type="button" data-settings-save-action>儲存 AI 設定</button>
           </div>
@@ -7350,7 +7350,7 @@
 <script src="/js/35-drive.js?v=20260604-storage-bulk-clarity" defer></script>
   <script src="/js/35-drive-preview-share.js?v=20260507-drive-preview-share-split" defer></script>
 <!-- cache marker retained for template-import regression: /js/36-comfyui.js?v=20260509-comfyui-template-embeddings -->
-<script src="/js/36-comfyui.js?v=20260604-lora-draft-quiet" defer></script>
+<script src="/js/36-comfyui.js?v=20260604-hf-settings-fronttab" defer></script>
 <script src="/js/36-comfyui-workflows.js?v=20260604-remote-workflow-shared-default" defer></script>
 <script src="/js/37-bug-report.js?v=20260502-device-feature" defer></script>
 <script src="/js/41-game-modules.js?v=20260601-rubiks-visible" defer></script>
@@ -7360,7 +7360,7 @@
 <script src="/js/42-experiments.js?v=20260528-experiments-bounded-motion" defer></script>
   <script src="/js/39-videos.js?v=20260603-video-audio-native" defer></script>
 <script src="/js/40-auth-users.js?v=20260531-profile-settings-split" defer></script>
-<script src="/js/50-admin.js?v=20260531-feature-settings-live-sync" defer></script>
+<script src="/js/50-admin.js?v=20260604-hf-settings-fronttab" defer></script>
 <script src="/js/51-admin-server-mode-launch-check.js?v=20260526-server-mode-prelaunch" defer></script>
 <script src="/js/52-admin-trading.js?v=20260601-admin-trading-module" defer></script>
 <script src="/js/53-admin-storage-economy.js?v=20260602-transmission-test-status" defer></script>

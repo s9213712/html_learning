@@ -232,6 +232,10 @@ function relocateSystemAdminSections() {
       section.classList.add("active");
       slot.appendChild(section);
     }
+    if (sectionId === "sec-settings-comfyui" && section && slot && slot.contains(section)) {
+      section.open = true;
+      section.dataset.frontendSettingsExpanded = "1";
+    }
   });
 }
 
