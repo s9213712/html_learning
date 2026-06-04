@@ -2283,10 +2283,11 @@
     }
 
     .comfyui-template-prompt-sharing {
-      display: grid;
-      gap: .65rem;
-      grid-template-columns: minmax(0, 1fr) minmax(220px, 320px);
-      align-items: end;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: .55rem .75rem;
       padding: .7rem;
       margin-bottom: .65rem;
       border: 1px solid var(--border);
@@ -2294,8 +2295,24 @@
       background: var(--card);
     }
 
+    .comfyui-template-prompt-sharing-text {
+      flex: 1 1 220px;
+      min-width: 0;
+    }
+
+    .comfyui-template-prompt-sharing .drive-card-title {
+      margin-bottom: .25rem;
+    }
+
+    .comfyui-template-prompt-sharing .drive-card-sub {
+      line-height: 1.45;
+      overflow-wrap: anywhere;
+    }
+
     .comfyui-template-prompt-sharing select {
-      width: 100%;
+      flex: 0 1 280px;
+      width: auto;
+      max-width: 100%;
     }
 
     .comfyui-multi-compare-card {

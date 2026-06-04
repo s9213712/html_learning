@@ -171,7 +171,14 @@ def test_template_prompts_ask_before_global_sharing_multiple_fields():
     assert "請先選擇是否全域共用提示詞" in workflow_js
     assert "syncComfyuiTemplateSharedPromptFields" in workflow_js
     assert 'data-comfyui-template-prompt-role="${sanitize(binding.promptRole)}"' in workflow_js
+    assert 'class="comfyui-template-prompt-sharing-text"' in workflow_js
     assert ".comfyui-template-prompt-sharing" in css
+    assert "display: flex;" in css
+    assert "flex-wrap: wrap;" in css
+    assert ".comfyui-template-prompt-sharing-text" in css
+    assert "overflow-wrap: anywhere;" in css
+    assert "flex: 0 1 280px;" in css
+    assert "width: auto;" in css
 
 
 def test_compare_two_checkpoints_shares_sampler_params_except_checkpoint_models():

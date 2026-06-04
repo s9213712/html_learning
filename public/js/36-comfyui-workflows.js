@@ -1820,7 +1820,7 @@ function renderComfyuiTemplatePromptSharingControl(detail = comfyuiSelectedTempl
   if (roles.negative.length > 1) parts.push(`負面 ${roles.negative.length} 個`);
   return `
     <div class="comfyui-template-prompt-sharing">
-      <div>
+      <div class="comfyui-template-prompt-sharing-text">
         <div class="drive-card-title">提示詞共用</div>
         <div class="drive-card-sub">偵測到多個提示詞欄位：${sanitize(parts.join("、"))}。</div>
       </div>
