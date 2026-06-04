@@ -348,6 +348,16 @@ def test_storage_browser_bulk_selection_actions_are_wired():
     assert "async function downloadSelectedStorageItems()" in drive_js
     assert "async function deleteSelectedStorageItems()" in drive_js
     assert "function selectedStorageFilesForShareOrDownload()" in drive_js
+    assert "function effectiveSelectedStorageItems()" in drive_js
+    assert "function topLevelSelectedStorageFolders" in drive_js
+    assert "function storageFolderIsInsideFolder" in drive_js
+    assert "批次操作" in drive_js
+    assert "移動複選" in drive_js
+    assert "刪除複選" in drive_js
+    assert "批次刪除複選項目：將處理" in drive_js
+    assert "批次移動複選項目：將處理" in drive_js
+    assert "子項目已包含在所選資料夾內" in drive_js
+    assert "const { files, folders } = effectiveSelectedStorageItems();" in drive_js
     assert 'storageAction("/storage/folders/trash", "POST", { path })' in drive_js
     assert 'storageAction("/storage/folders/trash", "DELETE"' not in drive_js
     assert 'storageAction("/storage/albums", "POST", {' in drive_js

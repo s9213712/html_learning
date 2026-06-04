@@ -4831,6 +4831,34 @@ function storageFilesInSelectedFolders(folders = selectedStorageFolders()) {
     .filter((file) => folderPaths.some((folderPath) => storageFileIsInsideFolder(file, folderPath)));
 }
 
+function storageFolderIsInsideFolder(path, folderPath) {
+  const child = normalizeStoragePath(path);
+  const parent = normalizeStoragePath(folderPath);
+  return Boolean(child && parent && child !== parent && parent !== "/" && child.startsWith(`${parent}/`));
+}
+
+function topLevelSelectedStorageFolders(folders = selectedStorageFolders()) {
+  const normalized = folders
+    .map((folder) => ({ ...folder, virtual_path: normalizeStoragePath(folder?.virtual_path || "") }))
+    .filter((folder) => folder.virtual_path && folder.virtual_path !== "/")
+    .sort((a, b) => storageDepth(a.virtual_path) - storageDepth(b.virtual_path));
+  const top = [];
+  normalized.forEach((folder) => {
+    if (!top.some((parent) => storageFolderIsInsideFolder(folder.virtual_path, parent.virtual_path))) {
+      top.push(folder);
+    }
+  });
+  return top;
+}
+
+function effectiveSelectedStorageItems() {
+  const folders = topLevelSelectedStorageFolders();
+  const folderPaths = folders.map((folder) => normalizeStoragePath(folder?.virtual_path || ""));
+  const files = selectedStorageFiles()
+    .filter((file) => !folderPaths.some((folderPath) => storageFileIsInsideFolder(file, folderPath)));
+  return { files, folders };
+}
+
 function selectedStorageFilesForShareOrDownload() {
   const byId = new Map();
   selectedStorageFiles().forEach((file) => byId.set(String(file.id || ""), file));
@@ -4870,19 +4898,25 @@ function renderStorageBulkToolbar() {
   const count = storageSelectionCount();
   const visibleCount = visibleStorageFiles().length + visibleStorageFolders().length;
   const disabled = count ? "" : " disabled";
+  const effective = effectiveSelectedStorageItems();
+  const effectiveCount = effective.files.length + effective.folders.length;
+  const skipped = Math.max(0, count - effectiveCount);
+  const selectionHint = count
+    ? `已複選 ${count} 個項目；批次操作會處理 ${effectiveCount} 個${skipped ? `，另 ${skipped} 個子項目會隨資料夾一起處理` : ""}。`
+    : "勾選檔案或資料夾後，可一次移動、分享、下載或刪除。";
   return `
-    <div class="drive-file-row storage-browser-row storage-browser-bulk-toolbar">
+    <div class="drive-file-row storage-browser-row storage-browser-bulk-toolbar" aria-live="polite">
       <div>
-        <strong>批次選取</strong>
-        <div class="drive-card-sub">本層 ${visibleCount} 個項目；已選取 ${count} 個。</div>
+        <strong>批次操作</strong>
+        <div class="drive-card-sub">本層 ${visibleCount} 個項目；${selectionHint}</div>
       </div>
-      <div class="drive-file-actions">
+      <div class="drive-file-actions" aria-label="複選批次操作">
         <button class="btn btn-sm" type="button" data-drive-action="select-visible-storage">全選本層</button>
-        <button class="btn btn-sm" type="button" data-drive-action="clear-storage-selection">清除選取</button>
-        <button class="btn btn-sm" type="button" data-drive-action="move-selected-storage"${disabled}>移動</button>
-        <button class="btn btn-sm" type="button" data-drive-action="share-selected-storage"${disabled}>分享</button>
-        <button class="btn btn-sm" type="button" data-drive-action="download-selected-storage"${disabled}>下載</button>
-        <button class="btn btn-danger btn-sm" type="button" data-drive-action="delete-selected-storage"${disabled}>刪除</button>
+        <button class="btn btn-sm" type="button" data-drive-action="clear-storage-selection">清除複選</button>
+        <button class="btn btn-sm" type="button" data-drive-action="move-selected-storage"${disabled}>移動複選</button>
+        <button class="btn btn-sm" type="button" data-drive-action="share-selected-storage"${disabled}>分享複選</button>
+        <button class="btn btn-sm" type="button" data-drive-action="download-selected-storage"${disabled}>下載複選</button>
+        <button class="btn btn-danger btn-sm" type="button" data-drive-action="delete-selected-storage"${disabled}>刪除複選</button>
       </div>
     </div>
   `;
@@ -5169,14 +5203,25 @@ async function trashSelectedStorageItems() {
 }
 
 async function deleteSelectedStorageItems() {
-  const fileIds = Array.from(selectedStorageFileIds).filter(Boolean);
-  const folderPaths = Array.from(selectedStorageFolderPaths).filter(Boolean);
-  const total = fileIds.length + folderPaths.length;
+  const { files, folders } = effectiveSelectedStorageItems();
+  const total = files.length + folders.length;
+  const skipped = storageSelectionCount() - total;
   if (!total) return;
-  if (!window.confirm(`刪除已選取的 ${total} 個檔案/資料夾？可在已刪除檔案中還原。`)) return;
+  const suffix = skipped > 0 ? `
+
+另外 ${skipped} 個子項目已包含在所選資料夾內，會隨資料夾一起處理，不會重複刪除。` : "";
+  if (!window.confirm(`批次刪除複選項目：將處理 ${total} 個檔案/資料夾。可在已刪除檔案中還原。${suffix}`)) return;
   try {
-    for (const path of folderPaths) await storageAction("/storage/folders/trash", "POST", { path });
-    for (const id of fileIds) await storageAction(`/storage/files/${encodeURIComponent(id)}`, "DELETE");
+    for (const folder of folders) {
+      const path = normalizeStoragePath(folder?.virtual_path || "");
+      if (!path || path === "/") continue;
+      await storageAction("/storage/folders/trash", "POST", { path });
+    }
+    for (const file of files) {
+      const id = String(file?.id || "");
+      if (!id) continue;
+      await storageAction(`/storage/files/${encodeURIComponent(id)}`, "DELETE");
+    }
     clearStorageSelection();
     await loadDriveDashboard();
   } catch (err) {
@@ -5185,13 +5230,17 @@ async function deleteSelectedStorageItems() {
 }
 
 async function moveSelectedStorageItems() {
-  const folders = selectedStorageFolders();
-  const selectedFolderPaths = folders.map((folder) => normalizeStoragePath(folder?.virtual_path || "")).filter(Boolean);
-  const files = selectedStorageFiles()
-    .filter((file) => !selectedFolderPaths.some((folderPath) => storageFileIsInsideFolder(file, folderPath)));
+  const { files, folders } = effectiveSelectedStorageItems();
   const total = files.length + folders.length;
   if (!total) return;
-  const requested = window.prompt("移動已選取項目到資料夾", currentStoragePath || "/");
+  const skipped = storageSelectionCount() - total;
+  const moveHint = skipped > 0
+    ? `
+${skipped} 個子項目已包含在所選資料夾內，會隨資料夾一起移動，不會重複處理。`
+    : "";
+  const requested = window.prompt(`批次移動複選項目：將處理 ${total} 個檔案/資料夾。${moveHint}
+
+請輸入目標資料夾`, currentStoragePath || "/");
   if (requested === null) return;
   const targetFolder = requested && requested.startsWith("/")
     ? normalizeStoragePath(requested)
