@@ -216,6 +216,8 @@ def _normalize_comfyui_backend_url(value):
     if not raw:
         return ""
     parsed = urlparse(raw)
+    if parsed.scheme == "diffusers" and parsed.netloc == "frontend" and not parsed.path.strip("/") and not parsed.query and not parsed.fragment:
+        return diffusers_backend_url("")
     if parsed.scheme == "diffusers" and parsed.netloc == "local" and not parsed.query and not parsed.fragment:
         repo_id = repo_id_from_diffusers_url(raw)
         normalized_repo_id = normalize_huggingface_repo_id(repo_id, allow_blank=True)

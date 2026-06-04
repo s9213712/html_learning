@@ -87,6 +87,11 @@ def test_hf_and_comfyui_are_separate_frontend_generation_tabs():
     assert 'return backendUrl ? { backend_url: backendUrl } : {};' in comfyui_js
     assert 'backend_url=request.args.get("backend_url")' in runtime_routes
     assert 'backend_url=request_data.get("backend_url") or request_data.get("comfyui_backend_url")' in runtime_routes
+    assert '"backend_url": request.args.get("backend_url") or request.args.get("comfyui_backend_url")' in runtime_routes
+    admin_helpers = _read("routes/comfyui_sections/admin_helpers.py")
+    assert 'binding = _comfyui_binding(actor, backend_url=data.get("backend_url") or data.get("comfyui_backend_url"))' in runtime_routes
+    assert 'parsed.netloc == "frontend"' in admin_helpers
+    assert 'return diffusers_backend_url("")' in admin_helpers
     assert 'function comfyuiDiffusersStatusText()' in comfyui_js
     assert '不使用 ComfyUI server 模型清單' in comfyui_js
     assert 'updateComfyuiStatusForActiveBackend();' in comfyui_js

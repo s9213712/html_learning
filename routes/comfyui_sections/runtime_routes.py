@@ -356,6 +356,7 @@ def register_comfyui_runtime_routes(app, ctx):
             data = {
                 "diffusers_model_repo": request.args.get("diffusers_model_repo") or request.args.get("model") or request.args.get("repo"),
                 "generation_mode": request.args.get("generation_mode") or "txt2img",
+                "backend_url": request.args.get("backend_url") or request.args.get("comfyui_backend_url"),
             }
         else:
             try:
@@ -363,7 +364,7 @@ def register_comfyui_runtime_routes(app, ctx):
             except Exception:
                 return json_resp({"ok": False, "msg": "請求 JSON 格式錯誤"}), 400
             data = data if isinstance(data, dict) else {}
-        binding = _comfyui_binding(actor)
+        binding = _comfyui_binding(actor, backend_url=data.get("backend_url") or data.get("comfyui_backend_url"))
         active_client = _client_for_url(binding["url"])
         if not hasattr(active_client, "inspect_model_repo"):
             return json_resp({
