@@ -2521,6 +2521,17 @@ def register_comfyui_routes(app, deps):
         if getattr(active_client, "backend_kind", "") == "diffusers":
             repo = str(params.get("diffusers_model_repo") or params.get("model") or getattr(active_client, "model_repo", "") or "").strip()
             variant = str(params.get("diffusers_gguf_file") or params.get("diffusers_model_variant") or "default").strip() or "default"
+            if str(params.get("diffusers_gguf_file") or "").strip():
+                return {
+                    "phase": "routing",
+                    "percent": 1,
+                    "backend_kind": "diffusers",
+                    "detail": f"準備 GGUF profile：{repo or 'Hugging Face repo'}（{variant}），正在檢查遠端模型或本地匯入條件",
+                    "step": "建立 GGUF 檢查工作",
+                    "current_file": str(params.get("diffusers_gguf_file") or ""),
+                    "timeout_seconds": timeout_value,
+                    "timeout_unlimited": timeout_value <= 0,
+                }
             return {
                 "phase": "downloading",
                 "percent": 1,
@@ -2729,6 +2740,98 @@ def register_comfyui_routes(app, deps):
             shutil.copy2(gguf_path, destination)
         return filename
 
+    def _install_cached_hf_model_file_to_local_comfyui(prepared, native_binding, *, model_type, relative_dir, filename, role):
+        model_path = Path(str((prepared or {}).get("path") or ""))
+        raw_filename = str(filename or (prepared or {}).get("filename") or model_path.name or "").strip()
+        safe_filename = Path(raw_filename.replace("\\", "/")).name
+        role_label = str(role or safe_filename or "模型").strip()
+        if not safe_filename or Path(safe_filename).suffix.lower() not in COMFYUI_MODEL_DOWNLOAD_EXTENSIONS:
+            raise ComfyUIError(f"{role_label} 檔名不合法，無法匯入 ComfyUI models")
+        if not model_path.is_file():
+            raise ComfyUIError(f"{role_label} 快取檔不存在，無法匯入 ComfyUI：{model_path}")
+        if not _is_local_comfyui_url(native_binding.get("url")):
+            raise ComfyUIError(
+                f"{role_label} 需要匯入 ComfyUI 模型目錄；遠端 ComfyUI API 無法由本站直接寫入模型檔。"
+                f"請聯絡遠端 ComfyUI 管理人把檔案放到 models/{relative_dir or model_type}/{safe_filename}，"
+                "或切到本地 ComfyUI 並設定 COMFYUI_BASE_DIR，讓本站從 Hugging Face cache 自動接入。"
+            )
+        destination_dir, safe_relative_dir, _label, msg = _resolve_model_destination_dir(
+            model_type=model_type,
+            relative_dir=relative_dir,
+        )
+        if msg or not destination_dir:
+            raise ComfyUIError(
+                f"{role_label} 自動匯入本地 ComfyUI 失敗：{msg or '找不到模型目錄'}。"
+                f"請設定 COMFYUI_BASE_DIR，或手動放到 ComfyUI/models/{relative_dir or model_type}/{safe_filename}。"
+            )
+        destination_dir.mkdir(parents=True, exist_ok=True)
+        destination = (destination_dir / safe_filename).resolve()
+        try:
+            destination.relative_to(destination_dir.resolve())
+        except ValueError as exc:
+            raise ComfyUIError("模型匯入目的地超出 ComfyUI models 目錄") from exc
+        if not destination.exists() or destination.stat().st_size != model_path.stat().st_size:
+            shutil.copy2(model_path, destination)
+        return safe_filename, safe_relative_dir
+
+    def _gguf_companion_capability_key(companion):
+        model_type = str((companion or {}).get("model_type") or "").strip().lower()
+        slot = str((companion or {}).get("slot") or "").strip()
+        if model_type == "vae" or slot == "vae_name":
+            return "vaes"
+        return "clip_models"
+
+    def _maybe_prepare_gguf_profile_companions(job_id, active_client, profile, native_binding, capabilities):
+        companions = [item for item in (profile or {}).get("companions") or [] if isinstance(item, dict)]
+        if not companions:
+            return capabilities
+        capabilities = dict(capabilities or {})
+        prepare_file = getattr(active_client, "prepare_huggingface_file", None)
+        if not callable(prepare_file):
+            return capabilities
+        updated = False
+        for index, companion in enumerate(companions):
+            filename = str(companion.get("filename") or "").strip()
+            if not filename:
+                continue
+            capability_key = _gguf_companion_capability_key(companion)
+            if _select_exact_or_basename([filename], list(capabilities.get(capability_key) or [])):
+                continue
+            role = str(companion.get("role") or companion.get("slot") or filename).strip()
+            repo_id = str(companion.get("repo_id") or (profile or {}).get("repo_id") or "").strip()
+            prepared = prepare_file(
+                repo_id,
+                filename,
+                progress_callback=lambda progress: _update_generation_job_progress(job_id, progress),
+                label=f"GGUF companion {role}",
+                base_percent=min(88, 28 + index * 4),
+                span_percent=4,
+            )
+            model_type = str(companion.get("model_type") or "").strip().lower() or ("vae" if capability_key == "vaes" else "text_encoder")
+            installed_name, safe_relative_dir = _install_cached_hf_model_file_to_local_comfyui(
+                prepared,
+                native_binding,
+                model_type=model_type,
+                relative_dir=str(companion.get("install_subdir") or "").strip(),
+                filename=filename,
+                role=role,
+            )
+            existing = list(capabilities.get(capability_key) or [])
+            extra = [installed_name]
+            if safe_relative_dir:
+                extra.append(f"{safe_relative_dir}/{installed_name}")
+            capabilities[capability_key] = sorted(set(existing + extra))
+            updated = True
+            _update_generation_job_progress(job_id, {
+                "phase": "routing",
+                "percent": min(92, 32 + index * 4),
+                "backend_kind": "comfyui_gguf",
+                "step": "GGUF companion 已匯入",
+                "current_file": installed_name,
+                "detail": f"已匯入 {role}：{safe_relative_dir}/{installed_name}",
+            })
+        return capabilities if updated else capabilities
+
     def _maybe_prepare_diffusers_gguf_auto_route(job_id, actor, active_client, params, backend_binding):
         if getattr(active_client, "backend_kind", "") != "diffusers":
             return active_client, backend_binding, params
@@ -2755,22 +2858,6 @@ def register_comfyui_routes(app, deps):
         params["diffusers_gguf_file"] = str(profile_variant.get("gguf_file") or gguf_file).strip()
         params["diffusers_gguf_base_repo"] = str(profile.get("base_repo") or params.get("diffusers_gguf_base_repo") or "").strip()
         gguf_file = params["diffusers_gguf_file"]
-        prepare = getattr(active_client, "prepare_gguf_file_for_backend", None)
-        if not callable(prepare):
-            return active_client, backend_binding, params
-        prepared = prepare(
-            params.get("diffusers_model_repo") or params.get("model"),
-            gguf_file,
-            progress_callback=lambda progress: _update_generation_job_progress(job_id, progress),
-        )
-        if str((prepared or {}).get("suggested_backend") or "") != "comfyui_gguf":
-            base_repo = normalize_huggingface_repo_id(params.get("diffusers_gguf_base_repo"), allow_blank=True)
-            if base_repo is None:
-                raise ComfyUIError("GGUF base Diffusers repo 格式不合法。")
-            if not base_repo:
-                raise ComfyUIError("GGUF 需要設定 base Diffusers repo，例如 stabilityai/stable-diffusion-xl-base-1.0。")
-            params["diffusers_gguf_base_repo"] = base_repo
-            return active_client, backend_binding, params
 
         native_binding = _native_comfyui_binding_for_gguf(actor)
         native_client = _client_for_url(native_binding["url"])
@@ -2780,6 +2867,34 @@ def register_comfyui_routes(app, deps):
             raise ComfyUIError(f"ComfyUI-GGUF 自動路由無法連線到 ComfyUI backend：{exc}") from exc
         diffusion_options = list((capabilities or {}).get("diffusion_models") or [])
         gguf_option = resolve_model_option(gguf_file, diffusion_options)
+        if native_binding.get("connection_mode") == "remote" and not gguf_option:
+            raise ComfyUIError(
+                f"遠端 ComfyUI 未安裝 GGUF UNet：{gguf_file}。"
+                "遠端模式不會自動下載或寫入模型檔，請先由遠端 ComfyUI 管理人安裝後再執行。"
+            )
+        if native_binding.get("connection_mode") != "remote":
+            prepare = getattr(active_client, "prepare_gguf_file_for_backend", None)
+            if not callable(prepare):
+                return active_client, backend_binding, params
+            prepared = prepare(
+                params.get("diffusers_model_repo") or params.get("model"),
+                gguf_file,
+                progress_callback=lambda progress: _update_generation_job_progress(job_id, progress),
+            )
+            if str((prepared or {}).get("suggested_backend") or "") != "comfyui_gguf":
+                base_repo = normalize_huggingface_repo_id(params.get("diffusers_gguf_base_repo"), allow_blank=True)
+                if base_repo is None:
+                    raise ComfyUIError("GGUF base Diffusers repo 格式不合法。")
+                if not base_repo:
+                    raise ComfyUIError("GGUF 需要設定 base Diffusers repo，例如 stabilityai/stable-diffusion-xl-base-1.0。")
+                params["diffusers_gguf_base_repo"] = base_repo
+                return active_client, backend_binding, params
+        else:
+            prepared = {
+                "suggested_backend": "comfyui_gguf",
+                "model_repo": params.get("diffusers_model_repo") or params.get("model"),
+                "gguf_file": gguf_file,
+            }
         if not gguf_option:
             installed_name = _install_cached_gguf_to_local_comfyui(prepared, native_binding)
             try:
@@ -2791,6 +2906,14 @@ def register_comfyui_routes(app, deps):
             if not resolve_model_option(installed_name, refreshed_options):
                 capabilities["diffusion_models"] = sorted(set(refreshed_options + diffusion_options + [installed_name]))
             gguf_option = resolve_model_option(installed_name, (capabilities or {}).get("diffusion_models") or []) or installed_name
+        if native_binding.get("connection_mode") != "remote":
+            capabilities = _maybe_prepare_gguf_profile_companions(
+                job_id,
+                active_client,
+                profile,
+                native_binding,
+                capabilities,
+            )
         runtime_models = _select_gguf_profile_runtime_models(native_client, capabilities, profile, profile_variant, gguf_option)
         requested_width = int(params.get("width") or 1024)
         requested_height = int(params.get("height") or 1024)

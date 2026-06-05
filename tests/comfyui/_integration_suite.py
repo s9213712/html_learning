@@ -3514,6 +3514,184 @@ def test_comfyui_diffusers_mode_auto_routes_native_gguf_to_comfyui_workflow(tmp_
     assert FakeComfyUIClient.last_params["scheduler"] == "normal"
 
 
+def test_comfyui_diffusers_mode_auto_downloads_missing_gguf_companions(tmp_path):
+    prepared_dir = tmp_path / "hf-cache"
+    prepared_dir.mkdir()
+    comfyui_base = tmp_path / "ComfyUI"
+    (comfyui_base / "models").mkdir(parents=True)
+    downloaded = []
+
+    class AutoRouteDiffusersBackendClient(FakeDiffusersBackendClient):
+        def prepare_gguf_file_for_backend(self, model_repo, gguf_file, *, progress_callback=None, log_capture=None):
+            path = prepared_dir / gguf_file
+            path.write_bytes(b"fake-gguf")
+            return {
+                "path": str(path),
+                "stats": {"cache_hit": True, "bytes_written": path.stat().st_size, "total_bytes": path.stat().st_size},
+                "metadata": {"has_comfy_metadata": True, "has_original_unet_names": True},
+                "suggested_backend": "comfyui_gguf",
+                "model_repo": model_repo,
+                "gguf_file": gguf_file,
+            }
+
+        def prepare_huggingface_file(
+            self,
+            model_repo,
+            filename,
+            *,
+            progress_callback=None,
+            log_capture=None,
+            label="Hugging Face 檔案",
+            base_percent=24,
+            span_percent=4,
+        ):
+            path = prepared_dir / filename
+            path.write_bytes(f"fake-{filename}".encode("utf-8"))
+            downloaded.append((model_repo, filename, label))
+            if progress_callback:
+                progress_callback({
+                    "phase": "downloading",
+                    "percent": base_percent,
+                    "backend_kind": "diffusers",
+                    "step": f"下載 {label}",
+                    "current_file": filename,
+                    "detail": f"下載 {filename}",
+                })
+            return {
+                "path": str(path),
+                "stats": {"cache_hit": False, "bytes_written": path.stat().st_size, "total_bytes": path.stat().st_size},
+                "model_repo": model_repo,
+                "filename": filename,
+            }
+
+    class LocalMissingCompanionNativeGgufComfyUIClient(FakeNativeGgufComfyUIClient):
+        base_url = "http://127.0.0.1:8188"
+
+        def get_capabilities(self):
+            payload = super().get_capabilities()
+            payload["diffusion_models"] = []
+            payload["clip_models"] = []
+            payload["vaes"] = []
+            return payload
+
+    db_path = tmp_path / "comfyui.db"
+    storage_root = tmp_path / "storage"
+    storage_root.mkdir()
+    _init_db(db_path)
+
+    def factory(url):
+        if str(url).startswith("diffusers://"):
+            return AutoRouteDiffusersBackendClient()
+        return LocalMissingCompanionNativeGgufComfyUIClient()
+
+    client = _build_app(
+        db_path,
+        storage_root,
+        settings={
+            "comfyui_connection_mode": "local",
+            "comfyui_diffusers_model_repo": WAI_GGUF_REPO,
+            "comfyui_api_host": "127.0.0.1",
+            "comfyui_api_port": 8188,
+            "comfyui_base_dir": str(comfyui_base),
+            "comfyui_huggingface_api_token": "hf_read_token",
+        },
+        extra_deps={
+            "comfyui_client": None,
+            "comfyui_client_factory": factory,
+        },
+    ).test_client()
+
+    generated = client.post(
+        "/api/comfyui/generate",
+        json={
+            "generation_mode": "txt2img",
+            "model": WAI_GGUF_REPO,
+            "diffusers_model_repo": WAI_GGUF_REPO,
+            "diffusers_gguf_profile": WAI_GGUF_PROFILE_ID,
+            "diffusers_gguf_variant": WAI_GGUF_VARIANT_ID,
+            "diffusers_gguf_file": WAI_GGUF_FILE,
+            "prompt": "illustration",
+            "negative_prompt": "",
+            "backend_url": "diffusers://frontend",
+            "confirm_billing": True,
+        },
+    )
+
+    payload = _await_comfyui_result(client, generated)
+    assert payload["image"]["image_ref"]["filename"] == "hackme_web_00001_.png"
+    assert (comfyui_base / "models" / "unet" / WAI_GGUF_FILE).read_bytes() == b"fake-gguf"
+    assert (comfyui_base / "models" / "text_encoders" / WAI_CLIP_L).exists()
+    assert (comfyui_base / "models" / "text_encoders" / WAI_CLIP_G).exists()
+    assert (comfyui_base / "models" / "vae" / WAI_VAE).exists()
+    assert {item[1] for item in downloaded} == {WAI_CLIP_L, WAI_CLIP_G, WAI_VAE}
+    assert FakeComfyUIClient.last_params["model"] == WAI_GGUF_FILE
+    assert FakeComfyUIClient.last_params["clip"] == WAI_CLIP_L
+    assert FakeComfyUIClient.last_params["clip2"] == WAI_CLIP_G
+    assert FakeComfyUIClient.last_params["vae"] == WAI_VAE
+
+
+def test_comfyui_diffusers_mode_remote_missing_gguf_reports_without_download(tmp_path):
+    class UnexpectedGgufDownloadClient(FakeDiffusersBackendClient):
+        def prepare_gguf_file_for_backend(self, *args, **kwargs):
+            pytest.fail("remote-missing GGUF must be reported before any local Hugging Face download")
+
+        def prepare_huggingface_file(self, *args, **kwargs):
+            pytest.fail("remote-missing GGUF companions must not be downloaded locally")
+
+    class RemoteMissingNativeGgufComfyUIClient(FakeNativeGgufComfyUIClient):
+        base_url = "http://192.168.18.19:8188"
+
+        def get_capabilities(self):
+            payload = super().get_capabilities()
+            payload["diffusion_models"] = []
+            payload["clip_models"] = []
+            payload["vaes"] = []
+            return payload
+
+    db_path = tmp_path / "comfyui.db"
+    storage_root = tmp_path / "storage"
+    storage_root.mkdir()
+    _init_db(db_path)
+
+    def factory(url):
+        if str(url).startswith("diffusers://"):
+            return UnexpectedGgufDownloadClient()
+        return RemoteMissingNativeGgufComfyUIClient()
+
+    client = _build_app(
+        db_path,
+        storage_root,
+        settings={
+            "comfyui_connection_mode": "diffusers",
+            "comfyui_diffusers_model_repo": WAI_GGUF_REPO,
+            "comfyui_remote_api_url": "http://192.168.18.19:8188",
+        },
+        extra_deps={
+            "comfyui_client": None,
+            "comfyui_client_factory": factory,
+        },
+    ).test_client()
+
+    generated = client.post(
+        "/api/comfyui/generate",
+        json={
+            "generation_mode": "txt2img",
+            "model": WAI_GGUF_REPO,
+            "diffusers_model_repo": WAI_GGUF_REPO,
+            "diffusers_gguf_profile": WAI_GGUF_PROFILE_ID,
+            "diffusers_gguf_variant": WAI_GGUF_VARIANT_ID,
+            "diffusers_gguf_file": WAI_GGUF_FILE,
+            "prompt": "illustration",
+            "negative_prompt": "",
+            "confirm_billing": True,
+        },
+    )
+
+    job = _await_comfyui_job(client, generated, expected_status="error")
+    assert "遠端 ComfyUI 未安裝 GGUF UNet" in job["error"]
+    assert WAI_GGUF_FILE in job["error"]
+
+
 def test_comfyui_diffusers_mode_rejects_failed_sd35_gguf_before_download(tmp_path):
     class UnexpectedGgufDownloadClient(FakeDiffusersBackendClient):
         def prepare_gguf_file_for_backend(self, model_repo, gguf_file, *, progress_callback=None, log_capture=None):

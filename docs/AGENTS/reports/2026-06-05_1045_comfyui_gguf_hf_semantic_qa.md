@@ -21,12 +21,20 @@
   `calcuis_illustrious_sdxl`, `diving_illustrious_flat_anime_sdxl`, `wai_illustrious_v110_sdxl`, `sothmik_wai_illustrious_v140_sdxl`.
 - Verified frontend payloads for all four profiles include non-empty `diffusers_gguf_file`, `diffusers_gguf_base_repo`, `diffusers_gguf_profile`, and `diffusers_gguf_variant`.
 - Verified backend billing quote accepts all four official GGUF profile payloads with HTTP 200 for the root account.
+- Verified GGUF profile generation only starts work after the user submits the selected profile. In remote ComfyUI mode, missing remote GGUF/companion files now report directly instead of downloading locally.
+- Verified local ComfyUI mode can auto-download and import missing official GGUF companion files into `models/unet`, `models/text_encoders`, and `models/vae` when `COMFYUI_BASE_DIR` is configured.
+- Verified the live `:5000` runtime has Hugging Face token configured without exposing the token in logs or responses.
 - Fixed `scripts/testing/playwright_comfyui_template_default_qa.py` so captured data URLs are written as image bytes instead of attempting to write an integer size.
 
 ## Commands
 
 - `python3 -m pytest /home/s92137/hackme_web/tests/frontend/comfyui/test_comfyui_diffusers_repo_ui.py /home/s92137/hackme_web/tests/frontend/comfyui/test_comfyui_idle_retry.py` - 17 passed.
+- `python3 -m pytest /home/s92137/hackme_web/tests/comfyui/generation/test_comfyui_generation.py -q -k 'gguf and (auto_routes or auto_downloads or remote_missing or rejects_failed_sd35 or profiles_hide or installed_gguf)'` - 6 passed.
+- `python3 -m pytest /home/s92137/hackme_web/tests/comfyui/test_diffusers_client.py /home/s92137/hackme_web/tests/frontend/comfyui/test_comfyui_diffusers_repo_ui.py /home/s92137/hackme_web/tests/frontend/comfyui/test_comfyui_idle_retry.py -q` - 54 passed.
 - `python3 -m py_compile /home/s92137/hackme_web/scripts/testing/playwright_comfyui_template_default_qa.py` - passed.
+- `python3 -m py_compile /home/s92137/hackme_web/routes/comfyui.py /home/s92137/hackme_web/services/comfyui/diffusers_client.py` - passed.
+- `bash -n /home/s92137/hackme_web/test_for_develop.sh` - passed.
 - `python3 /home/s92137/hackme_web/scripts/testing/playwright_comfyui_template_default_qa.py --base-url https://127.0.0.1:5000 --root-password root --comfyui-api-url http://127.0.0.1:8188 --only origin_sdxl_gguf_txt2img --per-template-timeout 180 --out-dir /tmp/hackme_web_gguf_template_frontend_qa_final_20260605` - expected failure due missing GGUF/SDXL dependencies.
 - `python3 /tmp/gguf_profile_payload_probe.py` - all four frontend GGUF profiles present and payloads populated.
 - `python3 /tmp/gguf_backend_profile_probe.py` - all four backend quote requests returned HTTP 200.
+- `python3 /tmp/gguf_remote_missing_probe.py` - remote ComfyUI mode returned missing `clip_g`/`vae` without local download bytes.

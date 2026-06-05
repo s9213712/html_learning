@@ -886,6 +886,51 @@ class DiffusersClient:
             "gguf_file": gguf_file,
         }
 
+    def prepare_huggingface_file(
+        self,
+        model_repo,
+        filename,
+        *,
+        progress_callback=None,
+        log_capture=None,
+        label="Hugging Face 檔案",
+        base_percent=24,
+        span_percent=4,
+    ):
+        model_repo = normalize_huggingface_repo_id(model_repo)
+        filename = str(filename or "").strip().replace("\\", "/")
+        if not model_repo:
+            raise ComfyUIError("Hugging Face repo 格式不合法。")
+        if not filename or filename.startswith("/") or ".." in filename.split("/"):
+            raise ComfyUIError("Hugging Face 檔名不合法。")
+        backend = self._configure_huggingface_download_backend(log_capture=log_capture)
+        if progress_callback:
+            progress_callback({
+                "phase": "downloading",
+                "percent": base_percent,
+                "backend_kind": "diffusers",
+                "step": f"下載 {label}",
+                "current_file": filename,
+                "detail": f"正在下載/檢查 {filename}",
+                "token_used": bool(self.token),
+                **backend,
+            })
+        path, stats = self._stream_huggingface_file_download(
+            model_repo,
+            filename,
+            progress_callback=progress_callback,
+            log_capture=log_capture,
+            backend=backend,
+            base_percent=base_percent,
+            span_percent=span_percent,
+        )
+        return {
+            "path": str(path),
+            "stats": dict(stats or {}),
+            "model_repo": model_repo,
+            "filename": filename,
+        }
+
     def _raise_if_unsupported_diffusers_gguf(self, gguf_path, *, gguf_file="", progress_callback=None, log_capture=None):
         metadata = self._inspect_gguf_file_metadata(gguf_path)
         if log_capture:
