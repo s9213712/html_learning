@@ -724,6 +724,7 @@ Streaming notes:
 - `GET /api/comfyui/jobs/{job_id}`
 - `GET /api/comfyui/history`
 - `POST /api/comfyui/history/{history_id}/rerun`
+- `POST /api/comfyui/workflow-runs/{run_id}/rerun`
 - `POST /api/comfyui/image-preview`
 - `POST /api/comfyui/interrupt`
 - `POST /api/comfyui/save`
@@ -762,6 +763,11 @@ ComfyUI notes:
 - History replay stores prompt, LoRA, generation mode, source/mask/control
   image refs, ControlNet settings, outpaint extents, and upscale model so the
   frontend can offer one-click restore and rerun.
+- Workflow history replay stores and returns the workflow snapshot so the
+  frontend can restore template-specific node inputs. Workflow run rerun is
+  actor-scoped: official/public preset visibility does not allow rerunning
+  another user's saved run snapshot. See
+  [COMFYUI_HISTORY_RERUN_GGUF.md](comfyui/COMFYUI_HISTORY_RERUN_GGUF.md).
 - Root-only Civitai endpoints inspect a page URL, list versions/files, and
   download the selected checkpoint or LoRA into the configured local project.
 - Root-only Civitai search now uses the official `/api/v1/models` endpoint with

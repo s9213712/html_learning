@@ -16,6 +16,9 @@ def test_diffusers_generation_page_accepts_repo_and_variant_selection():
     assert 'id="comfyui-diffusers-inspect-btn"' in html
     assert 'id="comfyui-diffusers-model-variant"' in html
     assert 'id="comfyui-diffusers-repo-status"' in html
+    assert 'id="comfyui-diffusers-hf-token"' in html
+    assert 'id="comfyui-diffusers-hf-token-save-btn"' in html
+    assert 'id="comfyui-diffusers-hf-token-state"' in html
     assert 'id="s-comfyui-allow-in-process-diffusers"' in html
     assert 'id="s-comfyui-diffusers-device-map"' in html
     assert 'id="s-comfyui-diffusers-low-cpu-mem-usage"' in html
@@ -53,6 +56,9 @@ def test_diffusers_js_preflights_huggingface_repo_before_generation():
     assert "diffusers_gguf_profile" in js
     assert "fillComfyuiGgufProfiles" in js
     assert "renderComfyuiGgufProfileHint" in js
+    assert "function loadComfyuiDiffusersTokenState" in js
+    assert "function saveComfyuiDiffusersTokenShortcut" in js
+    assert 'comfyui_huggingface_api_token_clear' in js
     assert "prompt_style_hint" in js
     assert "comfyuiInstalledGgufModels" in js
     assert "renderComfyuiInstalledGgufModels" in js
@@ -66,8 +72,8 @@ def test_diffusers_js_preflights_huggingface_repo_before_generation():
 
 def test_diffusers_cache_busts_preflight_ui_assets():
     html = _read("public/index.html")
-    assert "/js/36-comfyui.js?v=20260605-hf-gguf-profile-ui" in html
-    assert "/js/36-comfyui-workflows.js?v=20260604-shared-fields-builtin-vae" in html
+    assert "/js/36-comfyui.js?v=20260605-history-gguf-token" in html
+    assert "/js/36-comfyui-workflows.js?v=20260605-history-gguf-token" in html
 
 
 
@@ -101,6 +107,7 @@ def test_hf_and_comfyui_are_separate_frontend_generation_tabs():
     assert 'diffusers_gguf_file: diffusersMode && selectedGgufVariant ?' in comfyui_js
     assert 'HF / Diffusers 只支援 Hugging Face 模型頁' in html
     assert 'GGUF 只允許官方已驗證 profile' in html
+    assert 'comfyui-diffusers-hf-token-save-btn' in html
 
 
 def test_comfyui_history_lists_and_reruns_workflow_runs():
@@ -112,13 +119,38 @@ def test_comfyui_history_lists_and_reruns_workflow_runs():
     assert "name='comfyui_workflow_runs'" in runtime_routes
     assert 'JOIN comfyui_workflow_presets p ON p.id = r.preset_id' in runtime_routes
     assert 'WHERE r.actor_user_id=?' in runtime_routes
+    assert 'r.workflow_json, r.output_refs_json' in runtime_routes
+    assert '"workflow_json": workflow_json' in runtime_routes
+    assert 'if callable(_ensure_comfyui_workflow_schema):' in runtime_routes
+    assert '"ensure_comfyui_workflow_schema": _ensure_comfyui_workflow_schema' in _read("routes/comfyui.py")
+    assert '"create_workflow_run": _create_workflow_run' in _read("routes/comfyui.py")
+    assert '"run_comfyui_workflow_preset_job": _run_comfyui_workflow_preset_job' in _read("routes/comfyui.py")
     assert 'items.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)' in runtime_routes
     assert 'text.startsWith("workflow-")' in comfyui_js
     assert 'historyItem?.history_source === "workflow"' in comfyui_js
-    assert 'API + `/comfyui/workflows/${encodeURIComponent(workflowPresetId)}/run`' in comfyui_js
+    assert 'await loadComfyuiSelectedTemplateDetail(workflowPresetId, { silent: true, applyDefaults: false });' in comfyui_js
+    workflow_js = _read("public/js/36-comfyui-workflows.js")
+    assert "function applyComfyuiTemplateHistorySnapshotToForm" in workflow_js
+    assert "comfyuiGgufProfileVariantForSnapshot" in workflow_js
+    assert 'applyComfyuiTemplateHistorySnapshotToForm(item.workflow_json || {}, payload);' in comfyui_js
+    assert 'API + `/comfyui/workflow-runs/${encodeURIComponent(workflowRunId)}/rerun`' in comfyui_js
     assert "function comfyuiHistoryPreviewMarkup" in comfyui_js
     assert "hydrateComfyuiHistoryPreviews().catch(() => {});" in comfyui_js
     assert "data-comfyui-history-preview" in comfyui_js
+    assert 'can_rerun = int(row["actor_user_id"] or 0) == actor_id' in runtime_routes
+    assert 'or int(row["is_official"] or 0) == 1' not in runtime_routes
+
+
+def test_gguf_workflow_history_rerun_repairs_legacy_checkpoint_snapshot():
+    runtime_routes = _read("routes/comfyui_sections/runtime_routes.py")
+    gguf_workflow = _read("services/comfyui/template/gguf_workflow.py")
+
+    assert "needs_gguf_workflow_snapshot_repair(workflow_json)" in runtime_routes
+    assert "infer_gguf_workflow_spec_from_snapshot(workflow_json, params)" in runtime_routes
+    assert "p.workflow_json AS preset_workflow_json, p.system_bundle_id" in runtime_routes
+    assert "def needs_gguf_workflow_snapshot_repair" in gguf_workflow
+    assert 'class_type == "CheckpointLoaderSimple" and ckpt_name.endswith(".gguf")' in gguf_workflow
+    assert "def infer_gguf_workflow_spec_from_snapshot" in gguf_workflow
 
 def test_hf_settings_tab_is_exposed_in_comfyui_frontend_settings():
     html = _read("public/index.html")

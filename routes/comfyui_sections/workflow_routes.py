@@ -6,10 +6,20 @@ from flask import send_file
 
 from services.comfyui.template import errors as template_errors
 from services.comfyui.template.capability import rewrite_workflow_model_inputs_to_local_options
+from services.comfyui.template.gguf_workflow import (
+    GgufWorkflowError,
+    apply_gguf_workflow_profile,
+    is_gguf_workflow_id,
+)
 from services.comfyui.template.multi_compare import (
     MultiCompareWorkflowError,
     expand_multi_compare_workflow,
     is_multi_compare_workflow_id,
+)
+from services.comfyui.template.sdxl_refiner import (
+    SdxlRefinerWorkflowError,
+    apply_sdxl_refiner_option,
+    is_sdxl_refiner_workflow_id,
 )
 from services.comfyui.template.upscale_breakpoint import (
     UpscaleBreakpointError,
@@ -309,6 +319,50 @@ def register_comfyui_workflow_routes(app, ctx):
                     continue
                 inputs[key] = value
         return patched
+
+    def _workflow_snapshot_params(default_params, workflow_json):
+        params = dict(default_params or {})
+        if not isinstance(workflow_json, dict):
+            return params
+        prompts = []
+        negatives = []
+        for node in workflow_json.values():
+            if not isinstance(node, dict):
+                continue
+            inputs = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
+            class_type = str(node.get("class_type") or "")
+            if class_type == "CheckpointLoaderSimple" and inputs.get("ckpt_name") and not params.get("model"):
+                params["model"] = inputs.get("ckpt_name")
+                params["checkpoint"] = inputs.get("ckpt_name")
+            if class_type in {"KSampler", "KSamplerAdvanced"}:
+                if inputs.get("noise_seed") is not None:
+                    params["seed"] = inputs.get("noise_seed")
+                elif inputs.get("seed") is not None:
+                    params["seed"] = inputs.get("seed")
+                for src, dst in (("steps", "steps"), ("cfg", "cfg"), ("sampler_name", "sampler_name"), ("scheduler", "scheduler")):
+                    if inputs.get(src) is not None:
+                        params[dst] = inputs.get(src)
+            if class_type == "EmptyLatentImage":
+                for key in ("width", "height", "batch_size"):
+                    if inputs.get(key) is not None:
+                        params[key] = inputs.get(key)
+            if class_type in {"CLIPTextEncode", "CLIPTextEncodeFlux"}:
+                text = str(inputs.get("text") or "").strip()
+                if not text:
+                    continue
+                meta_title = ""
+                if isinstance(node.get("_meta"), dict):
+                    meta_title = str(node.get("_meta", {}).get("title") or "")
+                haystack = f"{meta_title} {text}".lower()
+                if any(marker in haystack for marker in ("negative", "負", "low quality", "worst quality", "watermark")):
+                    negatives.append(text)
+                else:
+                    prompts.append(text)
+        if prompts:
+            params["prompt"] = prompts[0]
+        if negatives:
+            params["negative_prompt"] = negatives[0]
+        return params
 
     def _workflow_output_kinds(workflow_json):
         output_class_kinds = {
@@ -770,6 +824,8 @@ def register_comfyui_workflow_routes(app, ctx):
             if isinstance(body.get("upscale_breakpoint"), dict)
             else {}
         )
+        sdxl_refiner = body.get("sdxl_refiner") if isinstance(body.get("sdxl_refiner"), dict) else {}
+        gguf_workflow = body.get("gguf_workflow") if isinstance(body.get("gguf_workflow"), dict) else {}
         conn = get_db()
         try:
             row, err_resp = load_workflow_preset(conn, preset_id=preset_id, actor=actor)
@@ -812,6 +868,45 @@ def register_comfyui_workflow_routes(app, ctx):
                 workflow_json = expansion.workflow
                 user_inputs = expansion.user_inputs
                 runtime_workflow_changed = True
+            if is_sdxl_refiner_workflow_id(row["system_bundle_id"]) and sdxl_refiner:
+                try:
+                    selection = apply_sdxl_refiner_option(
+                        workflow_json,
+                        user_inputs,
+                        sdxl_refiner,
+                    )
+                except SdxlRefinerWorkflowError as exc:
+                    return json_resp({"ok": False, "msg": str(exc), "stage": "sdxl_refiner_validation"}), 400
+                workflow_json = selection.workflow
+                user_inputs = selection.user_inputs
+                if selection.skip_refiner:
+                    default_params = dict(default_params)
+                    default_params["skip_refiner"] = True
+                    base_model = (workflow_json.get("4") or {}).get("inputs", {}).get("ckpt_name")
+                    if base_model:
+                        default_params["model"] = base_model
+                        default_params["checkpoint"] = base_model
+                    runtime_workflow_changed = True
+
+            if is_gguf_workflow_id(row["system_bundle_id"]) and gguf_workflow:
+                try:
+                    selection = apply_gguf_workflow_profile(
+                        workflow_json,
+                        user_inputs,
+                        gguf_workflow,
+                    )
+                except GgufWorkflowError as exc:
+                    return json_resp({"ok": False, "msg": str(exc), "stage": "gguf_workflow_validation"}), 400
+                workflow_json = selection.workflow
+                user_inputs = selection.user_inputs
+                if selection.profile and selection.variant:
+                    default_params = dict(default_params)
+                    default_params["gguf_profile"] = selection.profile.get("id") or ""
+                    default_params["gguf_variant"] = selection.variant.get("id") or ""
+                    default_params["model"] = selection.variant.get("gguf_file") or selection.variant.get("filename") or default_params.get("model")
+                    default_params["diffusion_model"] = default_params["model"]
+                    default_params["clip_loader_class"] = selection.profile.get("clip_loader_class") or ""
+                    runtime_workflow_changed = True
 
             if runtime_workflow_changed:
                 runtime_dependency_row = dict(row)
@@ -931,13 +1026,14 @@ def register_comfyui_workflow_routes(app, ctx):
                 if paid_api_error:
                     return paid_api_error
 
+            workflow_run_params = _workflow_snapshot_params(default_params, workflow_json)
             run_id = create_workflow_run(
                 conn,
                 preset_id=preset_id,
                 actor=actor,
-                prompt=default_params.get("prompt") or "",
-                negative_prompt=default_params.get("negative_prompt") or "",
-                params_json=default_params,
+                prompt=workflow_run_params.get("prompt") or "",
+                negative_prompt=workflow_run_params.get("negative_prompt") or "",
+                params_json=workflow_run_params,
                 workflow_json=workflow_json,
             )
             conn.commit()

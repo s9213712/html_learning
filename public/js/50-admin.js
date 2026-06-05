@@ -2231,8 +2231,8 @@ function updateComfyuiConnectionModeFields() {
   if (localBox) localBox.style.display = mode === "local" && settingsFamily === "comfyui" ? "" : "none";
   if (remoteBox) remoteBox.style.display = mode === "remote" && settingsFamily === "comfyui" ? "" : "none";
   if (diffusersBox) diffusersBox.style.display = settingsFamily === "hf" ? "" : "none";
-  if (civitaiBox) civitaiBox.style.display = mode === "local" && settingsFamily === "comfyui" ? "" : "none";
-  if (civitaiInput) civitaiInput.disabled = mode !== "local";
+  if (civitaiBox) civitaiBox.style.display = settingsFamily === "comfyui" ? "" : "none";
+  if (civitaiInput) civitaiInput.disabled = settingsFamily !== "comfyui";
   if (hfTokenInput) hfTokenInput.disabled = settingsFamily !== "hf";
   if (hfTokenClear) hfTokenClear.disabled = settingsFamily !== "hf";
   if (allowInProcessDiffusers) allowInProcessDiffusers.disabled = settingsFamily !== "hf";
@@ -2251,7 +2251,7 @@ function updateComfyuiConnectionModeFields() {
       ? "HF 頁籤會檢查 Hugging Face repo 與 Python / Diffusers 套件；只有勾選主程序資源風險確認後才允許直接推論，切換到這裡不會停用 ComfyUI / GGUF 設定。"
       : (mode === "local"
         ? "本地模式會測試本地 API；若產圖時 API 未啟動，後端會嘗試執行啟動腳本。"
-        : "ComfyUI / GGUF 遠端模式只負責呼叫指定 API 生圖，無法透過 API 把模型下載回本站的本地 ComfyUI，所以會隱藏本地模型下載與 Civitai API Key。");
+        : "ComfyUI / GGUF 遠端模式只負責呼叫指定 API 生圖；Civitai API Key 仍可保存，但模型下載只能用於本站本地 ComfyUI 或由遠端主機自行安裝。");
     status.style.color = "var(--muted)";
   }
   if (typeof updateComfyuiRootPanelVisibility === "function") updateComfyuiRootPanelVisibility(mode);

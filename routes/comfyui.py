@@ -879,7 +879,7 @@ def register_comfyui_routes(app, deps):
         _ensure_comfyui_workflow_schema(conn)
         rows = conn.execute(
             """
-            SELECT id, prompt, negative_prompt, params_json, output_refs_json, status, error, created_at, updated_at
+            SELECT id, prompt, negative_prompt, params_json, workflow_json, output_refs_json, status, error, created_at, updated_at
             FROM comfyui_workflow_runs
             WHERE preset_id=?
             ORDER BY created_at DESC, id DESC
@@ -892,6 +892,7 @@ def register_comfyui_routes(app, deps):
             "prompt": row["prompt"] or "",
             "negative_prompt": row["negative_prompt"] or "",
             "params": _parse_json_field(row["params_json"], {}) or {},
+            "workflow_json": _parse_json_field(row["workflow_json"], {}) or {},
             "output_refs": _parse_json_field(row["output_refs_json"], {}) or {},
             "status": row["status"] or "queued",
             "error": row["error"] or "",
@@ -4100,12 +4101,16 @@ def register_comfyui_routes(app, deps):
         "normalize_generation_timeout": _normalize_generation_timeout,
         "parse_generation_request": _parse_generation_request,
         "record_generation_history": _record_generation_history,
+        "parse_json_field": _parse_json_field,
+        "create_workflow_run": _create_workflow_run,
+        "run_comfyui_workflow_preset_job": _run_comfyui_workflow_preset_job,
         "register_active_generation": _register_active_generation,
         "generation_job_payload": _generation_job_payload,
         "image_ref_payload": _image_ref_payload,
         "initial_generation_progress": _initial_generation_progress,
         "update_generation_job_progress": _update_generation_job_progress,
         "run_comfyui_generation_job": _run_comfyui_generation_job,
+        "ensure_comfyui_workflow_schema": _ensure_comfyui_workflow_schema,
         "start_local_comfyui": _start_local_comfyui,
         "stop_local_comfyui": _stop_local_comfyui,
         "unregister_active_generation": _unregister_active_generation,

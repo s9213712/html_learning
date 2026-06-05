@@ -520,6 +520,7 @@ def public_gguf_profiles():
                 "clip_loader_class",
                 "source_url",
                 "prompt_style_hint",
+                "sampler_defaults",
                 "native_resolution_policy",
                 "disabled_reason",
             )

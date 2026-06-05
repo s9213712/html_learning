@@ -2269,7 +2269,16 @@
               </div>
             </div>
             <div class="drive-card-sub" id="comfyui-diffusers-gguf-profile-hint">官方 profile 會帶入對應 workflow、文字編碼器、VAE 與已驗證精度。</div>
-            <div class="drive-card-sub">HF / Diffusers 只支援 Hugging Face 模型頁「Use this model」內有 Diffusers 的 repo；GGUF 只允許官方已驗證 profile，或改到 Workflow 選官方 GGUF workflow。</div>
+            <div class="drive-card-sub">HF / Diffusers 只支援 Hugging Face 模型頁「Use this model」內有 Diffusers 的 repo；GGUF 只允許官方已驗證 profile，ComfyUI 原生 GGUF workflow 可在 ComfyUI / GGUF 分頁選官方 workflow。</div>
+          </div>
+          <div class="field" id="comfyui-diffusers-token-field" style="display:none;">
+            <label>Hugging Face API Token</label>
+            <div class="inline-control-row">
+              <input type="password" id="comfyui-diffusers-hf-token" placeholder="私有或 gated 模型才需要；留空不變更" autocomplete="off" />
+              <button class="btn btn-sm" id="comfyui-diffusers-hf-token-save-btn" type="button">儲存 token</button>
+            </div>
+            <label style="margin-top:.35rem;"><input type="checkbox" id="comfyui-diffusers-hf-token-clear" /> 清除已儲存的 Hugging Face API Token</label>
+            <div class="drive-card-sub" id="comfyui-diffusers-hf-token-state">root 可在此儲存 token；也可到 AI 後端設定 → HF 管理。</div>
           </div>
           <div class="field">
             <label>模型</label>
@@ -7357,8 +7366,8 @@
 <script src="/js/35-drive.js?v=20260604-storage-bulk-clarity" defer></script>
   <script src="/js/35-drive-preview-share.js?v=20260507-drive-preview-share-split" defer></script>
 <!-- cache marker retained for template-import regression: /js/36-comfyui.js?v=20260509-comfyui-template-embeddings -->
-<script src="/js/36-comfyui.js?v=20260605-hf-gguf-profile-ui" defer></script>
-<script src="/js/36-comfyui-workflows.js?v=20260604-shared-fields-builtin-vae" defer></script>
+<script src="/js/36-comfyui.js?v=20260605-history-gguf-token" defer></script>
+<script src="/js/36-comfyui-workflows.js?v=20260605-history-gguf-token" defer></script>
 <script src="/js/37-bug-report.js?v=20260502-device-feature" defer></script>
 <script src="/js/41-game-modules.js?v=20260601-rubiks-visible" defer></script>
 <script src="/js/games/game-view-registry.js?v=20260513-legacy-modules" defer></script>

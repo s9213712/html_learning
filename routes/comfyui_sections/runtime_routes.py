@@ -59,6 +59,9 @@ def register_comfyui_runtime_routes(app, ctx):
     _record_generation_history = ctx["record_generation_history"]
     _register_active_generation = ctx["register_active_generation"]
     _run_comfyui_generation_job = ctx["run_comfyui_generation_job"]
+    _create_workflow_run = ctx.get("create_workflow_run")
+    _ensure_comfyui_workflow_schema = ctx.get("ensure_comfyui_workflow_schema")
+    _run_comfyui_workflow_preset_job = ctx.get("run_comfyui_workflow_preset_job")
     _generation_job_payload = ctx.get("generation_job_payload")
     _initial_generation_progress = ctx.get("initial_generation_progress")
     _update_generation_job_progress = ctx.get("update_generation_job_progress")
@@ -622,7 +625,7 @@ def register_comfyui_runtime_routes(app, ctx):
                 workflow_rows = conn.execute(
                     """
                     SELECT r.id, r.preset_id, r.prompt, r.negative_prompt, r.params_json,
-                           r.output_refs_json, r.status, r.error, r.created_at, r.updated_at,
+                           r.workflow_json, r.output_refs_json, r.status, r.error, r.created_at, r.updated_at,
                            p.title AS preset_title, p.purpose AS preset_purpose, p.visibility,
                            p.owner_user_id AS preset_owner_user_id, p.is_official
                     FROM comfyui_workflow_runs r
@@ -636,6 +639,7 @@ def register_comfyui_runtime_routes(app, ctx):
                 ).fetchall()
             for row in workflow_rows:
                 params = _runtime_parse_json_field(row["params_json"], {})
+                workflow_json = _runtime_parse_json_field(row["workflow_json"], {})
                 output_refs = _runtime_parse_json_field(row["output_refs_json"], {})
                 prompt = row["prompt"] or params.get("prompt") or row["preset_title"] or ""
                 items.append({
@@ -655,6 +659,7 @@ def register_comfyui_runtime_routes(app, ctx):
                     },
                     "input_assets": {},
                     "controlnet": {},
+                    "workflow_json": workflow_json,
                     "result": output_refs,
                     "status": row["status"] or "queued",
                     "error": row["error"] or "",
@@ -719,5 +724,116 @@ def register_comfyui_runtime_routes(app, ctx):
                 "job_id": job_id,
                 "status": "queued",
                 "progress": {"phase": "queued", "percent": 0, "detail": "已建立重跑工作"},
+            },
+        })
+
+    @app.route("/api/comfyui/workflow-runs/<int:run_id>/rerun", methods=["POST"])
+    @require_csrf
+    def comfyui_workflow_run_history_rerun(run_id):
+        actor, err = _actor_or_401()
+        if err:
+            return err
+        if not callable(_create_workflow_run) or not callable(_run_comfyui_workflow_preset_job):
+            return json_resp({"ok": False, "msg": "workflow 重跑服務尚未初始化"}), 503
+        conn = get_db()
+        try:
+            if callable(_ensure_comfyui_workflow_schema):
+                _ensure_comfyui_workflow_schema(conn)
+            has_tables = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='comfyui_workflow_runs'"
+            ).fetchone() and conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='comfyui_workflow_presets'"
+            ).fetchone()
+            if not has_tables:
+                return json_resp({"ok": False, "msg": "找不到 workflow run 歷史資料表"}), 404
+            row = conn.execute(
+                """
+                SELECT r.id, r.preset_id, r.actor_user_id, r.prompt, r.negative_prompt,
+                       r.params_json, r.workflow_json,
+                       p.workflow_json AS preset_workflow_json, p.system_bundle_id,
+                       p.title AS preset_title, p.visibility, p.owner_user_id, p.is_official
+                FROM comfyui_workflow_runs r
+                JOIN comfyui_workflow_presets p ON p.id = r.preset_id
+                WHERE r.id=?
+                """,
+                (int(run_id),),
+            ).fetchone()
+            if not row:
+                return json_resp({"ok": False, "msg": "找不到這筆 workflow run 歷史紀錄"}), 404
+            actor_id = int(actor.get("id") or 0)
+            can_rerun = int(row["actor_user_id"] or 0) == actor_id
+            if not can_rerun:
+                return json_resp({"ok": False, "msg": "你沒有權限重跑這筆 workflow run"}), 403
+            params = _parse_json_field(row["params_json"], {}) or {}
+            workflow_json = _parse_json_field(row["workflow_json"], {}) or {}
+            try:
+                from services.comfyui.template.gguf_workflow import (
+                    apply_gguf_workflow_profile,
+                    infer_gguf_workflow_spec_from_snapshot,
+                    is_gguf_workflow_id,
+                    needs_gguf_workflow_snapshot_repair,
+                )
+                if is_gguf_workflow_id(row["system_bundle_id"]) and needs_gguf_workflow_snapshot_repair(workflow_json):
+                    preset_workflow = _parse_json_field(row["preset_workflow_json"], {}) or {}
+                    spec = infer_gguf_workflow_spec_from_snapshot(workflow_json, params)
+                    selection = apply_gguf_workflow_profile(preset_workflow or workflow_json, {}, spec)
+                    repaired = selection.workflow
+                    for node_id, node in (workflow_json or {}).items():
+                        if not isinstance(node, dict):
+                            continue
+                        target = repaired.get(str(node_id))
+                        if not isinstance(target, dict):
+                            continue
+                        src_inputs = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
+                        dst_inputs = target.get("inputs") if isinstance(target.get("inputs"), dict) else {}
+                        for input_name, value in src_inputs.items():
+                            if isinstance(value, list) or input_name not in dst_inputs:
+                                continue
+                            if str(input_name) in {"ckpt_name", "unet_name", "clip_name1", "clip_name2", "clip_name3", "vae_name"}:
+                                continue
+                            dst_inputs[str(input_name)] = value
+                    workflow_json = repaired
+                    params = dict(params)
+                    if selection.profile and selection.variant:
+                        params["gguf_profile"] = selection.profile.get("id") or params.get("gguf_profile") or ""
+                        params["gguf_variant"] = selection.variant.get("id") or params.get("gguf_variant") or ""
+                        params["model"] = selection.variant.get("gguf_file") or params.get("model") or ""
+                        params["diffusion_model"] = params["model"]
+            except Exception:
+                pass
+            new_run_id = _create_workflow_run(
+                conn,
+                preset_id=int(row["preset_id"]),
+                actor=actor,
+                prompt=row["prompt"] or params.get("prompt") or row["preset_title"] or "",
+                negative_prompt=row["negative_prompt"] or params.get("negative_prompt") or "",
+                params_json=params,
+                workflow_json=workflow_json,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        import json as _json
+        job_id = _create_generation_job(actor)
+        request_meta = _capture_request_audit_meta()
+        worker_row = {
+            "id": int(row["preset_id"]),
+            "default_params_json": _json.dumps(params, ensure_ascii=False, sort_keys=True),
+            "workflow_json": _json.dumps(workflow_json, ensure_ascii=False, sort_keys=True),
+        }
+        worker = threading.Thread(
+            target=_run_comfyui_workflow_preset_job,
+            args=(job_id, dict(actor), worker_row, new_run_id, DEFAULT_GENERATION_TIMEOUT_SECONDS, request_meta, None, workflow_json),
+            daemon=True,
+        )
+        worker.start()
+        return json_resp({
+            "ok": True,
+            "async": True,
+            "workflow_run_id": new_run_id,
+            "job": {
+                "job_id": job_id,
+                "status": "queued",
+                "progress": {"phase": "queued", "percent": 0, "detail": "已用歷史 workflow 快照建立重跑工作"},
             },
         })

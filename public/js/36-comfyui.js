@@ -108,9 +108,6 @@ const COMFYUI_DRAFT_FIELD_IDS = [
   "comfyui-model-relative-path",
   "comfyui-diffusers-model-repo",
   "comfyui-diffusers-model-variant",
-  "comfyui-diffusers-gguf-profile",
-  "comfyui-diffusers-gguf-variant",
-  "comfyui-diffusers-gguf-base-repo",
   "comfyui-model-select",
   "comfyui-vae-select",
   "comfyui-prompt",
@@ -152,8 +149,6 @@ const COMFYUI_DYNAMIC_SELECT_IDS = [
   "comfyui-controlnet-model",
   "comfyui-controlnet-preprocessor",
   "comfyui-upscale-model",
-  "comfyui-diffusers-gguf-profile",
-  "comfyui-diffusers-gguf-variant",
 ];
 const COMFYUI_RANDOM_SEED_MAX = 0xFFFFFFFF;
 const COMFYUI_UI_SEED_MAX = Number.MAX_SAFE_INTEGER;
@@ -1043,6 +1038,80 @@ function canManageComfyuiLocalModels(modeOverride = null) {
   return currentUser === "root" && mode === "local";
 }
 
+
+async function loadComfyuiDiffusersTokenState({ force = false } = {}) {
+  const status = $("comfyui-diffusers-hf-token-state");
+  const field = $("comfyui-diffusers-token-field");
+  if (field) field.style.display = isComfyuiDiffusersMode() ? "" : "none";
+  if (!status || currentUser !== "root") {
+    if (status) status.textContent = "只有 root 可以在前台儲存 Hugging Face API Token；一般使用者會使用 root 已設定的 token 或公開模型。";
+    return;
+  }
+  if (!force && status.dataset.loaded === "1") return;
+  status.textContent = "正在讀取 Hugging Face token 狀態...";
+  try {
+    await fetchCsrfToken({ force: true });
+    const res = await apiFetch(API + "/admin/settings", {
+      credentials: "same-origin",
+      headers: { "X-CSRF-Token": getCsrfToken() || "" }
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok || !json.ok) throw new Error(json.msg || `設定讀取失敗（HTTP ${res.status}）`);
+    const configured = !!json.settings?.comfyui_huggingface_api_token_configured;
+    status.dataset.loaded = "1";
+    status.textContent = configured
+      ? "目前已儲存 Hugging Face API Token；留空儲存不會變更。"
+      : "目前未儲存 Hugging Face API Token；公開模型可不填。";
+  } catch (err) {
+    status.textContent = err.message || "Hugging Face token 狀態讀取失敗";
+  }
+}
+
+async function saveComfyuiDiffusersTokenShortcut() {
+  if (currentUser !== "root") {
+    setComfyuiMessage("只有 root 可以儲存 Hugging Face API Token。", false);
+    return;
+  }
+  const tokenInput = $("comfyui-diffusers-hf-token");
+  const clearInput = $("comfyui-diffusers-hf-token-clear");
+  const status = $("comfyui-diffusers-hf-token-state");
+  const token = (tokenInput?.value || "").trim();
+  const clear = !!clearInput?.checked;
+  if (!token && !clear) {
+    setComfyuiMessage("請輸入 Hugging Face token，或勾選清除已儲存 token。", false);
+    return;
+  }
+  if (status) status.textContent = clear ? "正在清除 Hugging Face API Token..." : "正在儲存 Hugging Face API Token...";
+  await fetchCsrfToken({ force: true });
+  const res = await apiFetch(API + "/admin/settings", {
+    method: "PUT",
+    credentials: "same-origin",
+    headers: {
+      "Content-Type": "application/json",
+      "X-CSRF-Token": getCsrfToken() || ""
+    },
+    body: JSON.stringify({
+      comfyui_huggingface_api_token: token,
+      comfyui_huggingface_api_token_clear: clear,
+    })
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok || !json.ok) {
+    const message = json.msg || `Hugging Face token 儲存失敗（HTTP ${res.status}）`;
+    if (status) status.textContent = message;
+    setComfyuiMessage(message, false);
+    return;
+  }
+  if (tokenInput) tokenInput.value = "";
+  if (clearInput) clearInput.checked = false;
+  if (status) {
+    status.dataset.loaded = "";
+    status.textContent = clear ? "已清除 Hugging Face API Token。" : "已儲存 Hugging Face API Token。";
+  }
+  setComfyuiMessage(clear ? "已清除 Hugging Face API Token。" : "已儲存 Hugging Face API Token。", true);
+  await loadComfyuiDiffusersTokenState({ force: true });
+}
+
 function setComfyuiView(view, { persist = true } = {}) {
   const selected = normalizeComfyuiView(view);
   const modelTab = document.querySelector('[data-comfyui-view="models"]');
@@ -1081,6 +1150,9 @@ function setComfyuiView(view, { persist = true } = {}) {
   if (activeView === "settings" && typeof loadSettings === "function") {
     loadSettings();
   }
+  if (activeView === "hf") {
+    loadComfyuiDiffusersTokenState().catch(() => {});
+  }
   updateComfyuiModeNote();
   updateComfyuiStartButton();
   updateComfyuiDiffusersUi();
@@ -1105,6 +1177,7 @@ function updateComfyuiDiffusersUi() {
   const legacy = $("comfyui-legacy-form-panel");
   const repoField = $("comfyui-diffusers-repo-field");
   const repoInput = $("comfyui-diffusers-model-repo");
+  const tokenField = $("comfyui-diffusers-token-field");
   const modelSelect = $("comfyui-model-select");
   const modelField = modelSelect?.closest(".field");
   const vaeField = $("comfyui-vae-select")?.closest(".field");
@@ -1118,6 +1191,7 @@ function updateComfyuiDiffusersUi() {
     legacy.open = true;
   }
   if (repoField) repoField.style.display = diffusers ? "" : "none";
+  if (tokenField) tokenField.style.display = diffusers ? "" : "none";
   if (repoInput && diffusers && !repoInput.value && modelSelect?.value) {
     repoInput.value = modelSelect.value;
   }
@@ -2815,6 +2889,15 @@ function bindComfyuiAdvancedUi() {
     diffusersInspectBtn.dataset.comfyuiBound = "1";
     diffusersInspectBtn.addEventListener("click", () => inspectComfyuiDiffusersRepo({ quiet: false }));
   }
+  const diffusersTokenSaveBtn = $("comfyui-diffusers-hf-token-save-btn");
+  if (diffusersTokenSaveBtn && diffusersTokenSaveBtn.dataset.comfyuiBound !== "1") {
+    diffusersTokenSaveBtn.dataset.comfyuiBound = "1";
+    diffusersTokenSaveBtn.addEventListener("click", () => {
+      saveComfyuiDiffusersTokenShortcut().catch((err) => {
+        setComfyuiMessage(err.message || "Hugging Face token 儲存失敗", false);
+      });
+    });
+  }
   const diffusersVariantSelect = $("comfyui-diffusers-model-variant");
   if (diffusersVariantSelect && diffusersVariantSelect.dataset.comfyuiBound !== "1") {
     diffusersVariantSelect.dataset.comfyuiBound = "1";
@@ -3356,6 +3439,22 @@ async function applyComfyuiHistoryToForm(historyId) {
   const payload = item.payload || {};
   const controlnet = item.controlnet || {};
   const loras = Array.isArray(payload.loras) ? payload.loras : [];
+  const workflowPresetId = item.history_source === "workflow" ? Number(item.preset_id || 0) : 0;
+  if (workflowPresetId > 0) {
+    try {
+      if (typeof loadComfyuiWorkflowPresets === "function" && Array.isArray(comfyuiWorkflowPresets) && !comfyuiWorkflowPresets.length) {
+        await loadComfyuiWorkflowPresets({ silentTemplateReload: true });
+      }
+      const select = $("comfyui-template-select");
+      if (select) select.value = String(workflowPresetId);
+      if (typeof loadComfyuiSelectedTemplateDetail === "function") {
+        await loadComfyuiSelectedTemplateDetail(workflowPresetId, { silent: true, applyDefaults: false });
+      }
+    } catch (err) {
+      setComfyuiHistoryActionMessage(err.message || "Workflow 模板讀取失敗，無法完整套回歷史。", false);
+      throw err;
+    }
+  }
   comfyuiSelectedLoras = loras
     .filter((entry) => entry && typeof entry === "object" && normalizeComfyuiLoraName(entry.name))
     .slice(0, COMFYUI_MAX_LORAS)
@@ -3398,6 +3497,9 @@ async function applyComfyuiHistoryToForm(historyId) {
   if ($("comfyui-controlnet-enabled")) $("comfyui-controlnet-enabled").checked = controlEnabled;
   fillComfyuiControlnetModelOptions();
   fillComfyuiControlnetPreprocessorOptions();
+  if (workflowPresetId > 0 && typeof applyComfyuiTemplateHistorySnapshotToForm === "function") {
+    applyComfyuiTemplateHistorySnapshotToForm(item.workflow_json || {}, payload);
+  }
   await applyComfyuiHistoryAssets(item.input_assets || {});
   updateComfyuiModeVisibility();
   writeComfyuiDraft();
@@ -3420,9 +3522,9 @@ async function rerunComfyuiHistory(historyId) {
   const controller = new AbortController();
   comfyuiGenerateAbortController = controller;
   try {
-    const workflowPresetId = historyItem?.history_source === "workflow" ? Number(historyItem?.preset_id || 0) : 0;
-    const res = await apiFetch(workflowPresetId > 0
-      ? API + `/comfyui/workflows/${encodeURIComponent(workflowPresetId)}/run`
+    const workflowRunId = historyItem?.history_source === "workflow" ? Number(historyItem?.workflow_run_id || 0) : 0;
+    const res = await apiFetch(workflowRunId > 0
+      ? API + `/comfyui/workflow-runs/${encodeURIComponent(workflowRunId)}/rerun`
       : API + `/comfyui/history/${encodeURIComponent(targetId)}/rerun`, {
       method: "POST",
       credentials: "same-origin",
