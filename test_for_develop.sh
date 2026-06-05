@@ -52,6 +52,9 @@ SERVER_RUNNER="${HACKME_DEV_SERVER_RUNNER:-gunicorn}"
 GUNICORN_WORKERS="${HACKME_DEV_GUNICORN_WORKERS:-auto}"
 GUNICORN_THREADS="${HACKME_DEV_GUNICORN_THREADS:-auto}"
 GUNICORN_TIMEOUT="${HACKME_DEV_GUNICORN_TIMEOUT:-20}"
+GUNICORN_TIMEOUT_SET=0
+[[ -n "${HACKME_DEV_GUNICORN_TIMEOUT+x}" ]] && GUNICORN_TIMEOUT_SET=1
+COMFYUI_DEV_GUNICORN_TIMEOUT_FLOOR="${HACKME_DEV_COMFYUI_GUNICORN_TIMEOUT_FLOOR:-900}"
 GUNICORN_GRACEFUL_TIMEOUT="${HACKME_DEV_GUNICORN_GRACEFUL_TIMEOUT:-10}"
 GUNICORN_KEEP_ALIVE="${HACKME_DEV_GUNICORN_KEEP_ALIVE:-2}"
 GUNICORN_BACKLOG="${HACKME_DEV_GUNICORN_BACKLOG:-64}"
@@ -109,6 +112,24 @@ is_auto_capacity_value() {
 gunicorn_capacity_auto_requested() {
   [[ "$SERVER_RUNNER" == "gunicorn" ]] || return 1
   is_auto_capacity_value "$GUNICORN_WORKERS" || is_auto_capacity_value "$GUNICORN_THREADS"
+}
+
+comfyui_feature_selection_requested() {
+  local selected=" $(feature_selection_text_for_requirements) "
+  [[ "$FEATURE_MODE" == "all" || "$selected" == *"feature_comfyui_enabled"* || "$selected" == *" ai"* || "$selected" == *" full-user"* || "$selected" == *" qa-all"* ]]
+}
+
+apply_comfyui_dev_gunicorn_timeout_floor() {
+  [[ "$SERVER_RUNNER" == "gunicorn" ]] || return 0
+  [[ "$GUNICORN_TIMEOUT_SET" == "0" ]] || return 0
+  [[ "$SERVER_MODE" == "dev_ready" ]] || return 0
+  comfyui_feature_selection_requested || return 0
+  [[ "$COMFYUI_DEV_GUNICORN_TIMEOUT_FLOOR" =~ ^[0-9]+$ ]] || return 0
+  [[ "$GUNICORN_TIMEOUT" =~ ^[0-9]+$ ]] || return 0
+  if (( GUNICORN_TIMEOUT < COMFYUI_DEV_GUNICORN_TIMEOUT_FLOOR )); then
+    GUNICORN_TIMEOUT="$COMFYUI_DEV_GUNICORN_TIMEOUT_FLOOR"
+    say "[dev-tmp] gunicorn: timeout raised to ${GUNICORN_TIMEOUT}s for dev_ready ComfyUI/HF startup; pass --gunicorn-timeout to override"
+  fi
 }
 
 shell_quote() {
@@ -706,7 +727,8 @@ Options:
                            auto means local capacity probe result when present;
                            otherwise the script runs one unless disabled.
   --gunicorn-threads N      Default: auto when --server-runner gunicorn
-  --gunicorn-timeout N      Default: 20 seconds
+  --gunicorn-timeout N      Default: 20 seconds; dev_ready ComfyUI/HF
+                           startup uses a 900s floor unless explicitly set
   --gunicorn-backlog N      Default: 64
   --gunicorn-max-requests N Default: 10000; 0 disables worker recycling
   --capacity-probe          Run/refresh the local capacity probe before launch
@@ -3164,6 +3186,7 @@ prompt_server_runner() {
     prompt_value "Gunicorn workers" "$GUNICORN_WORKERS" GUNICORN_WORKERS
     prompt_value "Gunicorn threads per worker" "$GUNICORN_THREADS" GUNICORN_THREADS
     prompt_value "Gunicorn timeout seconds" "$GUNICORN_TIMEOUT" GUNICORN_TIMEOUT
+    GUNICORN_TIMEOUT_SET=1
     prompt_value "Gunicorn backlog" "$GUNICORN_BACKLOG" GUNICORN_BACKLOG
     CAPACITY_SETTINGS_FINALIZED=1
   fi
@@ -4628,6 +4651,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     --gunicorn-timeout)
       GUNICORN_TIMEOUT="${2:?missing gunicorn timeout}"
+      GUNICORN_TIMEOUT_SET=1
       shift 2
       ;;
     --gunicorn-graceful-timeout)
@@ -4931,6 +4955,7 @@ else
   DISABLE_TRUSTED_HOSTS="$NORMALIZED_YES_NO"
   finalize_trusted_hosts
 fi
+apply_comfyui_dev_gunicorn_timeout_floor
 
 RUN_ROOT="${RUN_ROOT:-/tmp/hackme_web_dev_${RUN_ID}_$$}"
 if runtime_maintenance_action_requested; then

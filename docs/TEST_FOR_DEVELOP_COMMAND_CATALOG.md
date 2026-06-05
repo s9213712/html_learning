@@ -95,7 +95,7 @@ and intentionally excludes git metadata.
 | `--server-runner RUNNER` | `flask` or `gunicorn`. Default: `gunicorn`. |
 | `--gunicorn-workers N` | Worker count. `auto` uses capacity report/probe when available. |
 | `--gunicorn-threads N` | Threads per worker. `auto` uses capacity report/probe when available. |
-| `--gunicorn-timeout N` | Worker timeout seconds. Default: `20`. |
+| `--gunicorn-timeout N` | Worker timeout seconds. Default: `20`; dev-ready ComfyUI/HF startup uses a `900` second floor unless this option or `HACKME_DEV_GUNICORN_TIMEOUT` is set. |
 | `--gunicorn-graceful-timeout N` | Graceful shutdown timeout seconds. |
 | `--gunicorn-keep-alive N` | Keep-alive timeout seconds. |
 | `--gunicorn-backlog N` | Listen backlog. Default: `64`. |
