@@ -27,7 +27,8 @@ PROFILE_ACCENTS = {"default", "ocean", "sunrise", "forest", "mono", "violet", "r
 PROFILE_DENSITIES = {"comfortable", "compact"}
 PROFILE_BANNERS = {"none", "aurora", "neon_grid", "paper", "night_sky", "terminal"}
 PROFILE_AVATAR_FRAMES = {"none", "soft_ring", "neon", "pixel", "botanical", "crown"}
-PROFILE_AVATAR_SIZE_STEPS = {str(value) for value in range(100, 225, 5)}
+PROFILE_AVATAR_SHAPES = {"circle", "rounded", "squircle", "square"}
+PROFILE_AVATAR_SIZE_STEPS = {str(value) for value in range(100, 505, 5)}
 PROFILE_AVATAR_SIZES = {"large", "xl", "hero", *PROFILE_AVATAR_SIZE_STEPS}
 PROFILE_NAME_FONTS = {"system", "rounded", "serif", "mono", "display"}
 PROFILE_NAME_SIZES = {"normal", "large", "hero"}
@@ -37,6 +38,7 @@ PROFILE_BACKGROUND_TONES = {"soft", "standard", "bold"}
 PROFILE_STYLE_DEFAULTS = {
     "banner": "none",
     "avatar_frame": "soft_ring",
+    "avatar_shape": "circle",
     "avatar_size": "140",
     "name_font": "system",
     "name_size": "large",
@@ -87,6 +89,7 @@ def ensure_user_profile_schema(conn):
             profile_density TEXT NOT NULL DEFAULT 'comfortable',
             profile_style_json TEXT NOT NULL DEFAULT '{}',
             public_account_fields_json TEXT NOT NULL DEFAULT '[]',
+            profile_public_info_json TEXT NOT NULL DEFAULT '[]',
             appearance_json TEXT NOT NULL DEFAULT '{}',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
@@ -112,6 +115,8 @@ def ensure_user_profile_schema(conn):
         conn.execute("ALTER TABLE user_profiles ADD COLUMN profile_style_json TEXT NOT NULL DEFAULT '{}'")
     if "public_account_fields_json" not in columns:
         conn.execute("ALTER TABLE user_profiles ADD COLUMN public_account_fields_json TEXT NOT NULL DEFAULT '[]'")
+    if "profile_public_info_json" not in columns:
+        conn.execute("ALTER TABLE user_profiles ADD COLUMN profile_public_info_json TEXT NOT NULL DEFAULT '[]'")
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_user_profiles_friend_code ON user_profiles(friend_code) WHERE friend_code IS NOT NULL AND friend_code<>''")
 
 
@@ -156,6 +161,7 @@ def sanitize_profile_style(data):
     return {
         "banner": _choice(data.get("banner"), PROFILE_BANNERS, PROFILE_STYLE_DEFAULTS["banner"]),
         "avatar_frame": _choice(data.get("avatar_frame"), PROFILE_AVATAR_FRAMES, PROFILE_STYLE_DEFAULTS["avatar_frame"]),
+        "avatar_shape": _choice(data.get("avatar_shape"), PROFILE_AVATAR_SHAPES, PROFILE_STYLE_DEFAULTS["avatar_shape"]),
         "avatar_size": _choice(data.get("avatar_size"), PROFILE_AVATAR_SIZES, PROFILE_STYLE_DEFAULTS["avatar_size"]),
         "name_font": _choice(data.get("name_font"), PROFILE_NAME_FONTS, PROFILE_STYLE_DEFAULTS["name_font"]),
         "name_size": _choice(data.get("name_size"), PROFILE_NAME_SIZES, PROFILE_STYLE_DEFAULTS["name_size"]),
@@ -196,6 +202,32 @@ def sanitize_public_account_fields(value):
 
 def public_account_fields_for_payload(profile):
     return sanitize_public_account_fields((profile or {}).get("public_account_fields_json") or [])
+
+
+def sanitize_profile_public_info(value):
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except Exception:
+            value = []
+    if not isinstance(value, (list, tuple)):
+        return []
+    out = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        label = _clean(item.get("label"), 80)
+        text = _clean(item.get("value"), 500)
+        if not label or not text:
+            continue
+        out.append({"label": label, "value": text})
+        if len(out) >= 20:
+            break
+    return out
+
+
+def public_profile_info_for_payload(profile):
+    return sanitize_profile_public_info((profile or {}).get("profile_public_info_json") or [])
 
 
 def _profile_style_from_update(profile, data):
@@ -395,9 +427,10 @@ def get_or_create_profile(conn, user_id):
             user_id, display_name, bio, signature, location, website,
             friend_code, friend_code_rotated_at, profile_visibility,
             display_timezone, profile_template, profile_accent, profile_density,
-            profile_style_json, appearance_json, created_at, updated_at
+            profile_style_json, public_account_fields_json, profile_public_info_json,
+            appearance_json, created_at, updated_at
         )
-        VALUES (?, '', '', '', '', '', ?, ?, 'public', 'auto', 'classic', 'default', 'comfortable', ?, '{}', ?, ?)
+        VALUES (?, '', '', '', '', '', ?, ?, 'public', 'auto', 'classic', 'default', 'comfortable', ?, '[]', '[]', '{}', ?, ?)
         """,
         (
             int(user_id),
@@ -429,6 +462,9 @@ def update_profile(conn, *, actor, data):
         "public_account_fields": sanitize_public_account_fields(
             data.get("public_account_fields", profile.get("public_account_fields_json") or [])
         ),
+        "profile_public_info": sanitize_profile_public_info(
+            data.get("profile_public_info", profile.get("profile_public_info_json") or [])
+        ),
     }
     if updates["website"] and not (updates["website"].startswith("https://") or updates["website"].startswith("http://")):
         return None, "website 必須以 http:// 或 https:// 開頭"
@@ -440,7 +476,8 @@ def update_profile(conn, *, actor, data):
         UPDATE user_profiles
         SET display_name=?, bio=?, signature=?, location=?, website=?,
             profile_visibility=?, display_timezone=?, profile_template=?,
-            profile_accent=?, profile_density=?, profile_style_json=?, public_account_fields_json=?, updated_at=?
+            profile_accent=?, profile_density=?, profile_style_json=?,
+            public_account_fields_json=?, profile_public_info_json=?, updated_at=?
         WHERE user_id=?
         """,
         (
@@ -456,6 +493,7 @@ def update_profile(conn, *, actor, data):
             updates["profile_density"],
             json.dumps(updates["profile_style"], ensure_ascii=False, sort_keys=True),
             json.dumps(updates["public_account_fields"], ensure_ascii=False),
+            json.dumps(updates["profile_public_info"], ensure_ascii=False),
             updates["updated_at"],
             int(actor["id"]),
         ),
@@ -477,7 +515,7 @@ def get_public_profile(conn, *, username, viewer=None):
                p.friend_code, p.friend_code_rotated_at,
                p.custom_title, p.custom_title_status, p.profile_visibility,
                p.profile_template, p.profile_accent, p.profile_density,
-               p.profile_style_json,
+               p.profile_style_json, p.profile_public_info_json,
                p.updated_at AS profile_updated_at
         FROM users u
         LEFT JOIN user_profiles p ON p.user_id=u.id
@@ -492,6 +530,7 @@ def get_public_profile(conn, *, username, viewer=None):
     data["profile_accent"] = _profile_accent(data.get("profile_accent"))
     data["profile_density"] = _profile_density(data.get("profile_density"))
     data["profile_style"] = _profile_style_from_row(data)
+    data["profile_public_info"] = public_profile_info_for_payload(data)
     visibility = data.get("profile_visibility") or "public"
     is_owner = viewer and int(viewer.get("id") or -1) == int(data["id"])
     is_member = bool(viewer)
@@ -500,16 +539,19 @@ def get_public_profile(conn, *, username, viewer=None):
         data["signature"] = ""
         data["location"] = ""
         data["website"] = ""
+        data["profile_public_info"] = []
     if visibility == "members" and not is_member:
         data["bio"] = ""
         data["signature"] = ""
         data["location"] = ""
         data["website"] = ""
+        data["profile_public_info"] = []
     if visibility == "friends" and not is_owner:
         data["bio"] = ""
         data["signature"] = ""
         data["location"] = ""
         data["website"] = ""
+        data["profile_public_info"] = []
     if not is_owner:
         data.pop("friend_code", None)
         data.pop("friend_code_rotated_at", None)

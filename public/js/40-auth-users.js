@@ -316,8 +316,7 @@ const USER_APPEARANCE_THEME_PALETTES = {
 };
 let editingUserOriginalAppearance = {};
 let userAppearanceResetPending = false;
-const AVATAR_CROPPER_MIN_ZOOM = 0.5;
-const AVATAR_CROPPER_MAX_ZOOM = 6;
+const AVATAR_CROPPER_DEFAULT_ZOOM = 1;
 const avatarCropState = {
   bound: false,
   objectUrl: "",
@@ -349,6 +348,11 @@ function avatarCropperElements() {
 
 function clampAvatarValue(value, min, max) {
   return Math.max(min, Math.min(max, value));
+}
+
+function normalizeAvatarCropZoom(value) {
+  const numeric = Number.parseFloat(String(value ?? ""));
+  return Number.isFinite(numeric) && numeric > 0 ? numeric : AVATAR_CROPPER_DEFAULT_ZOOM;
 }
 
 function avatarCroppedUploadFilename(sourceName = "") {
@@ -474,20 +478,9 @@ function avatarCropStageMetrics() {
   };
 }
 
-function avatarCropMinimumZoom(metrics) {
-  if (!metrics || !avatarCropState.naturalWidth || !avatarCropState.naturalHeight || !avatarCropState.baseScale) {
-    return AVATAR_CROPPER_MIN_ZOOM;
-  }
-  const minScale = Math.max(
-    metrics.cropSize / avatarCropState.naturalWidth,
-    metrics.cropSize / avatarCropState.naturalHeight
-  );
-  return clampAvatarValue(minScale / avatarCropState.baseScale, AVATAR_CROPPER_MIN_ZOOM, 1);
-}
-
 function clampAvatarCropOffsets(metrics = avatarCropStageMetrics()) {
   if (!metrics || !avatarCropState.hasImage) return;
-  const scale = avatarCropState.baseScale * avatarCropState.zoom;
+  const scale = avatarCropState.baseScale * normalizeAvatarCropZoom(avatarCropState.zoom);
   const imageWidth = avatarCropState.naturalWidth * scale;
   const imageHeight = avatarCropState.naturalHeight * scale;
   const maxX = Math.max(0, (imageWidth - metrics.cropSize) / 2);
@@ -501,7 +494,7 @@ function syncAvatarCropPayloadFromVisual() {
   if (!metrics || !avatarCropState.hasImage || !avatarCropState.naturalWidth || !avatarCropState.naturalHeight) {
     return currentAvatarCropPayloadFromFields();
   }
-  const scale = avatarCropState.baseScale * avatarCropState.zoom;
+  const scale = avatarCropState.baseScale * normalizeAvatarCropZoom(avatarCropState.zoom);
   const imageWidth = avatarCropState.naturalWidth * scale;
   const imageHeight = avatarCropState.naturalHeight * scale;
   const imageLeft = (metrics.width / 2 + avatarCropState.offsetX) - imageWidth / 2;
@@ -525,16 +518,10 @@ function renderAvatarCropper() {
     metrics.width / avatarCropState.naturalWidth,
     metrics.height / avatarCropState.naturalHeight
   );
-  const minZoom = avatarCropMinimumZoom(metrics);
-  if (els.zoom) {
-    els.zoom.min = minZoom.toFixed(2);
-  }
-  avatarCropState.zoom = clampAvatarValue(Number(avatarCropState.zoom) || 1, minZoom, AVATAR_CROPPER_MAX_ZOOM);
-  if (els.zoom && Number(els.zoom.value || 1) < minZoom) {
-    els.zoom.value = minZoom.toFixed(2);
-  }
+  avatarCropState.zoom = normalizeAvatarCropZoom(avatarCropState.zoom);
+  if (els.zoom) els.zoom.value = String(avatarCropState.zoom);
   clampAvatarCropOffsets(metrics);
-  const scale = avatarCropState.baseScale * avatarCropState.zoom;
+  const scale = avatarCropState.baseScale * normalizeAvatarCropZoom(avatarCropState.zoom);
   const imageWidth = avatarCropState.naturalWidth * scale;
   const imageHeight = avatarCropState.naturalHeight * scale;
   els.image.style.width = `${imageWidth}px`;
@@ -631,11 +618,7 @@ function bindAvatarCropperUi() {
   }
   if (els.zoom) {
     els.zoom.addEventListener("input", () => {
-      avatarCropState.zoom = clampAvatarValue(
-        parseFloat(els.zoom.value || "1") || 1,
-        avatarCropMinimumZoom(avatarCropStageMetrics()),
-        AVATAR_CROPPER_MAX_ZOOM
-      );
+      avatarCropState.zoom = normalizeAvatarCropZoom(els.zoom.value);
       renderAvatarCropper();
     });
   }

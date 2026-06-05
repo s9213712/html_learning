@@ -454,7 +454,7 @@ def register_system_admin_settings_routes(app, ctx):
         if "comfyui_diffusers_model_repo" in data:
             repo_id = normalize_huggingface_repo_id(data.get("comfyui_diffusers_model_repo"), allow_blank=True)
             if repo_id is None:
-                return json_resp({"ok":False,"msg":"comfyui_diffusers_model_repo 必須是 Hugging Face repo id 或模型頁網址，例如 dhead/waiIllustriousSDXL_v150"}), 400
+                return json_resp({"ok":False,"msg":"comfyui_diffusers_model_repo 必須是 Hugging Face repo id 或模型頁網址，例如 dhead/waiIllustriousSDXL_v150 或 Heartsync/NSFW-Uncensored；不要填 .safetensors / .gguf 權重檔名"}), 400
             data["comfyui_diffusers_model_repo"] = repo_id
         if "comfyui_huggingface_cache_root" in data:
             raw_cache_root = str(data.get("comfyui_huggingface_cache_root") or "").strip()

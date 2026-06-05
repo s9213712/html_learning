@@ -5256,7 +5256,7 @@
       align-items: center;
       padding: 1.25rem 0 1.35rem;
       border-bottom: 1px solid rgba(255,255,255,.08);
-      overflow: hidden;
+      overflow: visible;
     }
 
     .profile-summary.profile-template-creator,
@@ -5404,15 +5404,15 @@
     .profile-avatar-large {
       position: relative;
       z-index: 1;
-      --profile-avatar-custom-size: clamp(76px, 55vw, min(90vw, 230px));
+      --profile-avatar-custom-size: var(--profile-avatar-size, 140px);
       width: var(--profile-avatar-custom-size);
       height: var(--profile-avatar-custom-size);
       inline-size: var(--profile-avatar-custom-size);
       block-size: var(--profile-avatar-custom-size);
-      min-inline-size: 76px;
-      max-inline-size: min(90vw, 260px);
-      min-block-size: 76px;
-      max-block-size: min(90vw, 260px);
+      min-inline-size: var(--profile-avatar-custom-size);
+      max-inline-size: none;
+      min-block-size: var(--profile-avatar-custom-size);
+      max-block-size: none;
       flex: 0 0 var(--profile-avatar-custom-size);
       border-radius: 50%;
       display: grid;
@@ -5427,11 +5427,11 @@
     }
 
     .profile-avatar-large.profile-avatar-size-xl {
-      --profile-avatar-custom-size: clamp(96px, 60vw, min(90vw, 230px));
+      --profile-avatar-custom-size: 180px;
     }
 
     .profile-avatar-large.profile-avatar-size-hero {
-      --profile-avatar-custom-size: clamp(112px, 72vw, min(90vw, 230px));
+      --profile-avatar-custom-size: 220px;
     }
 
     .profile-avatar-large.profile-avatar-frame-soft_ring {
@@ -5459,17 +5459,32 @@
       box-shadow: 0 -7px 0 -3px rgba(250, 204, 21, .85), 0 0 0 4px rgba(250, 204, 21, .14);
     }
 
+    .profile-avatar-large.profile-avatar-shape-circle {
+      border-radius: 50% !important;
+    }
+
+    .profile-avatar-large.profile-avatar-shape-rounded {
+      border-radius: 24% !important;
+    }
+
+    .profile-avatar-large.profile-avatar-shape-squircle {
+      border-radius: 34% !important;
+    }
+
+    .profile-avatar-large.profile-avatar-shape-square {
+      border-radius: 8px !important;
+    }
+
     .profile-summary.profile-template-compact .profile-avatar-large {
-      --profile-avatar-compact-max: min(52vw, 160px);
-      width: min(var(--profile-avatar-custom-size), var(--profile-avatar-compact-max));
-      height: min(var(--profile-avatar-custom-size), var(--profile-avatar-compact-max));
-      inline-size: min(var(--profile-avatar-custom-size), var(--profile-avatar-compact-max));
-      block-size: min(var(--profile-avatar-custom-size), var(--profile-avatar-compact-max));
-      min-inline-size: 72px;
-      max-inline-size: var(--profile-avatar-compact-max);
-      min-block-size: 72px;
-      max-block-size: var(--profile-avatar-compact-max);
-      flex-basis: min(var(--profile-avatar-custom-size), var(--profile-avatar-compact-max));
+      width: var(--profile-avatar-custom-size);
+      height: var(--profile-avatar-custom-size);
+      inline-size: var(--profile-avatar-custom-size);
+      block-size: var(--profile-avatar-custom-size);
+      min-inline-size: var(--profile-avatar-custom-size);
+      max-inline-size: none;
+      min-block-size: var(--profile-avatar-custom-size);
+      max-block-size: none;
+      flex-basis: var(--profile-avatar-custom-size);
     }
 
     .profile-avatar-upload-button {
@@ -7794,6 +7809,22 @@
       box-shadow: 0 0 0 999px rgba(0,0,0,.44);
       outline: 1px solid rgba(255,255,255,.75);
       pointer-events: none;
+    }
+
+    .avatar-crop-box.avatar-crop-shape-circle {
+      border-radius: 50%;
+    }
+
+    .avatar-crop-box.avatar-crop-shape-rounded {
+      border-radius: 24%;
+    }
+
+    .avatar-crop-box.avatar-crop-shape-squircle {
+      border-radius: 34%;
+    }
+
+    .avatar-crop-box.avatar-crop-shape-square {
+      border-radius: 8px;
     }
 
     .avatar-crop-box span {
@@ -13720,6 +13751,40 @@
   font-weight: 700;
 }
 
+.profile-public-info-editor-list {
+  display: grid;
+  gap: .55rem;
+  min-width: 0;
+}
+
+.profile-public-info-editor-row {
+  display: grid;
+  grid-template-columns: minmax(8rem, .42fr) minmax(12rem, 1fr) auto;
+  gap: .55rem;
+  align-items: end;
+  min-width: 0;
+}
+
+.profile-public-info-editor-row .field {
+  min-width: 0;
+}
+
+.profile-public-info-editor-row .btn {
+  min-height: 2.45rem;
+  white-space: nowrap;
+}
+
+@media (max-width: 640px) {
+  .profile-public-info-editor-row {
+    grid-template-columns: minmax(0, 1fr);
+    align-items: stretch;
+  }
+
+  .profile-public-info-editor-row .btn {
+    justify-self: flex-start;
+  }
+}
+
 /* 20260531 mobile account management compact controls */
 @media (max-width: 640px) {
   #module-users,
@@ -14223,12 +14288,13 @@
   }
 
   #profile-home-avatar {
-    width: 5.5rem !important;
-    height: 5.5rem !important;
-    min-width: 5.5rem !important;
-    min-height: 5.5rem !important;
-    max-width: 5.5rem !important;
-    max-height: 5.5rem !important;
+    --profile-avatar-custom-size: var(--profile-avatar-size, 140px);
+    width: var(--profile-avatar-custom-size) !important;
+    height: var(--profile-avatar-custom-size) !important;
+    min-width: var(--profile-avatar-custom-size) !important;
+    min-height: var(--profile-avatar-custom-size) !important;
+    max-width: var(--profile-avatar-custom-size) !important;
+    max-height: var(--profile-avatar-custom-size) !important;
   }
 
   .global-modal-close-row {
@@ -14840,22 +14906,24 @@
   grid-template-columns: minmax(120px, max-content) minmax(0, 1fr) !important;
   align-items: center !important;
   column-gap: clamp(1rem, 3vw, 2.4rem) !important;
+  overflow: visible !important;
 }
 
 #profile-pane-home #profile-home-avatar.profile-avatar-large {
-  width: var(--profile-avatar-custom-size, 140px) !important;
-  height: var(--profile-avatar-custom-size, 140px) !important;
-  inline-size: var(--profile-avatar-custom-size, 140px) !important;
-  block-size: var(--profile-avatar-custom-size, 140px) !important;
-  min-width: var(--profile-avatar-custom-size, 140px) !important;
-  min-height: var(--profile-avatar-custom-size, 140px) !important;
-  min-inline-size: var(--profile-avatar-custom-size, 140px) !important;
-  min-block-size: var(--profile-avatar-custom-size, 140px) !important;
-  max-width: var(--profile-avatar-custom-size, 140px) !important;
-  max-height: var(--profile-avatar-custom-size, 140px) !important;
-  max-inline-size: var(--profile-avatar-custom-size, 140px) !important;
-  max-block-size: var(--profile-avatar-custom-size, 140px) !important;
-  flex-basis: var(--profile-avatar-custom-size, 140px) !important;
+  --profile-avatar-custom-size: var(--profile-avatar-size, 140px);
+  width: var(--profile-avatar-custom-size) !important;
+  height: var(--profile-avatar-custom-size) !important;
+  inline-size: var(--profile-avatar-custom-size) !important;
+  block-size: var(--profile-avatar-custom-size) !important;
+  min-width: var(--profile-avatar-custom-size) !important;
+  min-height: var(--profile-avatar-custom-size) !important;
+  min-inline-size: var(--profile-avatar-custom-size) !important;
+  min-block-size: var(--profile-avatar-custom-size) !important;
+  max-width: var(--profile-avatar-custom-size) !important;
+  max-height: var(--profile-avatar-custom-size) !important;
+  max-inline-size: var(--profile-avatar-custom-size) !important;
+  max-block-size: var(--profile-avatar-custom-size) !important;
+  flex-basis: var(--profile-avatar-custom-size) !important;
 }
 
 #profile-pane-home #profile-home-avatar.profile-avatar-large .user-avatar-img,
@@ -14896,22 +14964,24 @@
   grid-template-columns: minmax(120px, max-content) minmax(0, 1fr) !important;
   align-items: center !important;
   column-gap: clamp(1rem, 3vw, 2.4rem) !important;
+  overflow: visible !important;
 }
 
 #profile-pane-home #profile-home-avatar.profile-avatar-large {
-  width: var(--profile-avatar-custom-size, 140px) !important;
-  height: var(--profile-avatar-custom-size, 140px) !important;
-  inline-size: var(--profile-avatar-custom-size, 140px) !important;
-  block-size: var(--profile-avatar-custom-size, 140px) !important;
-  min-width: var(--profile-avatar-custom-size, 140px) !important;
-  min-height: var(--profile-avatar-custom-size, 140px) !important;
-  min-inline-size: var(--profile-avatar-custom-size, 140px) !important;
-  min-block-size: var(--profile-avatar-custom-size, 140px) !important;
-  max-width: var(--profile-avatar-custom-size, 140px) !important;
-  max-height: var(--profile-avatar-custom-size, 140px) !important;
-  max-inline-size: var(--profile-avatar-custom-size, 140px) !important;
-  max-block-size: var(--profile-avatar-custom-size, 140px) !important;
-  flex-basis: var(--profile-avatar-custom-size, 140px) !important;
+  --profile-avatar-custom-size: var(--profile-avatar-size, 140px);
+  width: var(--profile-avatar-custom-size) !important;
+  height: var(--profile-avatar-custom-size) !important;
+  inline-size: var(--profile-avatar-custom-size) !important;
+  block-size: var(--profile-avatar-custom-size) !important;
+  min-width: var(--profile-avatar-custom-size) !important;
+  min-height: var(--profile-avatar-custom-size) !important;
+  min-inline-size: var(--profile-avatar-custom-size) !important;
+  min-block-size: var(--profile-avatar-custom-size) !important;
+  max-width: var(--profile-avatar-custom-size) !important;
+  max-height: var(--profile-avatar-custom-size) !important;
+  max-inline-size: var(--profile-avatar-custom-size) !important;
+  max-block-size: var(--profile-avatar-custom-size) !important;
+  flex-basis: var(--profile-avatar-custom-size) !important;
 }
 
 #profile-pane-home #profile-home-avatar.profile-avatar-large .user-avatar-img,

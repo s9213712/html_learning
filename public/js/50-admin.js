@@ -33,6 +33,34 @@ const DEFAULT_CLOUD_DRIVE_TRANSFER_LIMITS = {
 };
 
 const DEFAULT_COMFYUI_REMOTE_API_URL = "http://192.168.18.19:8188";
+const ADMIN_HF_MODEL_FILE_EXT_RE = /\.(?:safetensors|ckpt|pt|pth|bin|gguf)$/i;
+
+function normalizeAdminHuggingFaceRepoInput(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const withScheme = raw.startsWith("http://") || raw.startsWith("https://") ? raw : (/^huggingface\.co\//i.test(raw) ? `https://${raw}` : "");
+  if (withScheme) {
+    try {
+      const parsed = new URL(withScheme);
+      const host = String(parsed.hostname || "").toLowerCase();
+      if (host === "huggingface.co" || host === "www.huggingface.co") {
+        const parts = parsed.pathname.split("/").filter(Boolean);
+        const tail = parts[parts.length - 1] || "";
+        if (ADMIN_HF_MODEL_FILE_EXT_RE.test(tail)) return "";
+        return parts.length >= 2 ? `${parts[0]}/${parts[1]}` : "";
+      }
+    } catch (_) {}
+  }
+  const normalized = raw.replace(/^\/+|\/+$/g, "");
+  const tail = normalized.replace(/\\/g, "/").split("/").pop() || "";
+  if (ADMIN_HF_MODEL_FILE_EXT_RE.test(tail)) return "";
+  const parts = normalized.split("/");
+  if (parts.length !== 2 || !parts[0] || !parts[1]) return "";
+  return /^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$/.test(parts[0])
+    && /^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$/.test(parts[1])
+    ? normalized
+    : "";
+}
 
 let suppressNextSettingsStatusClear = false;
 let currentServerMode = "dev_ready";
@@ -2248,7 +2276,7 @@ function updateComfyuiConnectionModeFields() {
   const status = $("comfyui-test-connection-status");
   if (status && !status.dataset.userTouched) {
     status.textContent = settingsFamily === "hf"
-      ? "HF 頁籤會檢查 Hugging Face repo 與 Python / Diffusers 套件；只有勾選主程序資源風險確認後才允許直接推論，切換到這裡不會停用 ComfyUI / GGUF 設定。"
+      ? "HF 頁籤會檢查 Hugging Face repo 與 Python / Diffusers 套件；只有勾選主程序資源風險確認後才允許直接推論，切換到這裡不會停用 ComfyUI 設定。"
       : (mode === "local"
         ? "本地模式會測試本地 API；若產圖時 API 未啟動，後端會嘗試執行啟動腳本。"
         : "ComfyUI / GGUF 遠端模式只負責呼叫指定 API 生圖；Civitai API Key 仍可保存，但模型下載只能用於本站本地 ComfyUI 或由遠端主機自行安裝。");
@@ -2569,7 +2597,7 @@ async function loadSettings() {
   if ($("s-comfyui-local-cache-lru")) $("s-comfyui-local-cache-lru").value = Number(s.comfyui_local_cache_lru || 0);
   if ($("s-comfyui-local-reserve-vram-gb")) $("s-comfyui-local-reserve-vram-gb").value = s.comfyui_local_reserve_vram_gb || "";
   if ($("s-comfyui-civitai-api-key")) $("s-comfyui-civitai-api-key").value = s.comfyui_civitai_api_key || "";
-  if ($("s-comfyui-diffusers-model-repo")) $("s-comfyui-diffusers-model-repo").value = s.comfyui_diffusers_model_repo || "";
+  if ($("s-comfyui-diffusers-model-repo")) $("s-comfyui-diffusers-model-repo").value = normalizeAdminHuggingFaceRepoInput(s.comfyui_diffusers_model_repo || "");
   if ($("s-comfyui-huggingface-api-token")) $("s-comfyui-huggingface-api-token").value = "";
   if ($("s-comfyui-huggingface-api-token-clear")) $("s-comfyui-huggingface-api-token-clear").checked = false;
   if ($("s-comfyui-huggingface-cache-root")) $("s-comfyui-huggingface-cache-root").value = s.comfyui_huggingface_cache_root || "";
@@ -4868,7 +4896,7 @@ async function saveSettings() {
     comfyui_local_cache_lru: parseInt($("s-comfyui-local-cache-lru")?.value || "0", 10) || 0,
     comfyui_local_reserve_vram_gb: ($("s-comfyui-local-reserve-vram-gb")?.value || "").trim(),
     comfyui_civitai_api_key: ($("s-comfyui-civitai-api-key")?.value || "").trim(),
-    comfyui_diffusers_model_repo: ($("s-comfyui-diffusers-model-repo")?.value || "").trim(),
+    comfyui_diffusers_model_repo: normalizeAdminHuggingFaceRepoInput($("s-comfyui-diffusers-model-repo")?.value || ""),
     comfyui_huggingface_api_token: ($("s-comfyui-huggingface-api-token")?.value || "").trim(),
     comfyui_huggingface_api_token_clear: !!$("s-comfyui-huggingface-api-token-clear")?.checked,
     comfyui_huggingface_cache_root: ($("s-comfyui-huggingface-cache-root")?.value || "").trim(),

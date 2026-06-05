@@ -175,7 +175,7 @@ def _parse_comfyui_endpoint(data):
             allow_blank=True,
         )
         if not repo_id:
-            return None, None, "Diffusers 模式請先填 Hugging Face model repo，例如 dhead/waiIllustriousSDXL_v150"
+            return None, None, "Diffusers 模式請先填 Hugging Face model repo，例如 dhead/waiIllustriousSDXL_v150 或 Heartsync/NSFW-Uncensored"
         url = diffusers_backend_url(repo_id)
         return url, {"mode": "diffusers", "model_repo": repo_id}, None
     if mode == "remote":

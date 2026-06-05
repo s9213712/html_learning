@@ -81,6 +81,7 @@ const COMFYUI_LORA_EXTRA_PRICE = 1;
 const COMFYUI_VAE_BUILTIN = "__checkpoint_builtin__";
 const COMFYUI_VIEW_STORAGE_KEY = "hackme_web.comfyui.active_view";
 const COMFYUI_IMAGE_ASSET_KEYS = ["source", "mask", "control"];
+const COMFYUI_HF_MODEL_FILE_EXT_RE = /\.(?:safetensors|ckpt|pt|pth|bin|gguf)$/i;
 const COMFYUI_CONTROLNET_TIPS = {
   canny: "適合保留邊緣與輪廓，常用於重畫原圖構圖。",
   depth: "適合保留場景深度與立體關係。",
@@ -554,6 +555,7 @@ function inferComfyuiGenerationMode() {
   if (templateMode) return templateMode;
   const explicit = comfyuiExplicitSpecialMode();
   if (explicit) return explicit;
+  if (comfyuiDiffusersTextOnlyMode()) return "txt2img";
   if (comfyuiHasInputAsset("source")) {
     if (comfyuiHasInputAsset("mask")) return "inpaint";
     if (String($("comfyui-upscale-model")?.value || "").trim()) return "upscale";
@@ -579,6 +581,10 @@ function isComfyuiDiffusersMode(mode = null) {
   return comfyuiEffectiveConnectionMode(mode) === "diffusers";
 }
 
+function comfyuiCurrentDiffusersRepoInput() {
+  return normalizeComfyuiHuggingFaceRepoInput($("comfyui-diffusers-model-repo")?.value || "");
+}
+
 function normalizeComfyuiHuggingFaceRepoInput(value) {
   const raw = String(value || "").trim();
   if (!raw) return "";
@@ -589,11 +595,52 @@ function normalizeComfyuiHuggingFaceRepoInput(value) {
       const host = String(parsed.hostname || "").toLowerCase();
       if (host === "huggingface.co" || host === "www.huggingface.co") {
         const parts = parsed.pathname.split("/").filter(Boolean);
+        const tail = parts[parts.length - 1] || "";
+        if (COMFYUI_HF_MODEL_FILE_EXT_RE.test(tail)) return "";
         if (parts.length >= 2) return `${parts[0]}/${parts[1]}`;
       }
     } catch (_err) {}
   }
-  return raw.replace(/^\/+|\/+$/g, "");
+  const normalized = raw.replace(/^\/+|\/+$/g, "");
+  const tail = normalized.replace(/\\/g, "/").split("/").pop() || "";
+  if (COMFYUI_HF_MODEL_FILE_EXT_RE.test(tail)) return "";
+  return normalized;
+}
+
+function isComfyuiHuggingFaceRepoLike(value) {
+  const repo = normalizeComfyuiHuggingFaceRepoInput(value);
+  if (!repo) return false;
+  const parts = repo.split("/");
+  if (parts.length !== 2 || !parts[0] || !parts[1]) return false;
+  return /^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$/.test(parts[0])
+    && /^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$/.test(parts[1]);
+}
+
+function comfyuiHuggingFaceRepoInputLooksLikeModelFile(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return false;
+  const tail = raw.replace(/[?#].*$/, "").replace(/\\/g, "/").split("/").pop() || "";
+  return COMFYUI_HF_MODEL_FILE_EXT_RE.test(tail);
+}
+
+function sanitizeComfyuiDiffusersRepoField({ strict = false, quiet = true } = {}) {
+  const input = $("comfyui-diffusers-model-repo");
+  if (!input) return "";
+  const raw = String(input.value || "").trim();
+  if (!raw) return "";
+  const repo = normalizeComfyuiHuggingFaceRepoInput(raw);
+  if (repo && isComfyuiHuggingFaceRepoLike(repo)) {
+    if (input.value !== repo) input.value = repo;
+    return repo;
+  }
+  if (strict || comfyuiHuggingFaceRepoInputLooksLikeModelFile(raw)) {
+    input.value = "";
+    clearComfyuiDiffusersInspection();
+    if (!quiet) {
+      setComfyuiMessage("Hugging Face Repo 請填 namespace/model 或模型頁網址，不要填 .safetensors / .gguf 權重檔名。", false);
+    }
+  }
+  return "";
 }
 
 function comfyuiDiffusersVariantLabel(option) {
@@ -610,6 +657,66 @@ function comfyuiSelectedDiffusersVariantOption() {
     ? comfyuiDiffusersInspection.data.variant_options
     : [];
   return options.find((option) => String(option?.value || option?.variant || "") === selected) || null;
+}
+
+function comfyuiDiffusersInspectionMatchesCurrentRepo() {
+  const inspection = comfyuiDiffusersInspection;
+  if (!inspection || inspection.loading || inspection.error || !inspection.data) return false;
+  const currentRepo = comfyuiCurrentDiffusersRepoInput();
+  if (!currentRepo) return false;
+  return String(inspection.repo || inspection.data?.repo_id || "").trim() === currentRepo
+    || String(inspection.data?.repo_id || "").trim() === currentRepo;
+}
+
+function comfyuiDiffusersInspectionSupportedModes() {
+  if (!comfyuiDiffusersInspectionMatchesCurrentRepo()) return [];
+  return Array.isArray(comfyuiDiffusersInspection?.data?.supported_modes)
+    ? comfyuiDiffusersInspection.data.supported_modes.map((mode) => normalizeComfyuiGenerationModeAlias(mode)).filter(Boolean)
+    : [];
+}
+
+function comfyuiDiffusersTextOnlyMode() {
+  if (!isComfyuiDiffusersMode()) return false;
+  const modes = comfyuiDiffusersInspectionSupportedModes();
+  return modes.length > 0 && modes.every((mode) => mode === "txt2img");
+}
+
+function resetComfyuiInputAssetState(key) {
+  const asset = comfyuiAssetState(key);
+  revokeComfyuiAssetPreview(asset);
+  comfyuiInputAssets[key] = { file: null, imageRef: null, previewUrl: "", filename: "", cloudFileId: "" };
+  const meta = COMFYUI_INPUT_ASSET_META[key];
+  const fileInput = meta?.fileInputId ? $(meta.fileInputId) : null;
+  if (fileInput) fileInput.value = "";
+  renderComfyuiInputAsset(key);
+}
+
+function clearComfyuiDiffusersImageAssetsForTextOnly() {
+  if (!comfyuiDiffusersTextOnlyMode()) return false;
+  let changed = false;
+  ["source", "mask", "control"].forEach((key) => {
+    const asset = comfyuiAssetState(key);
+    if (asset.file || asset.imageRef || asset.previewUrl || asset.filename || asset.cloudFileId) {
+      resetComfyuiInputAssetState(key);
+      changed = true;
+    }
+  });
+  const controlCheckbox = $("comfyui-controlnet-enabled");
+  if (controlCheckbox?.checked) {
+    controlCheckbox.checked = false;
+    changed = true;
+  }
+  const field = $("comfyui-generation-mode");
+  if (field && field.value !== "txt2img") {
+    field.value = "txt2img";
+    changed = true;
+  }
+  return changed;
+}
+
+function comfyuiCanUseInputAssetForCurrentMode(key) {
+  if (!["source", "mask", "control"].includes(String(key || ""))) return true;
+  return !comfyuiDiffusersTextOnlyMode();
 }
 
 function comfyuiSelectedGgufProfile() {
@@ -786,7 +893,7 @@ function updateComfyuiDiffusersGgufOptions() {
   const panel = $("comfyui-diffusers-gguf-options");
   const input = $("comfyui-diffusers-gguf-base-repo");
   const profile = comfyuiSelectedGgufProfile();
-  if (panel) panel.style.display = isComfyuiDiffusersMode() ? "" : "none";
+  if (panel) panel.style.display = "none";
   if (!profile && input) input.value = "";
   if (profile && input && !input.value) {
     input.value = profile.base_repo || "";
@@ -802,7 +909,7 @@ function renderComfyuiDiffusersInspection() {
   variantSelect.disabled = true;
   if (!inspection) {
     updateComfyuiDiffusersGgufOptions();
-    if (status) status.textContent = "貼上 repo 後會先檢查支援模式與可下載精度版本。";
+    if (status) status.textContent = "貼上 Hugging Face repo id 後會先檢查支援模式與可下載精度版本；.safetensors 是權重檔名，不是 repo。";
     return;
   }
   if (inspection.loading) {
@@ -816,9 +923,10 @@ function renderComfyuiDiffusersInspection() {
     return;
   }
   const data = inspection.data || {};
+  const textOnly = comfyuiDiffusersTextOnlyMode();
+  if (textOnly) clearComfyuiDiffusersImageAssetsForTextOnly();
   const allOptions = Array.isArray(data.variant_options) ? data.variant_options : [];
   const options = allOptions.filter((option) => option?.kind !== "gguf");
-  const hasGguf = allOptions.some((option) => option?.kind === "gguf");
   const warnings = Array.isArray(data.warnings) ? data.warnings.filter(Boolean) : [];
   const modeText = data.supported_for_mode ? `支援 ${data.requested_mode || comfyuiGenerationMode()}` : `不支援 ${data.requested_mode || comfyuiGenerationMode()}`;
   if (options.length > 1) {
@@ -835,9 +943,10 @@ function renderComfyuiDiffusersInspection() {
   if (status) {
     const pipeline = data.pipeline_tag ? ` · pipeline=${data.pipeline_tag}` : "";
     const variantNote = options.length > 1 ? " · 請選擇 Diffusers 精度版本" : "";
-    const ggufNote = hasGguf ? " · 偵測到 GGUF 檔案；若要使用本站已驗證 GGUF，請選官方 GGUF profile。" : "";
-    status.textContent = `${data.repo_id || inspection.repo || ""}：${modeText}${pipeline}${variantNote}${ggufNote}${warnings.length ? `。${warnings.join(" ")}` : ""}`;
+    const textOnlyNote = textOnly ? " · 已判斷為文字生圖，已隱藏來源圖片/遮罩卡片" : "";
+    status.textContent = `${data.repo_id || inspection.repo || ""}：${modeText}${pipeline}${variantNote}${textOnlyNote}${warnings.length ? `。${warnings.join(" ")}` : ""}`;
   }
+  updateComfyuiModeVisibility();
 }
 
 function clearComfyuiDiffusersInspection() {
@@ -874,11 +983,11 @@ function cacheComfyuiDiffusersInspection(cacheKey, data) {
 }
 
 async function inspectComfyuiDiffusersRepo({ quiet = false } = {}) {
-  const repo = normalizeComfyuiHuggingFaceRepoInput($("comfyui-diffusers-model-repo")?.value || "");
+  const repo = sanitizeComfyuiDiffusersRepoField({ strict: true, quiet });
   const mode = comfyuiGenerationMode();
   if (!repo) {
     clearComfyuiDiffusersInspection();
-    if (!quiet) setComfyuiMessage("請先輸入 Hugging Face repo。", false);
+    if (!quiet) setComfyuiMessage("請先輸入 Hugging Face repo id 或模型頁網址；不要填權重檔名。", false);
     return null;
   }
   const cacheKey = comfyuiDiffusersInspectCacheKey(repo, mode);
@@ -936,6 +1045,7 @@ function comfyuiModeUsesSourceImage(mode = comfyuiGenerationMode()) {
 }
 
 function comfyuiShouldShowSourceImageCard(mode = comfyuiGenerationMode()) {
+  if (comfyuiDiffusersTextOnlyMode()) return false;
   if (!isComfyuiDiffusersMode()) return true;
   return comfyuiModeUsesSourceImage(mode) || comfyuiHasInputAsset("source") || comfyuiHasInputAsset("mask");
 }
@@ -955,6 +1065,13 @@ function comfyuiModeUsesUpscale(mode = comfyuiGenerationMode()) {
 function normalizeComfyuiGenerationModeAlias(mode) {
   const normalized = String(mode || "").trim().toLowerCase();
   return {
+    txt2image: "txt2img",
+    text2img: "txt2img",
+    text2image: "txt2img",
+    "text-to-img": "txt2img",
+    "text-to-image": "txt2img",
+    image2image: "img2img",
+    "image-to-image": "img2img",
     t2a: "t2s",
     text2audio: "t2s",
     "text-to-audio": "t2s",
@@ -1106,8 +1223,8 @@ async function loadComfyuiDiffusersTokenState({ force = false } = {}) {
     const configured = !!json.settings?.comfyui_huggingface_api_token_configured;
     status.dataset.loaded = "1";
     status.textContent = configured
-      ? "目前已儲存 Hugging Face API Token；留空儲存不會變更。"
-      : "目前未儲存 Hugging Face API Token；公開模型可不填。";
+      ? "目前已儲存 Hugging Face API Token；會套用於 metadata 檢查、Diffusers snapshot、hf_transfer/Xet 加速下載與手動串流下載。"
+      : "目前未儲存 Hugging Face API Token；公開模型可不填，gated 或高流量下載建議設定。";
   } catch (err) {
     status.textContent = err.message || "Hugging Face token 狀態讀取失敗";
   }
@@ -1150,12 +1267,16 @@ async function saveComfyuiDiffusersTokenShortcut() {
   }
   if (tokenInput) tokenInput.value = "";
   if (clearInput) clearInput.checked = false;
+  const successMessage = clear
+    ? "已清除 Hugging Face API Token。"
+    : "已儲存 Hugging Face API Token，並會套用於 HF 加速下載通道。";
   if (status) {
     status.dataset.loaded = "";
-    status.textContent = clear ? "已清除 Hugging Face API Token。" : "已儲存 Hugging Face API Token。";
+    status.textContent = successMessage;
   }
-  setComfyuiMessage(clear ? "已清除 Hugging Face API Token。" : "已儲存 Hugging Face API Token。", true);
+  setComfyuiMessage(successMessage, true);
   await loadComfyuiDiffusersTokenState({ force: true });
+  if (status) status.textContent = successMessage;
 }
 
 function setComfyuiView(view, { persist = true } = {}) {
@@ -1218,6 +1339,7 @@ function bindComfyuiSubnav() {
 
 function updateComfyuiDiffusersUi() {
   const diffusers = isComfyuiDiffusersMode();
+  const textOnly = comfyuiDiffusersTextOnlyMode();
   const templateSelector = document.querySelector("#module-comfyui .comfyui-template-selector");
   const importBtn = $("comfyui-template-import-btn");
   const legacy = $("comfyui-legacy-form-panel");
@@ -1238,8 +1360,12 @@ function updateComfyuiDiffusersUi() {
   }
   if (repoField) repoField.style.display = diffusers ? "" : "none";
   if (tokenField) tokenField.style.display = diffusers ? "" : "none";
+  if (repoInput && diffusers && repoInput.value) sanitizeComfyuiDiffusersRepoField({ strict: false, quiet: true });
   if (repoInput && diffusers && !repoInput.value && modelSelect?.value) {
-    repoInput.value = modelSelect.value;
+    const candidateRepo = normalizeComfyuiHuggingFaceRepoInput(modelSelect.value);
+    if (candidateRepo && isComfyuiHuggingFaceRepoLike(candidateRepo)) {
+      repoInput.value = candidateRepo;
+    }
   }
   if (modelField) modelField.style.display = diffusers ? "none" : "";
   if (vaeField) vaeField.style.display = diffusers ? "none" : "";
@@ -1247,6 +1373,7 @@ function updateComfyuiDiffusersUi() {
   if (loraPanel) loraPanel.style.display = diffusers ? "none" : "";
   if (loraNote) loraNote.style.display = diffusers ? "none" : "";
   if (diffusers) {
+    if (textOnly) clearComfyuiDiffusersImageAssetsForTextOnly();
     const selectedMode = comfyuiGenerationModes.find((item) => item.key === comfyuiGenerationMode());
     if (selectedMode && selectedMode.available === false) {
       const firstAvailable = comfyuiGenerationModes.find((item) => item.available);
@@ -1333,6 +1460,7 @@ function updateComfyuiControlnetTip() {
 
 function updateComfyuiModeVisibility() {
   const mode = syncComfyuiGenerationMode();
+  const diffusersTextOnly = comfyuiDiffusersTextOnlyMode();
   const modeTip = $("comfyui-generation-mode-tip");
   const denoiseField = $("comfyui-denoise-field");
   const upscaleField = $("comfyui-upscale-model-field");
@@ -1346,9 +1474,9 @@ function updateComfyuiModeVisibility() {
   if (upscaleField) upscaleField.style.display = comfyuiHasInputAsset("source") || comfyuiModeUsesUpscale(mode) ? "" : "none";
   if (outpaintPanel) outpaintPanel.style.display = comfyuiModeUsesOutpaint(mode) ? "" : "none";
   if (sourceCard) sourceCard.style.display = comfyuiShouldShowSourceImageCard(mode) ? "" : "none";
-  if (maskCard) maskCard.style.display = comfyuiHasInputAsset("source") || comfyuiHasInputAsset("mask") || comfyuiModeUsesMaskImage(mode) ? "" : "none";
+  if (maskCard) maskCard.style.display = diffusersTextOnly ? "none" : (comfyuiHasInputAsset("source") || comfyuiHasInputAsset("mask") || comfyuiModeUsesMaskImage(mode) ? "" : "none");
   if (controlFields) controlFields.style.display = isComfyuiControlnetEnabled() ? "" : "none";
-  if (controlCard) controlCard.style.display = isComfyuiControlnetEnabled() ? "" : "none";
+  if (controlCard) controlCard.style.display = diffusersTextOnly ? "none" : (isComfyuiControlnetEnabled() ? "" : "none");
   updateComfyuiControlnetTip();
   updateComfyuiDiffusersUi();
 }
@@ -1405,6 +1533,13 @@ function renderComfyuiInputAsset(key) {
 }
 
 function setComfyuiInputAssetFromFile(key, file) {
+  if (!comfyuiCanUseInputAssetForCurrentMode(key)) {
+    const meta = COMFYUI_INPUT_ASSET_META[key];
+    const fileInput = meta?.fileInputId ? $(meta.fileInputId) : null;
+    if (fileInput) fileInput.value = "";
+    setComfyuiMessage("這個 HF repo 已判斷為文字生圖，不需要來源圖片或遮罩。", false);
+    return;
+  }
   const asset = comfyuiAssetState(key);
   revokeComfyuiAssetPreview(asset);
   comfyuiInputAssets[key] = {
@@ -1421,6 +1556,10 @@ function setComfyuiInputAssetFromFile(key, file) {
 }
 
 function setComfyuiInputAssetFromRef(key, imageRef, previewUrl = "", filename = "", options = {}) {
+  if (!comfyuiCanUseInputAssetForCurrentMode(key)) {
+    setComfyuiMessage("這個 HF repo 已判斷為文字生圖，不需要來源圖片或遮罩。", false);
+    return;
+  }
   const asset = comfyuiAssetState(key);
   if (!asset?.previewUrl || asset.previewUrl !== previewUrl) revokeComfyuiAssetPreview(asset);
   comfyuiInputAssets[key] = {
@@ -2436,7 +2575,12 @@ function writeComfyuiDraft() {
   COMFYUI_DRAFT_FIELD_IDS.forEach((id) => {
     const el = $(id);
     if (!el) return;
-    draft[id] = el.value;
+    if (id === "comfyui-diffusers-model-repo") {
+      const repo = normalizeComfyuiHuggingFaceRepoInput(el.value || "");
+      draft[id] = repo && isComfyuiHuggingFaceRepoLike(repo) ? repo : "";
+    } else {
+      draft[id] = el.value;
+    }
   });
   draft.selected_loras = comfyuiSelectedLoras;
   try {
@@ -2449,6 +2593,11 @@ function writeComfyuiDraft() {
 function setComfyuiFieldValue(id, value) {
   const el = $(id);
   if (!el || value === undefined || value === null) return;
+  if (id === "comfyui-diffusers-model-repo") {
+    const repo = normalizeComfyuiHuggingFaceRepoInput(value);
+    if (!repo || !isComfyuiHuggingFaceRepoLike(repo)) return;
+    value = repo;
+  }
   if (el.tagName === "SELECT") {
     const exists = Array.from(el.options || []).some((option) => option.value === String(value));
     if (!exists && String(value)) return;
@@ -2928,8 +3077,12 @@ function bindComfyuiAdvancedUi() {
       }
       clearComfyuiDiffusersInspection();
     });
-    diffusersRepoInput.addEventListener("change", () => inspectComfyuiDiffusersRepo({ quiet: true }));
-    diffusersRepoInput.addEventListener("blur", () => inspectComfyuiDiffusersRepo({ quiet: true }));
+    diffusersRepoInput.addEventListener("change", () => {
+      if (sanitizeComfyuiDiffusersRepoField({ strict: true, quiet: true })) inspectComfyuiDiffusersRepo({ quiet: true });
+    });
+    diffusersRepoInput.addEventListener("blur", () => {
+      if (sanitizeComfyuiDiffusersRepoField({ strict: true, quiet: true })) inspectComfyuiDiffusersRepo({ quiet: true });
+    });
   }
   const diffusersInspectBtn = $("comfyui-diffusers-inspect-btn");
   if (diffusersInspectBtn && diffusersInspectBtn.dataset.comfyuiBound !== "1") {
@@ -3051,6 +3204,11 @@ function bindComfyuiAdvancedUi() {
           clearComfyuiInputAsset(key);
           return;
         }
+        if (!comfyuiCanUseInputAssetForCurrentMode(key)) {
+          setComfyuiMessage("這個 HF repo 已判斷為文字生圖，不需要來源圖片或遮罩。", false);
+          fileInput.value = "";
+          return;
+        }
         if (!/^image\/(png|jpeg|webp)$/i.test(file.type || "")) {
           setComfyuiMessage("控制圖、遮罩圖與來源圖只支援 PNG、JPG、WEBP。", false);
           fileInput.value = "";
@@ -3068,6 +3226,10 @@ function bindComfyuiAdvancedUi() {
     if (pickerBtn && pickerBtn.dataset.comfyuiBound !== "1") {
       pickerBtn.dataset.comfyuiBound = "1";
       pickerBtn.addEventListener("click", () => {
+        if (!comfyuiCanUseInputAssetForCurrentMode(key)) {
+          setComfyuiMessage("這個 HF repo 已判斷為文字生圖，不需要來源圖片或遮罩。", false);
+          return;
+        }
         openComfyuiImagePicker(key).catch((err) => setComfyuiMessage(err.message || "圖片選擇器開啟失敗", false));
       });
     }
@@ -4200,22 +4362,20 @@ function applyComfyuiSeedAfterGenerate(completedSeed = null) {
 function comfyuiPayload() {
   const vae = $("comfyui-vae-select")?.value || COMFYUI_VAE_BUILTIN;
   const mode = comfyuiGenerationMode();
-  const diffusersRepo = normalizeComfyuiHuggingFaceRepoInput($("comfyui-diffusers-model-repo")?.value || "");
+  const diffusersRepo = isComfyuiDiffusersMode()
+    ? sanitizeComfyuiDiffusersRepoField({ strict: true, quiet: true })
+    : normalizeComfyuiHuggingFaceRepoInput($("comfyui-diffusers-model-repo")?.value || "");
   const diffusersVariant = $("comfyui-diffusers-model-variant")?.value || "";
   const diffusersMode = isComfyuiDiffusersMode();
-  const selectedGgufProfile = diffusersMode ? comfyuiSelectedGgufProfile() : null;
-  const selectedGgufVariant = diffusersMode ? comfyuiSelectedGgufVariant() : null;
-  const selectedGgufBaseRepo = $("comfyui-diffusers-gguf-base-repo")?.value || selectedGgufProfile?.base_repo || "";
-  const effectiveDiffusersRepo = selectedGgufProfile?.repo_id || diffusersRepo;
   const payload = {
     generation_mode: mode,
-    model: diffusersMode && effectiveDiffusersRepo ? effectiveDiffusersRepo : ($("comfyui-model-select")?.value || ""),
-    diffusers_model_repo: diffusersMode ? effectiveDiffusersRepo : "",
-    diffusers_model_variant: diffusersMode && !selectedGgufProfile ? diffusersVariant : "",
-    diffusers_gguf_file: diffusersMode && selectedGgufVariant ? (selectedGgufVariant.gguf_file || selectedGgufVariant.filename || "") : "",
-    diffusers_gguf_base_repo: diffusersMode && selectedGgufProfile ? selectedGgufBaseRepo : "",
-    diffusers_gguf_profile: diffusersMode && selectedGgufProfile ? (selectedGgufProfile.id || "") : "",
-    diffusers_gguf_variant: diffusersMode && selectedGgufVariant ? (selectedGgufVariant.id || "") : "",
+    model: diffusersMode && diffusersRepo ? diffusersRepo : ($("comfyui-model-select")?.value || ""),
+    diffusers_model_repo: diffusersMode ? diffusersRepo : "",
+    diffusers_model_variant: diffusersMode ? diffusersVariant : "",
+    diffusers_gguf_file: "",
+    diffusers_gguf_base_repo: "",
+    diffusers_gguf_profile: "",
+    diffusers_gguf_variant: "",
     prompt: $("comfyui-prompt")?.value || "",
     negative_prompt: $("comfyui-negative-prompt")?.value || "",
     width: comfyuiNumberValue("comfyui-width", comfyuiDefaultWidth),
@@ -4231,8 +4391,9 @@ function comfyuiPayload() {
     denoise_strength: comfyuiNumberValue("comfyui-denoise-strength", 0.65),
     filename_prefix: "hackme_web",
   };
-  if (comfyuiInputAssets.source?.imageRef) payload.source_image_ref = comfyuiInputAssets.source.imageRef;
-  if (comfyuiInputAssets.mask?.imageRef) payload.mask_image_ref = comfyuiInputAssets.mask.imageRef;
+  const includeImageAssets = !(diffusersMode && comfyuiDiffusersTextOnlyMode());
+  if (includeImageAssets && comfyuiInputAssets.source?.imageRef) payload.source_image_ref = comfyuiInputAssets.source.imageRef;
+  if (includeImageAssets && comfyuiInputAssets.mask?.imageRef) payload.mask_image_ref = comfyuiInputAssets.mask.imageRef;
   if (!diffusersMode && isComfyuiControlnetEnabled()) {
     payload.controlnet = {
       type: comfyuiSelectedControlnetType(),
@@ -4266,16 +4427,7 @@ function comfyuiValidatePayloadForUi(payload) {
       return "Hugging Face Diffusers 模式目前支援文字生圖、圖生圖與局部重繪；影片、語音、放大與 workflow 模板請切回 ComfyUI 後端。";
     }
     if (!String(payload?.diffusers_model_repo || payload?.model || "").trim()) {
-      return "請輸入 Hugging Face repo，例如 dhead/waiIllustriousSDXL_v150 或模型頁網址。";
-    }
-    if (String(payload?.diffusers_gguf_file || "").trim() && !String(payload?.diffusers_gguf_profile || "").trim()) {
-      return "GGUF 只允許官方已驗證 profile，請從官方 GGUF 下拉選單選擇模型與精度。";
-    }
-    if (String(payload?.diffusers_gguf_profile || "").trim()) {
-      const profile = comfyuiSelectedGgufProfile();
-      const variant = comfyuiSelectedGgufVariant();
-      if (!profile || !profile.enabled) return "請選擇已開放的官方 GGUF profile。";
-      if (!variant || !variant.enabled) return "請選擇已驗證開放的 GGUF 精度版本。";
+      return "請輸入 Hugging Face repo，例如 dhead/waiIllustriousSDXL_v150 或 Heartsync/NSFW-Uncensored；不要填權重檔名。";
     }
     const repo = normalizeComfyuiHuggingFaceRepoInput(payload.diffusers_model_repo || payload.model || "");
     if (comfyuiDiffusersInspectionMatches(repo, mode)) {
@@ -4310,7 +4462,8 @@ function comfyuiValidatePayloadForUi(payload) {
 }
 
 function comfyuiBuildGenerateRequest(payload) {
-  const useMultipart = COMFYUI_IMAGE_ASSET_KEYS.some((key) => comfyuiInputAssets[key]?.file);
+  const allowImageAssets = !(isComfyuiDiffusersMode() && comfyuiDiffusersTextOnlyMode());
+  const useMultipart = allowImageAssets && COMFYUI_IMAGE_ASSET_KEYS.some((key) => comfyuiInputAssets[key]?.file);
   if (!useMultipart) {
     return {
       headers: { "Content-Type": "application/json" },
@@ -4364,9 +4517,9 @@ function comfyuiBuildGenerateRequest(payload) {
     appendScalar("outpaint_bottom", payload.outpaint.bottom);
     appendScalar("outpaint_feathering", payload.outpaint.feathering);
   }
-  if (comfyuiInputAssets.source?.file) form.append("source_image", comfyuiInputAssets.source.file, comfyuiInputAssets.source.file.name || "source.png");
-  if (comfyuiInputAssets.mask?.file) form.append("mask_image", comfyuiInputAssets.mask.file, comfyuiInputAssets.mask.file.name || "mask.png");
-  if (comfyuiInputAssets.control?.file) form.append("control_image", comfyuiInputAssets.control.file, comfyuiInputAssets.control.file.name || "control.png");
+  if (allowImageAssets && comfyuiInputAssets.source?.file) form.append("source_image", comfyuiInputAssets.source.file, comfyuiInputAssets.source.file.name || "source.png");
+  if (allowImageAssets && comfyuiInputAssets.mask?.file) form.append("mask_image", comfyuiInputAssets.mask.file, comfyuiInputAssets.mask.file.name || "mask.png");
+  if (allowImageAssets && comfyuiInputAssets.control?.file) form.append("control_image", comfyuiInputAssets.control.file, comfyuiInputAssets.control.file.name || "control.png");
   return { headers: {}, body: form };
 }
 

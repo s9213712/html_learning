@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>hackme_web — 登入系統</title>
   <!-- Security headers via HTTP (set by server/Talisman) -->
-  <link rel="stylesheet" href="/styles.css?v=20260604-comfyui-history-thumbs" />
+  <link rel="stylesheet" href="/styles.css?v=20260605-avatar-shape-hf-repo-sanitize" />
   <link rel="stylesheet" href="/experiments.css?v=20260517-plane-view-angle" />
   <link rel="stylesheet" href="/i18n-language-switcher.css?v=20260520-deep-audit" />
 </head>
@@ -511,17 +511,27 @@
                 <option value="crown">王冠</option>
               </select>
             </label>
+            <label class="field">
+              <span>頭像形狀</span>
+              <select id="profile-edit-avatar-shape">
+                <option value="circle">圓形</option>
+                <option value="rounded">圓角方形</option>
+                <option value="squircle">超橢圓</option>
+                <option value="square">方形</option>
+              </select>
+            </label>
             <label class="field profile-avatar-size-field">
               <span class="field-label-row">
                 <span>頭像大小</span>
                 <output id="profile-edit-avatar-size-value" for="profile-edit-avatar-size">140px</output>
               </span>
-              <input type="range" id="profile-edit-avatar-size" min="100" max="220" step="5" value="140" />
+              <input type="range" id="profile-edit-avatar-size" min="100" max="500" step="5" value="140" />
               <div class="profile-avatar-size-presets" aria-label="頭像大小快速選擇">
                 <button class="btn btn-sm" type="button" data-profile-avatar-size="110">小</button>
                 <button class="btn btn-sm" type="button" data-profile-avatar-size="140">中</button>
                 <button class="btn btn-sm" type="button" data-profile-avatar-size="180">大</button>
-                <button class="btn btn-sm" type="button" data-profile-avatar-size="220">最大</button>
+                <button class="btn btn-sm" type="button" data-profile-avatar-size="220">220</button>
+                <button class="btn btn-sm" type="button" data-profile-avatar-size="500">500</button>
               </div>
               <small class="drive-card-sub">手機可拖曳或直接點大小按鈕；預覽會立刻套用到上方頭像。</small>
             </label>
@@ -656,6 +666,13 @@
             <label class="inline-check"><input type="checkbox" id="profile-public-account-real_name" /> 真實姓名</label>
             <label class="inline-check"><input type="checkbox" id="profile-public-account-birthdate" /> 生日</label>
             <label class="inline-check"><input type="checkbox" id="profile-public-account-phone" /> 電話</label>
+          </div>
+        </div>
+        <div class="drive-card profile-public-info-editor" style="margin:.75rem 0;">
+          <div class="drive-card-title">自訂公開資訊</div>
+          <div class="profile-public-info-editor-list" id="profile-public-info-editor-list"></div>
+          <div class="drive-file-actions" style="justify-content:flex-start;margin-top:.55rem;">
+            <button class="btn btn-sm" id="profile-public-info-add-btn" type="button">新增資訊</button>
           </div>
         </div>
         <div class="profile-code-row">
@@ -2243,42 +2260,23 @@
           <div class="field" id="comfyui-diffusers-repo-field" style="display:none;">
             <label>Hugging Face Repo</label>
             <div class="inline-control-row">
-              <input type="text" id="comfyui-diffusers-model-repo" placeholder="dhead/waiIllustriousSDXL_v150 或 https://huggingface.co/dhead/waiIllustriousSDXL_v150" autocomplete="off" />
+              <input type="text" id="comfyui-diffusers-model-repo" placeholder="dhead/waiIllustriousSDXL_v150 或 Heartsync/NSFW-Uncensored" autocomplete="off" />
               <button class="btn btn-sm" id="comfyui-diffusers-inspect-btn" type="button">檢查模型</button>
             </div>
             <select id="comfyui-diffusers-model-variant" disabled>
               <option value="">檢查後選擇精度版本</option>
             </select>
-            <div class="drive-card-sub" id="comfyui-diffusers-repo-status">貼上 repo 後會先檢查支援模式與可下載 Diffusers 精度版本。</div>
-            <div class="settings-option-grid" id="comfyui-diffusers-gguf-options" style="display:none;margin-top:.65rem;">
-              <div class="field">
-                <label>官方 GGUF profile</label>
-                <select id="comfyui-diffusers-gguf-profile">
-                  <option value="">不使用官方 GGUF</option>
-                </select>
-              </div>
-              <div class="field">
-                <label>GGUF 精度版本</label>
-                <select id="comfyui-diffusers-gguf-variant" disabled>
-                  <option value="">先選擇官方 GGUF profile</option>
-                </select>
-              </div>
-              <div class="field">
-                <label>GGUF base Diffusers repo</label>
-                <input type="text" id="comfyui-diffusers-gguf-base-repo" autocomplete="off" placeholder="例如 stabilityai/stable-diffusion-xl-base-1.0" />
-              </div>
-            </div>
-            <div class="drive-card-sub" id="comfyui-diffusers-gguf-profile-hint">官方 profile 會帶入對應 workflow、文字編碼器、VAE 與已驗證精度。</div>
-            <div class="drive-card-sub">HF / Diffusers 只支援 Hugging Face 模型頁「Use this model」內有 Diffusers 的 repo；GGUF 只允許官方已驗證 profile，ComfyUI 原生 GGUF workflow 可在 ComfyUI / GGUF 分頁選官方 workflow。</div>
+            <div class="drive-card-sub" id="comfyui-diffusers-repo-status">貼上 Hugging Face repo id 後會先檢查支援模式與可下載 Diffusers 精度版本；<code>.safetensors</code> 是權重檔名，不是 repo。</div>
+            <div class="drive-card-sub">HF / Diffusers 只支援 Hugging Face 模型頁「Use this model」內有 Diffusers 的 repo。</div>
           </div>
           <div class="field" id="comfyui-diffusers-token-field" style="display:none;">
-            <label>Hugging Face API Token</label>
+            <label>Hugging Face Token 快速設定</label>
             <div class="inline-control-row">
-              <input type="password" id="comfyui-diffusers-hf-token" placeholder="私有或 gated 模型才需要；留空不變更" autocomplete="off" />
+              <input type="password" id="comfyui-diffusers-hf-token" placeholder="貼上 read token；留空不變更" autocomplete="off" />
               <button class="btn btn-sm" id="comfyui-diffusers-hf-token-save-btn" type="button">儲存 token</button>
             </div>
             <label style="margin-top:.35rem;"><input type="checkbox" id="comfyui-diffusers-hf-token-clear" /> 清除已儲存的 Hugging Face API Token</label>
-            <div class="drive-card-sub" id="comfyui-diffusers-hf-token-state">root 可在此儲存 token；也可到 AI 後端設定 → HF 管理。</div>
+            <div class="drive-card-sub" id="comfyui-diffusers-hf-token-state">root 可在此快速儲存 token；會套用於 Hugging Face metadata 檢查、Diffusers snapshot、hf_transfer/Xet 加速下載與手動串流下載。</div>
           </div>
           <div class="field">
             <label>模型</label>
@@ -2856,7 +2854,7 @@
           <div class="drive-card-heading">
             <div>
               <div class="drive-card-title">AI 產圖系統設定</div>
-              <div class="drive-card-sub">ComfyUI / GGUF 與 HF 是兩組獨立設定；切換頁籤只改正在編輯的表單，不會停用另一組。</div>
+              <div class="drive-card-sub">ComfyUI 與 HF 是兩組獨立設定；切換頁籤只改正在編輯的表單，不會停用另一組。</div>
             </div>
             <button class="btn btn-primary btn-sm" type="button" data-settings-save-action>儲存 AI 設定</button>
           </div>
@@ -5460,14 +5458,14 @@
               <summary>
                 <div>
                   <div class="drive-card-title">AI 後端與模型來源</div>
-                  <div class="drive-card-sub">ComfyUI / GGUF 管理本地或遠端執行後端；HF 管理 Hugging Face 與 Diffusers 模型來源。</div>
+                  <div class="drive-card-sub">ComfyUI 管理本地或遠端執行後端；HF 管理 Hugging Face 與 Diffusers 模型來源。</div>
                 </div>
               </summary>
               <div class="drive-collapsible-body">
             <div class="field">
               <label>設定頁籤</label>
               <div class="drive-file-actions" style="justify-content:flex-start;gap:.45rem;flex-wrap:wrap;">
-                <button class="btn btn-sm comfyui-backend-family-tab active" type="button" data-comfyui-settings-family="comfyui" aria-selected="true">ComfyUI / GGUF</button>
+                <button class="btn btn-sm comfyui-backend-family-tab active" type="button" data-comfyui-settings-family="comfyui" aria-selected="true">ComfyUI</button>
                 <button class="btn btn-sm comfyui-backend-family-tab" type="button" data-comfyui-settings-family="hf" aria-selected="false">HF</button>
               </div>
               <select id="s-comfyui-connection-mode" hidden aria-hidden="true">
@@ -5475,15 +5473,15 @@
                 <option value="local">local</option>
                 <option value="diffusers">diffusers</option>
               </select>
-              <div class="drive-card-sub">兩組設定彼此獨立；切換頁籤只改變正在編輯的表單，不會停用另一組。ComfyUI / GGUF 決定本地或遠端執行後端，HF 只管理 Hugging Face / Diffusers。</div>
+              <div class="drive-card-sub">兩組設定彼此獨立；切換頁籤只改變正在編輯的表單，不會停用另一組。ComfyUI 決定本地或遠端執行後端，HF 只管理 Hugging Face / Diffusers。</div>
             </div>
             <div class="field" data-comfyui-settings-family-panel="comfyui">
-              <label>ComfyUI / GGUF 執行方式</label>
+              <label>ComfyUI 執行方式</label>
               <select id="s-comfyui-comfyui-backend-mode">
                 <option value="remote">連線遠端 ComfyUI API</option>
                 <option value="local">使用本地 ComfyUI 資料夾與啟動腳本</option>
               </select>
-              <div class="drive-card-sub">GGUF / workflow 仍由 ComfyUI 後端處理；遠端模式只呼叫 API，本地模式才會使用本站啟動腳本與本地模型下載設定。</div>
+              <div class="drive-card-sub">Workflow 仍由 ComfyUI 後端處理；遠端模式只呼叫 API，本地模式才會使用本站啟動腳本與本地模型下載設定。</div>
             </div>
             <div id="comfyui-remote-settings" data-comfyui-settings-family-panel="comfyui">
               <div class="field">
@@ -5495,14 +5493,14 @@
             <div id="comfyui-diffusers-settings" data-comfyui-settings-family-panel="hf" style="display:none;">
               <div class="field">
                 <label>HF Model Repo</label>
-                <input type="text" id="s-comfyui-diffusers-model-repo" placeholder="dhead/waiIllustriousSDXL_v150" autocomplete="off" />
-                <div class="drive-card-sub">填 Hugging Face repo id。HF / Diffusers 會用 Python 直接下載、快取並推論，不經過 ComfyUI server。</div>
+                <input type="text" id="s-comfyui-diffusers-model-repo" placeholder="dhead/waiIllustriousSDXL_v150 或 Heartsync/NSFW-Uncensored" autocomplete="off" />
+                <div class="drive-card-sub">填 Hugging Face repo id，例如 <code>dhead/waiIllustriousSDXL_v150</code> 或 <code>Heartsync/NSFW-Uncensored</code>；不要填 <code>.safetensors</code> 權重檔名。HF / Diffusers 會用 Python 直接下載、快取並推論，不經過 ComfyUI server。</div>
               </div>
               <div class="field">
                 <label>Hugging Face API Token</label>
                 <input type="password" id="s-comfyui-huggingface-api-token" placeholder="私有或 gated 模型才需要；留空代表不變更" autocomplete="off" />
                 <div class="drive-card-sub" id="comfyui-huggingface-api-token-state">尚未讀取 Hugging Face token 狀態。</div>
-                <div class="drive-card-sub">建議用 read 或 fine-grained token。也可用環境變數 <code>HF_TOKEN</code> 提供。</div>
+                <div class="drive-card-sub">建議用 read 或 fine-grained token。也可用環境變數 <code>HF_TOKEN</code> 提供；儲存後會套用於 metadata 檢查、Diffusers snapshot、hf_transfer/Xet 加速下載與手動串流下載。</div>
                 <label style="margin-top:.35rem;"><input type="checkbox" id="s-comfyui-huggingface-api-token-clear" /> 清除已儲存的 Hugging Face API Token</label>
               </div>
               <div class="field">
@@ -5547,7 +5545,7 @@
               </div>
               <div class="field">
                 <label><input type="checkbox" id="s-comfyui-allow-in-process-diffusers" /> 我接受在 Flask 主程序內載入 Diffusers 模型的 RAM / VRAM / CPU 風險</label>
-                <div class="drive-card-sub">未勾選時，Diffusers 模式只會檢查 repo；真正推論會被阻擋，建議改用 ComfyUI / GGUF 的本地或遠端後端。</div>
+                <div class="drive-card-sub">未勾選時，Diffusers 模式只會檢查 repo；真正推論會被阻擋，建議改用 ComfyUI 本地或遠端後端。</div>
               </div>
               <div class="field">
                 <label><input type="checkbox" id="s-comfyui-diffusers-low-cpu-mem-usage" /> Diffusers low_cpu_mem_usage</label>
@@ -5561,7 +5559,7 @@
                 <label><input type="checkbox" id="s-comfyui-diffusers-disable-xet" /> 停用 Hugging Face Xet 下載後端</label>
                 <div class="drive-card-sub">建議保持開啟。若 Hugging Face 傳輸後端造成進度異常或下載卡住，關閉此選項可讓 root 測試預設 HTTP 傳輸。</div>
               </div>
-              <div style="font-size:.78rem;color:var(--muted);margin:.25rem 0 .75rem;">HF / Diffusers 目前支援文字生圖、圖生圖與局部重繪；影片、語音、放大、ControlNet、GGUF 與 ComfyUI workflow 仍走 ComfyUI / GGUF 後端。</div>
+              <div style="font-size:.78rem;color:var(--muted);margin:.25rem 0 .75rem;">HF / Diffusers 目前支援文字生圖、圖生圖與局部重繪；影片、語音、放大、ControlNet 與 workflow 模板請切回 ComfyUI 後端。</div>
             </div>
             <div id="comfyui-local-settings" data-comfyui-settings-family-panel="comfyui" style="display:none;">
               <div class="field">
@@ -7200,8 +7198,15 @@
         </div>
       </div>
       <div class="avatar-cropper-tools">
+        <label for="profile-avatar-crop-shape">形狀</label>
+        <select id="profile-avatar-crop-shape" aria-label="頭像形狀">
+          <option value="circle">圓形</option>
+          <option value="rounded">圓角方形</option>
+          <option value="squircle">超橢圓</option>
+          <option value="square">方形</option>
+        </select>
         <label for="profile-avatar-crop-zoom">縮放</label>
-        <input type="range" id="profile-avatar-crop-zoom" min="0.5" max="6" step="0.01" value="1" />
+        <input type="range" id="profile-avatar-crop-zoom" min="0.1" max="10" step="0.01" value="1" />
         <button type="button" id="profile-avatar-crop-center" class="btn btn-sm">置中</button>
       </div>
       <div class="avatar-cropper-hint">不用輸入座標；拖曳圖片、調整縮放後直接上傳。</div>
@@ -7366,7 +7371,7 @@
 <script src="/js/35-drive.js?v=20260604-storage-bulk-clarity" defer></script>
   <script src="/js/35-drive-preview-share.js?v=20260507-drive-preview-share-split" defer></script>
 <!-- cache marker retained for template-import regression: /js/36-comfyui.js?v=20260509-comfyui-template-embeddings -->
-<script src="/js/36-comfyui.js?v=20260605-history-gguf-rehydrate" defer></script>
+<script src="/js/36-comfyui.js?v=20260605-hf-textonly-repo-sanitize" defer></script>
 <script src="/js/36-comfyui-workflows.js?v=20260605-history-gguf-rehydrate" defer></script>
 <script src="/js/37-bug-report.js?v=20260502-device-feature" defer></script>
 <script src="/js/41-game-modules.js?v=20260601-rubiks-visible" defer></script>
@@ -7376,7 +7381,7 @@
 <script src="/js/42-experiments.js?v=20260528-experiments-bounded-motion" defer></script>
   <script src="/js/39-videos.js?v=20260603-video-audio-native" defer></script>
 <script src="/js/40-auth-users.js?v=20260531-profile-settings-split" defer></script>
-<script src="/js/50-admin.js?v=20260604-hf-status-clean" defer></script>
+<script src="/js/50-admin.js?v=20260605-hf-repo-sanitize" defer></script>
 <script src="/js/51-admin-server-mode-launch-check.js?v=20260526-server-mode-prelaunch" defer></script>
 <script src="/js/52-admin-trading.js?v=20260601-admin-trading-module" defer></script>
 <script src="/js/53-admin-storage-economy.js?v=20260602-transmission-test-status" defer></script>
@@ -7385,7 +7390,7 @@
 <script src="/js/56-trading.js?v=20260525-usdt-market-labels" defer></script>
 <script src="/js/56-trading-bots.js?v=20260601-trading-bot-module" defer></script>
 <script src="/js/57-platform-centers.js?v=20260524-trading-status-split" defer></script>
-<script src="/js/58-profile-friends.js?v=20260531-avatar-visible" defer></script>
+<script src="/js/58-profile-friends.js?v=20260605-avatar-shape-crop" defer></script>
 <script src="/js/90-bootstrap.js?v=20260602-transmission-test" defer></script>
 </body>
 </html>

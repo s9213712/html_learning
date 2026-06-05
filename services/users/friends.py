@@ -5,6 +5,7 @@ from services.system.notifications import create_notification, notifications_ena
 from services.users.profiles import (
     ensure_user_profile_schema,
     get_or_create_profile,
+    public_profile_info_for_payload,
     profile_style_for_payload,
     public_account_fields_for_payload,
 )
@@ -490,7 +491,8 @@ def get_profile_payload(conn, *, target_user_id, viewer=None):
         "signature": profile.get("signature") or "",
         "location": profile.get("location") or "",
         "website": profile.get("website") or "",
-    } if show_private else {"bio": "", "signature": "", "location": "", "website": ""}
+        "profile_public_info": public_profile_info_for_payload(profile),
+    } if show_private else {"bio": "", "signature": "", "location": "", "website": "", "profile_public_info": []}
     blocked_state = relation["status"] in {"blocked", "blocked_by_them"}
     can_interact = relation["status"] == "accepted" or privileged
     if blocked_state and not privileged:

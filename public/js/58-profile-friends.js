@@ -8,8 +8,11 @@ let profileFriendsLoaded = false;
 let profileQuickCustomizeOpen = false;
 let profileAppearancePreviewTimer = 0;
 const targetOptionCache = new Map();
-const PROFILE_AVATAR_CROPPER_MIN_ZOOM = 0.5;
-const PROFILE_AVATAR_CROPPER_MAX_ZOOM = 6;
+const PROFILE_AVATAR_DEFAULT_ZOOM = 1;
+const PROFILE_AVATAR_MIN_ZOOM = 0.1;
+const PROFILE_AVATAR_MAX_ZOOM = 10;
+const PROFILE_AVATAR_MAX_DISPLAY_SIZE = 500;
+const PROFILE_AVATAR_MIN_DISPLAY_SIZE = 100;
 const PROFILE_TEMPLATE_KEYS = ["classic", "creator", "compact", "showcase", "gallery", "neon"];
 const PROFILE_ACCENT_KEYS = ["default", "ocean", "sunrise", "forest", "mono", "violet", "ruby"];
 const PROFILE_DENSITY_KEYS = ["comfortable", "compact"];
@@ -17,6 +20,7 @@ const PROFILE_STYLE_FIELD_MAP = {
   "profile-edit-banner": "banner",
   "profile-edit-background-tone": "background_tone",
   "profile-edit-avatar-frame": "avatar_frame",
+  "profile-edit-avatar-shape": "avatar_shape",
   "profile-edit-avatar-size": "avatar_size",
   "profile-edit-name-font": "name_font",
   "profile-edit-name-size": "name_size",
@@ -27,6 +31,7 @@ const PROFILE_STYLE_DEFAULTS = {
   banner: "none",
   background_tone: "standard",
   avatar_frame: "soft_ring",
+  avatar_shape: "circle",
   avatar_size: "140",
   name_font: "system",
   name_size: "large",
@@ -37,7 +42,8 @@ const PROFILE_STYLE_ALLOWED = {
   banner: ["none", "aurora", "neon_grid", "paper", "night_sky", "terminal"],
   background_tone: ["soft", "standard", "bold"],
   avatar_frame: ["none", "soft_ring", "neon", "pixel", "botanical", "crown"],
-  avatar_size: ["100", "105", "110", "115", "120", "125", "130", "135", "140", "145", "150", "155", "160", "165", "170", "175", "180", "185", "190", "195", "200", "205", "210", "215", "220", "large", "xl", "hero"],
+  avatar_shape: ["circle", "rounded", "squircle", "square"],
+  avatar_size: [...Array.from({ length: 81 }, (_, index) => String(100 + index * 5)), "large", "xl", "hero"],
   name_font: ["system", "rounded", "serif", "mono", "display"],
   name_size: ["normal", "large", "hero"],
   sticker: ["none", "sparkles", "star", "heart", "music", "game", "code", "crown"],
@@ -59,6 +65,7 @@ const PROFILE_PUBLIC_ACCOUNT_FIELD_LABELS = {
   birthdate: "生日",
   phone: "電話",
 };
+const PROFILE_PUBLIC_INFO_MAX_ITEMS = 20;
 let profileAvatarCloudFiles = [];
 let profileAvatarCloudFilesLoadedAt = 0;
 const profileAvatarCropState = {
@@ -125,6 +132,7 @@ function profileAvatarCropperElements() {
     stage: $("profile-avatar-crop-stage"),
     image: $("profile-avatar-crop-image"),
     box: $("profile-avatar-crop-box"),
+    shape: $("profile-avatar-crop-shape"),
     zoom: $("profile-avatar-crop-zoom"),
     center: $("profile-avatar-crop-center"),
     file: $("profile-avatar-file"),
@@ -137,6 +145,35 @@ function profileAvatarCropperElements() {
 
 function profileAvatarClamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
+}
+
+function normalizeProfileAvatarZoom(value) {
+  const numeric = Number.parseFloat(String(value ?? ""));
+  const safe = Number.isFinite(numeric) ? numeric : PROFILE_AVATAR_DEFAULT_ZOOM;
+  return profileAvatarClamp(safe, PROFILE_AVATAR_MIN_ZOOM, PROFILE_AVATAR_MAX_ZOOM);
+}
+
+function currentProfileAvatarShape() {
+  return profileChoice(
+    $("profile-avatar-crop-shape")?.value || $("profile-edit-avatar-shape")?.value,
+    PROFILE_STYLE_ALLOWED.avatar_shape,
+    PROFILE_STYLE_DEFAULTS.avatar_shape
+  );
+}
+
+function syncProfileAvatarShapeControls(shape = currentProfileAvatarShape(), { preview = true } = {}) {
+  const normalized = profileChoice(shape, PROFILE_STYLE_ALLOWED.avatar_shape, PROFILE_STYLE_DEFAULTS.avatar_shape);
+  const editShape = $("profile-edit-avatar-shape");
+  const cropShape = $("profile-avatar-crop-shape");
+  if (editShape && editShape.value !== normalized) editShape.value = normalized;
+  if (cropShape && cropShape.value !== normalized) cropShape.value = normalized;
+  const { box } = profileAvatarCropperElements();
+  if (box) {
+    box.classList.remove(...PROFILE_STYLE_ALLOWED.avatar_shape.map((key) => `avatar-crop-shape-${key}`));
+    box.classList.add(`avatar-crop-shape-${normalized}`);
+  }
+  if (preview) previewProfileAppearanceFromForm();
+  return normalized;
 }
 
 function setProfileAvatarCropHidden(crop = {}) {
@@ -178,6 +215,7 @@ function resetProfileAvatarCropper({ keepFile = false } = {}) {
   }
   if (els.stage) els.stage.classList.remove("is-dragging");
   if (els.zoom) els.zoom.value = "1";
+  syncProfileAvatarShapeControls(currentProfileAvatarShape(), { preview: false });
   setProfileAvatarCropHidden();
 }
 
@@ -202,20 +240,9 @@ function profileAvatarStageMetrics() {
   };
 }
 
-function profileAvatarMinimumZoom(metrics) {
-  if (!metrics || !profileAvatarCropState.naturalWidth || !profileAvatarCropState.naturalHeight || !profileAvatarCropState.baseScale) {
-    return PROFILE_AVATAR_CROPPER_MIN_ZOOM;
-  }
-  const minScale = Math.max(
-    metrics.cropSize / profileAvatarCropState.naturalWidth,
-    metrics.cropSize / profileAvatarCropState.naturalHeight
-  );
-  return profileAvatarClamp(minScale / profileAvatarCropState.baseScale, PROFILE_AVATAR_CROPPER_MIN_ZOOM, 1);
-}
-
 function clampProfileAvatarOffsets(metrics = profileAvatarStageMetrics()) {
   if (!metrics || !profileAvatarCropState.hasImage) return;
-  const scale = profileAvatarCropState.baseScale * profileAvatarCropState.zoom;
+  const scale = profileAvatarCropState.baseScale * normalizeProfileAvatarZoom(profileAvatarCropState.zoom);
   const imageWidth = profileAvatarCropState.naturalWidth * scale;
   const imageHeight = profileAvatarCropState.naturalHeight * scale;
   const maxX = Math.max(0, (imageWidth - metrics.cropSize) / 2);
@@ -234,7 +261,7 @@ function currentProfileAvatarCropPayload() {
       height: parseInt($("profile-avatar-crop-height")?.value || "0", 10) || 0,
     };
   }
-  const scale = profileAvatarCropState.baseScale * profileAvatarCropState.zoom;
+  const scale = profileAvatarCropState.baseScale * normalizeProfileAvatarZoom(profileAvatarCropState.zoom);
   const imageWidth = profileAvatarCropState.naturalWidth * scale;
   const imageHeight = profileAvatarCropState.naturalHeight * scale;
   const imageLeft = (metrics.width / 2 + profileAvatarCropState.offsetX) - imageWidth / 2;
@@ -258,16 +285,10 @@ function renderProfileAvatarCropper() {
     metrics.width / profileAvatarCropState.naturalWidth,
     metrics.height / profileAvatarCropState.naturalHeight
   );
-  const minZoom = profileAvatarMinimumZoom(metrics);
-  if (els.zoom) {
-    els.zoom.min = minZoom.toFixed(2);
-  }
-  profileAvatarCropState.zoom = profileAvatarClamp(Number(profileAvatarCropState.zoom) || 1, minZoom, PROFILE_AVATAR_CROPPER_MAX_ZOOM);
-  if (els.zoom && Number(els.zoom.value || 1) < minZoom) {
-    els.zoom.value = minZoom.toFixed(2);
-  }
+  profileAvatarCropState.zoom = normalizeProfileAvatarZoom(profileAvatarCropState.zoom);
+  if (els.zoom) els.zoom.value = String(profileAvatarCropState.zoom);
   clampProfileAvatarOffsets(metrics);
-  const scale = profileAvatarCropState.baseScale * profileAvatarCropState.zoom;
+  const scale = profileAvatarCropState.baseScale * normalizeProfileAvatarZoom(profileAvatarCropState.zoom);
   const imageWidth = profileAvatarCropState.naturalWidth * scale;
   const imageHeight = profileAvatarCropState.naturalHeight * scale;
   els.image.style.width = `${imageWidth}px`;
@@ -278,6 +299,7 @@ function renderProfileAvatarCropper() {
   els.box.style.height = `${metrics.cropSize}px`;
   els.box.style.left = `${metrics.cropLeft}px`;
   els.box.style.top = `${metrics.cropTop}px`;
+  syncProfileAvatarShapeControls(currentProfileAvatarShape(), { preview: false });
   currentProfileAvatarCropPayload();
 }
 
@@ -513,6 +535,7 @@ function openProfileAvatarUploader({ pickFile = false } = {}) {
   const els = profileAvatarCropperElements();
   if (!els.overlay) return;
   resetProfileAvatarCropper();
+  syncProfileAvatarShapeControls($("profile-edit-avatar-shape")?.value || currentProfileAvatarShape(), { preview: false });
   profileAvatarSetMsg("");
   els.overlay.classList.add("show");
   els.overlay.setAttribute("aria-hidden", "false");
@@ -718,7 +741,30 @@ function profileAvatarSizeValue(value) {
   if (!legacy[raw] && numeric > 0 && numeric <= 90) {
     numeric = Math.round((numeric * 2) / 5) * 5;
   }
-  return String(Math.max(100, Math.min(220, numeric)));
+  return String(Math.max(PROFILE_AVATAR_MIN_DISPLAY_SIZE, Math.min(PROFILE_AVATAR_MAX_DISPLAY_SIZE, numeric)));
+}
+
+function applyProfileAvatarElementSize(avatar, value) {
+  if (!avatar) return "";
+  const size = profileAvatarSizeValue(value);
+  const px = `${size}px`;
+  avatar.style.setProperty("--profile-avatar-custom-size", px);
+  avatar.style.setProperty("--profile-avatar-size", px);
+  avatar.style.width = px;
+  avatar.style.height = px;
+  avatar.style.inlineSize = px;
+  avatar.style.blockSize = px;
+  avatar.style.minWidth = px;
+  avatar.style.minHeight = px;
+  avatar.style.minInlineSize = px;
+  avatar.style.minBlockSize = px;
+  avatar.style.maxWidth = px;
+  avatar.style.maxHeight = px;
+  avatar.style.maxInlineSize = px;
+  avatar.style.maxBlockSize = px;
+  avatar.style.flexBasis = px;
+  avatar.dataset.avatarSize = size;
+  return size;
 }
 
 function updateProfileAvatarSizeControl(value) {
@@ -768,6 +814,8 @@ function draftProfileFromAppearanceForm() {
 function previewProfileAppearanceFromForm() {
   if (!currentProfileIsViewingSelf) return;
   const draft = draftProfileFromAppearanceForm();
+  syncProfileAvatarShapeControls(draft.profile_style?.avatar_shape, { preview: false });
+  if (profileAvatarCropState.hasImage) renderProfileAvatarCropper();
   renderProfileHome(draft);
   const quick = $("profile-quick-customize-card");
   if (quick) quick.open = true;
@@ -776,7 +824,7 @@ function previewProfileAppearanceFromForm() {
   if (signal) {
     const style = draft.profile_style || {};
     signal.hidden = false;
-    signal.textContent = `預覽中：頭像 ${profileAvatarSizeValue(style.avatar_size)}px · ${draft.profile_template || "classic"} · ${draft.profile_accent || "default"} · ${style.banner || "none"}`;
+    signal.textContent = `預覽中：頭像 ${profileAvatarSizeValue(style.avatar_size)}px · ${style.avatar_shape || "circle"} · ${draft.profile_template || "classic"} · ${draft.profile_accent || "default"} · ${style.banner || "none"}`;
   }
   const summary = $("profile-pane-home")?.querySelector(".profile-summary");
   if (summary) {
@@ -858,17 +906,12 @@ function applyProfilePresentation(profile) {
   if (avatar) {
     avatar.classList.remove(
       ...PROFILE_STYLE_ALLOWED.avatar_frame.map((key) => `profile-avatar-frame-${key}`),
+      ...PROFILE_STYLE_ALLOWED.avatar_shape.map((key) => `profile-avatar-shape-${key}`),
       ...PROFILE_STYLE_ALLOWED.avatar_size.map((key) => `profile-avatar-size-${key}`)
     );
     const size = profileAvatarSizeValue(style.avatar_size);
-    avatar.classList.add(`profile-avatar-frame-${style.avatar_frame}`);
-    avatar.dataset.avatarSize = size;
-    avatar.style.setProperty("--profile-avatar-custom-size", `${size}px`);
-    avatar.style.setProperty("--profile-avatar-size", `${size}px`);
-    avatar.style.width = `${size}px`;
-    avatar.style.height = `${size}px`;
-    avatar.style.minWidth = `${size}px`;
-    avatar.style.minHeight = `${size}px`;
+    avatar.classList.add(`profile-avatar-frame-${style.avatar_frame}`, `profile-avatar-shape-${style.avatar_shape}`);
+    applyProfileAvatarElementSize(avatar, size);
   }
   const name = $("profile-home-name");
   if (name) {
@@ -943,7 +986,7 @@ function renderProfileHomePublicAccountFields(profile) {
   const fields = profile?.public_account_fields && typeof profile.public_account_fields === "object"
     ? profile.public_account_fields
     : {};
-  const rows = PROFILE_PUBLIC_ACCOUNT_FIELDS
+  const accountRows = PROFILE_PUBLIC_ACCOUNT_FIELDS
     .filter((key) => String(fields[key] || "").trim())
     .map((key) => `
       <div class="profile-public-info-item">
@@ -951,6 +994,14 @@ function renderProfileHomePublicAccountFields(profile) {
         <strong>${sanitize(fields[key])}</strong>
       </div>
     `);
+  const customRows = normalizedProfilePublicInfo(profile?.profile_public_info)
+    .map((item) => `
+      <div class="profile-public-info-item">
+        <span class="drive-card-sub">${sanitize(item.label)}</span>
+        <strong>${sanitize(item.value)}</strong>
+      </div>
+    `);
+  const rows = [...accountRows, ...customRows];
   host.innerHTML = rows.length ? rows.join("") : "";
   host.style.display = rows.length ? "" : "none";
 }
@@ -965,6 +1016,57 @@ function setProfilePublicAccountFields(keys) {
     const el = $(`profile-public-account-${key}`);
     if (el) el.checked = selected.has(key);
   });
+}
+
+function normalizedProfilePublicInfo(items) {
+  const rows = Array.isArray(items) ? items : [];
+  return rows
+    .map((item) => ({
+      label: String(item?.label || "").trim().slice(0, 80),
+      value: String(item?.value || "").trim().slice(0, 500),
+    }))
+    .filter((item) => item.label && item.value)
+    .slice(0, PROFILE_PUBLIC_INFO_MAX_ITEMS);
+}
+
+function profilePublicInfoRowMarkup(item = {}, index = 0) {
+  return `
+    <div class="profile-public-info-editor-row" data-profile-public-info-row>
+      <label class="field">
+        <span>欄位</span>
+        <input type="text" data-profile-public-info-label maxlength="80" value="${sanitize(item.label || "")}" />
+      </label>
+      <label class="field">
+        <span>內容</span>
+        <input type="text" data-profile-public-info-value maxlength="500" value="${sanitize(item.value || "")}" />
+      </label>
+      <button class="btn btn-sm" type="button" data-profile-public-info-remove="${index}">刪除</button>
+    </div>
+  `;
+}
+
+function renderProfilePublicInfoEditor(items = []) {
+  const host = $("profile-public-info-editor-list");
+  if (!host) return;
+  const rows = normalizedProfilePublicInfo(items);
+  host.innerHTML = rows.map((item, index) => profilePublicInfoRowMarkup(item, index)).join("");
+}
+
+function addProfilePublicInfoEditorRow(item = {}) {
+  const host = $("profile-public-info-editor-list");
+  if (!host) return;
+  const count = host.querySelectorAll("[data-profile-public-info-row]").length;
+  if (count >= PROFILE_PUBLIC_INFO_MAX_ITEMS) return;
+  host.insertAdjacentHTML("beforeend", profilePublicInfoRowMarkup(item, count));
+}
+
+function profilePublicInfoFromForm() {
+  return normalizedProfilePublicInfo(
+    Array.from(document.querySelectorAll("[data-profile-public-info-row]")).map((row) => ({
+      label: row.querySelector("[data-profile-public-info-label]")?.value || "",
+      value: row.querySelector("[data-profile-public-info-value]")?.value || "",
+    }))
+  );
 }
 
 function fillProfileEdit(profile) {
@@ -983,6 +1085,7 @@ function fillProfileEdit(profile) {
     "profile-edit-banner": style.banner,
     "profile-edit-background-tone": style.background_tone,
     "profile-edit-avatar-frame": style.avatar_frame,
+    "profile-edit-avatar-shape": style.avatar_shape,
     "profile-edit-avatar-size": profileAvatarSizeValue(style.avatar_size),
     "profile-edit-name-font": style.name_font,
     "profile-edit-name-size": style.name_size,
@@ -999,6 +1102,7 @@ function fillProfileEdit(profile) {
     setUserDisplayTimezone(profile?.display_timezone || "auto");
   }
   setProfilePublicAccountFields(profile?.profile_public_account_fields || []);
+  renderProfilePublicInfoEditor(profile?.profile_public_info || []);
 }
 
 async function loadMyProfile({ quiet = false } = {}) {
@@ -1047,6 +1151,7 @@ async function saveMyProfile() {
     profile_density: $("profile-edit-density")?.value || "comfortable",
     profile_style: collectProfileStyleFromForm(),
     public_account_fields: profilePublicAccountFieldsFromForm(),
+    profile_public_info: profilePublicInfoFromForm(),
   };
   try {
     const json = await profileReadJson(API + "/users/me/profile", {
@@ -1483,11 +1588,13 @@ function bindProfileAvatarUploaderControls() {
   }
   if (els.zoom) {
     els.zoom.addEventListener("input", () => {
-      profileAvatarCropState.zoom = profileAvatarClamp(
-        parseFloat(els.zoom.value || "1") || 1,
-        profileAvatarMinimumZoom(profileAvatarStageMetrics()),
-        PROFILE_AVATAR_CROPPER_MAX_ZOOM
-      );
+      profileAvatarCropState.zoom = normalizeProfileAvatarZoom(els.zoom.value);
+      renderProfileAvatarCropper();
+    });
+  }
+  if (els.shape) {
+    els.shape.addEventListener("change", () => {
+      syncProfileAvatarShapeControls(els.shape.value, { preview: true });
       renderProfileAvatarCropper();
     });
   }
@@ -1537,6 +1644,21 @@ function bindProfileFriendsControls() {
     quickCustomize.addEventListener("toggle", () => {
       profileQuickCustomizeOpen = quickCustomize.open && currentProfileIsViewingSelf;
       if (typeof updateSidebarActiveState === "function") updateSidebarActiveState();
+    });
+  }
+  const publicInfoAdd = $("profile-public-info-add-btn");
+  if (publicInfoAdd) {
+    publicInfoAdd.addEventListener("click", () => {
+      addProfilePublicInfoEditorRow();
+    });
+  }
+  const publicInfoList = $("profile-public-info-editor-list");
+  if (publicInfoList) {
+    publicInfoList.addEventListener("click", (event) => {
+      const remove = event.target?.closest?.("[data-profile-public-info-remove]");
+      if (!remove) return;
+      event.preventDefault();
+      remove.closest("[data-profile-public-info-row]")?.remove();
     });
   }
   [
@@ -1699,8 +1821,8 @@ function bindTargetUserOptionInputs() {
   });
 }
 (() => {
-  const MIN_PROFILE_AVATAR_SIZE = 100;
-  const MAX_PROFILE_AVATAR_SIZE = 220;
+  const MIN_PROFILE_AVATAR_SIZE = PROFILE_AVATAR_MIN_DISPLAY_SIZE;
+  const MAX_PROFILE_AVATAR_SIZE = PROFILE_AVATAR_MAX_DISPLAY_SIZE;
   const DEFAULT_PROFILE_AVATAR_SIZE = 140;
 
   function profileAvatarSizeInput() {
@@ -1758,12 +1880,7 @@ function bindTargetUserOptionInputs() {
     setProfileAvatarSizeOutput(size);
     markProfileAvatarPreset(size);
     profileAvatarPreviewTargets().forEach((avatar) => {
-      avatar.style.setProperty("--profile-avatar-size", `${size}px`);
-      avatar.style.width = `${size}px`;
-      avatar.style.height = `${size}px`;
-      avatar.style.minWidth = `${size}px`;
-      avatar.style.minHeight = `${size}px`;
-      avatar.dataset.avatarSize = String(size);
+      applyProfileAvatarElementSize(avatar, size);
     });
     const signal = document.getElementById("profile-appearance-preview-signal");
     if (signal) {

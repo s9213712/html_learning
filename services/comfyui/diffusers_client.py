@@ -454,7 +454,7 @@ class DiffusersClient:
 
     def _ensure_configured(self, model_repo=None):
         if not str(model_repo or self.model_repo or "").strip():
-            raise ComfyUIError("Diffusers 模式尚未設定 Hugging Face model repo，例如 dhead/waiIllustriousSDXL_v150")
+            raise ComfyUIError("Diffusers 模式尚未設定 Hugging Face model repo，例如 dhead/waiIllustriousSDXL_v150 或 Heartsync/NSFW-Uncensored")
 
     def _ensure_in_process_runtime_allowed(self):
         if self.allow_in_process_runtime or _env_flag("HTML_LEARNING_ALLOW_IN_PROCESS_DIFFUSERS", default=False):

@@ -169,6 +169,7 @@ COMFYUI_DEFAULT_SETTINGS = {
 COMFYUI_SETTING_KEYS = tuple(COMFYUI_DEFAULT_SETTINGS)
 COMFYUI_HOST_RE = re.compile(r"^[A-Za-z0-9_.:-]+$")
 HUGGINGFACE_REPO_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}/[A-Za-z0-9][A-Za-z0-9._-]{0,95}$")
+HUGGINGFACE_MODEL_FILE_EXTENSIONS = {".safetensors", ".bin", ".ckpt", ".pt", ".pth", ".gguf"}
 
 
 def normalize_comfyui_connection_mode(value):
@@ -187,6 +188,9 @@ def validate_huggingface_repo_id(value, *, allow_blank=False):
     if "\\" in repo_id or repo_id.startswith(("/", ".")) or ".." in repo_id.split("/"):
         return None
     if not HUGGINGFACE_REPO_ID_RE.match(repo_id):
+        return None
+    repo_name = repo_id.rsplit("/", 1)[-1].lower()
+    if any(repo_name.endswith(ext) for ext in HUGGINGFACE_MODEL_FILE_EXTENSIONS):
         return None
     return repo_id
 

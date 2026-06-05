@@ -1518,13 +1518,13 @@ def register_comfyui_routes(app, deps):
                 allow_blank=True,
             )
             if requested_repo is None:
-                return capabilities, "Hugging Face repo 格式不合法，請填 namespace/model 或 huggingface.co 的模型頁網址。"
+                return capabilities, "Hugging Face repo 格式不合法，請填 namespace/model 或 huggingface.co 的模型頁網址；不要填 .safetensors / .gguf 權重檔名。"
             model_repo = requested_repo or str((capabilities or {}).get("model_repo") or getattr(active_client, "model_repo", "") or "").strip()
             model_repo = normalize_huggingface_repo_id(model_repo, allow_blank=True)
             if model_repo is None:
-                return capabilities, "root 預設 Hugging Face repo 格式不合法，請改填 namespace/model。"
+                return capabilities, "root 預設 Hugging Face repo 格式不合法，請改填 namespace/model；不要填 .safetensors / .gguf 權重檔名。"
             if not model_repo:
-                return capabilities, "請在生圖頁面輸入 Hugging Face repo，例如 dhead/waiIllustriousSDXL_v150。"
+                return capabilities, "請在生圖頁面輸入 Hugging Face repo，例如 dhead/waiIllustriousSDXL_v150 或 Heartsync/NSFW-Uncensored。"
             selected_gguf_file = normalize_huggingface_repo_file(params.get("diffusers_gguf_file"), allow_blank=True)
             if selected_gguf_file is None:
                 return capabilities, "GGUF 檔案路徑不合法。"
@@ -3675,7 +3675,7 @@ def register_comfyui_routes(app, deps):
             allow_blank=True,
         )
         if diffusers_model_repo is None:
-            return None, "Hugging Face repo 格式不合法，請填 namespace/model 或 huggingface.co 的模型頁網址"
+            return None, "Hugging Face repo 格式不合法，請填 namespace/model 或 huggingface.co 的模型頁網址；不要填 .safetensors / .gguf 權重檔名"
         diffusers_gguf_profile = str(data.get("diffusers_gguf_profile") or "").strip()
         diffusers_gguf_variant = str(data.get("diffusers_gguf_variant") or "").strip()
         model = str(data.get("model") or diffusers_model_repo or "").strip()

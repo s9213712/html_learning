@@ -6220,7 +6220,7 @@ def test_comfyui_frontend_is_wired():
     assert 'data-comfyui-view="hf">HF / Diffusers</button>' in index_html
     assert 'id="s-comfyui-remote-api-url"' in index_html
     assert '兩組設定彼此獨立' in index_html
-    assert 'ComfyUI / GGUF 決定本地或遠端執行後端' in index_html
+    assert 'ComfyUI 決定本地或遠端執行後端' in index_html
     assert 'id="comfyui-diffusers-settings"' in index_html
     assert 'data-comfyui-settings-family-panel="hf"' in index_html
     assert 'id="s-comfyui-diffusers-model-repo"' in index_html
@@ -6240,8 +6240,8 @@ def test_comfyui_frontend_is_wired():
     assert 'if (panel) panel.style.display = showLocalModels ? "" : "none";' in comfyui_js
     assert "if (modelsTab) modelsTab.hidden = !showLocalModels;" in comfyui_js
     assert '目前是雲端 / 遠端模式，所以這個區塊只保留說明。若要管理本站的本地 ComfyUI 模型，請先把 backend 切回本地模式。' in comfyui_js
-    assert "/js/36-comfyui.js?v=20260605-hf-gguf-profile-ui" in index_html
-    assert "/styles.css?v=20260604-comfyui-history-thumbs" in index_html
+    assert "/js/36-comfyui.js?v=20260605-hf-textonly-repo-sanitize" in index_html
+    assert "/styles.css?v=20260605-avatar-shape-hf-repo-sanitize" in index_html
     assert "width: min(420px, 100%);" in css
     assert "max-height: 320px;" in css
     assert ".comfyui-root-details" in css

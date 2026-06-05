@@ -33,6 +33,16 @@ def test_huggingface_repo_normalizer_accepts_repo_id_and_model_page_url():
     assert normalize_huggingface_repo_id("https://example.com/dhead/waiIllustriousSDXL_v150") is None
 
 
+def test_huggingface_repo_normalizer_rejects_model_file_names():
+    assert normalize_huggingface_repo_id("xxx.safetensors") is None
+    assert normalize_huggingface_repo_id("owner/model.safetensors") is None
+    assert normalize_huggingface_repo_id("owner/model.gguf") is None
+    assert (
+        normalize_huggingface_repo_id("https://huggingface.co/owner/model-repo/blob/main/model.safetensors")
+        == "owner/model-repo"
+    )
+
+
 def test_huggingface_diffusers_metadata_groups_precision_variants_by_size():
     options = build_diffusers_variant_options([
         {"rfilename": "unet/diffusion_pytorch_model.safetensors", "size": 1000},
@@ -213,6 +223,53 @@ def test_huggingface_diffusers_repo_inspection_returns_model_card_hints(monkeypa
     assert result["model_card_hints"]["dtype"] == "bfloat16"
     assert result["model_card_hints"]["dtype_kwarg"] == "dtype"
     assert result["model_card_hints"]["device_map"] == "cuda"
+
+
+def test_huggingface_diffusers_inspect_uses_saved_token_for_metadata_and_card(tmp_path, monkeypatch):
+    huggingface_service._HF_REPO_INSPECT_CACHE.clear()
+    readme = tmp_path / "README.md"
+    readme.write_text(
+        'from diffusers import DiffusionPipeline\n'
+        'pipe = DiffusionPipeline.from_pretrained("owner/tokened-model", torch_dtype=torch.float16)\n',
+        encoding="utf-8",
+    )
+    captured = {}
+
+    class FakeApi:
+        def model_info(self, repo_id, token=None, files_metadata=True):
+            captured["model_info"] = {
+                "repo_id": repo_id,
+                "token": token,
+                "files_metadata": files_metadata,
+            }
+            return types.SimpleNamespace(
+                siblings=[
+                    {"rfilename": "model_index.json"},
+                    {"rfilename": "unet/diffusion_pytorch_model.safetensors", "size": 1000},
+                ],
+                pipeline_tag="text-to-image",
+                library_name="diffusers",
+                tags=["diffusers"],
+                cardData={},
+                config={},
+            )
+
+    def fake_hf_hub_download(**kwargs):
+        captured["hf_hub_download"] = kwargs
+        return str(readme)
+
+    fake_hf = types.ModuleType("huggingface_hub")
+    fake_hf.HfApi = lambda: FakeApi()
+    fake_hf.hf_hub_download = fake_hf_hub_download
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: object() if name == "huggingface_hub" else None)
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf)
+
+    result = inspect_huggingface_diffusers_repo("owner/tokened-model", token="hf_saved_token", mode="txt2img")
+
+    assert result["ok"] is True
+    assert captured["model_info"]["token"] == "hf_saved_token"
+    assert captured["model_info"]["files_metadata"] is True
+    assert captured["hf_hub_download"]["token"] == "hf_saved_token"
 
 
 def test_diffusers_health_allows_blank_default_repo_for_generation_page_override(tmp_path, monkeypatch):
@@ -664,7 +721,7 @@ def test_diffusers_client_configures_root_huggingface_cache_env(tmp_path, monkey
 
 
 def test_diffusers_stream_huggingface_file_download_reports_bytes(tmp_path, monkeypatch):
-    client = DiffusersClient(model_repo="owner/model", storage_root=tmp_path)
+    client = DiffusersClient(model_repo="owner/model", token="hf_download_token", storage_root=tmp_path)
     events = []
     requests = []
 
@@ -699,6 +756,7 @@ def test_diffusers_stream_huggingface_file_download_reports_bytes(tmp_path, monk
 
     assert requests
     assert requests[0].full_url == "https://huggingface.co/owner/model/resolve/main/model.gguf"
+    assert requests[0].headers["Authorization"] == "Bearer hf_download_token"
     with open(path, "rb") as handle:
         assert handle.read() == b"abcdef"
     assert stats == {"cache_hit": False, "bytes_written": 6, "total_bytes": 6}
