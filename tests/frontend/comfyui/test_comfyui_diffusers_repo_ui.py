@@ -56,6 +56,8 @@ def test_diffusers_js_preflights_huggingface_repo_before_generation():
     assert "diffusers_gguf_profile" in js
     assert "fillComfyuiGgufProfiles" in js
     assert "renderComfyuiGgufProfileHint" in js
+    assert "ensureComfyuiGgufProfilesLoaded" in js
+    assert 'API + "/comfyui/installed-gguf" + comfyuiRequestQuery()' in js
     assert "function loadComfyuiDiffusersTokenState" in js
     assert "function saveComfyuiDiffusersTokenShortcut" in js
     assert 'comfyui_huggingface_api_token_clear' in js
@@ -72,8 +74,8 @@ def test_diffusers_js_preflights_huggingface_repo_before_generation():
 
 def test_diffusers_cache_busts_preflight_ui_assets():
     html = _read("public/index.html")
-    assert "/js/36-comfyui.js?v=20260605-history-gguf-token" in html
-    assert "/js/36-comfyui-workflows.js?v=20260605-history-gguf-token" in html
+    assert "/js/36-comfyui.js?v=20260605-history-gguf-rehydrate" in html
+    assert "/js/36-comfyui-workflows.js?v=20260605-history-gguf-rehydrate" in html
 
 
 
@@ -108,6 +110,7 @@ def test_hf_and_comfyui_are_separate_frontend_generation_tabs():
     assert 'HF / Diffusers 只支援 Hugging Face 模型頁' in html
     assert 'GGUF 只允許官方已驗證 profile' in html
     assert 'comfyui-diffusers-hf-token-save-btn' in html
+    assert 'updateComfyuiDiffusersGgufOptions();' in comfyui_js
 
 
 def test_comfyui_history_lists_and_reruns_workflow_runs():

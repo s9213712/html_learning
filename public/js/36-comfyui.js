@@ -39,6 +39,7 @@ let comfyuiModelFamilies = [];
 let comfyuiDiffusersInspection = null;
 let comfyuiGgufProfiles = [];
 let comfyuiInstalledGgufModels = [];
+let comfyuiGgufProfilesLoadPromise = null;
 const comfyuiDiffusersInspectCache = new Map();
 const comfyuiDiffusersInspectInflight = new Map();
 let comfyuiHistoryItems = [];
@@ -699,6 +700,31 @@ function fillComfyuiGgufVariants(profileId = "") {
   renderComfyuiGgufProfileHint();
 }
 
+async function ensureComfyuiGgufProfilesLoaded({ force = false } = {}) {
+  if (!force && Array.isArray(comfyuiGgufProfiles) && comfyuiGgufProfiles.length) return true;
+  if (!currentUser || !canAccessModule("comfyui")) return false;
+  if (!force && comfyuiGgufProfilesLoadPromise) return comfyuiGgufProfilesLoadPromise;
+  comfyuiGgufProfilesLoadPromise = (async () => {
+    await fetchCsrfToken();
+    const res = await apiFetch(API + "/comfyui/installed-gguf" + comfyuiRequestQuery(), {
+      credentials: "same-origin",
+      headers: { "X-CSRF-Token": getCsrfToken() || "" }
+    });
+    const json = await res.json().catch(() => ({}));
+    syncComfyuiPrimaryConnectionModeFromResponse(json);
+    if (!res.ok || !json.ok) throw new Error(json.msg || `GGUF profile 讀取失敗（HTTP ${res.status}）`);
+    fillComfyuiGgufProfiles(json.gguf_profiles || []);
+    comfyuiInstalledGgufModels = Array.isArray(json.installed_gguf_models) ? json.installed_gguf_models : [];
+    renderComfyuiInstalledGgufModels(comfyuiInstalledGgufModels);
+    return comfyuiGgufProfiles.length > 0;
+  })();
+  try {
+    return await comfyuiGgufProfilesLoadPromise;
+  } finally {
+    comfyuiGgufProfilesLoadPromise = null;
+  }
+}
+
 function fillComfyuiGgufProfiles(profiles = []) {
   comfyuiGgufProfiles = Array.isArray(profiles) ? profiles.filter((item) => item && item.id) : [];
   const select = $("comfyui-diffusers-gguf-profile");
@@ -1209,6 +1235,7 @@ function updateComfyuiDiffusersUi() {
     const controlCheckbox = $("comfyui-controlnet-enabled");
     if (controlCheckbox?.checked) controlCheckbox.checked = false;
   }
+  updateComfyuiDiffusersGgufOptions();
 }
 
 function fillComfyuiControlnetTypes(types = {}) {
@@ -3442,6 +3469,11 @@ async function applyComfyuiHistoryToForm(historyId) {
   const workflowPresetId = item.history_source === "workflow" ? Number(item.preset_id || 0) : 0;
   if (workflowPresetId > 0) {
     try {
+      const needsGgufProfiles = payload.gguf_profile || payload.gguf_variant || payload.diffusion_model || payload.diffusers_gguf_file
+        || (item.workflow_json && typeof item.workflow_json === "object" && item.workflow_json["4"]);
+      if (needsGgufProfiles && typeof ensureComfyuiGgufProfilesLoaded === "function") {
+        await ensureComfyuiGgufProfilesLoaded();
+      }
       if (typeof loadComfyuiWorkflowPresets === "function" && Array.isArray(comfyuiWorkflowPresets) && !comfyuiWorkflowPresets.length) {
         await loadComfyuiWorkflowPresets({ silentTemplateReload: true });
       }
