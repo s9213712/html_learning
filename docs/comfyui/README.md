@@ -6,7 +6,7 @@ Cross-feature external integration boundaries are summarized in
 [EXTERNAL_INTEGRATION_PLAYBOOK.md](../EXTERNAL_INTEGRATION_PLAYBOOK.md).
 
 - [COMFYUI_ADMIN.md](COMFYUI_ADMIN.md): root/admin-only ComfyUI and Civitai operations
-- [COMFYUI_HISTORY_RERUN_GGUF.md](COMFYUI_HISTORY_RERUN_GGUF.md): history restore/rerun ACL, workflow snapshot restore, GGUF rerun repair, and HF token shortcut QA
+- [COMFYUI_HISTORY_RERUN_GGUF.md](COMFYUI_HISTORY_RERUN_GGUF.md): history restore/rerun ACL, workflow snapshot restore, GGUF rerun repair, HF token shortcut QA, and the 2026-06-05 live `.18` validation record
 - [COMFYUI_PERFORMANCE_HARDENING.md](COMFYUI_PERFORMANCE_HARDENING.md): async generation, bounded backend timeouts, stale job handling, and small-VRAM deployment guidance
 - [COMFYUI_WORKFLOW_LAYOUT_BUILDER.md](COMFYUI_WORKFLOW_LAYOUT_BUILDER.md): user guide for custom workflow layouts, import/export, version metadata, and dependency errors
 - [COMFYUI_TEMPLATE_IMPORTER_PLAN.md](COMFYUI_TEMPLATE_IMPORTER_PLAN.md): staged design for stricter workflow import, manifest derivation, and run gates

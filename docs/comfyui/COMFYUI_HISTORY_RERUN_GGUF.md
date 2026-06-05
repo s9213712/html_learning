@@ -75,6 +75,45 @@ shortcut. It writes to the existing admin setting through
 - Non-root users use the already configured server token or public Hugging Face
   access; they cannot update the token from the frontend.
 
+
+## 2026-06-05 Live QA Record
+
+Live validation used the site frontend against remote ComfyUI
+`http://192.168.18.18:8188`. The local site runtime was isolated under
+`/tmp/hackme_comfy_front_20260605`; QA artifacts were written to
+`/tmp/hackme_comfy_front_20260605/reports/qa/`.
+
+Verified results:
+
+- `/system_stats`, `/queue`, `object_info/UnetLoaderGGUF`, and
+  `object_info/CheckpointLoaderSimple` responded from `192.168.18.18:8188`.
+- `CheckpointLoaderSimple` did not list `illustrious-q4_0.gguf`, confirming
+  the original `value_not_in_list` failure would still occur if a GGUF file
+  were submitted through `ckpt_name`.
+- A real rerun of workflow run `#4` returned HTTP 200, created workflow run
+  `#5`, and completed with one output image. The prompt sent to ComfyUI used
+  `UnetLoaderGGUF.unet_name = illustrious-q4_0.gguf`, not
+  `CheckpointLoaderSimple.ckpt_name`.
+- The completed output was `hackme_web_sdxl_gguf_00001_.png`, model
+  `illustrious-q4_0.gguf`, seed `2026060506`, size `768x768`.
+- Firefox/geckodriver frontend validation confirmed the HF / Diffusers token
+  field is visible and the HF GGUF profile controls are visible.
+- Applying history item `workflow-4` restored prompt, negative prompt, seed,
+  width, height, steps, cfg, sampler, scheduler, template id, GGUF profile
+  `calcuis_illustrious_sdxl`, and GGUF variant `q4_0`.
+- Cross-account checks confirmed a non-owner account received an empty history
+  list and `403` when posting to the owner's workflow rerun endpoint.
+- Final remote ComfyUI queue state was empty.
+
+Known limitation from that run:
+
+- The generated PNG was downloaded and verified as a nonblank 768x768 PNG, but
+  the local `view_image` helper failed because the filesystem sandbox helper
+  hit `bwrap: loopback: Failed RTM_NEWADDR`. No local vision model was
+  installed, so semantic image inspection for fine details such as cat ears,
+  bed posture, and clothing had to be recorded as not reliably inspectable in
+  that environment.
+
 ## Live QA Notes
 
 When running against a remote ComfyUI backend:
