@@ -45,6 +45,15 @@ from scripts.testing.playwright_deep_site_check import (  # noqa: E402
 SHARE_PASSWORD = "BrowserShare123!"
 
 
+def browser_dependency_error(text: str) -> bool:
+    lowered = str(text or "").lower()
+    return (
+        "error while loading shared libraries" in lowered
+        or "host system is missing dependencies" in lowered
+        or "browser executable doesn't exist" in lowered
+    )
+
+
 def attach_error_handlers(page, bucket: list[dict[str, str]], browser_name: str) -> None:
     seen: set[str] = set()
 
@@ -134,7 +143,7 @@ def publish_video_fixture(page, base_url: str, runtime_root: Path) -> dict[str, 
     video_path.parent.mkdir(parents=True, exist_ok=True)
     fixture_meta = generate_multiaudio_mkv(video_path)
     try:
-        login(page, base_url)
+        login(page, base_url, load_app=False)
         enable_required_features(page, base_url)
         switch_module(page, "videos")
         page.evaluate(
@@ -494,7 +503,17 @@ def check_shared_video_browser(browser_type, *, browser_name: str, base_url: str
         result.update({"ok": bool(ok), "media": media, "playback": playback, "master": master, "standard": standard, "fatal_errors": fatal_errors})
         return result
     except Exception as exc:
-        result.update({"ok": False, "exception": f"{type(exc).__name__}: {exc}", "traceback": traceback.format_exc()})
+        exception_text = f"{type(exc).__name__}: {exc}"
+        skipped = browser_dependency_error(exception_text)
+        result.update(
+            {
+                "ok": False,
+                "skipped": skipped,
+                "skip_reason": "browser_dependency_missing" if skipped else "",
+                "exception": exception_text,
+                "traceback": traceback.format_exc(),
+            }
+        )
         return result
     finally:
         if context is not None:
@@ -527,7 +546,7 @@ def write_outputs(runtime_root: Path, payload: dict[str, Any]) -> tuple[Path, Pa
         "",
     ]
     for item in payload.get("checks") or []:
-        mark = "PASS" if item.get("ok") else "FAIL"
+        mark = "SKIP" if item.get("skipped") else ("PASS" if item.get("ok") else "FAIL")
         media = item.get("media") or {}
         playback = (item.get("playback") or {}).get("body") or {}
         standard = item.get("standard") or {}
@@ -539,6 +558,8 @@ def write_outputs(runtime_root: Path, payload: dict[str, Any]) -> tuple[Path, Pa
         )
         if item.get("exception"):
             lines.append(f"  - exception: `{item.get('exception')}`")
+        if item.get("skipped"):
+            lines.append(f"  - skip_reason: `{item.get('skip_reason')}`")
         if item.get("fatal_errors"):
             lines.append(f"  - fatal errors: `{len(item.get('fatal_errors') or [])}`")
     md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -594,11 +615,12 @@ def main() -> int:
                         mobile=mobile,
                     )
                     payload["checks"].append(result)
-                    mark = "PASS" if result.get("ok") else "FAIL"
+                    mark = "SKIP" if result.get("skipped") else ("PASS" if result.get("ok") else "FAIL")
                     print(f"[{mark}] {name} {'mobile' if mobile else 'desktop'}", flush=True)
     finally:
         payload["finished_at"] = datetime.now(timezone.utc).isoformat()
-        payload["ok"] = bool(payload.get("checks")) and all(item.get("ok") for item in payload.get("checks", []))
+        runnable_checks = [item for item in payload.get("checks", []) if not item.get("skipped")]
+        payload["ok"] = bool(runnable_checks) and all(item.get("ok") for item in runnable_checks)
         json_path, md_path = write_outputs(runtime_root, payload)
         print(json.dumps({"ok": payload["ok"], "json": str(json_path), "md": str(md_path), "base_url": base_url}, ensure_ascii=False), flush=True)
         if server.poll() is None and not args.keep_server:

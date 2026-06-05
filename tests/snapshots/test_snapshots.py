@@ -22,6 +22,9 @@ from services.snapshots import (
 from services.security.upload_security import ensure_upload_security_schema
 
 
+ROOT = Path(__file__).resolve().parents[2]
+
+
 def _db(path):
     conn = sqlite3.connect(path, timeout=10)
     conn.row_factory = sqlite3.Row
@@ -1900,6 +1903,14 @@ def test_restart_launcher_waits_for_parent_exit_and_port_release():
     assert "close_fds=True" in code
     assert "start_new_session=True" in code
     assert "subprocess.Popen([python_exe, script_path]" in code
+
+
+def test_runtime_restart_wiring_preserves_current_bind_port():
+    server_py = (ROOT / "server.py").read_text(encoding="utf-8")
+    system_admin_py = (ROOT / "routes" / "system_admin.py").read_text(encoding="utf-8")
+
+    assert "CURRENT_SERVER_BIND_STATE = SERVER_BIND_STATE" in server_py
+    assert 'os.environ.get("HTML_LEARNING_PORT")' in system_admin_py
 
 
 def test_security_profile_api_validates_and_server_mode_lists_profiles():

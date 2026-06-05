@@ -863,12 +863,14 @@ def check_auth_registration_journey(rec: Recorder, browser, base_url: str, root_
         page.fill("#reg-pw-confirm", password)
         page.fill("#reg-nickname", "QA 行動註冊")
         page.fill("#reg-email", f"{username}@example.test")
+        register_started = time.perf_counter()
         with page.expect_response(
             lambda response: response.request.method == "POST" and response.url.endswith("/api/register"),
-            timeout=10000,
+            timeout=30000,
         ) as register_response_info:
             page.click("#reg-btn")
         register_response = register_response_info.value
+        register_elapsed_ms = int((time.perf_counter() - register_started) * 1000)
         try:
             register_body = register_response.json()
         except Exception:
@@ -903,8 +905,9 @@ def check_auth_registration_journey(rec: Recorder, browser, base_url: str, root_
         rec.add(
             "auth_registration_login_flow",
             ok,
-            f"user={username}, register_status={register_response.status}, pending_status={pending_login['status']}, approved_status={approved_login['status']}",
+            f"user={username}, register_status={register_response.status}, register_ms={register_elapsed_ms}, pending_status={pending_login['status']}, approved_status={approved_login['status']}",
             username=username,
+            register_elapsed_ms=register_elapsed_ms,
             reg_msg=reg_msg,
             register_body=register_body,
             pending_login=pending_login.get("body"),

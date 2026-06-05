@@ -58,8 +58,13 @@ def test_functional_smoke_covers_latest_trading_and_announcement_paths():
     script = (ROOT / "scripts" / "security" / "pentest" / "run_functional_smoke.sh").read_text(encoding="utf-8")
     docs = (ROOT / "docs" / "security" / "FUNCTIONAL_SMOKE.md").read_text(encoding="utf-8")
 
-    assert 'request "points chain seal blocked outside production" "POST" "/api/root/points/chain/seal" "400"' in script
-    assert '"points chain seal guidance"' in script
+    assert 'request "points admin credit smoke user disabled" "POST" "/api/admin/points/adjust" "410"' in script
+    assert '"points admin credit disabled policy"' in script
+    assert 'request "points chain seal async job" "POST" "/api/root/points/chain/seal" "202"' in script
+    assert '"points chain seal async guidance"' in script
+    assert 'request "points chain verify async job" "GET" "/api/root/points/chain/verify" "202"' in script
+    assert 'request "points economy stats async job" "GET" "/api/admin/points/economy/stats" "202"' in script
+    assert 'bool(data.get("job_uuid") or data.get("job_id"))' in script
     assert 'request "points chain backup manual disabled" "POST" "/api/root/points/chain/backups" "410" \'{}\'' in script
     assert '"points chain backup disabled policy"' in script
     assert 'request "trading market buy blocked in custom profile" "POST" "/api/trading/orders" "400"' in script
@@ -76,9 +81,11 @@ def test_functional_smoke_covers_latest_trading_and_announcement_paths():
     assert "Using utcnow() here creates a token" in script
     assert 'request "root create tester token for smoke trading" "POST" "/api/root/tester-token/create" "200"' in script
     assert 'login_smoke_user "auth login smoke user internal_test" "$TESTER_TOKEN"' in script
-    assert 'request_with_tester_token "trading tester internal_test limit order blocked until live warmup confirmed" "POST" "/api/trading/orders" "400"' in script
-    assert '"尚未收到任何即時價格更新" in str(data["msg"])' in script
-    assert '"trading tester internal_test warmup gate guidance"' in script
+    assert 'request_with_tester_token "trading tester internal_test limit order accepted after live warmup" "POST" "/api/trading/orders" "200"' in script
+    assert 'internal_test routed trading write succeeds after live quote warmup' in script
+    assert '"trading tester internal_test routed order payload"' in script
+    assert '"isinstance": isinstance' in script
+    assert 'isinstance(data.get("order"), dict)' in script
     assert 'request "security center switch back to test mode after internal_test" "POST" "/api/admin/server-mode" "200"' in script
     assert 'request "trading root price fusion status" "GET" "/api/root/trading/price-fusion-status?market_symbol=ETH/USDT" "200"' in script
     assert 'request "trading root bot audit dashboard" "GET" "/api/root/trading/bot-audit/dashboard?limit=10" "200"' in script
@@ -100,10 +107,10 @@ def test_functional_smoke_covers_latest_trading_and_announcement_paths():
     assert '"transport_state" in data.get("status", {}) and "connected" in data.get("status", {}) and "fallback" in data.get("status", {}) and "stale" in data.get("status", {}) and "confidence" in data.get("status", {}) and "provider_count" in data.get("status", {}) and "last_update_at" in data.get("status", {}) and "exclusion_reason" in data.get("status", {})' in script
     assert "trading extras" in docs
     assert "announcement create/edit" in docs
-    assert "custom profile trading block plus test-mode diagnostics and internal_test warm-up gate guidance" in docs
+    assert "custom profile trading block plus test-mode diagnostics and internal_test routed order payload after live warm-up" in docs
     assert "browser-only mode 需帶 maintenance bypass token" in docs
     assert "本地時間、無時區" in docs
-    assert "production-only chain seal rejection guidance" in docs
+    assert "seal/verify/one-click anomaly handler/economy stats async job payloads" in docs
     assert "Civitai search API key guard" in docs
     assert "workflow preset list/import guards" in docs
     assert "template preview text panel `text:embeddings` / `embedding_shortcuts` child" in docs

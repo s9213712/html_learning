@@ -343,7 +343,7 @@ def register_system_admin_routes(app, deps):
         python_exe = sys.executable or "python3"
         host = CURRENT_SERVER_BIND_STATE.get("host") or os.environ.get("HTML_LEARNING_HOST") or "127.0.0.1"
         probe_host = "127.0.0.1" if host in {"0.0.0.0", "::", ""} else host
-        port = int(CURRENT_SERVER_BIND_STATE.get("port") or 5000)
+        port = int(CURRENT_SERVER_BIND_STATE.get("port") or os.environ.get("HTML_LEARNING_PORT") or 5000)
 
         def restart_delayed():
             time.sleep(delay_seconds)
