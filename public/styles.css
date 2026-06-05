@@ -15017,6 +15017,50 @@
   }
 }
 
+/* Profile avatar custom size must remain literal on mobile, even when it exceeds the viewport. */
+#profile-pane-home #profile-home-avatar.profile-avatar-large.profile-avatar-upload-button,
+#profile-pane-home #profile-home-avatar.profile-avatar-large.profile-avatar-preview-button,
+#profile-pane-home #profile-home-avatar.profile-avatar-large {
+  --profile-avatar-custom-size: var(--profile-avatar-size, 140px);
+  width: var(--profile-avatar-custom-size) !important;
+  height: var(--profile-avatar-custom-size) !important;
+  inline-size: var(--profile-avatar-custom-size) !important;
+  block-size: var(--profile-avatar-custom-size) !important;
+  min-width: var(--profile-avatar-custom-size) !important;
+  min-height: var(--profile-avatar-custom-size) !important;
+  min-inline-size: var(--profile-avatar-custom-size) !important;
+  min-block-size: var(--profile-avatar-custom-size) !important;
+  max-width: var(--profile-avatar-custom-size) !important;
+  max-height: var(--profile-avatar-custom-size) !important;
+  max-inline-size: var(--profile-avatar-custom-size) !important;
+  max-block-size: var(--profile-avatar-custom-size) !important;
+  flex: 0 0 var(--profile-avatar-custom-size) !important;
+  flex-basis: var(--profile-avatar-custom-size) !important;
+  aspect-ratio: 1 / 1 !important;
+}
+
+@media (max-width: 720px) {
+  #profile-pane-home {
+    overflow-x: auto !important;
+  }
+
+  #profile-pane-home .profile-summary {
+    grid-template-columns: max-content !important;
+    justify-items: start !important;
+    justify-content: start !important;
+    text-align: center !important;
+    width: max-content !important;
+    min-width: min(100%, var(--profile-avatar-size, 140px)) !important;
+    max-width: none !important;
+    overflow: visible !important;
+  }
+
+  #profile-pane-home .profile-summary-main {
+    width: min(100vw - 1.5rem, var(--profile-avatar-size, 140px)) !important;
+    max-width: var(--profile-avatar-size, 140px) !important;
+  }
+}
+
 .rubiks-game-shell {
   display: grid;
   grid-template-columns: minmax(18rem, 1fr) minmax(13rem, 0.45fr);

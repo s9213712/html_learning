@@ -207,7 +207,7 @@ def test_profile_api_returns_random_friend_code_only_to_owner(tmp_path):
         "profile_template": "creator",
         "profile_accent": "ocean",
         "profile_density": "compact",
-        "profile_style": {"avatar_size": "500", "avatar_frame": "neon", "avatar_shape": "squircle"},
+        "profile_style": {"avatar_size": "1000", "avatar_frame": "neon", "avatar_shape": "squircle"},
         "profile_public_info": [
             {"label": "作品集", "value": "https://example.test/alice"},
             {"label": "社群", "value": "@alice"},
@@ -226,7 +226,7 @@ def test_profile_api_returns_random_friend_code_only_to_owner(tmp_path):
     assert updated.get_json()["profile"]["profile_template"] == "creator"
     assert updated.get_json()["profile"]["profile_accent"] == "ocean"
     assert updated.get_json()["profile"]["profile_density"] == "compact"
-    assert updated.get_json()["profile"]["profile_style"]["avatar_size"] == "500"
+    assert updated.get_json()["profile"]["profile_style"]["avatar_size"] == "1000"
     assert updated.get_json()["profile"]["profile_style"]["avatar_frame"] == "neon"
     assert updated.get_json()["profile"]["profile_style"]["avatar_shape"] == "squircle"
     assert updated.get_json()["profile"]["profile_public_info"] == [
@@ -234,7 +234,7 @@ def test_profile_api_returns_random_friend_code_only_to_owner(tmp_path):
         {"label": "社群", "value": "@alice"},
     ]
     assert public.get_json()["profile"]["profile_template"] == "creator"
-    assert public.get_json()["profile"]["profile_style"]["avatar_size"] == "500"
+    assert public.get_json()["profile"]["profile_style"]["avatar_size"] == "1000"
     assert public.get_json()["profile"]["profile_style"]["avatar_shape"] == "squircle"
     assert public.get_json()["profile"]["profile_public_info"][0]["label"] == "作品集"
     assert "friend_code" not in public.get_json()["profile"]

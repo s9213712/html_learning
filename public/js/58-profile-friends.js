@@ -6,12 +6,13 @@ let currentProfileViewedUserId = null;
 let currentProfileIsViewingSelf = true;
 let profileFriendsLoaded = false;
 let profileQuickCustomizeOpen = false;
+let profileEditFormDirty = false;
 let profileAppearancePreviewTimer = 0;
 const targetOptionCache = new Map();
 const PROFILE_AVATAR_DEFAULT_ZOOM = 1;
 const PROFILE_AVATAR_MIN_ZOOM = 0.1;
 const PROFILE_AVATAR_MAX_ZOOM = 10;
-const PROFILE_AVATAR_MAX_DISPLAY_SIZE = 500;
+const PROFILE_AVATAR_MAX_DISPLAY_SIZE = 1000;
 const PROFILE_AVATAR_MIN_DISPLAY_SIZE = 100;
 const PROFILE_TEMPLATE_KEYS = ["classic", "creator", "compact", "showcase", "gallery", "neon"];
 const PROFILE_ACCENT_KEYS = ["default", "ocean", "sunrise", "forest", "mono", "violet", "ruby"];
@@ -43,7 +44,7 @@ const PROFILE_STYLE_ALLOWED = {
   background_tone: ["soft", "standard", "bold"],
   avatar_frame: ["none", "soft_ring", "neon", "pixel", "botanical", "crown"],
   avatar_shape: ["circle", "rounded", "squircle", "square"],
-  avatar_size: [...Array.from({ length: 81 }, (_, index) => String(100 + index * 5)), "large", "xl", "hero"],
+  avatar_size: [...Array.from({ length: 181 }, (_, index) => String(100 + index * 5)), "large", "xl", "hero"],
   name_font: ["system", "rounded", "serif", "mono", "display"],
   name_size: ["normal", "large", "hero"],
   sticker: ["none", "sparkles", "star", "heart", "music", "game", "code", "crown"],
@@ -123,6 +124,14 @@ function profileAvatarSetMsg(text, bad = false) {
   if (text && typeof scheduleInlineMessageClear === "function") {
     scheduleInlineMessageClear(el, text, !bad, { duration: bad ? 4200 : 2200 });
   }
+}
+
+function markProfileEditFormDirty() {
+  profileEditFormDirty = true;
+}
+
+function clearProfileEditFormDirty() {
+  profileEditFormDirty = false;
 }
 
 function profileAvatarCropperElements() {
@@ -1069,7 +1078,8 @@ function profilePublicInfoFromForm() {
   );
 }
 
-function fillProfileEdit(profile) {
+function fillProfileEdit(profile, { force = false } = {}) {
+  if (profileEditFormDirty && !force) return;
   const style = profileStyleFromProfile(profile || {});
   const fields = {
     "profile-edit-display-name": profile?.display_name || "",
@@ -1108,10 +1118,15 @@ function fillProfileEdit(profile) {
 async function loadMyProfile({ quiet = false } = {}) {
   try {
     const json = await profileReadJson(API + "/users/me/profile");
+    const preserveDraft = profileEditFormDirty && currentProfileIsViewingSelf;
     profilePanelCache = json.profile || {};
     currentProfileViewedUserId = profilePanelCache.id || currentUserId || null;
-    renderProfileHome(profilePanelCache);
-    fillProfileEdit(profilePanelCache);
+    if (preserveDraft) {
+      previewProfileAppearanceFromForm();
+    } else {
+      renderProfileHome(profilePanelCache);
+      fillProfileEdit(profilePanelCache);
+    }
     if (!quiet) profileSetMsg("");
     return profilePanelCache;
   } catch (err) {
@@ -1159,12 +1174,13 @@ async function saveMyProfile() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
+    clearProfileEditFormDirty();
     profilePanelCache = json.profile || {};
     if (typeof setUserDisplayTimezone === "function") {
       setUserDisplayTimezone(profilePanelCache.display_timezone || payload.display_timezone || "auto");
     }
     renderProfileHome(profilePanelCache);
-    fillProfileEdit(profilePanelCache);
+    fillProfileEdit(profilePanelCache, { force: true });
     const signal = $("profile-appearance-preview-signal");
     if (signal) {
       signal.hidden = false;
@@ -1649,18 +1665,29 @@ function bindProfileFriendsControls() {
   const publicInfoAdd = $("profile-public-info-add-btn");
   if (publicInfoAdd) {
     publicInfoAdd.addEventListener("click", () => {
+      markProfileEditFormDirty();
       addProfilePublicInfoEditorRow();
     });
   }
   const publicInfoList = $("profile-public-info-editor-list");
   if (publicInfoList) {
+    publicInfoList.addEventListener("input", markProfileEditFormDirty);
+    publicInfoList.addEventListener("change", markProfileEditFormDirty);
     publicInfoList.addEventListener("click", (event) => {
       const remove = event.target?.closest?.("[data-profile-public-info-remove]");
       if (!remove) return;
       event.preventDefault();
+      markProfileEditFormDirty();
       remove.closest("[data-profile-public-info-row]")?.remove();
     });
   }
+  ["profile-quick-customize-card", "profile-pane-edit"].forEach((id) => {
+    const host = $(id);
+    if (!host || host.dataset.profileDirtyBound === "1") return;
+    host.dataset.profileDirtyBound = "1";
+    host.addEventListener("input", markProfileEditFormDirty);
+    host.addEventListener("change", markProfileEditFormDirty);
+  });
   [
     "profile-edit-template",
     "profile-edit-accent",
@@ -1674,6 +1701,7 @@ function bindProfileFriendsControls() {
   });
   document.querySelectorAll("[data-profile-avatar-size]").forEach((button) => {
     button.addEventListener("click", () => {
+      markProfileEditFormDirty();
       updateProfileAvatarSizeControl(button.dataset.profileAvatarSize);
       previewProfileAppearanceFromForm();
     });
@@ -1853,8 +1881,6 @@ function bindTargetUserOptionInputs() {
       ".profile-editor-preview .profile-avatar",
       ".profile-editor-preview .profile-avatar-large",
       "#profile-home-avatar",
-      "#profile-home-avatar .user-avatar-img",
-      "#profile-home-avatar .user-avatar-fallback",
       "#profile-pane-home .profile-avatar-large",
       ".profile-summary .profile-avatar-large",
       "[data-profile-preview-avatar]",
