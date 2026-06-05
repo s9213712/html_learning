@@ -334,6 +334,12 @@ def main() -> int:
                         const upscaleBreakpointSpec = comfyuiTemplateIsMultiMethodUpscale(detail)
                             ? comfyuiUpscaleBreakpointRunSpec(detail)
                             : null;
+                        const sdxlRefinerSpec = comfyuiTemplateIsSdxlRefinerWorkflow(detail)
+                            ? comfyuiSdxlRefinerRunSpec(detail)
+                            : null;
+                        const ggufWorkflowSpec = comfyuiTemplateIsGgufWorkflow(detail)
+                            ? comfyuiGgufWorkflowRunSpec(detail)
+                            : null;
                         const promptish = [];
                         Object.entries(userInputs || {}).forEach(([nodeId, inputs]) => {
                             Object.entries(inputs || {}).forEach(([name, value]) => {
@@ -366,6 +372,8 @@ def main() -> int:
                             missingAssignments: imageAssignmentState.missing || [],
                             multiCompareSpec,
                             upscaleBreakpointSpec,
+                            sdxlRefinerSpec,
+                            ggufWorkflowSpec,
                             outputNodes,
                             templateMessage: document.getElementById("comfyui-message")?.textContent || "",
                         };
@@ -396,6 +404,8 @@ def main() -> int:
                                 image_field_assignments: prepared.assignments || {},
                                 multi_compare: prepared.multiCompareSpec || undefined,
                                 upscale_breakpoint: prepared.upscaleBreakpointSpec || undefined,
+                                sdxl_refiner: prepared.sdxlRefinerSpec || undefined,
+                                gguf_workflow: prepared.ggufWorkflowSpec || undefined,
                             }),
                         });
                         const json = await res.json().catch(() => ({}));

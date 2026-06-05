@@ -30,6 +30,7 @@ def test_diffusers_generation_page_accepts_repo_and_variant_selection():
     assert 'id="comfyui-diffusers-gguf-variant"' in html
     assert 'id="comfyui-diffusers-gguf-base-repo"' in html
     assert 'id="comfyui-installed-gguf-list"' in html
+    assert 'id="comfyui-installed-gguf-list" class="comfyui-installed-gguf-list" hidden' in html
 
 
 def test_comfyui_background_refresh_failures_are_visible():
@@ -64,6 +65,8 @@ def test_diffusers_js_preflights_huggingface_repo_before_generation():
     assert "prompt_style_hint" in js
     assert "comfyuiInstalledGgufModels" in js
     assert "renderComfyuiInstalledGgufModels" in js
+    assert "shouldShowComfyuiInstalledGgufModels" in js
+    assert '"origin_sdxl_gguf_txt2img"' in js
     assert "installed_gguf_models" in js
     assert "若要使用本站已驗證 GGUF，請選官方 GGUF profile" in js
     assert "updateComfyuiDiffusersGgufOptions" in js

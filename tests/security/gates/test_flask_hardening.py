@@ -345,6 +345,56 @@ def test_backpressure_qos_header_and_edge_burst_guard(monkeypatch):
     assert status["traffic"]["totals"]["edge_guard"] >= 1
 
 
+def test_backpressure_feature_gate_reserves_fast_lane_capacity():
+    app = Flask(__name__)
+    app.testing = True
+    install_backpressure(
+        app,
+        settings_provider=lambda: {
+            "server_backpressure_enabled": True,
+            "server_backpressure_mode": "manual",
+            "server_backpressure_thread_capacity": 4,
+            "server_backpressure_normal_limit": 4,
+            "server_backpressure_heavy_limit": 4,
+            "server_backpressure_root_priority_enabled": False,
+            "server_backpressure_root_limit": 0,
+            "server_backpressure_fast_lane_reserved": 1,
+            "server_backpressure_retry_after_seconds": 2,
+            "server_backpressure_refresh_seconds": 60,
+        },
+    )
+
+    @app.route("/api/version")
+    def version_probe():
+        return jsonify({"ok": True})
+
+    @app.route("/api/normal")
+    def normal_probe():
+        return jsonify({"ok": True})
+
+    client = app.test_client()
+    state = app.config["HACKME_BACKPRESSURE"]
+    assert state["limits"]["feature"] == 3
+
+    feature_leases = [state["feature"].acquire() for _ in range(3)]
+    try:
+        assert all(feature_leases)
+
+        blocked_normal = client.get("/api/normal")
+        assert blocked_normal.status_code == 503
+        assert blocked_normal.get_json()["gate"] == "feature"
+        assert blocked_normal.headers["X-Hackme-Backpressure"] == "feature"
+
+        fast_lane = client.get("/api/version")
+        assert fast_lane.status_code == 200
+        assert fast_lane.headers["X-Hackme-Backpressure"] == "fast_lane"
+        assert fast_lane.get_json()["ok"] is True
+    finally:
+        for lease in feature_leases:
+            if lease:
+                lease.release()
+
+
 def test_backpressure_qos_classification_matches_route_planes():
     assert backpressure_module.classify_request_qos("/api/version") == "health"
     assert backpressure_module.classify_request_qos("/") == "bootstrap"
@@ -383,7 +433,37 @@ def test_backpressure_auto_uses_gunicorn_threads_from_argv(monkeypatch):
     assert state["limits"]["normal"] == 12
     assert state["limits"]["heavy"] == 6
     assert state["limits"]["root"] == 3
+    assert state["limits"]["feature"] == 8
     assert state["limits"]["fast_lane_reserved"] == 4
+
+
+def test_backpressure_caps_configured_capacity_to_live_gunicorn_threads(monkeypatch):
+    monkeypatch.delenv("HTML_LEARNING_BACKPRESSURE_THREAD_CAPACITY", raising=False)
+    monkeypatch.delenv("HACKME_DEV_GUNICORN_THREADS", raising=False)
+    monkeypatch.delenv("GUNICORN_THREADS", raising=False)
+    monkeypatch.setattr(backpressure_module, "_total_memory_mb", lambda: 8192)
+    monkeypatch.setattr(
+        backpressure_module.sys,
+        "argv",
+        ["python", "-m", "gunicorn", "server:app", "--worker-class", "gthread", "--threads", "4"],
+    )
+
+    state = backpressure_module._build_backpressure_state({
+        "server_backpressure_enabled": True,
+        "server_backpressure_mode": "auto",
+        "server_backpressure_thread_capacity": 6,
+        "server_backpressure_normal_limit": 0,
+        "server_backpressure_heavy_limit": 0,
+        "server_backpressure_root_limit": 0,
+        "server_backpressure_fast_lane_reserved": 0,
+        "server_backpressure_root_priority_enabled": True,
+    })
+
+    assert state["limits"]["thread_capacity"] == 4
+    assert state["limits"]["normal"] == 4
+    assert state["limits"]["heavy"] == 1
+    assert state["limits"]["feature"] == 2
+    assert state["limits"]["fast_lane_reserved"] == 2
 
 
 def test_backpressure_auto_keeps_small_gthread_workers_usable(monkeypatch):
@@ -412,7 +492,8 @@ def test_backpressure_auto_keeps_small_gthread_workers_usable(monkeypatch):
     assert state["limits"]["normal"] == 6
     assert state["limits"]["heavy"] == 5
     assert state["limits"]["root"] == 2
-    assert state["limits"]["fast_lane_reserved"] == 1
+    assert state["limits"]["feature"] == 4
+    assert state["limits"]["fast_lane_reserved"] == 2
 
 
 def test_backpressure_auto_does_not_scale_with_large_cpu_count(monkeypatch):
@@ -438,7 +519,8 @@ def test_backpressure_auto_does_not_scale_with_large_cpu_count(monkeypatch):
     assert state["limits"]["normal"] == 8
     assert state["limits"]["heavy"] == 4
     assert state["limits"]["root"] == 2
-    assert state["limits"]["fast_lane_reserved"] == 1
+    assert state["limits"]["feature"] == 6
+    assert state["limits"]["fast_lane_reserved"] == 2
 
 
 def test_backpressure_auto_keeps_heavy_limit_low_on_tiny_memory(monkeypatch):
@@ -465,3 +547,4 @@ def test_backpressure_auto_keeps_heavy_limit_low_on_tiny_memory(monkeypatch):
 
     assert state["limits"]["thread_capacity"] == 8
     assert state["limits"]["heavy"] == 1
+    assert state["limits"]["feature"] == 6

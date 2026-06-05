@@ -258,10 +258,18 @@ def _total_memory_mb() -> int:
     return 0
 
 
+def _cap_to_gunicorn_threads(value: int, gunicorn_threads: int | None) -> int:
+    value = max(1, int(value or 1))
+    if gunicorn_threads:
+        return max(1, min(value, int(gunicorn_threads)))
+    return value
+
+
 def _thread_capacity(settings: dict | None = None) -> int:
+    gunicorn_threads = _gunicorn_thread_capacity_from_process()
     setting_value = _setting_int_or_none(settings, "server_backpressure_thread_capacity", minimum=4, maximum=256)
     if setting_value:
-        return setting_value
+        return _cap_to_gunicorn_threads(setting_value, gunicorn_threads)
     for name in (
         "HTML_LEARNING_BACKPRESSURE_THREAD_CAPACITY",
         "HACKME_DEV_GUNICORN_THREADS",
@@ -269,15 +277,15 @@ def _thread_capacity(settings: dict | None = None) -> int:
     ):
         value = _env_int_or_none(name, minimum=4, maximum=256)
         if value:
-            return value
-    gunicorn_threads = _gunicorn_thread_capacity_from_process()
+            return _cap_to_gunicorn_threads(value, gunicorn_threads)
     if gunicorn_threads:
         # Auto-detected WSGI threads are not the same as effective app
         # throughput. SQLite write serialization, Python scheduling, and
         # chain/accounting critical sections mean this app often saturates
         # before every configured thread is productive. Keep auto mode
-        # conservative; root can raise this explicitly through settings/env.
-        return max(4, min(12, gunicorn_threads))
+        # conservative; root can lower this through settings/env, but never
+        # above the live gthread count for the current worker process.
+        return max(1, min(12, gunicorn_threads))
     cpu_count = max(1, int(os.cpu_count() or 1))
     mem_mb = _total_memory_mb()
     cpu_cap = max(4, min(8, cpu_count))
@@ -294,8 +302,10 @@ def _auto_fast_lane_reserved(thread_capacity: int, settings: dict | None = None)
     configured = _env_int_or_none("HTML_LEARNING_BACKPRESSURE_FAST_LANE_RESERVED", minimum=1, maximum=64)
     if configured:
         return min(configured, max(1, thread_capacity - 2))
-    if thread_capacity <= 8:
+    if thread_capacity <= 3:
         return 1
+    if thread_capacity <= 8:
+        return min(2, max(1, thread_capacity - 2))
     return min(max(2, thread_capacity // 3), max(1, thread_capacity - 2))
 
 
@@ -367,10 +377,12 @@ def _resolve_gate_limits(settings: dict | None = None) -> dict:
     if normal_limit + heavy_budget + fast_lane_budget > thread_capacity:
         overflow = normal_limit + heavy_budget + fast_lane_budget - thread_capacity
         normal_limit = max(1, normal_limit - overflow)
+    feature_limit = max(1, thread_capacity - reserved)
     return {
         "normal": int(normal_limit),
         "heavy": int(heavy_limit),
         "root": int(root_limit),
+        "feature": int(feature_limit),
         "fast_lane_reserved": int(reserved),
         "thread_capacity": int(thread_capacity),
         "cpu_count": int(cpu_count),
@@ -379,6 +391,7 @@ def _resolve_gate_limits(settings: dict | None = None) -> dict:
         "normal_source": normal_source,
         "heavy_source": heavy_source,
         "root_source": root_source,
+        "feature_source": "auto",
         "root_priority_enabled": bool(root_limit > 0),
         "process_local": True,
     }
@@ -556,6 +569,16 @@ class _GateLease:
         self.gate.release()
 
 
+@dataclass
+class _CompositeLease:
+    label: str
+    leases: tuple[_GateLease, ...]
+
+    def release(self) -> None:
+        for lease in reversed(self.leases):
+            lease.release()
+
+
 class RequestGate:
     def __init__(self, label: str, limit: int):
         self.label = str(label)
@@ -625,7 +648,7 @@ class RequestTrafficWindow:
         download_bytes: int = 0,
     ) -> None:
         now = int(time.time())
-        label = label if label in {"normal", "heavy", "root", "fast_lane", "edge_guard", "off"} else "other"
+        label = label if label in {"normal", "heavy", "root", "feature", "fast_lane", "edge_guard", "off"} else "other"
         status_code = int(status_code or 0)
         upload_bytes = max(0, int(upload_bytes or 0))
         download_bytes = max(0, int(download_bytes or 0))
@@ -638,6 +661,7 @@ class RequestTrafficWindow:
                 "normal": 0,
                 "heavy": 0,
                 "root": 0,
+                "feature": 0,
                 "fast_lane": 0,
                 "edge_guard": 0,
                 "off": 0,
@@ -674,6 +698,7 @@ class RequestTrafficWindow:
             "normal": 0,
             "heavy": 0,
             "root": 0,
+            "feature": 0,
             "fast_lane": 0,
             "edge_guard": 0,
             "off": 0,
@@ -820,6 +845,7 @@ def _build_backpressure_state(settings: dict | None = None, previous_state: dict
         "normal": RequestGate("normal", int(limits["normal"])),
         "heavy": RequestGate("heavy", int(limits["heavy"])),
         "root": RequestGate("root", int(limits["root"])),
+        "feature": RequestGate("feature", int(limits["feature"])),
         "traffic": traffic,
         "edge_guard": edge_guard,
         "limits": limits,
@@ -996,8 +1022,24 @@ def install_backpressure(app, settings_provider=None, root_priority_detector=Non
             gate = state.get("heavy") if is_heavy_request_path(path, request.method) else state.get("normal")
         if not hasattr(gate, "acquire"):
             return None
+        feature_gate = state.get("feature")
+        feature_lease = None
+        if hasattr(feature_gate, "acquire"):
+            feature_lease = feature_gate.acquire()
+            if feature_lease is None:
+                g._backpressure_traffic_label = feature_gate.label
+                g._backpressure_rejected = True
+                _record_backpressure_anomaly(app, {
+                    "event": "server_busy_rejected",
+                    "gate": feature_gate.label,
+                    "status_code": 503,
+                    "retry_after": int(state.get("retry_after") or 2),
+                })
+                return _busy_response(feature_gate.label, int(state.get("retry_after") or 2))
         lease = gate.acquire()
         if lease is None:
+            if feature_lease is not None:
+                feature_lease.release()
             g._backpressure_traffic_label = gate.label
             g._backpressure_rejected = True
             _record_backpressure_anomaly(app, {
@@ -1007,7 +1049,10 @@ def install_backpressure(app, settings_provider=None, root_priority_detector=Non
                 "retry_after": int(state.get("retry_after") or 2),
             })
             return _busy_response(gate.label, int(state.get("retry_after") or 2))
-        g._backpressure_lease = lease
+        if feature_lease is not None:
+            g._backpressure_lease = _CompositeLease(lease.label, (feature_lease, lease))
+        else:
+            g._backpressure_lease = lease
         g._backpressure_traffic_label = lease.label
         return None
 
@@ -1063,6 +1108,7 @@ def backpressure_status(app) -> dict:
     normal = state.get("normal")
     heavy = state.get("heavy")
     root = state.get("root")
+    feature = state.get("feature")
     traffic = state.get("traffic")
     edge_guard = state.get("edge_guard")
     limits = dict(state.get("limits") or {})
@@ -1081,10 +1127,12 @@ def backpressure_status(app) -> dict:
             "normal": limits.get("normal_source") or "unknown",
             "heavy": limits.get("heavy_source") or "unknown",
             "root": limits.get("root_source") or "unknown",
+            "feature": limits.get("feature_source") or "unknown",
         },
         "normal": normal.snapshot() if hasattr(normal, "snapshot") else {},
         "heavy": heavy.snapshot() if hasattr(heavy, "snapshot") else {},
         "root": root.snapshot() if hasattr(root, "snapshot") else {},
+        "feature": feature.snapshot() if hasattr(feature, "snapshot") else {},
         "traffic": traffic.snapshot() if hasattr(traffic, "snapshot") else {},
         "edge_guard": edge_guard.snapshot() if hasattr(edge_guard, "snapshot") else {},
         "anomaly_audit": {

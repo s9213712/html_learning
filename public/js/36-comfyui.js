@@ -649,9 +649,29 @@ function renderComfyuiGgufProfileHint() {
   hint.textContent = parts.join(" ");
 }
 
+function comfyuiSelectedTemplateBundleIdForGgufInventory() {
+  const detail = comfyuiSelectedTemplateDetail;
+  if (!detail || Number(detail?.id || 0) !== Number(comfyuiSelectedTemplatePresetId || 0)) return "";
+  return String(detail?.system_bundle_id || detail?.manifest_json?.id || "").trim();
+}
+
+function shouldShowComfyuiInstalledGgufModels() {
+  const detail = comfyuiSelectedTemplateDetail;
+  if (!detail || Number(detail?.id || 0) !== Number(comfyuiSelectedTemplatePresetId || 0)) return false;
+  return comfyuiSelectedTemplateBundleIdForGgufInventory() === "origin_sdxl_gguf_txt2img"
+    || String(detail?.title || detail?.name || "").trim() === "SDXL GGUF Text-to-Image (ComfyUI-GGUF)";
+}
+
+function updateComfyuiInstalledGgufVisibility() {
+  const box = $("comfyui-installed-gguf-list");
+  if (!box) return;
+  box.hidden = !shouldShowComfyuiInstalledGgufModels();
+}
+
 function renderComfyuiInstalledGgufModels(items = []) {
   const box = $("comfyui-installed-gguf-list");
   if (!box) return;
+  updateComfyuiInstalledGgufVisibility();
   const rows = Array.isArray(items) ? items.filter(Boolean) : [];
   if (!rows.length) {
     box.innerHTML = '<div class="drive-empty">尚未偵測到已安裝 GGUF UNet。</div>';
@@ -3396,8 +3416,9 @@ function renderComfyuiHistory() {
             ${sanitize(`步數 ${payload.steps || "-"} · CFG ${payload.cfg || "-"} · Seed ${payload.seed ?? "random"} · 張數 ${payload.batch_size || 1}`)}
           </div>
           <div class="drive-file-actions" style="justify-content:flex-start;">
-            <button class="btn btn-sm" type="button" data-comfyui-history-apply="${historyId}"${disabled}>套回表單</button>
-            <button class="btn btn-sm" type="button" data-comfyui-history-rerun="${historyId}"${disabled}>一鍵重跑</button>
+            <button class="btn btn-sm" type="button" data-comfyui-history-apply="${sanitize(historyId)}"${disabled}>套回表單</button>
+            <button class="btn btn-sm" type="button" data-comfyui-history-rerun="${sanitize(historyId)}"${disabled}>一鍵重跑</button>
+            <button class="btn btn-sm btn-danger" type="button" data-comfyui-history-delete="${sanitize(historyId)}"${disabled}>刪除</button>
           </div>
         </div>
       </div>
@@ -3417,6 +3438,14 @@ function renderComfyuiHistory() {
       const historyId = button.getAttribute("data-comfyui-history-rerun") || "";
       rerunComfyuiHistory(historyId).catch((err) => {
         setComfyuiHistoryActionMessage(err.message || "ComfyUI 歷史重跑失敗", false);
+      });
+    });
+  });
+  list.querySelectorAll("[data-comfyui-history-delete]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const historyId = button.getAttribute("data-comfyui-history-delete") || "";
+      deleteComfyuiHistory(historyId).catch((err) => {
+        setComfyuiHistoryActionMessage(err.message || "ComfyUI 歷史刪除失敗", false);
       });
     });
   });
@@ -3537,6 +3566,40 @@ async function applyComfyuiHistoryToForm(historyId) {
   writeComfyuiDraft();
   setComfyuiView("generate");
   setComfyuiMessage(`已套回第 ${displayId} 筆 ComfyUI 歷史，可直接再調整後重跑。`, true);
+}
+
+async function deleteComfyuiHistory(historyId) {
+  const targetId = String(historyId || "").trim();
+  if (!targetId) {
+    setComfyuiHistoryActionMessage("這筆 ComfyUI 歷史缺少可刪除 ID，請重新整理歷史。", false);
+    return;
+  }
+  const historyItem = comfyuiHistoryItemById(targetId);
+  const workflowRunId = historyItem?.history_source === "workflow"
+    ? Number(historyItem?.workflow_run_id || 0)
+    : (targetId.startsWith("workflow-") ? Number(targetId.slice("workflow-".length)) : 0);
+  const legacyId = workflowRunId > 0 ? 0 : Number(targetId);
+  if (workflowRunId <= 0 && (!Number.isFinite(legacyId) || legacyId <= 0)) {
+    setComfyuiHistoryActionMessage("這筆 ComfyUI 歷史 ID 格式不正確，請重新整理歷史。", false);
+    return;
+  }
+  const label = workflowRunId > 0 ? `workflow run #${workflowRunId}` : `第 ${legacyId} 筆 ComfyUI 歷史`;
+  if (!window.confirm(`刪除${label}？只會移除本站歷史列表，不會刪除 ComfyUI 輸出檔。`)) return;
+  await fetchCsrfToken({ force: true });
+  setComfyuiHistoryActionMessage("正在刪除 ComfyUI 歷史紀錄...", true);
+  const res = await apiFetch(workflowRunId > 0
+    ? API + `/comfyui/workflow-runs/${encodeURIComponent(workflowRunId)}`
+    : API + `/comfyui/history/${encodeURIComponent(legacyId)}`, {
+    method: "DELETE",
+    credentials: "same-origin",
+    headers: { "X-CSRF-Token": getCsrfToken() || "" }
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok || !json.ok) throw new Error(json.msg || `ComfyUI 歷史刪除失敗（HTTP ${res.status}）`);
+  comfyuiHistoryItems = comfyuiHistoryItems.filter((item) => comfyuiHistoryItemId(item) !== targetId);
+  renderComfyuiHistory();
+  loadComfyuiHistory().catch((err) => setComfyuiHistoryActionMessage(err?.message || "ComfyUI 歷史重新整理失敗", false));
+  setComfyuiHistoryActionMessage(`已刪除${label}。`, true);
 }
 
 async function rerunComfyuiHistory(historyId) {

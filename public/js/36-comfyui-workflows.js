@@ -2752,6 +2752,7 @@ function renderSelectedComfyuiTemplate({ preserveOpenPanels = false } = {}) {
   const host = $("comfyui-template-panels");
   const legacy = $("comfyui-legacy-form-panel");
   if (summary) summary.innerHTML = comfyuiTemplateSummaryMarkup(comfyuiSelectedTemplateDetail);
+  if (typeof updateComfyuiInstalledGgufVisibility === "function") updateComfyuiInstalledGgufVisibility();
   if (!host) return;
   if (!comfyuiSelectedTemplateDetail?.ui_schema?.panels) {
     if (summary) summary.hidden = true;

@@ -676,6 +676,34 @@ def register_comfyui_runtime_routes(app, ctx):
             conn.close()
         return json_resp({"ok": True, "history": items})
 
+    @app.route("/api/comfyui/history/<int:history_id>", methods=["DELETE"])
+    @require_csrf
+    def comfyui_generation_history_delete(history_id):
+        actor, err = _actor_or_401()
+        if err:
+            return err
+        conn = get_db()
+        try:
+            item = _load_generation_history(conn, actor=actor, history_id=history_id)
+            if not item:
+                return json_resp({"ok": False, "msg": "找不到這筆 ComfyUI 歷史紀錄"}), 404
+            conn.execute(
+                "DELETE FROM comfyui_generation_history WHERE id=? AND owner_user_id=?",
+                (int(history_id), int(actor.get("id") or 0)),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        audit(
+            "COMFYUI_HISTORY_DELETE",
+            get_client_ip(),
+            user=_actor_value(actor, "username"),
+            success=True,
+            ua=get_ua(),
+            detail=f"history_id={int(history_id)}",
+        )
+        return json_resp({"ok": True, "deleted_id": int(history_id), "msg": "已刪除 ComfyUI 歷史紀錄"})
+
     @app.route("/api/comfyui/history/<int:history_id>/rerun", methods=["POST"])
     @require_csrf
     def comfyui_generation_history_rerun(history_id):
@@ -732,6 +760,47 @@ def register_comfyui_runtime_routes(app, ctx):
                 "progress": {"phase": "queued", "percent": 0, "detail": "已建立重跑工作"},
             },
         })
+
+    @app.route("/api/comfyui/workflow-runs/<int:run_id>", methods=["DELETE"])
+    @require_csrf
+    def comfyui_workflow_run_history_delete(run_id):
+        actor, err = _actor_or_401()
+        if err:
+            return err
+        conn = get_db()
+        try:
+            if callable(_ensure_comfyui_workflow_schema):
+                _ensure_comfyui_workflow_schema(conn)
+            has_tables = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='comfyui_workflow_runs'"
+            ).fetchone()
+            if not has_tables:
+                return json_resp({"ok": False, "msg": "找不到 workflow run 歷史資料表"}), 404
+            row = conn.execute(
+                "SELECT id, actor_user_id FROM comfyui_workflow_runs WHERE id=?",
+                (int(run_id),),
+            ).fetchone()
+            if not row:
+                return json_resp({"ok": False, "msg": "找不到這筆 workflow run 歷史紀錄"}), 404
+            actor_id = int(actor.get("id") or 0)
+            if int(row["actor_user_id"] or 0) != actor_id:
+                return json_resp({"ok": False, "msg": "你沒有權限刪除這筆 workflow run"}), 403
+            conn.execute(
+                "DELETE FROM comfyui_workflow_runs WHERE id=? AND actor_user_id=?",
+                (int(run_id), actor_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        audit(
+            "COMFYUI_WORKFLOW_RUN_DELETE",
+            get_client_ip(),
+            user=_actor_value(actor, "username"),
+            success=True,
+            ua=get_ua(),
+            detail=f"run_id={int(run_id)}",
+        )
+        return json_resp({"ok": True, "deleted_id": int(run_id), "msg": "已刪除 workflow run 歷史紀錄"})
 
     @app.route("/api/comfyui/workflow-runs/<int:run_id>/rerun", methods=["POST"])
     @require_csrf
