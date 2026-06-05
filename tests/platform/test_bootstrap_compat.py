@@ -290,6 +290,7 @@ def test_init_db_repairs_legacy_sessions_before_schema_replay(tmp_path, monkeypa
         "owner_user_id", "title", "description", "visibility", "is_official", "workflow_json",
         "workflow_hash", "required_models_json", "required_loras_json", "required_controlnets_json",
         "default_params_json", "published_by_user_id", "published_at", "created_at", "updated_at",
+        "purpose", "layout_json", "workflow_schema_version", "required_custom_nodes_json", "is_default",
     } <= comfyui_workflow_preset_cols
     assert {
         "preset_id", "actor_user_id", "prompt", "negative_prompt", "params_json", "workflow_json",

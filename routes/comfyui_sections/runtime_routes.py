@@ -50,6 +50,7 @@ def register_comfyui_runtime_routes(app, ctx):
     _json_error_from_comfy = ctx["json_error_from_comfy"]
     _list_generation_history = ctx["list_generation_history"]
     _load_generation_history = ctx["load_generation_history"]
+    _ensure_comfyui_workflow_schema = ctx.get("ensure_comfyui_workflow_schema")
     _local_comfyui_runtime_status = ctx["local_comfyui_runtime_status"]
     _normalize_generation_payload = ctx["normalize_generation_payload"]
     _normalize_generation_timeout = ctx["normalize_generation_timeout"]
@@ -609,6 +610,8 @@ def register_comfyui_runtime_routes(app, ctx):
         conn = get_db()
         try:
             items = _list_generation_history(conn, actor=actor, limit=COMFYUI_HISTORY_LIMIT)
+            if callable(_ensure_comfyui_workflow_schema):
+                _ensure_comfyui_workflow_schema(conn)
             has_workflow_tables = conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='comfyui_workflow_runs'"
             ).fetchone() and conn.execute(

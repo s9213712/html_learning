@@ -404,22 +404,22 @@ class ComfyUIClient:
         upscale_models = _node_input_options_from_info(object_info, "UpscaleModelLoader", "model_name") if "UpscaleModelLoader" in available_nodes else []
         latent_upscale_models = _node_input_options_from_info(object_info, "LatentUpscaleModelLoader", "model_name") if "LatentUpscaleModelLoader" in available_nodes else []
         clip_vision_models = _node_input_options_from_info(object_info, "CLIPVisionLoader", "clip_name") if "CLIPVisionLoader" in available_nodes else []
-        if not controlnet_models:
+        if "ControlNetLoader" in available_nodes and not controlnet_models:
             try:
                 controlnet_models = self.get_model_folder_models("controlnet")
             except ComfyUIError:
                 controlnet_models = []
-        if not upscale_models:
+        if "UpscaleModelLoader" in available_nodes and not upscale_models:
             try:
                 upscale_models = self.get_model_folder_models("upscale_models")
             except ComfyUIError:
                 upscale_models = []
-        if not latent_upscale_models:
+        if "LatentUpscaleModelLoader" in available_nodes and not latent_upscale_models:
             try:
                 latent_upscale_models = self.get_model_folder_models("latent_upscale_models")
             except ComfyUIError:
                 latent_upscale_models = []
-        if not clip_vision_models:
+        if "CLIPVisionLoader" in available_nodes and not clip_vision_models:
             try:
                 clip_vision_models = self.get_model_folder_models("clip_vision")
             except ComfyUIError:

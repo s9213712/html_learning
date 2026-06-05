@@ -87,6 +87,53 @@ def test_deep_playwright_shared_video_uses_unlock_share_session():
     assert 'f"/api/videos/shared/{token}/playback{share_session_query}"' in script
 
 
+def test_deep_playwright_comfyui_host_port_counts_as_live_config():
+    script = (ROOT / "scripts" / "testing" / "playwright_deep_site_check.py").read_text(encoding="utf-8")
+
+    assert "or self.local_api_host.strip()" in script
+    assert "or self.local_api_port" in script
+    assert "or args.comfyui_api_host" in script
+    assert "or args.comfyui_api_port" in script
+    assert "elif cfg.local_base_dir or cfg.local_start_script or cfg.local_api_host or cfg.local_api_port:" in script
+
+
+def test_deep_playwright_video_flow_opens_detail_before_like_selector():
+    script = (ROOT / "scripts" / "testing" / "playwright_deep_site_check.py").read_text(encoding="utf-8")
+
+    assert 'latest_id = int(latest.get("id") or 0)' in script
+    assert "card.count() and card.is_visible(timeout=1000)" in script
+    assert "page.wait_for_selector(f'[data-video-like=\"{latest_id}\"]'" in script
+
+
+def test_deep_playwright_sets_up_admin_state_before_loading_full_app():
+    script = (ROOT / "scripts" / "testing" / "playwright_deep_site_check.py").read_text(encoding="utf-8")
+
+    assert "def load_authenticated_app(page, base_url: str)" in script
+    assert "login(page, base_url, load_app=False)" in script
+    assert "root_auth_headers.update(build_direct_auth_headers(page, base_url))" in script
+    assert "enable_required_features(page, base_url, load_app=False, auth_headers=root_auth_headers)" in script
+    assert "apply_optional_comfyui_settings(rec, page, optional_comfyui, base_url, root_auth_headers)" in script
+    assert 'rec.guard("load_authenticated_app", lambda: load_authenticated_app(page, base_url))' in script
+
+
+def test_deep_playwright_browser_fetches_are_bounded_and_traceable():
+    script = (ROOT / "scripts" / "testing" / "playwright_deep_site_check.py").read_text(encoding="utf-8")
+
+    assert "timeout_ms: int = 30000" in script
+    assert "new AbortController()" in script
+    assert 'print(f"[INFO] api_surface: {endpoint}", flush=True)' in script
+    assert "fetch_error" in script
+
+
+def test_deep_playwright_api_surface_uses_direct_session_http():
+    script = (ROOT / "scripts" / "testing" / "playwright_deep_site_check.py").read_text(encoding="utf-8")
+
+    assert "def build_direct_auth_headers(page, base_url: str)" in script
+    assert "def check_api_surface(rec: Recorder, page, base_url: str, auth_headers: dict[str, str])" in script
+    assert 'fetch_json_direct(page, base_url, "GET", endpoint, timeout_seconds=25, auth_headers=auth_headers)' in script
+    assert "check_api_surface(rec, page, base_url, root_auth_headers)" in script
+
+
 def test_deep_playwright_accepts_current_realtime_proxy_payload():
     script = (ROOT / "scripts" / "testing" / "playwright_deep_site_check.py").read_text(encoding="utf-8")
 

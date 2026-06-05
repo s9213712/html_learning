@@ -3967,6 +3967,7 @@ def register_comfyui_routes(app, deps):
         "json_error_from_comfy": _json_error_from_comfy,
         "list_generation_history": _list_generation_history,
         "load_generation_history": _load_generation_history,
+        "ensure_comfyui_workflow_schema": _ensure_comfyui_workflow_schema,
         "local_comfyui_runtime_status": _local_comfyui_runtime_status,
         "comfyui_paid_api_status_payload": _comfyui_paid_api_status_payload,
         "official_gguf_profiles": public_gguf_profiles,

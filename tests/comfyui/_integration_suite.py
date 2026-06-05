@@ -14,6 +14,7 @@ from flask import Flask, jsonify, make_response, request
 from routes import comfyui as comfyui_routes
 from routes.comfyui import register_comfyui_routes
 from routes.comfyui_sections import workflow_routes as comfyui_workflow_routes
+from services.comfyui import client as comfyui_client_module
 from services.comfyui import execution as comfy_execution
 from services.storage.cloud_drive import ensure_cloud_drive_attachment_schema
 from services.comfyui.client import ComfyUIClient, ComfyUIError, ComfyUIImage
@@ -58,6 +59,15 @@ SD35_CLIP_L = "clip_l.safetensors"
 SD35_CLIP_G = "clip_g.safetensors"
 SD35_T5 = "t5xxl_fp8_e4m3fn.safetensors"
 SD35_VAE = "diffusion_pytorch_model.safetensors"
+
+
+@pytest.fixture(autouse=True)
+def _isolate_comfyui_client_object_info_cache():
+    with comfyui_client_module._OBJECT_INFO_LOCK:
+        comfyui_client_module._OBJECT_INFO_CACHE.clear()
+    yield
+    with comfyui_client_module._OBJECT_INFO_LOCK:
+        comfyui_client_module._OBJECT_INFO_CACHE.clear()
 
 
 class FakeComfyUIClient:
@@ -5951,11 +5961,13 @@ def test_comfyui_frontend_is_wired():
     assert '<option value="controlnet">ControlNet</option>' in index_html
     assert '<option value="hypernetwork">Hypernetwork</option>' not in index_html
     assert 'id="s-comfyui-connection-mode"' in index_html
-    assert '<option value="diffusers">Hugging Face Diffusers' in index_html
+    assert '<option value="diffusers">diffusers</option>' in index_html
+    assert 'data-comfyui-view="hf">HF / Diffusers</button>' in index_html
     assert 'id="s-comfyui-remote-api-url"' in index_html
-    assert '主生圖 backend 依這裡切換' in index_html
-    assert 'Civitai API Key 只用在 root 的模型下載區' in index_html
-    assert 'id="comfyui-diffusers-settings" style="display:none;"' in index_html
+    assert '兩組設定彼此獨立' in index_html
+    assert 'ComfyUI / GGUF 決定本地或遠端執行後端' in index_html
+    assert 'id="comfyui-diffusers-settings"' in index_html
+    assert 'data-comfyui-settings-family-panel="hf"' in index_html
     assert 'id="s-comfyui-diffusers-model-repo"' in index_html
     assert 'id="s-comfyui-huggingface-api-token"' in index_html
     assert 'id="s-comfyui-huggingface-cache-root"' in index_html
@@ -5966,7 +5978,7 @@ def test_comfyui_frontend_is_wired():
     assert 'id="s-comfyui-local-start-script"' in index_html
     assert 'id="comfyui-local-start-template-link"' in index_html
     assert 'href="/api/root/comfyui/local-start-template"' in index_html
-    assert 'id="comfyui-civitai-settings" style="display:none;"' in index_html
+    assert 'id="comfyui-civitai-settings"' in index_html
     assert 'id="s-comfyui-civitai-api-key"' in index_html
     assert "function canManageComfyuiLocalModels" in comfyui_js
     assert 'return currentUser === "root" && mode === "local";' in comfyui_js
@@ -5986,8 +5998,8 @@ def test_comfyui_frontend_is_wired():
     assert 'switchModuleTab("comfyui")' in bootstrap_js
     assert 'normTab === "comfyui"' in admin_js
     assert '本地模式會測試本地 API；若產圖時 API 未啟動，後端會嘗試執行啟動腳本。' in admin_js
-    assert '遠端模式只負責呼叫指定 API 生圖，無法透過 API 把模型下載回本站的本地 ComfyUI，所以會隱藏本地模型下載與 Civitai API Key。' in admin_js
-    assert 'Diffusers 模式會檢查 Hugging Face repo 與 Python 套件' in admin_js
+    assert 'ComfyUI / GGUF 遠端模式只負責呼叫指定 API 生圖，無法透過 API 把模型下載回本站的本地 ComfyUI，所以會隱藏本地模型下載與 Civitai API Key。' in admin_js
+    assert 'HF 頁籤會檢查 Hugging Face repo 與 Python / Diffusers 套件' in admin_js
     assert 'apiFetch(API + "/comfyui/generate"' in comfyui_js
     assert 'apiFetch(API + "/comfyui/billing-quote"' in comfyui_js
     assert 'apiFetch(API + "/root/comfyui/civitai/search"' in comfyui_js
@@ -6166,7 +6178,7 @@ def test_comfyui_frontend_is_wired():
     assert '已從${promptType === "negative" ? "負面" : "正向"}提示詞移除 ${cleanName}。' in comfyui_js
     assert '<embeddings:' in comfyui_js
     assert "trigger words" in comfyui_js
-    assert "comfyuiConnectionMode !== \"local\"" in comfyui_js
+    assert 'comfyuiEffectiveConnectionMode() !== "local"' in comfyui_js
     assert 'currentUser === "root"' in comfyui_js
     assert 'return true;' in comfyui_js
     assert 'tab.disabled = false;' in comfyui_js

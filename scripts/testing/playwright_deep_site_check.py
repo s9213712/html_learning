@@ -84,7 +84,13 @@ class OptionalComfyUIConfig:
         return bool(self.civitai_api_key.strip())
 
     def has_live_comfyui(self) -> bool:
-        return bool(self.remote_api_url.strip() or self.local_base_dir.strip() or self.local_start_script.strip())
+        return bool(
+            self.remote_api_url.strip()
+            or self.local_base_dir.strip()
+            or self.local_start_script.strip()
+            or self.local_api_host.strip()
+            or self.local_api_port
+        )
 
     def safe_summary(self) -> dict[str, Any]:
         return {
@@ -125,7 +131,14 @@ def prompt_yes_no(label: str, default: bool = False) -> bool:
 
 def collect_optional_comfyui_config(args: argparse.Namespace) -> OptionalComfyUIConfig:
     cfg = OptionalComfyUIConfig(
-        enabled=bool(args.comfyui_api_url or args.comfyui_base_dir or args.comfyui_start_script or args.civitai_api_key),
+        enabled=bool(
+            args.comfyui_api_url
+            or args.comfyui_base_dir
+            or args.comfyui_start_script
+            or args.comfyui_api_host
+            or args.comfyui_api_port
+            or args.civitai_api_key
+        ),
         remote_api_url=args.comfyui_api_url.strip(),
         local_base_dir=args.comfyui_base_dir.strip(),
         local_start_script=args.comfyui_start_script.strip(),
@@ -223,6 +236,10 @@ def build_env(runtime_root: Path, port: int) -> dict[str, str]:
             "HTML_LEARNING_CHESS_REPLAY_BUFFER_PATH": str(runtime_root / "games" / "replays" / "chess_replay_buffer.jsonl"),
             "HTML_LEARNING_CHESS_REPLAY_QUARANTINE_PATH": str(runtime_root / "games" / "replays" / "chess_replay_quarantine.jsonl"),
             "HTML_LEARNING_CHESS_REPLAY_REJECTED_PATH": str(runtime_root / "games" / "replays" / "chess_replay_rejected.jsonl"),
+            "HTML_LEARNING_BACKPRESSURE_THREAD_CAPACITY": "32",
+            "HTML_LEARNING_BACKPRESSURE_ROOT_LIMIT": "16",
+            "HTML_LEARNING_BACKPRESSURE_HEAVY_LIMIT": "8",
+            "HTML_LEARNING_BACKPRESSURE_FAST_LANE_RESERVED": "4",
         }
     )
     return env
@@ -273,29 +290,53 @@ def cookie_value(page, name: str) -> str:
     )
 
 
-def fetch_json(page, method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+def fetch_json(
+    page,
+    method: str,
+    path: str,
+    payload: dict[str, Any] | None = None,
+    *,
+    timeout_ms: int = 30000,
+) -> dict[str, Any]:
     csrf = cookie_value(page, "csrf_token")
     return page.evaluate(
-        """async ({method, path, payload, csrf}) => {
+        """async ({method, path, payload, csrf, timeoutMs}) => {
             const cookieValue = name => {
                 const part = document.cookie.split('; ').find(item => item.startsWith(name + '='));
                 return part ? decodeURIComponent(part.split('=').slice(1).join('=')) : '';
             };
             const send = async token => {
+                const controller = new AbortController();
+                const timer = setTimeout(() => controller.abort(), timeoutMs);
                 const opts = {
                     method,
                     credentials: 'same-origin',
+                    signal: controller.signal,
                     headers: {'Accept': 'application/json', 'X-CSRF-Token': token || ''}
                 };
                 if (payload !== null) {
                     opts.headers['Content-Type'] = 'application/json';
                     opts.body = JSON.stringify(payload);
                 }
-                const response = await fetch(path, opts);
-                const text = await response.text();
-                let body = null;
-                try { body = text ? JSON.parse(text) : null; } catch (err) { body = {raw: text.slice(0, 500)}; }
-                return {status: response.status, ok: response.ok, body};
+                try {
+                    const response = await fetch(path, opts);
+                    const text = await response.text();
+                    let body = null;
+                    try { body = text ? JSON.parse(text) : null; } catch (err) { body = {raw: text.slice(0, 500)}; }
+                    return {status: response.status, ok: response.ok, body};
+                } catch (err) {
+                    return {
+                        status: 0,
+                        ok: false,
+                        body: {
+                            error: err && err.name ? err.name : 'fetch_failed',
+                            msg: err && err.message ? err.message : String(err || 'fetch failed'),
+                            path
+                        }
+                    };
+                } finally {
+                    clearTimeout(timer);
+                }
             };
             let result = await send(csrf || cookieValue('csrf_token'));
             if (method !== 'GET' && result.status === 403 && result.body && result.body.error === 'csrf_invalid') {
@@ -305,14 +346,28 @@ def fetch_json(page, method: str, path: str, payload: dict[str, Any] | None = No
             }
             return result;
         }""",
-        {"method": method, "path": path, "payload": payload, "csrf": csrf},
+        {"method": method, "path": path, "payload": payload, "csrf": csrf, "timeoutMs": int(timeout_ms)},
     )
 
 
-def fetch_json_direct(page, base_url: str, method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+def build_direct_auth_headers(page, base_url: str) -> dict[str, str]:
     cookies = page.context.cookies([base_url])
     cookie_header = "; ".join(f"{item['name']}={item['value']}" for item in cookies)
     csrf = next((item["value"] for item in cookies if item.get("name") == "csrf_token"), "")
+    return {"Cookie": cookie_header, "X-CSRF-Token": csrf}
+
+
+def fetch_json_direct(
+    page,
+    base_url: str,
+    method: str,
+    path: str,
+    payload: dict[str, Any] | None = None,
+    *,
+    timeout_seconds: float = 20.0,
+    auth_headers: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    direct_headers = auth_headers or build_direct_auth_headers(page, base_url)
     body = b""
     if payload is not None:
         body = json.dumps(payload).encode("utf-8")
@@ -323,13 +378,13 @@ def fetch_json_direct(page, base_url: str, method: str, path: str, payload: dict
         headers={
             "Accept": "application/json",
             "Content-Type": "application/json",
-            "Cookie": cookie_header,
-            "X-CSRF-Token": csrf,
+            "Cookie": direct_headers.get("Cookie", ""),
+            "X-CSRF-Token": direct_headers.get("X-CSRF-Token", ""),
         },
     )
     context = ssl._create_unverified_context()
     try:
-        with urllib.request.urlopen(request, timeout=20, context=context) as response:
+        with urllib.request.urlopen(request, timeout=timeout_seconds, context=context) as response:
             raw = response.read().decode("utf-8", errors="replace")
             parsed = json.loads(raw) if raw else {}
             return {"status": int(response.status), "ok": 200 <= int(response.status) < 300, "body": parsed}
@@ -574,21 +629,32 @@ def switch_admin_tab(page, tab: str) -> None:
     page.wait_for_timeout(800)
 
 
-def login(page, base_url: str) -> None:
+def load_authenticated_app(page, base_url: str) -> None:
+    page.goto(base_url + "/", wait_until="domcontentloaded")
+    wait_for_auth_app(page)
+
+
+def login(page, base_url: str, *, load_app: bool = True) -> None:
     page.goto(base_url + "/", wait_until="domcontentloaded")
     if not cookie_value(page, "csrf_token"):
         page.evaluate("() => fetch('/api/csrf-token', {credentials: 'same-origin'})")
     login_result = fetch_json(page, "POST", "/api/login", {"username": "root", "password": ROOT_PASSWORD})
     if login_result["status"] != 200 or not login_result["body"].get("ok"):
         raise RuntimeError(f"login api failed: {login_result}")
-    page.goto(base_url + "/", wait_until="domcontentloaded")
-    page.wait_for_timeout(300)
     me = fetch_json(page, "GET", "/api/me")
     if me["status"] != 200 or not me["body"].get("ok"):
         raise RuntimeError(f"login failed: {me}")
+    if load_app:
+        load_authenticated_app(page, base_url)
 
 
-def enable_required_features(page, base_url: str) -> None:
+def enable_required_features(
+    page,
+    base_url: str,
+    *,
+    load_app: bool = True,
+    auth_headers: dict[str, str] | None = None,
+) -> None:
     feature_keys = [
         "feature_accounts_enabled",
         "feature_chat_enabled",
@@ -620,13 +686,28 @@ def enable_required_features(page, base_url: str) -> None:
         "feature_videos_enabled",
     ]
     updates = {key: True for key in feature_keys}
-    result = fetch_json_direct(page, base_url, "PUT", "/api/admin/features", updates)
+    result = fetch_json_direct(
+        page,
+        base_url,
+        "PUT",
+        "/api/admin/features",
+        updates,
+        timeout_seconds=60,
+        auth_headers=auth_headers,
+    )
     if result["status"] != 200 or not result["body"].get("ok"):
         raise RuntimeError(f"feature enable failed: {result}")
-    page.goto(base_url + "/", wait_until="domcontentloaded")
+    if load_app:
+        load_authenticated_app(page, base_url)
 
 
-def apply_optional_comfyui_settings(rec: Recorder, page, cfg: OptionalComfyUIConfig) -> None:
+def apply_optional_comfyui_settings(
+    rec: Recorder,
+    page,
+    cfg: OptionalComfyUIConfig,
+    base_url: str | None = None,
+    auth_headers: dict[str, str] | None = None,
+) -> None:
     if not cfg.enabled:
         rec.add("optional_comfyui_settings", True, "not configured; offline checks only", configured=False)
         return
@@ -634,7 +715,7 @@ def apply_optional_comfyui_settings(rec: Recorder, page, cfg: OptionalComfyUICon
     if cfg.remote_api_url:
         payload["comfyui_connection_mode"] = "remote"
         payload["comfyui_remote_api_url"] = cfg.remote_api_url
-    elif cfg.local_base_dir or cfg.local_start_script:
+    elif cfg.local_base_dir or cfg.local_start_script or cfg.local_api_host or cfg.local_api_port:
         payload["comfyui_connection_mode"] = "local"
         if cfg.local_base_dir:
             payload["comfyui_base_dir"] = cfg.local_base_dir
@@ -649,7 +730,18 @@ def apply_optional_comfyui_settings(rec: Recorder, page, cfg: OptionalComfyUICon
     if not payload:
         rec.add("optional_comfyui_settings", True, "enabled but no settings provided; offline checks only", configured=False)
         return
-    result = fetch_json(page, "PUT", "/api/admin/settings", payload)
+    if base_url:
+        result = fetch_json_direct(
+            page,
+            base_url,
+            "PUT",
+            "/api/admin/settings",
+            payload,
+            timeout_seconds=60,
+            auth_headers=auth_headers,
+        )
+    else:
+        result = fetch_json(page, "PUT", "/api/admin/settings", payload)
     body = result.get("body") or {}
     ok = result["status"] == 200 and body.get("ok")
     safe_payload_keys = sorted(payload)
@@ -700,7 +792,7 @@ def check_live_comfyui_connection(rec: Recorder, page, cfg: OptionalComfyUIConfi
     )
 
 
-def check_api_surface(rec: Recorder, page) -> None:
+def check_api_surface(rec: Recorder, page, base_url: str, auth_headers: dict[str, str]) -> None:
     endpoints = [
         "/api/site-config",
         "/api/version",
@@ -739,10 +831,19 @@ def check_api_surface(rec: Recorder, page) -> None:
     statuses: dict[str, int] = {}
     failures: list[str] = []
     for endpoint in endpoints:
-        result = fetch_json(page, "GET", endpoint)
+        print(f"[INFO] api_surface: {endpoint}", flush=True)
+        try:
+            result = fetch_json_direct(page, base_url, "GET", endpoint, timeout_seconds=25, auth_headers=auth_headers)
+        except (TimeoutError, socket.timeout, urllib.error.URLError, ssl.SSLError) as exc:
+            statuses[endpoint] = 0
+            failures.append(f"{endpoint} -> {type(exc).__name__}")
+            continue
         statuses[endpoint] = int(result["status"])
         if result["status"] >= 400:
             failures.append(f"{endpoint} -> {result['status']}")
+        elif result["status"] == 0:
+            body = result.get("body") or {}
+            failures.append(f"{endpoint} -> fetch_error:{body.get('error') or 'unknown'}")
     rec.add("authenticated_api_surface", not failures, ", ".join(failures) or f"{len(endpoints)} endpoints <400", statuses=statuses)
 
 
@@ -762,13 +863,23 @@ def check_auth_registration_journey(rec: Recorder, browser, base_url: str, root_
         page.fill("#reg-pw-confirm", password)
         page.fill("#reg-nickname", "QA 行動註冊")
         page.fill("#reg-email", f"{username}@example.test")
-        page.click("#reg-btn")
-        page.locator("#reg-msg").wait_for(state="visible", timeout=8000)
-        page.wait_for_function(
-            "() => document.querySelector('#reg-msg')?.innerText.trim().length > 0",
-            timeout=8000,
-        )
-        reg_msg = page.locator("#reg-msg").inner_text(timeout=3000)
+        with page.expect_response(
+            lambda response: response.request.method == "POST" and response.url.endswith("/api/register"),
+            timeout=10000,
+        ) as register_response_info:
+            page.click("#reg-btn")
+        register_response = register_response_info.value
+        try:
+            register_body = register_response.json()
+        except Exception:
+            register_body = {}
+        try:
+            page.locator("#reg-msg.msg.show").wait_for(state="visible", timeout=5000)
+        except PlaywrightTimeoutError:
+            pass
+        reg_msg = page.locator("#reg-msg").inner_text(timeout=3000).strip()
+        if not reg_msg and isinstance(register_body, dict):
+            reg_msg = str(register_body.get("msg") or "").strip()
         pending_login = fetch_json(page, "POST", "/api/login", {"username": username, "password": password})
         users = fetch_json(root_page, "GET", "/api/admin/users?include_deleted=1")
         user_rows = users.get("body", {}).get("users") or []
@@ -780,7 +891,10 @@ def check_auth_registration_journey(rec: Recorder, browser, base_url: str, root_
             raise RuntimeError(f"registration approval failed: {review}")
         approved_login = fetch_json(page, "POST", "/api/login", {"username": username, "password": password})
         ok = (
-            "送出" in reg_msg
+            register_response.status == 200
+            and isinstance(register_body, dict)
+            and bool(register_body.get("ok"))
+            and "送出" in reg_msg
             and pending_login["status"] in {401, 403, 423}
             and approved_login["status"] == 200
             and approved_login.get("body", {}).get("ok")
@@ -789,9 +903,10 @@ def check_auth_registration_journey(rec: Recorder, browser, base_url: str, root_
         rec.add(
             "auth_registration_login_flow",
             ok,
-            f"user={username}, pending_status={pending_login['status']}, approved_status={approved_login['status']}",
+            f"user={username}, register_status={register_response.status}, pending_status={pending_login['status']}, approved_status={approved_login['status']}",
             username=username,
             reg_msg=reg_msg,
+            register_body=register_body,
             pending_login=pending_login.get("body"),
             approved_login=approved_login.get("body"),
         )
@@ -1157,6 +1272,14 @@ def check_video_share_journey(rec: Recorder, page) -> dict[str, Any]:
         videos_body = videos.get("body") or {}
         video_items = videos_body.get("videos") or videos_body.get("items") or videos_body.get("data") or []
         latest = video_items[0] if video_items else {}
+        latest_id = int(latest.get("id") or 0)
+        if latest_id:
+            card = page.locator(f'[data-video-open="{latest_id}"]').first
+            if card.count() and card.is_visible(timeout=1000):
+                card.click(timeout=5000)
+            else:
+                page.evaluate("(id) => window.openVideo?.(id)", latest_id)
+            page.wait_for_selector(f'[data-video-like="{latest_id}"]', timeout=10000)
         video_id_attr = page.locator("[data-video-like]").first.get_attribute("data-video-like", timeout=2000)
         video_id = int(video_id_attr or latest.get("id") or 0)
         playback = fetch_json(page, "GET", f"/api/videos/{video_id}/playback") if video_id else {"status": 0, "body": {}}
@@ -1899,6 +2022,7 @@ def main() -> int:
                 return page
 
             page = new_page({"width": 1366, "height": 768})
+            root_auth_headers: dict[str, str] = {}
 
             def unauth_editor() -> None:
                 anon = browser.new_context(ignore_https_errors=True, viewport={"width": 1280, "height": 720})
@@ -1909,15 +2033,27 @@ def main() -> int:
                 if "/comfyui-workflow-editor.html" in final_url:
                     raise RuntimeError(f"unauthenticated editor remained accessible: {final_url}")
 
+            def root_login() -> None:
+                login(page, base_url, load_app=False)
+                root_auth_headers.update(build_direct_auth_headers(page, base_url))
+
             rec.guard("protected_comfyui_editor_requires_login", unauth_editor)
-            rec.guard("ui_login_root", lambda: login(page, base_url))
-            rec.guard("enable_required_features", lambda: enable_required_features(page, base_url))
+            rec.guard("root_session_login", root_login)
+            rec.guard(
+                "enable_required_features",
+                lambda: enable_required_features(page, base_url, load_app=False, auth_headers=root_auth_headers),
+            )
+            if not args.only_drive_bulk:
+                rec.guard(
+                    "optional_comfyui_settings",
+                    lambda: apply_optional_comfyui_settings(rec, page, optional_comfyui, base_url, root_auth_headers),
+                )
+            rec.guard("load_authenticated_app", lambda: load_authenticated_app(page, base_url))
             if args.only_drive_bulk:
                 rec.guard("drive_bulk_selection_journey", lambda: check_drive_bulk_selection_journey(rec, page))
                 page.close()
             else:
-                rec.guard("optional_comfyui_settings", lambda: apply_optional_comfyui_settings(rec, page, optional_comfyui))
-                rec.guard("api_surface", lambda: check_api_surface(rec, page))
+                rec.guard("api_surface", lambda: check_api_surface(rec, page, base_url, root_auth_headers))
                 rec.guard("auth_registration_journey", lambda: check_auth_registration_journey(rec, browser, base_url, page))
                 rec.guard("admin_member_management_journey", lambda: check_admin_member_management(rec, page))
                 rec.guard("forum_journey", lambda: check_forum_journey(rec, page))
