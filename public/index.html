@@ -2227,6 +2227,9 @@
               <div class="drive-card-sub" id="comfyui-template-select-hint">可從官方模板、自己的 preset、其他公開 preset，或先匯入模板檔後再建立簡化卡片頁面。</div>
             </div>
             <div id="comfyui-template-summary" class="comfyui-template-summary" hidden></div>
+            <div id="comfyui-installed-gguf-list" class="comfyui-installed-gguf-list">
+              <div class="drive-empty">尚未偵測到已安裝 GGUF UNet。</div>
+            </div>
             <div id="comfyui-template-panels" class="comfyui-template-panels" hidden></div>
           </div>
           <details class="drive-collapsible-panel settings-collapse" id="comfyui-legacy-form-panel" style="display:none;margin-top:.85rem;">
@@ -2247,7 +2250,26 @@
               <option value="">檢查後選擇精度版本</option>
             </select>
             <div class="drive-card-sub" id="comfyui-diffusers-repo-status">貼上 repo 後會先檢查支援模式與可下載 Diffusers 精度版本。</div>
-            <div class="drive-card-sub">HF / Diffusers 只支援 Hugging Face 模型頁「Use this model」內有 Diffusers 的 repo；GGUF 請到 Workflow 選官方 GGUF workflow。</div>
+            <div class="settings-option-grid" id="comfyui-diffusers-gguf-options" style="display:none;margin-top:.65rem;">
+              <div class="field">
+                <label>官方 GGUF profile</label>
+                <select id="comfyui-diffusers-gguf-profile">
+                  <option value="">不使用官方 GGUF</option>
+                </select>
+              </div>
+              <div class="field">
+                <label>GGUF 精度版本</label>
+                <select id="comfyui-diffusers-gguf-variant" disabled>
+                  <option value="">先選擇官方 GGUF profile</option>
+                </select>
+              </div>
+              <div class="field">
+                <label>GGUF base Diffusers repo</label>
+                <input type="text" id="comfyui-diffusers-gguf-base-repo" autocomplete="off" placeholder="例如 stabilityai/stable-diffusion-xl-base-1.0" />
+              </div>
+            </div>
+            <div class="drive-card-sub" id="comfyui-diffusers-gguf-profile-hint">官方 profile 會帶入對應 workflow、文字編碼器、VAE 與已驗證精度。</div>
+            <div class="drive-card-sub">HF / Diffusers 只支援 Hugging Face 模型頁「Use this model」內有 Diffusers 的 repo；GGUF 只允許官方已驗證 profile，或改到 Workflow 選官方 GGUF workflow。</div>
           </div>
           <div class="field">
             <label>模型</label>
@@ -7335,7 +7357,7 @@
 <script src="/js/35-drive.js?v=20260604-storage-bulk-clarity" defer></script>
   <script src="/js/35-drive-preview-share.js?v=20260507-drive-preview-share-split" defer></script>
 <!-- cache marker retained for template-import regression: /js/36-comfyui.js?v=20260509-comfyui-template-embeddings -->
-<script src="/js/36-comfyui.js?v=20260604-hf-gguf-workflow-split" defer></script>
+<script src="/js/36-comfyui.js?v=20260605-hf-gguf-profile-ui" defer></script>
 <script src="/js/36-comfyui-workflows.js?v=20260604-shared-fields-builtin-vae" defer></script>
 <script src="/js/37-bug-report.js?v=20260502-device-feature" defer></script>
 <script src="/js/41-game-modules.js?v=20260601-rubiks-visible" defer></script>

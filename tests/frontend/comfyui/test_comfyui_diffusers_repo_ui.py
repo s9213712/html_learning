@@ -22,7 +22,11 @@ def test_diffusers_generation_page_accepts_repo_and_variant_selection():
     assert 'id="s-comfyui-diffusers-keep-downloaded-models"' in html
     assert "Use this model" in html
     assert "有 Diffusers 的 repo" in html
-    assert 'id="comfyui-diffusers-gguf-options"' not in html
+    assert 'id="comfyui-diffusers-gguf-options"' in html
+    assert 'id="comfyui-diffusers-gguf-profile"' in html
+    assert 'id="comfyui-diffusers-gguf-variant"' in html
+    assert 'id="comfyui-diffusers-gguf-base-repo"' in html
+    assert 'id="comfyui-installed-gguf-list"' in html
 
 
 def test_comfyui_background_refresh_failures_are_visible():
@@ -53,7 +57,7 @@ def test_diffusers_js_preflights_huggingface_repo_before_generation():
     assert "comfyuiInstalledGgufModels" in js
     assert "renderComfyuiInstalledGgufModels" in js
     assert "installed_gguf_models" in js
-    assert "GGUF 請改到 Workflow 選官方 GGUF workflow" in js
+    assert "若要使用本站已驗證 GGUF，請選官方 GGUF profile" in js
     assert "updateComfyuiDiffusersGgufOptions" in js
     assert "尚未開始下載" in js
     assert "避免重複下載" in js
@@ -62,7 +66,7 @@ def test_diffusers_js_preflights_huggingface_repo_before_generation():
 
 def test_diffusers_cache_busts_preflight_ui_assets():
     html = _read("public/index.html")
-    assert "/js/36-comfyui.js?v=20260604-hf-gguf-workflow-split" in html
+    assert "/js/36-comfyui.js?v=20260605-hf-gguf-profile-ui" in html
     assert "/js/36-comfyui-workflows.js?v=20260604-shared-fields-builtin-vae" in html
 
 
@@ -94,9 +98,9 @@ def test_hf_and_comfyui_are_separate_frontend_generation_tabs():
     assert 'updateComfyuiStatusForActiveBackend();' in comfyui_js
     assert 'isComfyuiDiffusersMode() ? comfyuiDiffusersStatusText() : comfyuiModelsLastStatusText' in comfyui_js
     assert 'if (!isComfyuiDiffusersMode()) comfyuiModelsLastStatusText = activeStatusText;' in comfyui_js
-    assert 'diffusers_gguf_file: "",' in comfyui_js
+    assert 'diffusers_gguf_file: diffusersMode && selectedGgufVariant ?' in comfyui_js
     assert 'HF / Diffusers 只支援 Hugging Face 模型頁' in html
-    assert 'GGUF 請到 Workflow 選官方 GGUF workflow' in html
+    assert 'GGUF 只允許官方已驗證 profile' in html
 
 
 def test_comfyui_history_lists_and_reruns_workflow_runs():

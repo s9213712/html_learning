@@ -482,17 +482,17 @@ def main() -> int:
                     if not data_url:
                         item["issues"].append("image_preview_missing_data_url")
                         continue
-                    mime, raw_size = decode_data_url(data_url)
+                    mime, data = decode_data_url(data_url)
                     ext = image_ext_for_mime(mime)
                     image_path = images_dir / f"{slug}_{img_index:02d}{ext}"
                     image_path.parent.mkdir(parents=True, exist_ok=True)
-                    image_path.write_bytes(raw_size)
+                    image_path.write_bytes(data)
                     analysis = analyze_image(image_path)
                     image_record = {
                         "index": img_index,
                         "path": str(image_path),
                         "mime_type": image.get("mime_type") or mime,
-                        "size_bytes": len(raw_size),
+                        "size_bytes": len(data),
                         "output_node_id": image.get("output_node_id") or "",
                         "output_label": image.get("output_label") or "",
                         "analysis": analysis.__dict__,

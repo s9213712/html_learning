@@ -745,7 +745,8 @@ function updateComfyuiDiffusersGgufOptions() {
   const panel = $("comfyui-diffusers-gguf-options");
   const input = $("comfyui-diffusers-gguf-base-repo");
   const profile = comfyuiSelectedGgufProfile();
-  if (panel) panel.style.display = "none";
+  if (panel) panel.style.display = isComfyuiDiffusersMode() ? "" : "none";
+  if (!profile && input) input.value = "";
   if (profile && input && !input.value) {
     input.value = profile.base_repo || "";
   }
@@ -793,7 +794,7 @@ function renderComfyuiDiffusersInspection() {
   if (status) {
     const pipeline = data.pipeline_tag ? ` · pipeline=${data.pipeline_tag}` : "";
     const variantNote = options.length > 1 ? " · 請選擇 Diffusers 精度版本" : "";
-    const ggufNote = hasGguf ? " · 偵測到 GGUF 檔案；GGUF 請改到 Workflow 選官方 GGUF workflow，不在 HF 分頁直接執行。" : "";
+    const ggufNote = hasGguf ? " · 偵測到 GGUF 檔案；若要使用本站已驗證 GGUF，請選官方 GGUF profile。" : "";
     status.textContent = `${data.repo_id || inspection.repo || ""}：${modeText}${pipeline}${variantNote}${ggufNote}${warnings.length ? `。${warnings.join(" ")}` : ""}`;
   }
 }
@@ -4005,16 +4006,19 @@ function comfyuiPayload() {
   const diffusersRepo = normalizeComfyuiHuggingFaceRepoInput($("comfyui-diffusers-model-repo")?.value || "");
   const diffusersVariant = $("comfyui-diffusers-model-variant")?.value || "";
   const diffusersMode = isComfyuiDiffusersMode();
-  const effectiveDiffusersRepo = diffusersRepo;
+  const selectedGgufProfile = diffusersMode ? comfyuiSelectedGgufProfile() : null;
+  const selectedGgufVariant = diffusersMode ? comfyuiSelectedGgufVariant() : null;
+  const selectedGgufBaseRepo = $("comfyui-diffusers-gguf-base-repo")?.value || selectedGgufProfile?.base_repo || "";
+  const effectiveDiffusersRepo = selectedGgufProfile?.repo_id || diffusersRepo;
   const payload = {
     generation_mode: mode,
     model: diffusersMode && effectiveDiffusersRepo ? effectiveDiffusersRepo : ($("comfyui-model-select")?.value || ""),
     diffusers_model_repo: diffusersMode ? effectiveDiffusersRepo : "",
-    diffusers_model_variant: diffusersMode ? diffusersVariant : "",
-    diffusers_gguf_file: "",
-    diffusers_gguf_base_repo: "",
-    diffusers_gguf_profile: "",
-    diffusers_gguf_variant: "",
+    diffusers_model_variant: diffusersMode && !selectedGgufProfile ? diffusersVariant : "",
+    diffusers_gguf_file: diffusersMode && selectedGgufVariant ? (selectedGgufVariant.gguf_file || selectedGgufVariant.filename || "") : "",
+    diffusers_gguf_base_repo: diffusersMode && selectedGgufProfile ? selectedGgufBaseRepo : "",
+    diffusers_gguf_profile: diffusersMode && selectedGgufProfile ? (selectedGgufProfile.id || "") : "",
+    diffusers_gguf_variant: diffusersMode && selectedGgufVariant ? (selectedGgufVariant.id || "") : "",
     prompt: $("comfyui-prompt")?.value || "",
     negative_prompt: $("comfyui-negative-prompt")?.value || "",
     width: comfyuiNumberValue("comfyui-width", comfyuiDefaultWidth),
