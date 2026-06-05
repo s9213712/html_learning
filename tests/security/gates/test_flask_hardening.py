@@ -214,6 +214,14 @@ def test_backpressure_preserves_fast_lane_root_priority_and_heavy_limits():
     def login_probe():
         return jsonify({"ok": True, "login": True})
 
+    @app.route("/")
+    def index_probe():
+        return "index"
+
+    @app.route("/js/app.js")
+    def app_js_probe():
+        return "console.log('ok');"
+
     @app.route("/api/normal")
     def normal_probe():
         return jsonify({"ok": True})
@@ -249,7 +257,18 @@ def test_backpressure_preserves_fast_lane_root_priority_and_heavy_limits():
 
         login_lane = client.post("/api/login", json={"username": "root"})
         assert login_lane.status_code == 200
+        assert login_lane.headers["X-Hackme-Backpressure"] == "fast_lane"
         assert login_lane.get_json()["login"] is True
+
+        bootstrap_lane = client.get("/")
+        assert bootstrap_lane.status_code == 200
+        assert bootstrap_lane.headers["X-Hackme-QoS-Class"] == "bootstrap"
+        assert bootstrap_lane.headers["X-Hackme-Backpressure"] == "fast_lane"
+
+        static_lane = client.get("/js/app.js")
+        assert static_lane.status_code == 200
+        assert static_lane.headers["X-Hackme-QoS-Class"] == "static"
+        assert static_lane.headers["X-Hackme-Backpressure"] == "fast_lane"
 
         root_priority = client.get("/api/root/points/report")
         assert root_priority.status_code == 200
@@ -328,7 +347,9 @@ def test_backpressure_qos_header_and_edge_burst_guard(monkeypatch):
 
 def test_backpressure_qos_classification_matches_route_planes():
     assert backpressure_module.classify_request_qos("/api/version") == "health"
+    assert backpressure_module.classify_request_qos("/") == "bootstrap"
     assert backpressure_module.classify_request_qos("/styles.css") == "static"
+    assert backpressure_module.classify_request_qos("/assets/logo.png") == "static"
     assert backpressure_module.classify_request_qos("/api/login", "POST") == "auth"
     assert backpressure_module.classify_request_qos("/api/admin/health") == "management"
     assert backpressure_module.classify_request_qos("/api/files/upload", "POST") == "heavy"

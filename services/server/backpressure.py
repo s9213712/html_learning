@@ -37,6 +37,17 @@ AUTH_FAST_LANE_PATHS = {
     "/api/site-config",
 }
 
+BOOTSTRAP_FAST_LANE_PATHS = {
+    "/",
+    "/index.html",
+    "/favicon.ico",
+    "/manifest.webmanifest",
+    "/site.webmanifest",
+    "/sw.js",
+    "/service-worker.js",
+    "/robots.txt",
+}
+
 CSRF_EDGE_GUARD_PATHS = {
     "/api/csrf-token",
 }
@@ -58,6 +69,7 @@ BACKPRESSURE_FAST_LANE_PREFIXES = (
     "/experiments.css",
     "/i18n-language-switcher.css",
     "/js/",
+    "/assets/",
 )
 
 ROOT_PRIORITY_PREFIXES = (
@@ -395,6 +407,8 @@ def is_health_fast_lane_path(path: str) -> bool:
 
 def is_backpressure_fast_lane_path(path: str) -> bool:
     path = path or ""
+    if path in BOOTSTRAP_FAST_LANE_PATHS:
+        return True
     if path in AUTH_FAST_LANE_PATHS:
         return True
     return any(path == prefix or path.startswith(prefix) for prefix in BACKPRESSURE_FAST_LANE_PREFIXES)
@@ -432,6 +446,8 @@ def classify_request_qos(path: str, method: str = "GET") -> str:
     method = (method or "GET").upper()
     if is_health_fast_lane_path(path):
         return "health"
+    if path in BOOTSTRAP_FAST_LANE_PATHS:
+        return "bootstrap"
     if path.startswith("/js/") or path.startswith("/assets/") or path in {"/styles.css", "/experiments.css", "/i18n-language-switcher.css"}:
         return "static"
     if path in AUTH_FAST_LANE_PATHS:
@@ -1003,6 +1019,8 @@ def install_backpressure(app, settings_provider=None, root_priority_detector=Non
         qos_class = getattr(g, "_hackme_qos_class", None)
         if qos_class:
             response.headers.setdefault("X-Hackme-QoS-Class", qos_class)
+        if label:
+            response.headers.setdefault("X-Hackme-Backpressure", label)
         if label is None and response.status_code == 503:
             label = response.headers.get("X-Hackme-Backpressure") or None
         if label and hasattr(traffic, "record"):
