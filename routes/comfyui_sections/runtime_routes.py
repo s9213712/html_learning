@@ -76,6 +76,12 @@ def register_comfyui_runtime_routes(app, ctx):
             return None
         media = job_result.get("media")
         records = []
+        image = job_result.get("image")
+        if isinstance(image, dict):
+            records.append(image)
+        images = job_result.get("images")
+        if isinstance(images, list):
+            records.extend(images)
         if isinstance(media, list):
             records.extend(media)
         elif isinstance(media, dict):

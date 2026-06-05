@@ -2873,7 +2873,22 @@ def register_comfyui_routes(app, deps):
                 f"遠端 ComfyUI 未安裝 GGUF UNet：{gguf_file}。"
                 "遠端模式不會自動下載或寫入模型檔，請先由遠端 ComfyUI 管理人安裝後再執行。"
             )
-        if native_binding.get("connection_mode") != "remote":
+        if native_binding.get("connection_mode") != "remote" and gguf_option:
+            prepared = {
+                "suggested_backend": "comfyui_gguf",
+                "model_repo": params.get("diffusers_model_repo") or params.get("model"),
+                "gguf_file": gguf_file,
+                "already_installed": True,
+            }
+            _update_generation_job_progress(job_id, {
+                "phase": "routing",
+                "percent": 24,
+                "backend_kind": "comfyui_gguf",
+                "step": "GGUF UNet 已安裝",
+                "current_file": gguf_file,
+                "detail": f"ComfyUI 已列出 GGUF UNet：{gguf_option}，跳過 Hugging Face UNet 下載。",
+            })
+        elif native_binding.get("connection_mode") != "remote":
             prepare = getattr(active_client, "prepare_gguf_file_for_backend", None)
             if not callable(prepare):
                 return active_client, backend_binding, params

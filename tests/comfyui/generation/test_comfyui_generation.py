@@ -15,6 +15,7 @@ from tests.comfyui._integration_suite import (
     test_comfyui_gguf_profiles_hide_failed_sd35_and_keep_sothmik_q8,
     test_comfyui_diffusers_mode_auto_routes_native_gguf_to_comfyui_workflow,
     test_comfyui_diffusers_mode_auto_downloads_missing_gguf_companions,
+    test_comfyui_diffusers_mode_local_native_gguf_skips_download_when_installed,
     test_comfyui_diffusers_mode_remote_missing_gguf_reports_without_download,
     test_comfyui_diffusers_mode_rejects_failed_sd35_gguf_before_download,
     test_comfyui_diffusers_mode_rejects_unmapped_gguf_before_download,
