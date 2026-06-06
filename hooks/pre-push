@@ -7,7 +7,12 @@
 # IMPORTANT: validation failures exit non-zero and block the push.
 
 RELEASE_FILE="services/platform/release_info.py"
-SUMMARY_FILE="docs/UPDATE_SUMMARY.md"
+RELEASE_DOCS=(
+  "README.md"
+  "docs/README.zh-TW.md"
+  "docs/For_developer.md"
+  "docs/UPDATE_SUMMARY.md"
+)
 
 bump_version() {
   if [[ ! -f "$RELEASE_FILE" ]]; then
@@ -33,10 +38,11 @@ PYEOF
     return 0
   fi
 
-  # Parse YYYY.MM.DD-NNN format
-  if [[ "$CURRENT" =~ ^([0-9]{4}\.[0-9]{2}\.[0-9]{2})-([0-9]+)$ ]]; then
-    local DATE_PART="${BASH_REMATCH[1]}"
-    local BUILD_PART="${BASH_REMATCH[2]}"
+  # Parse optional branch prefix plus YYYY.MM.DD-NNN format.
+  if [[ "$CURRENT" =~ ^((0[0-9]_)?)([0-9]{4}\.[0-9]{2}\.[0-9]{2})-([0-9]+)$ ]]; then
+    local PREFIX_PART="${BASH_REMATCH[1]}"
+    local DATE_PART="${BASH_REMATCH[3]}"
+    local BUILD_PART="${BASH_REMATCH[4]}"
   else
     echo "pre-push: unexpected version format '$CURRENT', skipping bump" >&2
     return 0
@@ -44,7 +50,7 @@ PYEOF
 
   local NEW_BUILD NEW_ID
   NEW_BUILD=$(printf "%03d" $((10#$BUILD_PART + 1)))
-  NEW_ID="${DATE_PART}-${NEW_BUILD}"
+  NEW_ID="${PREFIX_PART}${DATE_PART}-${NEW_BUILD}"
 
   echo "pre-push: bumping version $CURRENT → $NEW_ID"
 
@@ -58,26 +64,29 @@ result = re.sub(r'(APP_RELEASE_ID\s*=\s*)"[^"]+"', rf'\1"{new_id}"', content)
 open(path, "w").write(result)
 PYEOF
 
-  # Update docs/UPDATE_SUMMARY.md Release ID line
-  if [[ -f "$SUMMARY_FILE" ]]; then
-    python3 - "$NEW_ID" <<'PYEOF'
+  # Update visible release references.
+  python3 - "$NEW_ID" "${RELEASE_DOCS[@]}" <<'PYEOF'
 import re, sys
 new_id = sys.argv[1]
-path = "docs/UPDATE_SUMMARY.md"
-content = open(path).read()
-result = re.sub(r'(Release ID:\s*`)[^`]+(`)', rf'\1{new_id}\2', content)
-open(path, "w").write(result)
+for path in sys.argv[2:]:
+    try:
+        content = open(path, encoding="utf-8").read()
+    except FileNotFoundError:
+        continue
+    result = re.sub(r'((?:Current Release ID|Release ID|目前 Release ID|目前 Release ID：|Release ID:)\s*:?\s*`)[^`]+(`)', rf'\1{new_id}\2', content)
+    result = re.sub(r'(`)(?:0[0-9]_)?[0-9]{4}\.[0-9]{2}\.[0-9]{2}-[0-9]{3}(`)', rf'\1{new_id}\2', result, count=1)
+    result = re.sub(r'(^##\s+)(?:0[0-9]_)?[0-9]{4}\.[0-9]{2}\.[0-9]{2}-[0-9]{3}(\s*$)', rf'\1{new_id}\2', result, count=1, flags=re.MULTILINE)
+    open(path, "w", encoding="utf-8").write(result)
 PYEOF
-  fi
 
   # Stage and amend the tip commit with the version bump
   git add "$RELEASE_FILE"
-  [[ -f "$SUMMARY_FILE" ]] && git add "$SUMMARY_FILE"
+  git add "${RELEASE_DOCS[@]}"
   if git commit --amend --no-edit; then
     echo "pre-push: version bumped and committed (amend)"
   else
     echo "pre-push: amend failed, version bump skipped" >&2
-    git restore --staged "$RELEASE_FILE" "$SUMMARY_FILE" 2>/dev/null || true
+    git restore --staged "$RELEASE_FILE" "${RELEASE_DOCS[@]}" 2>/dev/null || true
   fi
 }
 

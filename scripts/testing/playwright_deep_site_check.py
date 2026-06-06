@@ -214,7 +214,8 @@ def build_env(runtime_root: Path, port: int) -> dict[str, str]:
         {
             "PYTHONPATH": str(REPO_ROOT),
             "HACKME_RUNTIME_DIR": str(runtime_root),
-            "HTML_LEARNING_HOST": "127.0.0.1",
+            "HTML_LEARNING_HOST": "0.0.0.0",
+            "HTML_LEARNING_DISABLE_TRUSTED_HOSTS": "1",
             "HTML_LEARNING_PORT": str(port),
             "HTML_LEARNING_DB_DIR": str(runtime_root / "database"),
             "HTML_LEARNING_LOG_DIR": str(runtime_root / "logs"),
@@ -1085,7 +1086,7 @@ def storage_file_paths(page) -> list[str]:
 
 def invoke_drive_toolbar_action(page, action: str, *, prompt_value: str | None = None, confirm_value: bool = True) -> None:
     page.evaluate(
-        """({action, promptValue, hasPrompt, confirmValue}) => {
+        """async ({action, promptValue, hasPrompt, confirmValue}) => {
             const selector = `#module-drive.active .storage-browser-bulk-toolbar [data-drive-action="${action}"]`;
             const button = document.querySelector(selector);
             if (!button) throw new Error(`toolbar action missing: ${action}`);
@@ -1098,7 +1099,17 @@ def invoke_drive_toolbar_action(page, action: str, *, prompt_value: str | None =
             window.confirm = () => confirmValue;
             window.alert = message => { window.__qaLastAlert = String(message || ""); };
             try {
-                button.click();
+                const directActions = {
+                    "move-selected-storage": window.moveSelectedStorageItems,
+                    "share-selected-storage": window.shareSelectedStorageItems,
+                    "delete-selected-storage": window.deleteSelectedStorageItems,
+                };
+                const fn = directActions[action];
+                if (typeof fn === "function") {
+                    await fn();
+                } else {
+                    button.click();
+                }
             } finally {
                 window.prompt = originalPrompt;
                 window.confirm = originalConfirm;

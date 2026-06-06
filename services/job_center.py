@@ -438,18 +438,39 @@ def _schema_cache_key(conn):
     return None
 
 
+def _job_center_schema_present(conn):
+    try:
+        row = conn.execute(
+            """
+            SELECT 1
+            FROM sqlite_master
+            WHERE type='table' AND name='job_center_jobs'
+            LIMIT 1
+            """
+        ).fetchone()
+        return bool(row)
+    except Exception:
+        return False
+
+
 def ensure_job_center_schema(conn):
     cache_key = _schema_cache_key(conn)
     if cache_key is None:
         _ensure_job_center_schema_uncached(conn)
         return
     if cache_key in _JOB_CENTER_SCHEMA_READY:
-        return
+        if _job_center_schema_present(conn):
+            return
+        with _JOB_CENTER_SCHEMA_LOCK:
+            _JOB_CENTER_SCHEMA_READY.discard(cache_key)
     with _JOB_CENTER_SCHEMA_LOCK:
         if cache_key in _JOB_CENTER_SCHEMA_READY:
-            return
+            if _job_center_schema_present(conn):
+                return
+            _JOB_CENTER_SCHEMA_READY.discard(cache_key)
         _ensure_job_center_schema_uncached(conn)
-        _JOB_CENTER_SCHEMA_READY.add(cache_key)
+        if not bool(getattr(conn, "in_transaction", False)) and _job_center_schema_present(conn):
+            _JOB_CENTER_SCHEMA_READY.add(cache_key)
 
 
 def _ensure_job_center_schema_uncached(conn):

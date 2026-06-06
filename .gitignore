@@ -71,4 +71,3 @@ security/reports/*
 !security/reports/.gitkeep
 .hackme_capacity_defaults.env
 .hackme_capacity_report.json
-restart_develop_server.sh

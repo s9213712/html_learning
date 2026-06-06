@@ -32,7 +32,7 @@ const DEFAULT_CLOUD_DRIVE_TRANSFER_LIMITS = {
   suspended: { upload_kb_per_sec: 0, download_kb_per_sec: 0, priority: 0 }
 };
 
-const DEFAULT_COMFYUI_REMOTE_API_URL = "http://192.168.18.19:8188";
+const DEFAULT_COMFYUI_REMOTE_API_URL = "http://127.0.0.1:8188";
 const ADMIN_HF_MODEL_FILE_EXT_RE = /\.(?:safetensors|ckpt|pt|pth|bin|gguf)$/i;
 
 function normalizeAdminHuggingFaceRepoInput(value) {
@@ -2259,8 +2259,8 @@ function updateComfyuiConnectionModeFields() {
   if (localBox) localBox.style.display = mode === "local" && settingsFamily === "comfyui" ? "" : "none";
   if (remoteBox) remoteBox.style.display = mode === "remote" && settingsFamily === "comfyui" ? "" : "none";
   if (diffusersBox) diffusersBox.style.display = settingsFamily === "hf" ? "" : "none";
-  if (civitaiBox) civitaiBox.style.display = settingsFamily === "comfyui" ? "" : "none";
-  if (civitaiInput) civitaiInput.disabled = settingsFamily !== "comfyui";
+  if (civitaiBox) civitaiBox.style.display = "";
+  if (civitaiInput) civitaiInput.disabled = false;
   if (hfTokenInput) hfTokenInput.disabled = settingsFamily !== "hf";
   if (hfTokenClear) hfTokenClear.disabled = settingsFamily !== "hf";
   if (allowInProcessDiffusers) allowInProcessDiffusers.disabled = settingsFamily !== "hf";
@@ -2279,7 +2279,7 @@ function updateComfyuiConnectionModeFields() {
       ? "HF 頁籤會檢查 Hugging Face repo 與 Python / Diffusers 套件；只有勾選主程序資源風險確認後才允許直接推論，切換到這裡不會停用 ComfyUI 設定。"
       : (mode === "local"
         ? "本地模式會測試本地 API；若產圖時 API 未啟動，後端會嘗試執行啟動腳本。"
-        : "ComfyUI / GGUF 遠端模式只負責呼叫指定 API 生圖；Civitai API Key 仍可保存，但模型下載只能用於本站本地 ComfyUI 或由遠端主機自行安裝。");
+        : "ComfyUI / GGUF 遠端模式只負責呼叫指定 API 生圖；Civitai API Key 與模型匯入區會常駐可見，下載會寫入本站設定的 ComfyUI models 目錄。");
     status.style.color = "var(--muted)";
   }
   if (typeof updateComfyuiRootPanelVisibility === "function") updateComfyuiRootPanelVisibility(mode);

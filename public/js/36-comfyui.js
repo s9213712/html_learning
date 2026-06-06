@@ -82,6 +82,24 @@ const COMFYUI_VAE_BUILTIN = "__checkpoint_builtin__";
 const COMFYUI_VIEW_STORAGE_KEY = "hackme_web.comfyui.active_view";
 const COMFYUI_IMAGE_ASSET_KEYS = ["source", "mask", "control"];
 const COMFYUI_HF_MODEL_FILE_EXT_RE = /\.(?:safetensors|ckpt|pt|pth|bin|gguf)$/i;
+const COMFYUI_DIFFUSERS_BUILTIN_COMMON_REPOS = [
+  { repo: "dhead/wai-nsfw-illustrious-sdxl-v140-sdxl", label: "dhead WAI Illustrious SDXL v140" },
+  { repo: "Heartsync/NSFW-Uncensored", label: "Heartsync NSFW Uncensored" },
+  { repo: "stabilityai/sd-turbo", label: "SD Turbo（txt2img / I2I）" },
+  { repo: "stabilityai/sdxl-turbo", label: "SDXL Turbo（txt2img / I2I）" },
+  { repo: "stable-diffusion-v1-5/stable-diffusion-v1-5", label: "Stable Diffusion 1.5（txt2img / I2I）" },
+  { repo: "RunDiffusion/Juggernaut-XL-v9", label: "Juggernaut XL v9（SDXL / I2I）" },
+  { repo: "SG161222/RealVisXL_V4.0", label: "RealVisXL V4.0（SDXL / I2I）" },
+  { repo: "cagliostrolab/animagine-xl-4.0", label: "Animagine XL 4.0（Anime SDXL / I2I）" },
+  { repo: "cagliostrolab/animagine-xl-3.1", label: "Animagine XL 3.1（Anime SDXL / I2I）" },
+  { repo: "stablediffusionapi/animapencil-xl-v3", label: "AnimaPencil XL v3（Anime SDXL / I2I）" },
+  { repo: "Lykon/AAM_XL_AnimeMix", label: "AAM XL AnimeMix（Anime SDXL / I2I）" },
+  { repo: "black-forest-labs/FLUX.1-schnell", label: "FLUX.1 schnell（txt2img / I2I，需 HF 授權）" },
+  { repo: "Qwen/Qwen-Image", label: "Qwen Image（txt2img / I2I）" },
+  { repo: "Qwen/Qwen-Image-Edit", label: "Qwen Image Edit（I2I）" },
+  { repo: "Tongyi-MAI/Z-Image-Turbo", label: "Z-Image Turbo（txt2img / I2I）" },
+];
+const COMFYUI_DIFFUSERS_MAX_CUSTOM_COMMON_REPOS = 20;
 const COMFYUI_CONTROLNET_TIPS = {
   canny: "適合保留邊緣與輪廓，常用於重畫原圖構圖。",
   depth: "適合保留場景深度與立體關係。",
@@ -305,9 +323,9 @@ function comfyuiConnectionModeDetail(mode = comfyuiConnectionMode) {
     return "目前是本地模式：可由 root 啟動 / 停止本地 ComfyUI，且 root 可在下方折疊區管理本地模型下載。";
   }
   if (normalized === "diffusers") {
-    return "目前是 Diffusers 模式：後端會直接載入 Hugging Face repo 生圖，不經過 ComfyUI server。";
+    return "目前是 Diffusers 模式：後端會直接載入 Hugging Face repo 生圖，不經過 ComfyUI server；root 仍可使用 Civitai 模型匯入區。";
   }
-  return "目前是雲端 / 遠端模式：此頁會直接呼叫遠端 ComfyUI API 生圖，不提供本地模型下載。";
+  return "目前是雲端 / 遠端模式：此頁會直接呼叫遠端 ComfyUI API 生圖；root 仍可使用 Civitai 模型匯入區，檔案會寫入本站設定的 ComfyUI models 目錄。";
 }
 
 function updateComfyuiModeNote(modeOverride = null) {
@@ -569,7 +587,15 @@ function syncComfyuiGenerationMode() {
   const field = $("comfyui-generation-mode");
   if (field && field.value !== mode) field.value = mode;
   const auto = $("comfyui-generation-mode-auto");
-  if (auto) auto.textContent = `系統判斷：${comfyuiReadableModeLabel(mode)}`;
+  if (auto) {
+    const imageInputHint = isComfyuiDiffusersMode()
+      && mode === "txt2img"
+      && comfyuiDiffusersSupportsImageInputMode()
+      && !comfyuiHasInputAsset("source")
+      ? "（repo 支援圖生圖，上傳來源圖後自動切換）"
+      : "";
+    auto.textContent = `系統判斷：${comfyuiReadableModeLabel(mode)}${imageInputHint}`;
+  }
   return mode;
 }
 
@@ -675,9 +701,22 @@ function comfyuiDiffusersInspectionSupportedModes() {
     : [];
 }
 
+function comfyuiDiffusersInspectionRunnableModes() {
+  if (!comfyuiDiffusersInspectionMatchesCurrentRepo()) return [];
+  const rawModes = Array.isArray(comfyuiDiffusersInspection?.data?.runnable_modes)
+    ? comfyuiDiffusersInspection.data.runnable_modes
+    : comfyuiDiffusersInspectionSupportedModes().filter((mode) => ["txt2img", "img2img", "inpaint"].includes(mode));
+  return rawModes.map((mode) => normalizeComfyuiGenerationModeAlias(mode)).filter(Boolean);
+}
+
+function comfyuiDiffusersSupportsImageInputMode() {
+  if (!isComfyuiDiffusersMode()) return false;
+  return comfyuiDiffusersInspectionRunnableModes().some((mode) => ["img2img", "inpaint"].includes(mode));
+}
+
 function comfyuiDiffusersTextOnlyMode() {
   if (!isComfyuiDiffusersMode()) return false;
-  const modes = comfyuiDiffusersInspectionSupportedModes();
+  const modes = comfyuiDiffusersInspectionRunnableModes();
   return modes.length > 0 && modes.every((mode) => mode === "txt2img");
 }
 
@@ -900,6 +939,148 @@ function updateComfyuiDiffusersGgufOptions() {
   }
 }
 
+function comfyuiDiffusersCommonRepoStorageKey() {
+  return comfyuiUserStorageKey("comfyui:diffusers-common-repos");
+}
+
+function normalizeComfyuiDiffusersCommonRepo(value) {
+  const repo = normalizeComfyuiHuggingFaceRepoInput(value || "");
+  return repo && isComfyuiHuggingFaceRepoLike(repo) ? repo : "";
+}
+
+function comfyuiDiffusersBuiltinRepoSet() {
+  return new Set(COMFYUI_DIFFUSERS_BUILTIN_COMMON_REPOS.map((item) => item.repo));
+}
+
+function readComfyuiDiffusersCustomRepos() {
+  let raw = [];
+  try {
+    raw = JSON.parse(localStorage.getItem(comfyuiDiffusersCommonRepoStorageKey()) || "[]") || [];
+  } catch (err) {
+    raw = [];
+  }
+  const seen = comfyuiDiffusersBuiltinRepoSet();
+  const repos = [];
+  (Array.isArray(raw) ? raw : []).forEach((item) => {
+    const repo = normalizeComfyuiDiffusersCommonRepo(typeof item === "string" ? item : item?.repo);
+    if (!repo || seen.has(repo)) return;
+    seen.add(repo);
+    repos.push({ repo, label: repo, custom: true });
+  });
+  return repos.slice(0, COMFYUI_DIFFUSERS_MAX_CUSTOM_COMMON_REPOS);
+}
+
+function writeComfyuiDiffusersCustomRepos(items) {
+  const seen = comfyuiDiffusersBuiltinRepoSet();
+  const repos = [];
+  (Array.isArray(items) ? items : []).forEach((item) => {
+    const repo = normalizeComfyuiDiffusersCommonRepo(typeof item === "string" ? item : item?.repo);
+    if (!repo || seen.has(repo)) return;
+    seen.add(repo);
+    repos.push({ repo });
+  });
+  try {
+    localStorage.setItem(
+      comfyuiDiffusersCommonRepoStorageKey(),
+      JSON.stringify(repos.slice(0, COMFYUI_DIFFUSERS_MAX_CUSTOM_COMMON_REPOS))
+    );
+  } catch (err) {
+    // Local storage can be unavailable in private mode; the live repo field still works.
+  }
+  return repos;
+}
+
+function allComfyuiDiffusersCommonRepos() {
+  return COMFYUI_DIFFUSERS_BUILTIN_COMMON_REPOS
+    .map((item) => ({ ...item, custom: false }))
+    .concat(readComfyuiDiffusersCustomRepos());
+}
+
+function selectedComfyuiDiffusersCommonRepo() {
+  return $("comfyui-diffusers-common-repo")?.value || "";
+}
+
+function renderComfyuiDiffusersCommonRepos() {
+  const select = $("comfyui-diffusers-common-repo");
+  const removeBtn = $("comfyui-diffusers-remove-common-repo");
+  if (!select) return;
+  const currentRepo = normalizeComfyuiDiffusersCommonRepo($("comfyui-diffusers-model-repo")?.value || "");
+  select.innerHTML = "";
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = "常用 repo";
+  select.appendChild(placeholder);
+  allComfyuiDiffusersCommonRepos().forEach((item) => {
+    const option = document.createElement("option");
+    option.value = item.repo;
+    option.textContent = item.custom ? `我的：${item.label || item.repo}` : (item.label || item.repo);
+    option.dataset.custom = item.custom ? "1" : "0";
+    select.appendChild(option);
+  });
+  select.value = currentRepo && Array.from(select.options).some((option) => option.value === currentRepo)
+    ? currentRepo
+    : "";
+  if (removeBtn) {
+    const selectedOption = select.selectedOptions?.[0];
+    removeBtn.disabled = !select.value || selectedOption?.dataset.custom !== "1";
+  }
+}
+
+function clearComfyuiDiffusersGgufProfileIfRepoChanged(repo) {
+  const profile = comfyuiSelectedGgufProfile();
+  if (profile && repo !== String(profile.repo_id || "")) {
+    const profileSelect = $("comfyui-diffusers-gguf-profile");
+    if (profileSelect) profileSelect.value = "";
+    fillComfyuiGgufVariants("");
+    updateComfyuiDiffusersGgufOptions();
+  }
+}
+
+function setComfyuiDiffusersRepo(repo, { inspect = true } = {}) {
+  const input = $("comfyui-diffusers-model-repo");
+  const normalized = normalizeComfyuiDiffusersCommonRepo(repo);
+  if (!input || !normalized) return false;
+  input.value = normalized;
+  clearComfyuiDiffusersGgufProfileIfRepoChanged(normalized);
+  clearComfyuiDiffusersInspection();
+  renderComfyuiDiffusersCommonRepos();
+  updateComfyuiModeVisibility();
+  writeComfyuiDraft();
+  if (inspect) inspectComfyuiDiffusersRepo({ quiet: true });
+  return true;
+}
+
+function addCurrentComfyuiDiffusersCommonRepo() {
+  const repo = sanitizeComfyuiDiffusersRepoField({ strict: true, quiet: true });
+  if (!repo) {
+    setComfyuiMessage("請先輸入有效的 Hugging Face repo。", false);
+    return;
+  }
+  if (comfyuiDiffusersBuiltinRepoSet().has(repo)) {
+    renderComfyuiDiffusersCommonRepos();
+    setComfyuiMessage("這個 repo 已在內建常用清單。", true);
+    return;
+  }
+  const custom = readComfyuiDiffusersCustomRepos().filter((item) => item.repo !== repo);
+  custom.unshift({ repo, label: repo, custom: true });
+  writeComfyuiDiffusersCustomRepos(custom);
+  renderComfyuiDiffusersCommonRepos();
+  const select = $("comfyui-diffusers-common-repo");
+  if (select) select.value = repo;
+  setComfyuiMessage("已加入 HF 常用 repo。", true);
+}
+
+function removeSelectedComfyuiDiffusersCommonRepo() {
+  const repo = selectedComfyuiDiffusersCommonRepo();
+  if (!repo || comfyuiDiffusersBuiltinRepoSet().has(repo)) {
+    renderComfyuiDiffusersCommonRepos();
+    return;
+  }
+  writeComfyuiDiffusersCustomRepos(readComfyuiDiffusersCustomRepos().filter((item) => item.repo !== repo));
+  renderComfyuiDiffusersCommonRepos();
+  setComfyuiMessage("已移除 HF 常用 repo。", true);
+}
+
 function renderComfyuiDiffusersInspection() {
   const status = $("comfyui-diffusers-repo-status");
   const variantSelect = $("comfyui-diffusers-model-variant");
@@ -928,6 +1109,14 @@ function renderComfyuiDiffusersInspection() {
   const allOptions = Array.isArray(data.variant_options) ? data.variant_options : [];
   const options = allOptions.filter((option) => option?.kind !== "gguf");
   const warnings = Array.isArray(data.warnings) ? data.warnings.filter(Boolean) : [];
+  const supportedModes = Array.isArray(data.supported_modes)
+    ? data.supported_modes.map((mode) => normalizeComfyuiGenerationModeAlias(mode)).filter(Boolean)
+    : [];
+  const supportedModeLabels = supportedModes.map((mode) => comfyuiReadableModeLabel(mode)).filter(Boolean);
+  const runnableModes = Array.isArray(data.runnable_modes)
+    ? data.runnable_modes.map((mode) => normalizeComfyuiGenerationModeAlias(mode)).filter(Boolean)
+    : supportedModes.filter((mode) => ["txt2img", "img2img", "inpaint"].includes(mode));
+  const runnableModeLabels = runnableModes.map((mode) => comfyuiReadableModeLabel(mode)).filter(Boolean);
   const modeText = data.supported_for_mode ? `支援 ${data.requested_mode || comfyuiGenerationMode()}` : `不支援 ${data.requested_mode || comfyuiGenerationMode()}`;
   if (options.length > 1) {
     variantSelect.disabled = false;
@@ -943,8 +1132,16 @@ function renderComfyuiDiffusersInspection() {
   if (status) {
     const pipeline = data.pipeline_tag ? ` · pipeline=${data.pipeline_tag}` : "";
     const variantNote = options.length > 1 ? " · 請選擇 Diffusers 精度版本" : "";
+    const supportedModeText = supportedModeLabels.length ? ` · 可用模式：${supportedModeLabels.join(" / ")}` : "";
+    const runnableModeText = runnableModeLabels.length && runnableModeLabels.join("/") !== supportedModeLabels.join("/")
+      ? ` · 本站可執行：${runnableModeLabels.join(" / ")}`
+      : "";
+    const imageInputNote = runnableModes.some((mode) => ["img2img", "inpaint"].includes(mode)) && !comfyuiHasInputAsset("source")
+      ? " · 若要圖生圖，請上傳來源圖片"
+      : "";
+    const unsupportedPipelineNote = supportedModes.length && !runnableModes.length ? " · 此 HF pipeline 目前只能辨識，不能直接由本站 HF 生圖器執行" : "";
     const textOnlyNote = textOnly ? " · 已判斷為文字生圖，已隱藏來源圖片/遮罩卡片" : "";
-    status.textContent = `${data.repo_id || inspection.repo || ""}：${modeText}${pipeline}${variantNote}${textOnlyNote}${warnings.length ? `。${warnings.join(" ")}` : ""}`;
+    status.textContent = `${data.repo_id || inspection.repo || ""}：${modeText}${pipeline}${variantNote}${supportedModeText}${runnableModeText}${imageInputNote}${unsupportedPipelineNote}${textOnlyNote}${warnings.length ? `。${warnings.join(" ")}` : ""}`;
   }
   updateComfyuiModeVisibility();
 }
@@ -1072,6 +1269,18 @@ function normalizeComfyuiGenerationModeAlias(mode) {
     "text-to-image": "txt2img",
     image2image: "img2img",
     "image-to-image": "img2img",
+    text2text: "t2t",
+    "text-to-text": "t2t",
+    "text2text-generation": "t2t",
+    "text-generation": "t2t",
+    summarization: "t2t",
+    translation: "t2t",
+    image2text: "i2t",
+    "image-to-text": "i2t",
+    "image-text-to-text": "i2t",
+    "visual-question-answering": "i2t",
+    "document-question-answering": "i2t",
+    "image-classification": "i2t",
     t2a: "t2s",
     text2audio: "t2s",
     "text-to-audio": "t2s",
@@ -1082,7 +1291,7 @@ function normalizeComfyuiGenerationModeAlias(mode) {
 
 function comfyuiModeRequiresWorkflowTemplate(mode = comfyuiGenerationMode()) {
   if (isComfyuiDiffusersMode()) return false;
-  return ["t2v", "i2v", "v2v", "t2s", "t2sv"].includes(normalizeComfyuiGenerationModeAlias(mode));
+  return ["t2v", "i2v", "v2v", "t2s", "t2sv", "t2t", "i2t"].includes(normalizeComfyuiGenerationModeAlias(mode));
 }
 
 function isComfyuiControlnetEnabled() {
@@ -1109,6 +1318,10 @@ function comfyuiModeTip(mode = comfyuiGenerationMode()) {
       return "文字轉語音：需使用 TTS workflow 模板，輸出會以音訊媒體顯示。";
     case "t2sv":
       return "文字生成語音影片：需使用同時輸出音訊/影片的 workflow 模板。";
+    case "t2t":
+      return "文字轉文字：此類 HF repo 目前只做 metadata 辨識；若要執行需使用對應 workflow 或文字模型後端。";
+    case "i2t":
+      return "圖片轉文字：此類 HF repo 目前只做 metadata 辨識；若要執行需使用對應 workflow 或視覺語言模型後端。";
     default:
       return "文字生圖：只需要提示詞，不需要來源圖片。";
   }
@@ -1129,6 +1342,8 @@ function comfyuiReadableModeLabel(mode = comfyuiGenerationMode()) {
     v2v: "影片生影片",
     t2s: "文字轉語音",
     t2sv: "文字生成語音影片",
+    t2t: "文字轉文字",
+    i2t: "圖片轉文字",
   }[normalized] || normalized || "文字生圖";
 }
 
@@ -1197,87 +1412,9 @@ function normalizeComfyuiView(view) {
 }
 
 function canManageComfyuiLocalModels(modeOverride = null) {
-  const mode = comfyuiEffectiveConnectionMode(modeOverride);
-  return currentUser === "root" && mode === "local";
+  return currentUser === "root";
 }
 
-
-async function loadComfyuiDiffusersTokenState({ force = false } = {}) {
-  const status = $("comfyui-diffusers-hf-token-state");
-  const field = $("comfyui-diffusers-token-field");
-  if (field) field.style.display = isComfyuiDiffusersMode() ? "" : "none";
-  if (!status || currentUser !== "root") {
-    if (status) status.textContent = "只有 root 可以在前台儲存 Hugging Face API Token；一般使用者會使用 root 已設定的 token 或公開模型。";
-    return;
-  }
-  if (!force && status.dataset.loaded === "1") return;
-  status.textContent = "正在讀取 Hugging Face token 狀態...";
-  try {
-    await fetchCsrfToken({ force: true });
-    const res = await apiFetch(API + "/admin/settings", {
-      credentials: "same-origin",
-      headers: { "X-CSRF-Token": getCsrfToken() || "" }
-    });
-    const json = await res.json().catch(() => ({}));
-    if (!res.ok || !json.ok) throw new Error(json.msg || `設定讀取失敗（HTTP ${res.status}）`);
-    const configured = !!json.settings?.comfyui_huggingface_api_token_configured;
-    status.dataset.loaded = "1";
-    status.textContent = configured
-      ? "目前已儲存 Hugging Face API Token；會套用於 metadata 檢查、Diffusers snapshot、hf_transfer/Xet 加速下載與手動串流下載。"
-      : "目前未儲存 Hugging Face API Token；公開模型可不填，gated 或高流量下載建議設定。";
-  } catch (err) {
-    status.textContent = err.message || "Hugging Face token 狀態讀取失敗";
-  }
-}
-
-async function saveComfyuiDiffusersTokenShortcut() {
-  if (currentUser !== "root") {
-    setComfyuiMessage("只有 root 可以儲存 Hugging Face API Token。", false);
-    return;
-  }
-  const tokenInput = $("comfyui-diffusers-hf-token");
-  const clearInput = $("comfyui-diffusers-hf-token-clear");
-  const status = $("comfyui-diffusers-hf-token-state");
-  const token = (tokenInput?.value || "").trim();
-  const clear = !!clearInput?.checked;
-  if (!token && !clear) {
-    setComfyuiMessage("請輸入 Hugging Face token，或勾選清除已儲存 token。", false);
-    return;
-  }
-  if (status) status.textContent = clear ? "正在清除 Hugging Face API Token..." : "正在儲存 Hugging Face API Token...";
-  await fetchCsrfToken({ force: true });
-  const res = await apiFetch(API + "/admin/settings", {
-    method: "PUT",
-    credentials: "same-origin",
-    headers: {
-      "Content-Type": "application/json",
-      "X-CSRF-Token": getCsrfToken() || ""
-    },
-    body: JSON.stringify({
-      comfyui_huggingface_api_token: token,
-      comfyui_huggingface_api_token_clear: clear,
-    })
-  });
-  const json = await res.json().catch(() => ({}));
-  if (!res.ok || !json.ok) {
-    const message = json.msg || `Hugging Face token 儲存失敗（HTTP ${res.status}）`;
-    if (status) status.textContent = message;
-    setComfyuiMessage(message, false);
-    return;
-  }
-  if (tokenInput) tokenInput.value = "";
-  if (clearInput) clearInput.checked = false;
-  const successMessage = clear
-    ? "已清除 Hugging Face API Token。"
-    : "已儲存 Hugging Face API Token，並會套用於 HF 加速下載通道。";
-  if (status) {
-    status.dataset.loaded = "";
-    status.textContent = successMessage;
-  }
-  setComfyuiMessage(successMessage, true);
-  await loadComfyuiDiffusersTokenState({ force: true });
-  if (status) status.textContent = successMessage;
-}
 
 function setComfyuiView(view, { persist = true } = {}) {
   const selected = normalizeComfyuiView(view);
@@ -1317,9 +1454,6 @@ function setComfyuiView(view, { persist = true } = {}) {
   if (activeView === "settings" && typeof loadSettings === "function") {
     loadSettings();
   }
-  if (activeView === "hf") {
-    loadComfyuiDiffusersTokenState().catch(() => {});
-  }
   updateComfyuiModeNote();
   updateComfyuiStartButton();
   updateComfyuiDiffusersUi();
@@ -1345,7 +1479,6 @@ function updateComfyuiDiffusersUi() {
   const legacy = $("comfyui-legacy-form-panel");
   const repoField = $("comfyui-diffusers-repo-field");
   const repoInput = $("comfyui-diffusers-model-repo");
-  const tokenField = $("comfyui-diffusers-token-field");
   const modelSelect = $("comfyui-model-select");
   const modelField = modelSelect?.closest(".field");
   const vaeField = $("comfyui-vae-select")?.closest(".field");
@@ -1359,7 +1492,6 @@ function updateComfyuiDiffusersUi() {
     legacy.open = true;
   }
   if (repoField) repoField.style.display = diffusers ? "" : "none";
-  if (tokenField) tokenField.style.display = diffusers ? "" : "none";
   if (repoInput && diffusers && repoInput.value) sanitizeComfyuiDiffusersRepoField({ strict: false, quiet: true });
   if (repoInput && diffusers && !repoInput.value && modelSelect?.value) {
     const candidateRepo = normalizeComfyuiHuggingFaceRepoInput(modelSelect.value);
@@ -1473,7 +1605,7 @@ function updateComfyuiModeVisibility() {
   if (denoiseField) denoiseField.style.display = mode === "txt2img" || mode === "upscale" ? "none" : "";
   if (upscaleField) upscaleField.style.display = comfyuiHasInputAsset("source") || comfyuiModeUsesUpscale(mode) ? "" : "none";
   if (outpaintPanel) outpaintPanel.style.display = comfyuiModeUsesOutpaint(mode) ? "" : "none";
-  if (sourceCard) sourceCard.style.display = comfyuiShouldShowSourceImageCard(mode) ? "" : "none";
+  if (sourceCard) sourceCard.style.display = comfyuiShouldShowSourceImageCard(mode) || comfyuiDiffusersSupportsImageInputMode() ? "" : "none";
   if (maskCard) maskCard.style.display = diffusersTextOnly ? "none" : (comfyuiHasInputAsset("source") || comfyuiHasInputAsset("mask") || comfyuiModeUsesMaskImage(mode) ? "" : "none");
   if (controlFields) controlFields.style.display = isComfyuiControlnetEnabled() ? "" : "none";
   if (controlCard) controlCard.style.display = diffusersTextOnly ? "none" : (isComfyuiControlnetEnabled() ? "" : "none");
@@ -2660,15 +2792,15 @@ function updateComfyuiRootPanelVisibility(modeOverride = null) {
   if (details && !showLocalModels) details.open = false;
   if (!panel) return;
   panel.querySelectorAll("input, select, button").forEach((el) => {
-    el.disabled = !localReady;
+    el.disabled = !showLocalModels;
   });
   panel.dataset.mode = mode === "diffusers" ? "diffusers" : (localReady ? "local" : "remote");
   if (hint) {
     hint.textContent = localReady
       ? "目前是本地模式，可在這裡用 Civitai 下載或直接上傳模型檔。"
       : (mode === "diffusers"
-        ? "目前是 Diffusers 模式，所以這個區塊只保留說明。Diffusers 模型會由 Hugging Face cache 管理，不寫入 ComfyUI models 資料夾。"
-        : "目前是雲端 / 遠端模式，所以這個區塊只保留說明。若要管理本站的本地 ComfyUI 模型，請先把 backend 切回本地模式。");
+        ? "目前是 Diffusers 模式；Civitai 匯入區仍可使用，但下載會寫入本站設定的 ComfyUI models 目錄，不會寫入 Hugging Face cache。"
+        : "目前是雲端 / 遠端模式；Civitai 匯入區仍可使用，但下載會寫入本站設定的 ComfyUI models 目錄。若遠端主機不是同一路徑，請在遠端自行同步或掛載。");
   }
   updateComfyuiModelSourceMode();
 }
@@ -3067,36 +3199,48 @@ function bindComfyuiAdvancedUi() {
   if (diffusersRepoInput && diffusersRepoInput.dataset.comfyuiBound !== "1") {
     diffusersRepoInput.dataset.comfyuiBound = "1";
     diffusersRepoInput.addEventListener("input", () => {
-      const profile = comfyuiSelectedGgufProfile();
       const repo = normalizeComfyuiHuggingFaceRepoInput(diffusersRepoInput.value || "");
-      if (profile && repo !== String(profile.repo_id || "")) {
-        const profileSelect = $("comfyui-diffusers-gguf-profile");
-        if (profileSelect) profileSelect.value = "";
-        fillComfyuiGgufVariants("");
-        updateComfyuiDiffusersGgufOptions();
-      }
+      clearComfyuiDiffusersGgufProfileIfRepoChanged(repo);
       clearComfyuiDiffusersInspection();
+      updateComfyuiModeVisibility();
+      renderComfyuiDiffusersCommonRepos();
     });
     diffusersRepoInput.addEventListener("change", () => {
       if (sanitizeComfyuiDiffusersRepoField({ strict: true, quiet: true })) inspectComfyuiDiffusersRepo({ quiet: true });
+      renderComfyuiDiffusersCommonRepos();
     });
     diffusersRepoInput.addEventListener("blur", () => {
       if (sanitizeComfyuiDiffusersRepoField({ strict: true, quiet: true })) inspectComfyuiDiffusersRepo({ quiet: true });
+      renderComfyuiDiffusersCommonRepos();
     });
+  }
+  renderComfyuiDiffusersCommonRepos();
+  const diffusersCommonRepoSelect = $("comfyui-diffusers-common-repo");
+  if (diffusersCommonRepoSelect && diffusersCommonRepoSelect.dataset.comfyuiBound !== "1") {
+    diffusersCommonRepoSelect.dataset.comfyuiBound = "1";
+    diffusersCommonRepoSelect.addEventListener("change", () => {
+      const repo = diffusersCommonRepoSelect.value || "";
+      if (repo) setComfyuiDiffusersRepo(repo, { inspect: true });
+      else {
+        updateComfyuiModeVisibility();
+        renderComfyuiDiffusersCommonRepos();
+      }
+    });
+  }
+  const diffusersCommonRepoAddBtn = $("comfyui-diffusers-add-common-repo");
+  if (diffusersCommonRepoAddBtn && diffusersCommonRepoAddBtn.dataset.comfyuiBound !== "1") {
+    diffusersCommonRepoAddBtn.dataset.comfyuiBound = "1";
+    diffusersCommonRepoAddBtn.addEventListener("click", addCurrentComfyuiDiffusersCommonRepo);
+  }
+  const diffusersCommonRepoRemoveBtn = $("comfyui-diffusers-remove-common-repo");
+  if (diffusersCommonRepoRemoveBtn && diffusersCommonRepoRemoveBtn.dataset.comfyuiBound !== "1") {
+    diffusersCommonRepoRemoveBtn.dataset.comfyuiBound = "1";
+    diffusersCommonRepoRemoveBtn.addEventListener("click", removeSelectedComfyuiDiffusersCommonRepo);
   }
   const diffusersInspectBtn = $("comfyui-diffusers-inspect-btn");
   if (diffusersInspectBtn && diffusersInspectBtn.dataset.comfyuiBound !== "1") {
     diffusersInspectBtn.dataset.comfyuiBound = "1";
     diffusersInspectBtn.addEventListener("click", () => inspectComfyuiDiffusersRepo({ quiet: false }));
-  }
-  const diffusersTokenSaveBtn = $("comfyui-diffusers-hf-token-save-btn");
-  if (diffusersTokenSaveBtn && diffusersTokenSaveBtn.dataset.comfyuiBound !== "1") {
-    diffusersTokenSaveBtn.dataset.comfyuiBound = "1";
-    diffusersTokenSaveBtn.addEventListener("click", () => {
-      saveComfyuiDiffusersTokenShortcut().catch((err) => {
-        setComfyuiMessage(err.message || "Hugging Face token 儲存失敗", false);
-      });
-    });
   }
   const diffusersVariantSelect = $("comfyui-diffusers-model-variant");
   if (diffusersVariantSelect && diffusersVariantSelect.dataset.comfyuiBound !== "1") {

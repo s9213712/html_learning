@@ -40,7 +40,7 @@ def test_profile_friends_panel_is_wired_as_user_module():
     assert '<option value="rounded">圓角方形</option>' in index_html
     assert '<option value="squircle">超橢圓</option>' in index_html
     assert '<option value="square">方形</option>' in index_html
-    assert '/styles.css?v=20260606-avatar-zoom-stepper' in index_html
+    assert '/styles.css?v=20260606-hf-common-repos' in index_html
     assert 'id="profile-edit-display-timezone"' in index_html
     assert 'id="profile-quick-customize-card"' in index_html
     assert 'id="profile-public-info-editor-list"' in index_html

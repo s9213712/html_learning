@@ -990,7 +990,8 @@ def start_isolated_server(args: argparse.Namespace, profile: Profile, run_root: 
     if not args.install:
         command.append("--skip-install")
     env = dict(os.environ)
-    env["HTML_LEARNING_HOST"] = "127.0.0.1"
+    env["HTML_LEARNING_HOST"] = "0.0.0.0"
+    env["HTML_LEARNING_DISABLE_TRUSTED_HOSTS"] = "1"
     env["HTML_LEARNING_PORT"] = str(port)
     if not args.keep_app_limits:
         env["HACKME_CAPACITY_PROBE_UNLIMITED"] = "1"

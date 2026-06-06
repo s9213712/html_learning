@@ -24,6 +24,27 @@ _UNSUPPORTED_PIPELINE_TAGS = {
     "text-to-video",
     "video-to-video",
 }
+_HF_PIPELINE_MODE_TAGS = {
+    "text-to-image": "txt2img",
+    "unconditional-image-generation": "txt2img",
+    "image-to-image": "img2img",
+    "image-to-text": "i2t",
+    "image-text-to-text": "i2t",
+    "image-classification": "i2t",
+    "visual-question-answering": "i2t",
+    "document-question-answering": "i2t",
+    "text2text-generation": "t2t",
+    "text-generation": "t2t",
+    "summarization": "t2t",
+    "translation": "t2t",
+    "text-to-video": "t2v",
+    "image-to-video": "i2v",
+    "video-to-video": "v2v",
+    "text-to-audio": "t2s",
+    "text-to-speech": "t2s",
+}
+_HF_MODE_ORDER = ["txt2img", "img2img", "inpaint", "t2t", "i2t", "t2v", "i2v", "v2v", "t2s", "t2sv"]
+_DIFFUSERS_IMAGE_GENERATION_MODES = {"txt2img", "img2img", "inpaint"}
 _PRECISION_LABELS = {
     "default": "預設精度",
     "fp16": "FP16 / half",
@@ -233,6 +254,14 @@ def _gguf_quant_from_filename(filename):
     return match.group(1).upper() if match else "GGUF"
 
 
+def _sorted_hf_modes(modes):
+    order = {mode: index for index, mode in enumerate(_HF_MODE_ORDER)}
+    return sorted(
+        {str(mode or "").strip().lower() for mode in modes if str(mode or "").strip()},
+        key=lambda mode: (order.get(mode, len(order)), mode),
+    )
+
+
 def _option_sort_key(option):
     if option.get("kind") == "gguf":
         return (0, str(option.get("label") or ""))
@@ -353,12 +382,13 @@ def detect_diffusers_supported_modes(*, repo_id="", pipeline_tag="", library_nam
     inpaint_hint = any("inpaint" in item for item in [repo_text, tag, class_name, *tag_set])
 
     supported = set()
-    if tag in _UNSUPPORTED_PIPELINE_TAGS:
-        return []
+    for item in [tag, *tag_set]:
+        if item in _HF_PIPELINE_MODE_TAGS:
+            supported.add(_HF_PIPELINE_MODE_TAGS[item])
     if has_gguf:
-        return ["txt2img"] if tag in {"", "text-to-image", "unconditional-image-generation"} else []
+        return _sorted_hf_modes(supported or (["txt2img"] if tag in {"", "text-to-image", "unconditional-image-generation"} else []))
     if not is_diffusers:
-        return []
+        return _sorted_hf_modes(mode for mode in supported if mode not in _DIFFUSERS_IMAGE_GENERATION_MODES)
     if tag in {"text-to-image", "unconditional-image-generation"}:
         supported.add("txt2img")
     if tag == "image-to-image":
@@ -371,9 +401,13 @@ def detect_diffusers_supported_modes(*, repo_id="", pipeline_tag="", library_nam
         supported.add("txt2img")
     if is_diffusers and any(name in class_name for name in ("image2image", "imagetoimage", "img2img")):
         supported.add("img2img")
+    if is_diffusers and any(name in class_name for name in ("text2text", "texttotext")):
+        supported.add("t2t")
+    if is_diffusers and any(name in class_name for name in ("image2text", "imagetotext")):
+        supported.add("i2t")
     if is_diffusers and inpaint_hint:
         supported.add("inpaint")
-    return sorted(supported, key=["txt2img", "img2img", "inpaint"].index)
+    return _sorted_hf_modes(supported)
 
 
 def inspect_huggingface_diffusers_repo(repo_value, *, token="", mode="txt2img"):
@@ -418,6 +452,7 @@ def inspect_huggingface_diffusers_repo(repo_value, *, token="", mode="txt2img"):
     requires_modular_pipeline = bool(has_modular_model_index and not has_regular_model_index)
     if requires_modular_pipeline:
         supported_modes = []
+    runnable_modes = [mode for mode in supported_modes if mode in _DIFFUSERS_IMAGE_GENERATION_MODES]
     variant_options = build_diffusers_variant_options(siblings)
     model_card_hints = _load_model_card_hints(repo_id, token)
     has_gguf_options = any(item.get("kind") == "gguf" for item in variant_options)
@@ -435,12 +470,23 @@ def inspect_huggingface_diffusers_repo(repo_value, *, token="", mode="txt2img"):
     warnings = []
     if pipeline_tag.lower() in _UNSUPPORTED_PIPELINE_TAGS:
         warnings.append(f"此 repo 的 Hugging Face pipeline 是 {pipeline_tag}，不是本站 Diffusers 生圖模式。")
-    if not has_diffusers_metadata and not has_gguf_options:
+    non_runnable_modes = [mode for mode in supported_modes if mode not in _DIFFUSERS_IMAGE_GENERATION_MODES]
+    if non_runnable_modes:
+        warnings.append(
+            "此 repo 偵測到 Hugging Face 模式 "
+            + ", ".join(non_runnable_modes)
+            + "；目前本站 HF / Diffusers 生圖器只支援文字生圖、圖生圖與局部重繪。"
+        )
+    if not has_diffusers_metadata and not has_gguf_options and not supported_modes:
         warnings.append("此 repo 的 Hugging Face metadata 沒有 Diffusers；請只使用模型頁 Use this model 內有 Diffusers 的 repo。")
+    elif not has_diffusers_metadata and not has_gguf_options:
+        warnings.append("此 repo 有 Hugging Face pipeline metadata，但不是本站 HF / Diffusers 生圖 repo。")
     if not supported_modes:
-        warnings.append("沒有偵測到可用的 Diffusers t2i / i2i metadata；為避免下載無法使用的模型，請改用支援的 repo。")
-    elif requested_mode not in supported_modes:
-        warnings.append(f"此 repo 目前偵測支援 {', '.join(supported_modes)}，不支援 {requested_mode}。")
+        warnings.append("沒有偵測到可用的 Hugging Face pipeline / Diffusers t2i / i2i metadata；為避免下載無法使用的模型，請改用支援的 repo。")
+    elif not runnable_modes:
+        warnings.append("此 repo 不屬於本站目前可直接執行的 Diffusers 生圖模式。")
+    elif requested_mode not in runnable_modes:
+        warnings.append(f"此 repo 目前偵測本站可執行 {', '.join(runnable_modes)}，不支援 {requested_mode}。")
     if len(variant_options) > 1:
         warnings.append("偵測到多個精度版本，請先選擇要下載/載入的版本，避免同一模型重複下載。")
     if model_card_hints:
@@ -472,8 +518,9 @@ def inspect_huggingface_diffusers_repo(repo_value, *, token="", mode="txt2img"):
         "pipeline_tag": pipeline_tag,
         "library_name": library_name,
         "supported_modes": supported_modes,
+        "runnable_modes": runnable_modes,
         "requested_mode": requested_mode,
-        "supported_for_mode": requested_mode in supported_modes,
+        "supported_for_mode": requested_mode in runnable_modes,
         "variant_options": variant_options,
         "has_gguf": has_gguf_options,
         "requires_modular_pipeline": requires_modular_pipeline,

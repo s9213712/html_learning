@@ -22,8 +22,8 @@
 
 ## 重要邊界
 
-- `remote` 模式只負責生圖，不負責把模型下載回本站主機
-- `Civitai API Key` 與 root-only 下載工具只在 `local` 模式有意義
+- `remote` 模式只負責呼叫遠端 API 生圖；Civitai / model-upload 仍寫入本站設定的 ComfyUI models 目錄
+- `Civitai API Key` 與 root-only 下載工具在 `local` / `remote` 模式都可見；遠端主機不同機時需自行同步或掛載 models 目錄
 - `ComfyUI Account API Key` 只用於官方付費 / API nodes。Key 由 root 在伺服器設定中輸入，前端 workflow JSON、匯出檔與 audit 不可保存明文 key
 - workflow preset / workflow JSON 匯入仍要通過 sanitize，不能接受本機絕對路徑、外部 URL、shell / exec 類節點
 
@@ -38,8 +38,8 @@
 | ComfyUI 官方付費 / API nodes（Partner Nodes） | 可用 | 條件式可用 | 需要 ComfyUI Account API Key 與官方 credits；遠端 backend 也必須支援 API Key integration 與安全網路條件。 |
 | 啟動 / 停止 ComfyUI process | 可用 | 不可用 | 只管理本站主機上 `comfyui_base_dir` 內的本地程序。 |
 | 下載 Linux 啟動腳本 template | 可用 | 不可用 | 只給本地模式配置使用。 |
-| Civitai 搜尋 / inspect / 下載模型到 ComfyUI 目錄 | 可用 | 不可用 | 遠端模式不能把模型下載回本站主機的本地 ComfyUI 目錄。 |
-| 本地模型檔案匯入 / 掃描本地 base dir | 可用 | 不可用 | 需要本站主機能讀寫 ComfyUI base dir。 |
+| Civitai 搜尋 / inspect / 下載模型到 ComfyUI 目錄 | 可用 | 可用 | 下載會寫入本站設定的 ComfyUI models 目錄；遠端主機若不同機需自行同步或掛載。 |
+| 本地模型檔案匯入 / 掃描本地 base dir | 可用 | 可用 | 需要本站主機能讀寫 ComfyUI base dir；遠端 API 不會替本站寫檔。 |
 | 刪除 ComfyUI output 原始檔 | 可用 | 不可用 | 遠端模式只會清本站網頁預覽，不會刪遠端 output。 |
 
 `remote` 不是「雲端託管本站」；它只是本站後端把 ComfyUI API request 送到指定 `http(s)://host:port`。
@@ -60,7 +60,7 @@
 
 ### Civitai API Key
 
-`Civitai API Key` 只用於 root 的模型搜尋 / inspect / 下載區，主要服務本地模型管理。它不是生圖 backend 的 ComfyUI API 位址，也不是 ComfyUI Account API Key。
+`Civitai API Key` 只用於 root 的模型搜尋 / inspect / 下載區。它不是生圖 backend 的 ComfyUI API 位址，也不是 ComfyUI Account API Key；遠端模式下仍可保存與使用，但檔案會寫入本站設定的 ComfyUI models 目錄。
 
 ### ComfyUI Account API Key
 

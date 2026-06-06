@@ -277,9 +277,10 @@ Root can configure ComfyUI in two modes from server settings:
 
 - Remote mode: set a full API URL such as `http://127.0.0.1:8192`. Discarding a
   preview only clears the web preview because a remote ComfyUI API does not offer
-  a safe file-delete endpoint. In this mode the root-only Civitai API key field
-  and model-download tools are hidden because the server cannot download models
-  into a remote ComfyUI host through the normal API.
+  a safe file-delete endpoint. The root-only Civitai key and model-import tools
+  stay visible in remote mode, but imports write to the server-configured
+  ComfyUI models directory; sync or mount that path yourself if the remote host
+  is a different machine.
 - Local mode: set a local ComfyUI folder and startup script. The image page shows
   a `Start ComfyUI` button; the server only runs the startup script when a user
   presses that button. If another user already started the shared ComfyUI backend,
@@ -290,9 +291,10 @@ Root can configure ComfyUI in two modes from server settings:
   Use local or remote ComfyUI as the deployment path. Only set
   `HTML_LEARNING_ALLOW_IN_PROCESS_DIFFUSERS=1` in a controlled single-user
   experiment where main-process resource risk is acceptable.
-- In the root settings page, token-like fields are now mode-aware: the
-  `Turnstile site key` only appears when CAPTCHA mode is `turnstile`, and the
-  `Civitai API Key` only appears when ComfyUI is in local mode.
+- In the root settings page, token-like fields are grouped by the setting they
+  control: the `Turnstile site key` only appears when CAPTCHA mode is
+  `turnstile`, while `Civitai API Key` and `Hugging Face Token` live under the
+  AI image settings.
 - The AI page keeps the main ComfyUI generation form focused on generation
   only. Root's Civitai model-download tools now live in a separate collapsed
   panel at the bottom of the page so downloading models does not crowd the

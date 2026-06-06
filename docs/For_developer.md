@@ -20,7 +20,7 @@ Related technical references:
 
 ## Release and Schema
 
-- Release ID: `2026.06.01-003`
+- Release ID: `04_2026.06.06-001`
 - Schema version: `30`
 - Release ID source: `services/platform/release_info.py`
 - Runtime version endpoint: `GET /api/version`
@@ -797,9 +797,10 @@ ComfyUI notes:
   evidence.
 - Local mode supports explicit start and root-only stop operations for the
   shared ComfyUI process.
-- Remote mode is generation-only. Root settings hide Civitai key / download UI
-  in that mode because the server cannot push models into a remote ComfyUI host
-  through the standard API.
+- Remote mode is generation-only for ComfyUI API execution. Root Civitai key and
+  model import UI remain visible, but downloads/uploads write to the
+  server-configured ComfyUI models directory; remote hosts need an external sync
+  or shared mount if they are not the same filesystem.
 - Frontend idle auto-logout is suspended while a ComfyUI generation is active.
 - In-process Diffusers generation remains an opt-in risk path guarded by
   `HTML_LEARNING_ALLOW_IN_PROCESS_DIFFUSERS=1`. Production-like deployments

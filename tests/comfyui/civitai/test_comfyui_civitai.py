@@ -12,4 +12,5 @@ from tests.comfyui._integration_suite import (
     test_comfyui_model_upload_rejects_relative_dir_traversal,
     test_root_can_upload_comfyui_model_file_into_custom_relative_dir,
     test_root_can_upload_comfyui_model_file_into_local_models_dir,
+    test_root_can_upload_comfyui_model_file_when_generation_backend_is_remote,
 )

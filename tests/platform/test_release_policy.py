@@ -18,7 +18,7 @@ def _release_id():
 
 def test_release_id_is_synced_to_public_docs():
     release_id = _release_id()
-    assert re.fullmatch(r"\d{4}\.\d{2}\.\d{2}-\d{3}", release_id)
+    assert re.fullmatch(r"(?:0[0-9]_)?\d{4}\.\d{2}\.\d{2}-\d{3}", release_id)
     for rel in ("README.md", "docs/README.zh-TW.md", "docs/For_developer.md", "docs/UPDATE_SUMMARY.md"):
         assert release_id in (ROOT / rel).read_text(encoding="utf-8")
 

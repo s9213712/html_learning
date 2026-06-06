@@ -26,7 +26,7 @@ mode, BTC_trade autostart, account passwords, and extra accounts.
 
 | Option | Purpose |
 | --- | --- |
-| `--host HOST` | Bind host. Default: `127.0.0.1`. |
+| `--host HOST` | Bind host. Default: `0.0.0.0`. |
 | `--port PORT` | Bind port. Default: `5000`. Interactive mode prompts if occupied. |
 | `--trusted-hosts LIST` | Comma-separated host allowlist exported as `HTML_LEARNING_TRUSTED_HOSTS`. |
 | `--public-host HOST`, `--public-ip HOST` | Add an external/NAT host/IP to trusted hosts and print it as a test URL. |
@@ -34,6 +34,10 @@ mode, BTC_trade autostart, account passwords, and extra accounts.
 | `--enforce-trusted-hosts` | Re-enable trusted-host checks after a previous disabling option/env value. |
 | `--port-conflict ACTION` | `ask`, `kill`, `fallback`, or `fail`. `kill` attempts to stop the occupying dev process and falls back if the port remains busy. |
 | `--stop`, `--shutdown` | Stop a previous dev server process group/child tree for the selected port and exit. |
+
+Generated restart shortcuts are written under the active runtime root by default
+as `restart_develop_server.sh`. Set `HACKME_DEV_RESTART_SCRIPT_FILE` only when a
+specific alternate shortcut path is needed.
 
 ### Feature Selection
 
@@ -128,9 +132,9 @@ and intentionally excludes git metadata.
 | `--transmission-setup-script PATH` | Override setup helper path. |
 | `--transmission-settings-file PATH` | Transmission `settings.json` passed to setup. Default: `/etc/transmission-daemon/settings.json`. |
 | `--transmission-service NAME` | systemd service passed to setup. Default: `transmission-daemon`. |
-| `--transmission-rpc-bind-address ADDR` | RPC bind address passed to setup helper. |
-| `--transmission-rpc-whitelist LIST` | RPC IP whitelist passed to setup helper. |
-| `--transmission-rpc-whitelist-enabled VALUE` | Enable whitelist: true/false. |
+| `--transmission-rpc-bind-address ADDR` | RPC bind address passed to setup helper. Helper default: `0.0.0.0`. |
+| `--transmission-rpc-whitelist LIST` | RPC IP whitelist passed to setup helper. Helper default: `*.*.*.*`. |
+| `--transmission-rpc-whitelist-enabled VALUE` | Enable whitelist: true/false. Helper default: `false`. |
 | `--transmission-rpc-authentication-required VALUE` | Require RPC/Web login: true/false. |
 | `--transmission-disable-rpc-auth`, `--disable-transmission-rpc-auth`, `--transmission-no-rpc-auth` | Dev-only: configure Transmission without login. Use only on isolated networks. |
 | `--transmission-allow-any-rpc-ip`, `--allow-any-transmission-rpc-ip` | Configure daemon RPC on `0.0.0.0` and allow any source IP. Auth still applies unless disabled. |

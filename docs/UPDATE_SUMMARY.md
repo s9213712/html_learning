@@ -1,6 +1,33 @@
 # Update Summary
 
-Release ID: `2026.06.01-003`
+Release ID: `04_2026.06.06-001`
+
+## 04_2026.06.06-001
+
+- Hardened Hugging Face / Diffusers repo inspection for multi-capability repos:
+  backend responses now separate all detected `supported_modes` from locally
+  runnable `runnable_modes`, so t2t/i2t metadata is visible without pretending
+  it can run through the current image-generation path.
+- Added common HF repo shortcuts for SD 1.5, Juggernaut XL, RealVisXL,
+  Animagine, AnimeMix, FLUX.1 schnell, Qwen Image/Edit, and Z-Image Turbo.
+  Qwen-VL and GPT-OSS style repos are detected as non-image-generation modes;
+  Anima modular repos report ModularPipeline incompatibility instead of being
+  offered as runnable Diffusers repos.
+- Updated the HF/Diffusers UI to keep image-source controls visible when a repo
+  supports i2i, show supported/runnable mode labels, and let users manage a
+  small local custom common-repo list.
+- Kept root Civitai model import visible across local, remote, and Diffusers
+  modes, and moved the Hugging Face token quick setting out of the generation
+  form into the gear-menu AI image settings.
+- Changed development launch defaults to bind `0.0.0.0`, disable trusted-host
+  enforcement unless explicitly re-enabled, and write generated restart
+  shortcuts under the active runtime root. The repo root restart shortcut is no
+  longer ignored so accidental generation there is visible in `git status`.
+- Aligned dev/probe launchers and the Transmission setup helper with the same
+  `0.0.0.0` testing policy; Transmission RPC whitelist defaults are disabled for
+  isolated dev runs.
+- Fixed a Job Center schema-ready cache race after rolled-back schema creation,
+  preventing first-read remote-download task 500s in deep browser probes.
 
 ## 2026.06.01-003
 

@@ -12,11 +12,11 @@ RUN_ID="$(date +%Y%m%d_%H%M%S)"
 RUN_ROOT=""
 CUSTOM_RUNTIME_ROOT="${HACKME_DEV_RUNTIME_ROOT:-}"
 CUSTOM_RUNTIME_ROOT_PROMPTED=0
-HOST="${HOST:-127.0.0.1}"
+HOST="${HOST:-0.0.0.0}"
 PORT="${PORT:-5000}"
 TRUSTED_HOSTS="${HTML_LEARNING_TRUSTED_HOSTS:-}"
 PUBLIC_HOST="${HACKME_DEV_PUBLIC_HOST:-}"
-DISABLE_TRUSTED_HOSTS="${HACKME_DEV_DISABLE_TRUSTED_HOSTS:-${HTML_LEARNING_DISABLE_TRUSTED_HOSTS:-0}}"
+DISABLE_TRUSTED_HOSTS="${HACKME_DEV_DISABLE_TRUSTED_HOSTS:-${HTML_LEARNING_DISABLE_TRUSTED_HOSTS:-1}}"
 SHUTDOWN=0
 CLI_MODE=0
 SKIP_INSTALL=0
@@ -101,7 +101,7 @@ DELETE_RUNTIME=0
 RUN_ROOT_SET=0
 RUNTIME_LAYOUT_SET=0
 RUNTIME_ROOT_SET=0
-RESTART_SCRIPT_FILE="${HACKME_DEV_RESTART_SCRIPT_FILE:-$SOURCE_ROOT/restart_develop_server.sh}"
+RESTART_SCRIPT_FILE="${HACKME_DEV_RESTART_SCRIPT_FILE:-}"
 
 is_auto_capacity_value() {
   local value="${1:-}"
@@ -177,7 +177,7 @@ normalize_runtime_maintenance_options() {
 }
 
 write_restart_shortcut_script() {
-  local shortcut_path="${RESTART_SCRIPT_FILE:-}"
+  local shortcut_path="${RESTART_SCRIPT_FILE:-$RUNTIME_ROOT/restart_develop_server.sh}"
   [[ -n "$shortcut_path" ]] || return 0
   local launcher="$SOURCE_ROOT/test_for_develop.sh"
   [[ -f "$launcher" ]] || return 0
@@ -659,7 +659,7 @@ Important:
 
 Options:
   --cli                    Run non-interactively from command/env options
-  --host HOST              Default: 127.0.0.1
+  --host HOST              Default: 0.0.0.0
   --port PORT              Default: 5000; prompts if occupied in interactive mode
   --trusted-hosts LIST     Comma-separated Host allowlist exported as
                            HTML_LEARNING_TRUSTED_HOSTS. Use this when exposing
@@ -770,12 +770,13 @@ Options:
                            transmission-daemon
   --transmission-rpc-bind-address ADDR
                            RPC bind address passed to setup helper. Default:
-                           helper default 127.0.0.1
+                           helper default 0.0.0.0
   --transmission-rpc-whitelist LIST
                            RPC IP whitelist passed to setup helper. Default:
-                           helper default 127.0.0.1,::1
+                           helper default *.*.*.*
   --transmission-rpc-whitelist-enabled VALUE
                            Enable RPC IP whitelist in setup helper: true/false.
+                           Helper default: false.
   --transmission-rpc-authentication-required VALUE
                            Require Transmission RPC/Web UI login in setup
                            helper: true/false.
@@ -5314,7 +5315,7 @@ feature_updates.update({
     "server_timezone": os.environ.get("HACKME_DEV_SERVER_TIMEZONE") or os.environ.get("TZ") or "Asia/Taipei",
     # Dev default: keep ComfyUI in remote mode unless a local override is explicit.
     "comfyui_connection_mode": os.environ.get("HACKME_DEV_COMFYUI_CONNECTION_MODE") or "remote",
-    "comfyui_remote_api_url": os.environ.get("HACKME_DEV_COMFYUI_REMOTE_API_URL") or os.environ.get("COMFYUI_API_URL") or "http://192.168.18.18:8188",
+    "comfyui_remote_api_url": os.environ.get("HACKME_DEV_COMFYUI_REMOTE_API_URL") or os.environ.get("COMFYUI_API_URL") or "http://127.0.0.1:8188",
     "comfyui_base_dir": os.environ.get("HACKME_DEV_COMFYUI_BASE_DIR") or "",
     "comfyui_local_start_script": os.environ.get("HACKME_DEV_COMFYUI_LOCAL_START_SCRIPT") or "",
 })

@@ -374,7 +374,7 @@ class FakeDiffusersBackendClient(FakeComfyUIClient):
 
 
 class FakeNativeGgufComfyUIClient(FakeComfyUIClient):
-    base_url = "http://192.168.18.19:8188"
+    base_url = "http://127.0.0.1:8188"
 
     def get_capabilities(self):
         payload = super().get_capabilities()
@@ -398,7 +398,7 @@ class FakeNativeGgufComfyUIClient(FakeComfyUIClient):
 
 
 class FakeSd35NativeGgufComfyUIClient(FakeComfyUIClient):
-    base_url = "http://192.168.18.19:8188"
+    base_url = "http://127.0.0.1:8188"
 
     def get_capabilities(self):
         payload = super().get_capabilities()
@@ -3307,7 +3307,7 @@ def test_comfyui_status_uses_lan_default_for_legacy_blank_remote_url(tmp_path):
     body = status.get_json()
     assert body["available"] is True
     assert body["connection_mode"] == "remote"
-    assert body["comfyui_url"] == "http://192.168.18.19:8188"
+    assert body["comfyui_url"] == "http://127.0.0.1:8188"
 
 
 def test_comfyui_status_warns_when_models_are_on_windows_mount(tmp_path):
@@ -3491,7 +3491,7 @@ def test_comfyui_diffusers_mode_auto_routes_native_gguf_to_comfyui_workflow(tmp_
         settings={
             "comfyui_connection_mode": "diffusers",
             "comfyui_diffusers_model_repo": WAI_GGUF_REPO,
-            "comfyui_remote_api_url": "http://192.168.18.19:8188",
+            "comfyui_remote_api_url": "http://127.0.0.1:8188",
             "comfyui_huggingface_api_token": "hf_read_token",
         },
         extra_deps={
@@ -3721,7 +3721,7 @@ def test_comfyui_diffusers_mode_remote_missing_gguf_reports_without_download(tmp
             pytest.fail("remote-missing GGUF companions must not be downloaded locally")
 
     class RemoteMissingNativeGgufComfyUIClient(FakeNativeGgufComfyUIClient):
-        base_url = "http://192.168.18.19:8188"
+        base_url = "http://127.0.0.1:8188"
 
         def get_capabilities(self):
             payload = super().get_capabilities()
@@ -3746,7 +3746,7 @@ def test_comfyui_diffusers_mode_remote_missing_gguf_reports_without_download(tmp
         settings={
             "comfyui_connection_mode": "diffusers",
             "comfyui_diffusers_model_repo": WAI_GGUF_REPO,
-            "comfyui_remote_api_url": "http://192.168.18.19:8188",
+            "comfyui_remote_api_url": "http://127.0.0.1:8188",
         },
         extra_deps={
             "comfyui_client": None,
@@ -3790,7 +3790,7 @@ def test_comfyui_diffusers_mode_rejects_failed_sd35_gguf_before_download(tmp_pat
         settings={
             "comfyui_connection_mode": "diffusers",
             "comfyui_diffusers_model_repo": SD35_GGUF_REPO,
-            "comfyui_remote_api_url": "http://192.168.18.19:8188",
+            "comfyui_remote_api_url": "http://127.0.0.1:8188",
         },
         extra_deps={
             "comfyui_client": None,
@@ -4032,7 +4032,7 @@ def test_comfyui_diffusers_mode_remote_native_gguf_requires_remote_admin(tmp_pat
         settings={
             "comfyui_connection_mode": "diffusers",
             "comfyui_diffusers_model_repo": WAI_GGUF_REPO,
-            "comfyui_remote_api_url": "http://192.168.18.19:8188",
+            "comfyui_remote_api_url": "http://127.0.0.1:8188",
         },
         extra_deps={
             "comfyui_client": None,
@@ -5308,6 +5308,42 @@ def test_root_can_upload_comfyui_model_file_into_local_models_dir(tmp_path):
     assert sidecar_data["uploaded_by"] == "root"
 
 
+def test_root_can_upload_comfyui_model_file_when_generation_backend_is_remote(tmp_path):
+    db_path = tmp_path / "comfyui.db"
+    storage_root = tmp_path / "storage"
+    storage_root.mkdir()
+    _init_db(db_path)
+    comfy_base = tmp_path / "comfyui_portable"
+    comfy_base.mkdir()
+    (comfy_base / "main.py").write_text("# comfy", encoding="utf-8")
+    root_actor = {"id": 1, "username": "root", "role": "super_admin"}
+    client = _build_app(
+        db_path,
+        storage_root,
+        actor=lambda: root_actor,
+        settings={
+            "comfyui_connection_mode": "remote",
+            "comfyui_remote_api_url": "http://example.invalid:8192",
+            "comfyui_base_dir": str(comfy_base),
+        },
+    ).test_client()
+
+    uploaded = client.post(
+        "/api/root/comfyui/model-upload",
+        data={
+            "type": "lora",
+            "base_dir": str(comfy_base),
+            "model_file": (io.BytesIO(b"remote-mode-bytes"), "remote_mode_lora.safetensors", "application/octet-stream"),
+        },
+        content_type="multipart/form-data",
+    )
+
+    assert uploaded.status_code == 200
+    saved = comfy_base / "models" / "loras" / "remote_mode_lora.safetensors"
+    assert saved.exists()
+    assert saved.read_bytes() == b"remote-mode-bytes"
+
+
 def test_root_can_upload_comfyui_model_file_into_custom_relative_dir(tmp_path):
     db_path = tmp_path / "comfyui.db"
     storage_root = tmp_path / "storage"
@@ -6218,6 +6254,7 @@ def test_comfyui_frontend_is_wired():
     assert 'id="comfyui-root-model-mode-hint"' in index_html
     assert 'root 模型匯入（Civitai / 檔案上傳）' in index_html
     assert '和上方生圖表單分開' in index_html
+    assert 'Civitai 模型匯入區會在本地與遠端模式常駐可見' in index_html
     assert '<option value="embedding">Embedding / TI</option>' in index_html
     assert '<option value="vae">VAE</option>' in index_html
     assert '<option value="controlnet">ControlNet</option>' in index_html
@@ -6243,12 +6280,12 @@ def test_comfyui_frontend_is_wired():
     assert 'id="comfyui-civitai-settings"' in index_html
     assert 'id="s-comfyui-civitai-api-key"' in index_html
     assert "function canManageComfyuiLocalModels" in comfyui_js
-    assert 'return currentUser === "root" && mode === "local";' in comfyui_js
+    assert 'return currentUser === "root";' in comfyui_js
     assert 'if (panel) panel.style.display = showLocalModels ? "" : "none";' in comfyui_js
     assert "if (modelsTab) modelsTab.hidden = !showLocalModels;" in comfyui_js
-    assert '目前是雲端 / 遠端模式，所以這個區塊只保留說明。若要管理本站的本地 ComfyUI 模型，請先把 backend 切回本地模式。' in comfyui_js
-    assert "/js/36-comfyui.js?v=20260605-hf-textonly-repo-sanitize" in index_html
-    assert "/styles.css?v=20260606-avatar-zoom-stepper" in index_html
+    assert '目前是雲端 / 遠端模式；Civitai 匯入區仍可使用' in comfyui_js
+    assert "/js/36-comfyui.js?v=20260606-hf-common-repos" in index_html
+    assert "/styles.css?v=20260606-hf-common-repos" in index_html
     assert "width: min(420px, 100%);" in css
     assert "max-height: 320px;" in css
     assert ".comfyui-root-details" in css
@@ -6260,7 +6297,7 @@ def test_comfyui_frontend_is_wired():
     assert 'switchModuleTab("comfyui")' in bootstrap_js
     assert 'normTab === "comfyui"' in admin_js
     assert '本地模式會測試本地 API；若產圖時 API 未啟動，後端會嘗試執行啟動腳本。' in admin_js
-    assert 'ComfyUI / GGUF 遠端模式只負責呼叫指定 API 生圖，無法透過 API 把模型下載回本站的本地 ComfyUI，所以會隱藏本地模型下載與 Civitai API Key。' in admin_js
+    assert 'ComfyUI / GGUF 遠端模式只負責呼叫指定 API 生圖；Civitai API Key 與模型匯入區會常駐可見' in admin_js
     assert 'HF 頁籤會檢查 Hugging Face repo 與 Python / Diffusers 套件' in admin_js
     assert 'apiFetch(API + "/comfyui/generate"' in comfyui_js
     assert 'apiFetch(API + "/comfyui/billing-quote"' in comfyui_js
@@ -6451,7 +6488,7 @@ def test_comfyui_frontend_is_wired():
     assert "function updateComfyuiConnectionModeFields()" in admin_js
     assert "s-comfyui-connection-mode" in bootstrap_js
     assert "s-comfyui-civitai-api-key" in admin_js
-    assert "無法透過 API 把模型下載回本站的本地 ComfyUI" in admin_js
+    assert "模型下載只能用於本站本地 ComfyUI 或由遠端主機自行安裝" in admin_js
     assert "startLocalComfyui" in bootstrap_js
     assert "searchComfyuiCivitaiModels" in comfyui_js
     assert "inspectComfyuiCivitaiModel" in bootstrap_js
@@ -6519,7 +6556,7 @@ def test_comfyui_frontend_is_wired():
     assert "/js/25-community.js?v=20260518-inline-media" in index_html
     assert 'isComfyuiAvailableForNavigation' in admin_js
     assert '"feature_comfyui_enabled": False' in platform_settings_py
-    assert 'DEFAULT_COMFYUI_REMOTE_API_URL = os.environ.get("COMFYUI_API_URL", "http://192.168.18.19:8188").rstrip("/")' in comfyui_settings_py
+    assert 'DEFAULT_COMFYUI_REMOTE_API_URL = os.environ.get("COMFYUI_API_URL", "http://127.0.0.1:8188").rstrip("/")' in comfyui_settings_py
     assert '"comfyui_remote_api_url": DEFAULT_COMFYUI_REMOTE_API_URL' in comfyui_settings_py
     assert '"comfyui_api_host": os.environ.get("COMFYUI_API_HOST", "localhost")' in comfyui_settings_py
     assert '"comfyui_api_port": DEFAULT_COMFYUI_PORT' in comfyui_settings_py

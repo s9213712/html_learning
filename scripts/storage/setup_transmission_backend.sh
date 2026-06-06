@@ -15,10 +15,10 @@ Options:
   --rpc-username USER       RPC username. Default: hackme_web
   --rpc-password PASS       RPC password. Default: generated random password
   --rpc-port PORT           RPC port. Default: 9091
-  --rpc-bind-address ADDR   RPC bind address. Default: 127.0.0.1
-  --rpc-whitelist LIST      RPC IP whitelist. Default: 127.0.0.1,::1
+  --rpc-bind-address ADDR   RPC bind address. Default: 0.0.0.0
+  --rpc-whitelist LIST      RPC IP whitelist value. Default: *.*.*.*
   --rpc-whitelist-enabled VALUE
-                           Enable RPC IP whitelist: true/false. Default: true
+                           Enable RPC IP whitelist: true/false. Default: false
   --rpc-authentication-required VALUE
                            Require RPC/Web UI login: true/false. Default: true
   --disable-rpc-auth       Development-only shortcut for
@@ -61,11 +61,11 @@ app_user="${SUDO_USER:-$(id -un)}"
 rpc_username="hackme_web"
 rpc_password=""
 rpc_port="9091"
-rpc_bind_address="127.0.0.1"
-rpc_whitelist="127.0.0.1,::1"
-rpc_whitelist_enabled="true"
+rpc_bind_address="0.0.0.0"
+rpc_whitelist="*.*.*.*"
+rpc_whitelist_enabled="false"
 rpc_authentication_required="true"
-allow_any_rpc_ip="0"
+allow_any_rpc_ip="1"
 restart_service="1"
 install_systemd_override="1"
 install_missing_packages="1"

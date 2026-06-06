@@ -84,14 +84,54 @@ def test_huggingface_diffusers_metadata_lists_gguf_files_as_selectable_options()
     assert options[0]["requires_base_repo"] is True
 
 
-def test_huggingface_diffusers_metadata_detects_unsupported_video_pipeline():
+def test_huggingface_diffusers_metadata_detects_non_image_pipeline_capability():
     assert detect_diffusers_supported_modes(
         repo_id="owner/video-model",
         pipeline_tag="text-to-video",
         library_name="diffusers",
         tags=["diffusers"],
         siblings=[{"rfilename": "model_index.json"}],
-    ) == []
+    ) == ["t2v"]
+
+
+def test_huggingface_diffusers_metadata_detects_text_to_text_pipeline_capability():
+    assert detect_diffusers_supported_modes(
+        repo_id="owner/text-model",
+        pipeline_tag="text2text-generation",
+        library_name="transformers",
+        tags=["text2text-generation"],
+        siblings=[{"rfilename": "config.json"}],
+    ) == ["t2t"]
+
+
+def test_huggingface_diffusers_metadata_detects_image_to_text_pipeline_capability():
+    assert detect_diffusers_supported_modes(
+        repo_id="owner/vision-language-model",
+        pipeline_tag="image-to-text",
+        library_name="transformers",
+        tags=["image-to-text"],
+        siblings=[{"rfilename": "config.json"}],
+    ) == ["i2t"]
+
+
+def test_huggingface_diffusers_metadata_detects_image_text_to_text_pipeline_capability():
+    assert detect_diffusers_supported_modes(
+        repo_id="Qwen/Qwen2.5-VL-3B-Instruct",
+        pipeline_tag="image-text-to-text",
+        library_name="transformers",
+        tags=["image-text-to-text", "multimodal"],
+        siblings=[{"rfilename": "config.json"}],
+    ) == ["i2t"]
+
+
+def test_huggingface_diffusers_metadata_accumulates_multiple_pipeline_capabilities():
+    assert detect_diffusers_supported_modes(
+        repo_id="owner/multi-capability-model",
+        pipeline_tag="text-to-image",
+        library_name="diffusers",
+        tags=["diffusers", "image-to-image", "text2text-generation", "image-to-text"],
+        siblings=[{"rfilename": "model_index.json"}],
+    ) == ["txt2img", "img2img", "t2t", "i2t"]
 
 
 def test_huggingface_diffusers_metadata_detects_gguf_text_to_image_only():
@@ -177,6 +217,60 @@ def test_huggingface_diffusers_repo_inspection_uses_short_metadata_cache(monkeyp
     assert second["ok"] is True
     assert second["cache"]["hit"] is True
     assert calls["count"] == 1
+
+
+def test_huggingface_diffusers_repo_inspection_separates_supported_and_runnable_modes(monkeypatch):
+    huggingface_service._HF_REPO_INSPECT_CACHE.clear()
+
+    class FakeApi:
+        def model_info(self, repo_id, token=None, files_metadata=True):
+            return types.SimpleNamespace(
+                siblings=[{"rfilename": "config.json"}],
+                pipeline_tag="image-to-text",
+                library_name="transformers",
+                tags=["image-to-text"],
+                cardData={},
+                config={},
+            )
+
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: object() if name == "huggingface_hub" else None)
+    monkeypatch.setattr(huggingface_service, "_load_model_card_hints", lambda repo_id, token: {})
+    monkeypatch.setitem(sys.modules, "huggingface_hub", types.SimpleNamespace(HfApi=lambda: FakeApi()))
+
+    result = inspect_huggingface_diffusers_repo("owner/vision-language-model", mode="img2img")
+
+    assert result["ok"] is True
+    assert result["supported_modes"] == ["i2t"]
+    assert result["runnable_modes"] == []
+    assert result["supported_for_mode"] is False
+    assert any("目前本站 HF / Diffusers 生圖器只支援" in item for item in result["warnings"])
+
+
+def test_huggingface_diffusers_repo_inspection_keeps_multi_mode_supported_and_runnable(monkeypatch):
+    huggingface_service._HF_REPO_INSPECT_CACHE.clear()
+
+    class FakeApi:
+        def model_info(self, repo_id, token=None, files_metadata=True):
+            return types.SimpleNamespace(
+                siblings=[{"rfilename": "model_index.json"}],
+                pipeline_tag="text-to-image",
+                library_name="diffusers",
+                tags=["diffusers", "image-to-image", "text2text-generation", "image-to-text"],
+                cardData={},
+                config={},
+            )
+
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: object() if name == "huggingface_hub" else None)
+    monkeypatch.setattr(huggingface_service, "_load_model_card_hints", lambda repo_id, token: {})
+    monkeypatch.setitem(sys.modules, "huggingface_hub", types.SimpleNamespace(HfApi=lambda: FakeApi()))
+
+    result = inspect_huggingface_diffusers_repo("owner/multi-capability-model", mode="img2img")
+
+    assert result["ok"] is True
+    assert result["supported_modes"] == ["txt2img", "img2img", "t2t", "i2t"]
+    assert result["runnable_modes"] == ["txt2img", "img2img"]
+    assert result["supported_for_mode"] is True
+    assert any("t2t, i2t" in item for item in result["warnings"])
 
 
 def test_huggingface_diffusers_repo_inspection_returns_model_card_hints(monkeypatch, tmp_path):

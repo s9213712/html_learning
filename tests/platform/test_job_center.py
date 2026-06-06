@@ -1,5 +1,5 @@
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from flask import Flask, jsonify, make_response
 
@@ -16,6 +16,7 @@ from services.job_center import (
     purge_terminal_jobs,
     request_cancel,
     request_retry,
+    reset_job_progress_buffer_for_tests,
     update_job,
 )
 
@@ -24,6 +25,26 @@ def connection():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def test_job_center_schema_ready_cache_ignores_rolled_back_schema(tmp_path):
+    reset_job_progress_buffer_for_tests()
+    db_path = tmp_path / "jobs.db"
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("BEGIN")
+    ensure_job_center_schema(conn)
+    assert conn.execute("SELECT name FROM sqlite_master WHERE name='job_center_jobs'").fetchone()
+    conn.rollback()
+    conn.close()
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    ensure_job_center_schema(conn)
+    assert expire_stale_cloud_remote_download_jobs(conn) == []
+    assert conn.execute("SELECT COUNT(*) FROM job_center_jobs").fetchone()[0] == 0
+    conn.close()
 
 
 def test_job_center_lifecycle():
@@ -321,6 +342,9 @@ def test_stale_empty_resumable_upload_jobs_are_expired(monkeypatch):
     ensure_job_center_schema(conn)
     monkeypatch.setenv("HACKME_RESUMABLE_UPLOAD_EMPTY_STALE_SECONDS", "60")
     monkeypatch.setenv("HACKME_RESUMABLE_UPLOAD_STALE_SECONDS", str(31 * 24 * 60 * 60))
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    stale_at = (now - timedelta(seconds=120)).isoformat()
+    active_at = now.isoformat()
     stale = create_job(
         conn,
         owner_user_id=1,
@@ -346,15 +370,15 @@ def test_stale_empty_resumable_upload_jobs_are_expired(monkeypatch):
         metadata={"session_id": "active-session", "filename": "active.bin", "received_bytes": 512, "total_bytes": 1024},
     )
     conn.execute(
-        "INSERT INTO cloud_resumable_upload_sessions (session_id, status, updated_at) VALUES ('stale-session', 'created', '2026-05-01T00:00:00')"
+        "INSERT INTO cloud_resumable_upload_sessions (session_id, status, updated_at) VALUES ('stale-session', 'created', ?)",
+        (stale_at,),
     )
     conn.execute(
-        "INSERT INTO cloud_resumable_upload_sessions (session_id, status, updated_at) VALUES ('active-session', 'uploading', '2026-05-01T00:00:00')"
+        "INSERT INTO cloud_resumable_upload_sessions (session_id, status, updated_at) VALUES ('active-session', 'uploading', ?)",
+        (active_at,),
     )
-    conn.execute(
-        "UPDATE job_center_jobs SET created_at='2026-05-01T00:00:00', updated_at='2026-05-01T00:00:00' WHERE job_uuid IN (?, ?)",
-        (stale["job_uuid"], active["job_uuid"]),
-    )
+    conn.execute("UPDATE job_center_jobs SET created_at=?, updated_at=? WHERE job_uuid=?", (stale_at, stale_at, stale["job_uuid"]))
+    conn.execute("UPDATE job_center_jobs SET created_at=?, updated_at=? WHERE job_uuid=?", (active_at, active_at, active["job_uuid"]))
     conn.commit()
 
     expired = expire_stale_resumable_upload_jobs(conn)

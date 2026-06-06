@@ -564,7 +564,7 @@ curl -k -sS https://127.0.0.1:5000/api/version
 | POST | `/api/root/comfyui/civitai/search` | root | 用關鍵字 / base model / 類型 / NSFW 篩選搜尋 Civitai 模型 |
 | POST | `/api/root/comfyui/civitai/inspect` | root | 讀 Civitai metadata |
 | POST | `/api/root/comfyui/civitai/download` | root | 下載模型 |
-| POST | `/api/root/comfyui/model-upload` | root | 直接上傳模型檔到本地 ComfyUI models 目錄 |
+| POST | `/api/root/comfyui/model-upload` | root | 直接上傳模型檔到本站設定的 ComfyUI models 目錄 |
 | GET | `/api/root/comfyui/download-jobs/<job_id>` | root | 下載 job 狀態 |
 
 ComfyUI 模型匯入補充：

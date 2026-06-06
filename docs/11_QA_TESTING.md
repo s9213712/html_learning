@@ -414,7 +414,7 @@ python3 scripts/on_live_reports/snapshot_restore.py
   - 離線 recovery 後是否留下審計紀錄；若 runtime 缺審計 secret，是否至少不會把 recovery 本身做失敗
   - `scripts/security/pentest/run_functional_smoke.sh` 是否仍能驗證 offline root recovery CLI 可執行
 - 若本次改到 ComfyUI，至少補：
-  - 設定頁的 `Civitai API Key` 與 root 本地模型下載工具，是否真的只在 `local` 模式出現；切到 `remote` 時不應殘留可操作入口
+  - 設定頁的 `Civitai API Key`、`Hugging Face Token` 與 root 模型匯入工具是否都在 AI 產圖設定與 root 模型匯入區維持可見；切到 `remote` 時文案需明確說明會寫入本站設定的 ComfyUI models 目錄
   - model list 是否回傳 `models / loras / embeddings / vaes / generation_modes / controlnet_types / controlnet_models / upscale_models`
   - LoRA metadata / `trained_words` 是否會在重新整理後仍存在，不是只在下載當下有
   - 使用者加入 LoRA 時，是否只會補上缺少的 trigger words，而不會每次重複疊加
@@ -422,7 +422,7 @@ python3 scripts/on_live_reports/snapshot_restore.py
   - workflow template preview 若有正/負 `CLIPTextEncode.text`，`ui_schema.panels[text]` 是否包含 synthetic `text:embeddings` / `embedding_shortcuts` 子項，且不被列為必填欄位
   - 前端從 template 文字面板插入 Embedding 後，已展開的 text panel 是否保持展開，不可被重新折疊
   - custom VAE 是否真的改到 workflow，而不是只有 UI 多一個欄位
-  - Civitai inspect / download 是否顯示 trigger words，且 remote mode 不會誤顯示本地下載工具
+  - Civitai inspect / download 是否顯示 trigger words，且 remote mode 顯示的模型匯入工具不會誤導成直接安裝到遠端主機
   - Civitai 搜尋是否支援關鍵字、base model、Checkpoint / LoRA / Embedding / ControlNet、Safe/NSFW 篩選，且搜尋結果會顯示版本、檔案大小、hash、相容模型摘要
   - root 若未設定 Civitai API Key，搜尋與 inspect/download 是否回人性化錯誤，而不是靜默失敗或 500
   - Civitai 下載前是否真的會跳二次確認；下載中斷時是否顯示「下載中斷或連線失敗」而非模糊錯誤
@@ -431,7 +431,7 @@ python3 scripts/on_live_reports/snapshot_restore.py
   - `img2img / inpaint / outpaint / upscale` 是否能正確接收來源圖 / 遮罩圖 / 控制圖，手機版表單不可擠壞
   - ControlNet 模型缺失、workflow 缺 node、控制圖格式錯誤、`control strength` 超出範圍時，是否回人性化錯誤而非靜默失敗
   - history replay 是否能套回來源圖、遮罩圖、ControlNet、outpaint 與 upscale 設定，不可只回填純文字 prompt
-  - root 模型匯入面板是否可在 `Civitai 網址 / 本地檔案上傳` 兩種來源間切換；本地上傳只允許合法副檔名，remote mode 不得出現誤導性入口
+  - root 模型匯入面板是否可在 `Civitai 網址 / 本地檔案上傳` 兩種來源間切換；本地上傳只允許合法副檔名，remote mode 仍需清楚標示寫入本站設定的 models 目錄
   - `ComfyUI Workflow 工作台` 是否可把目前表單匯出為 sanitized workflow JSON，再匯入成 private/public preset
   - workflow 匯入是否會拒絕壞 JSON、absolute path、shell / exec / script 類節點、外部 URL 與可疑敏感欄位
   - private workflow preset 是否不可被其他使用者讀取、更新或刪除

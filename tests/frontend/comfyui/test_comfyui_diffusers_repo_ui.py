@@ -13,7 +13,7 @@ def _read(path):
 
 def _hf_repo_block(html):
     start = html.index('id="comfyui-diffusers-repo-field"')
-    end = html.index('id="comfyui-diffusers-token-field"')
+    end = html.index('id="comfyui-model-select"')
     return html[start:end]
 
 
@@ -29,11 +29,16 @@ def test_diffusers_generation_page_accepts_repo_and_variant_selection():
     assert 'id="comfyui-diffusers-model-repo"' in html
     assert 'id="comfyui-diffusers-model-repo" placeholder="dhead/waiIllustriousSDXL_v150 或 Heartsync/NSFW-Uncensored"' in html
     assert 'id="comfyui-diffusers-inspect-btn"' in html
+    assert 'id="comfyui-diffusers-common-repo"' in html
+    assert 'id="comfyui-diffusers-add-common-repo"' in html
+    assert 'id="comfyui-diffusers-remove-common-repo"' in html
     assert 'id="comfyui-diffusers-model-variant"' in html
     assert 'id="comfyui-diffusers-repo-status"' in html
-    assert 'id="comfyui-diffusers-hf-token"' in html
-    assert 'id="comfyui-diffusers-hf-token-save-btn"' in html
-    assert 'id="comfyui-diffusers-hf-token-state"' in html
+    assert 'id="comfyui-diffusers-hf-token"' not in html
+    assert 'id="comfyui-diffusers-hf-token-save-btn"' not in html
+    assert 'id="comfyui-diffusers-hf-token-state"' not in html
+    assert 'id="s-comfyui-huggingface-api-token"' in html
+    assert 'id="comfyui-huggingface-api-token-state"' in html
     assert "Hugging Face Token 快速設定" in html
     assert "hf_transfer/Xet 加速下載" in html
     assert 'id="s-comfyui-allow-in-process-diffusers"' in html
@@ -93,12 +98,30 @@ def test_diffusers_js_preflights_huggingface_repo_before_generation():
     assert "fillComfyuiGgufProfiles" in js
     assert "renderComfyuiGgufProfileHint" in js
     assert "ensureComfyuiGgufProfilesLoaded" in js
+    assert "COMFYUI_DIFFUSERS_BUILTIN_COMMON_REPOS" in js
+    assert "dhead/wai-nsfw-illustrious-sdxl-v140-sdxl" in js
+    assert "Heartsync/NSFW-Uncensored" in js
+    assert "stabilityai/sd-turbo" in js
+    assert "stabilityai/sdxl-turbo" in js
+    assert "cagliostrolab/animagine-xl-4.0" in js
+    assert "stablediffusionapi/animapencil-xl-v3" in js
+    assert "black-forest-labs/FLUX.1-schnell" in js
+    assert "Qwen/Qwen-Image" in js
+    assert "Qwen/Qwen-Image-Edit" in js
+    assert "Tongyi-MAI/Z-Image-Turbo" in js
+    assert "SD Turbo（txt2img / I2I）" in js
+    assert "SDXL Turbo（txt2img / I2I）" in js
+    assert "Animagine XL 4.0（Anime SDXL / I2I）" in js
+    assert "FLUX.1 schnell（txt2img / I2I，需 HF 授權）" in js
+    assert "Qwen Image（txt2img / I2I）" in js
+    assert "Z-Image Turbo（txt2img / I2I）" in js
+    assert "function addCurrentComfyuiDiffusersCommonRepo()" in js
+    assert "function removeSelectedComfyuiDiffusersCommonRepo()" in js
+    assert "function setComfyuiDiffusersRepo(repo, { inspect = true } = {})" in js
+    assert "comfyui:diffusers-common-repos" in js
     assert 'API + "/comfyui/installed-gguf" + comfyuiRequestQuery()' in js
-    assert "function loadComfyuiDiffusersTokenState" in js
-    assert "function saveComfyuiDiffusersTokenShortcut" in js
-    assert 'comfyui_huggingface_api_token_clear' in js
-    assert "已儲存 Hugging Face API Token，並會套用於 HF 加速下載通道。" in js
-    assert "metadata 檢查、Diffusers snapshot、hf_transfer/Xet 加速下載與手動串流下載" in js
+    assert "function loadComfyuiDiffusersTokenState" not in js
+    assert "function saveComfyuiDiffusersTokenShortcut" not in js
     assert "prompt_style_hint" in js
     assert "comfyuiInstalledGgufModels" in js
     assert "renderComfyuiInstalledGgufModels" in js
@@ -108,6 +131,11 @@ def test_diffusers_js_preflights_huggingface_repo_before_generation():
     assert "sanitizeComfyuiDiffusersRepoField" in js
     assert "comfyuiHuggingFaceRepoInputLooksLikeModelFile" in js
     assert '"text-to-image": "txt2img"' in js
+    assert '"text2text-generation": "t2t"' in js
+    assert '"image-to-text": "i2t"' in js
+    assert '"image-text-to-text": "i2t"' in js
+    assert "文字轉文字" in js
+    assert "圖片轉文字" in js
     assert 'if (COMFYUI_HF_MODEL_FILE_EXT_RE.test(tail)) return "";' in js
     assert "repoInput.value = candidateRepo;" in js
     assert "repoInput.value = modelSelect.value;" not in js
@@ -116,18 +144,25 @@ def test_diffusers_js_preflights_huggingface_repo_before_generation():
     assert "updateComfyuiDiffusersGgufOptions" in js
     assert "尚未開始下載" in js
     assert "避免重複下載" in js
+    assert "可用模式：" in js
+    assert "本站可執行：" in js
+    assert "此 HF pipeline 目前只能辨識" in js
     assert "allOptions.filter((option) => option?.kind !== \"gguf\")" in js
 
 
 def test_diffusers_text_only_repo_hides_image_cards_and_omits_image_payloads():
     js = _read("public/js/36-comfyui.js")
     assert "function comfyuiDiffusersTextOnlyMode()" in js
+    assert "function comfyuiDiffusersInspectionRunnableModes()" in js
+    assert "runnable_modes" in js
     assert 'modes.every((mode) => mode === "txt2img")' in js
     assert "clearComfyuiDiffusersImageAssetsForTextOnly()" in js
     assert "已判斷為文字生圖，已隱藏來源圖片/遮罩卡片" in js
     assert 'if (comfyuiDiffusersTextOnlyMode()) return "txt2img";' in js
     assert "return !comfyuiDiffusersTextOnlyMode();" in js
-    assert "if (sourceCard) sourceCard.style.display = comfyuiShouldShowSourceImageCard(mode) ? \"\" : \"none\";" in js
+    assert "if (sourceCard) sourceCard.style.display = comfyuiShouldShowSourceImageCard(mode) || comfyuiDiffusersSupportsImageInputMode() ? \"\" : \"none\";" in js
+    assert "repo 支援圖生圖，上傳來源圖後自動切換" in js
+    assert "若要圖生圖，請上傳來源圖片" in js
     assert 'if (maskCard) maskCard.style.display = diffusersTextOnly ? "none"' in js
     assert 'if (controlCard) controlCard.style.display = diffusersTextOnly ? "none"' in js
     assert "const includeImageAssets = !(diffusersMode && comfyuiDiffusersTextOnlyMode());" in js
@@ -137,7 +172,7 @@ def test_diffusers_text_only_repo_hides_image_cards_and_omits_image_payloads():
 
 def test_diffusers_cache_busts_preflight_ui_assets():
     html = _read("public/index.html")
-    assert "/js/36-comfyui.js?v=20260605-hf-textonly-repo-sanitize" in html
+    assert "/js/36-comfyui.js?v=20260606-hf-common-repos-modes" in html
     assert "/js/36-comfyui-workflows.js?v=20260605-history-gguf-rehydrate" in html
 
 
@@ -176,7 +211,8 @@ def test_hf_and_comfyui_are_separate_frontend_generation_tabs():
     assert 'HF / Diffusers 只支援 Hugging Face 模型頁' in html
     assert "GGUF" not in hf_block
     assert "GGUF" not in hf_settings
-    assert 'comfyui-diffusers-hf-token-save-btn' in html
+    assert 'comfyui-diffusers-hf-token-save-btn' not in html
+    assert 'id="s-comfyui-huggingface-api-token"' in html
     assert 'updateComfyuiDiffusersGgufOptions();' in comfyui_js
 
 
@@ -279,7 +315,7 @@ def test_diffusers_txt2img_hides_source_image_card_until_needed():
     assert "function comfyuiShouldShowSourceImageCard" in js
     assert "if (!isComfyuiDiffusersMode()) return true;" in js
     assert 'return comfyuiModeUsesSourceImage(mode) || comfyuiHasInputAsset("source") || comfyuiHasInputAsset("mask");' in js
-    assert 'if (sourceCard) sourceCard.style.display = comfyuiShouldShowSourceImageCard(mode) ? "" : "none";' in js
+    assert 'if (sourceCard) sourceCard.style.display = comfyuiShouldShowSourceImageCard(mode) || comfyuiDiffusersSupportsImageInputMode() ? "" : "none";' in js
 
 
 def test_diffusers_in_process_runtime_confirmation_is_in_quick_settings():

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>hackme_web — 登入系統</title>
   <!-- Security headers via HTTP (set by server/Talisman) -->
-  <link rel="stylesheet" href="/styles.css?v=20260606-avatar-zoom-stepper" />
+  <link rel="stylesheet" href="/styles.css?v=20260606-hf-common-repos" />
   <link rel="stylesheet" href="/experiments.css?v=20260517-plane-view-angle" />
   <link rel="stylesheet" href="/i18n-language-switcher.css?v=20260520-deep-audit" />
 </head>
@@ -2264,20 +2264,18 @@
               <input type="text" id="comfyui-diffusers-model-repo" placeholder="dhead/waiIllustriousSDXL_v150 或 Heartsync/NSFW-Uncensored" autocomplete="off" />
               <button class="btn btn-sm" id="comfyui-diffusers-inspect-btn" type="button">檢查模型</button>
             </div>
+            <div class="inline-control-row comfyui-hf-common-row">
+              <select id="comfyui-diffusers-common-repo" aria-label="常用 Hugging Face Repo">
+                <option value="">常用 repo</option>
+              </select>
+              <button class="btn btn-sm" id="comfyui-diffusers-add-common-repo" type="button">加入常用</button>
+              <button class="btn btn-sm" id="comfyui-diffusers-remove-common-repo" type="button" disabled>移除</button>
+            </div>
             <select id="comfyui-diffusers-model-variant" disabled>
               <option value="">檢查後選擇精度版本</option>
             </select>
             <div class="drive-card-sub" id="comfyui-diffusers-repo-status">貼上 Hugging Face repo id 後會先檢查支援模式與可下載 Diffusers 精度版本；<code>.safetensors</code> 是權重檔名，不是 repo。</div>
             <div class="drive-card-sub">HF / Diffusers 只支援 Hugging Face 模型頁「Use this model」內有 Diffusers 的 repo。</div>
-          </div>
-          <div class="field" id="comfyui-diffusers-token-field" style="display:none;">
-            <label>Hugging Face Token 快速設定</label>
-            <div class="inline-control-row">
-              <input type="password" id="comfyui-diffusers-hf-token" placeholder="貼上 read token；留空不變更" autocomplete="off" />
-              <button class="btn btn-sm" id="comfyui-diffusers-hf-token-save-btn" type="button">儲存 token</button>
-            </div>
-            <label style="margin-top:.35rem;"><input type="checkbox" id="comfyui-diffusers-hf-token-clear" /> 清除已儲存的 Hugging Face API Token</label>
-            <div class="drive-card-sub" id="comfyui-diffusers-hf-token-state">root 可在此快速儲存 token；會套用於 Hugging Face metadata 檢查、Diffusers snapshot、hf_transfer/Xet 加速下載與手動串流下載。</div>
           </div>
           <div class="field">
             <label>模型</label>
@@ -2712,10 +2710,10 @@
         <details class="comfyui-root-details" id="comfyui-root-model-details">
           <summary class="comfyui-root-summary">
             <span class="comfyui-root-summary-title">root 模型匯入（Civitai / 檔案上傳）</span>
-            <span class="comfyui-root-summary-sub">展開後可從 Civitai 下載，或直接上傳模型檔到本地 ComfyUI models 目錄；和上方生圖表單分開。</span>
+            <span class="comfyui-root-summary-sub">展開後可從 Civitai 下載，或直接上傳模型檔到本站設定的 ComfyUI models 目錄；和上方生圖表單分開。</span>
           </summary>
           <div class="comfyui-root-body">
-            <div id="comfyui-root-model-mode-hint" class="drive-card-sub" style="margin-bottom:.8rem;">目前是本地模式，可在這裡管理 Civitai 模型下載。</div>
+            <div id="comfyui-root-model-mode-hint" class="drive-card-sub" style="margin-bottom:.8rem;">Civitai 模型匯入區會在本地與遠端模式常駐可見；下載會寫入本站設定的 ComfyUI models 目錄。</div>
             <div class="settings-option-grid">
               <div class="field">
                 <label>ComfyUI 專案資料夾</label>
@@ -5482,14 +5480,14 @@
                 <option value="remote">連線遠端 ComfyUI API</option>
                 <option value="local">使用本地 ComfyUI 資料夾與啟動腳本</option>
               </select>
-              <div class="drive-card-sub">Workflow 仍由 ComfyUI 後端處理；遠端模式只呼叫 API，本地模式才會使用本站啟動腳本與本地模型下載設定。</div>
+              <div class="drive-card-sub">Workflow 仍由 ComfyUI 後端處理；遠端模式只呼叫 API，本地模式才會使用本站啟動腳本。Civitai / 模型匯入會寫入本站設定的 ComfyUI models 目錄。</div>
             </div>
             <div id="comfyui-remote-settings" data-comfyui-settings-family-panel="comfyui">
               <div class="field">
                 <label>遠端 API 位址</label>
-                <input type="url" id="s-comfyui-remote-api-url" placeholder="http://192.168.18.19:8188" />
+                <input type="url" id="s-comfyui-remote-api-url" placeholder="http://127.0.0.1:8188" />
               </div>
-              <div style="font-size:.78rem;color:var(--muted);margin:.25rem 0 .75rem;">遠端模式只透過 ComfyUI API 產圖；丟棄預覽只會清掉網頁預覽，不會刪除遠端 output 原始檔，也不提供本地模型下載。</div>
+              <div style="font-size:.78rem;color:var(--muted);margin:.25rem 0 .75rem;">遠端模式只透過 ComfyUI API 產圖；丟棄預覽只會清掉網頁預覽，不會刪除遠端 output 原始檔。Civitai / 模型匯入仍可用，但檔案會寫入本站設定的 ComfyUI models 目錄。</div>
             </div>
             <div id="comfyui-diffusers-settings" data-comfyui-settings-family-panel="hf" style="display:none;">
               <div class="field">
@@ -5498,7 +5496,7 @@
                 <div class="drive-card-sub">填 Hugging Face repo id，例如 <code>dhead/waiIllustriousSDXL_v150</code> 或 <code>Heartsync/NSFW-Uncensored</code>；不要填 <code>.safetensors</code> 權重檔名。HF / Diffusers 會用 Python 直接下載、快取並推論，不經過 ComfyUI server。</div>
               </div>
               <div class="field">
-                <label>Hugging Face API Token</label>
+                <label>Hugging Face Token 快速設定</label>
                 <input type="password" id="s-comfyui-huggingface-api-token" placeholder="私有或 gated 模型才需要；留空代表不變更" autocomplete="off" />
                 <div class="drive-card-sub" id="comfyui-huggingface-api-token-state">尚未讀取 Hugging Face token 狀態。</div>
                 <div class="drive-card-sub">建議用 read 或 fine-grained token。也可用環境變數 <code>HF_TOKEN</code> 提供；儲存後會套用於 metadata 檢查、Diffusers snapshot、hf_transfer/Xet 加速下載與手動串流下載。</div>
@@ -5715,7 +5713,7 @@
             <div class="field" id="comfyui-civitai-settings" style="display:none;">
               <label>Civitai API Key</label>
               <input type="password" id="s-comfyui-civitai-api-key" placeholder="用於 root 模型下載面板讀取版本與下載" autocomplete="off" />
-              <div class="drive-card-sub">只在本地模式顯示，供 root 使用頁面最下方的 Civitai 模型下載折疊區；不會改變上方 ComfyUI 產圖 backend。</div>
+              <div class="drive-card-sub">不論本地或遠端模式都可保存，供 root 使用 Civitai 模型匯入區讀取版本與下載；不會改變上方 ComfyUI / HF 產圖 backend。</div>
             </div>
             <div class="field">
               <label><input type="checkbox" id="s-comfyui-paid-api-nodes-enabled" /> 允許 ComfyUI 付費 / API nodes</label>
@@ -7379,7 +7377,7 @@
 <script src="/js/35-drive.js?v=20260604-storage-bulk-clarity" defer></script>
   <script src="/js/35-drive-preview-share.js?v=20260507-drive-preview-share-split" defer></script>
 <!-- cache marker retained for template-import regression: /js/36-comfyui.js?v=20260509-comfyui-template-embeddings -->
-<script src="/js/36-comfyui.js?v=20260605-hf-textonly-repo-sanitize" defer></script>
+<script src="/js/36-comfyui.js?v=20260606-hf-common-repos-modes" defer></script>
 <script src="/js/36-comfyui-workflows.js?v=20260605-history-gguf-rehydrate" defer></script>
 <script src="/js/37-bug-report.js?v=20260502-device-feature" defer></script>
 <script src="/js/41-game-modules.js?v=20260601-rubiks-visible" defer></script>

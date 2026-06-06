@@ -393,18 +393,19 @@ def test_comfyui_tools_are_split_into_subviews():
     assert ".comfyui-subview[hidden]" in css
 
 
-def test_local_model_management_hides_outside_local_root_mode():
+def test_root_model_management_stays_visible_across_comfyui_modes():
     html = _read("public/index.html")
     js = _read("public/js/36-comfyui.js")
     css = _read("public/styles.css")
 
     assert 'data-comfyui-view="models" hidden' in html
     assert "function canManageComfyuiLocalModels" in js
-    assert 'return currentUser === "root" && mode === "local";' in js
+    assert 'return currentUser === "root";' in js
     assert 'const modelsUnavailable = selected === "models" && (!canManageComfyuiLocalModels() || (modelTab && modelTab.hidden));' in js
     assert "const showLocalModels = canManageComfyuiLocalModels(mode);" in js
     assert 'if (panel) panel.style.display = showLocalModels ? "" : "none";' in js
     assert "if (modelsTab) modelsTab.hidden = !showLocalModels;" in js
     assert "if (details && !showLocalModels) details.open = false;" in js
+    assert "Civitai 匯入區仍可使用" in js
     assert 'document.addEventListener("hackme:account-context-changed"' in js
     assert ".comfyui-subtab[hidden]" in css

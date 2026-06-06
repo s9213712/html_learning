@@ -2757,6 +2757,19 @@
       flex: 1;
     }
 
+    .comfyui-hf-common-row {
+      margin-top: .45rem;
+      flex-wrap: wrap;
+    }
+
+    .comfyui-hf-common-row select {
+      flex: 1 1 16rem;
+    }
+
+    .comfyui-hf-common-row .btn {
+      flex: 0 0 auto;
+    }
+
     .comfyui-lora-panel {
       margin: .35rem 0 .75rem;
       padding: .65rem;

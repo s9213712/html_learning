@@ -1731,8 +1731,6 @@ def _upload_comfyui_model_file(*, uploaded_file, model_type, base_dir, relative_
     model_type = _normalize_download_model_type(model_type)
     if model_type not in COMFYUI_MODEL_DOWNLOAD_TYPES:
         return None, "模型類型不支援"
-    if _configured_connection_mode() != "local":
-        return None, "目前是遠端模式，不提供本地 ComfyUI 模型匯入"
     if uploaded_file is None:
         return None, "請先選擇要上傳的模型檔案"
     original_name = str(getattr(uploaded_file, "filename", "") or "").strip()

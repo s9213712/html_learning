@@ -42,12 +42,13 @@ services/platform/release_info.py
 ```
 
 Every push to a shared branch must increment the last numeric segment by 1
-before release.
+before release. Branch-specific release trains may prefix the date build with
+the two-digit branch number, for example `04_` or `05_`.
 
 Example:
 
 ```text
-2026.04.29-016 -> 2026.04.29-017
+04_2026.04.29-016 -> 04_2026.04.29-017
 ```
 
 Also update visible documentation references:

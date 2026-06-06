@@ -78,7 +78,8 @@ def main() -> int:
     env = os.environ.copy()
     env.update({
         "PYTHONPATH": str(REPO_ROOT),
-        "HTML_LEARNING_HOST": "127.0.0.1",
+        "HTML_LEARNING_HOST": "0.0.0.0",
+        "HTML_LEARNING_DISABLE_TRUSTED_HOSTS": "1",
         "HTML_LEARNING_PORT": str(port),
         "HTML_LEARNING_DB_DIR": str(db_dir),
         "HTML_LEARNING_LOG_DIR": str(runtime_dir / "logs"),
