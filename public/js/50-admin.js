@@ -2706,6 +2706,12 @@ async function loadSettings() {
   if ($("s-video-hls-warm-keep-variants")) $("s-video-hls-warm-keep-variants").value = s.video_hls_warm_keep_variants || "original,480p";
   if ($("s-video-hls-mobile-floor-keep-variants")) $("s-video-hls-mobile-floor-keep-variants").value = s.video_hls_mobile_floor_keep_variants || "480p";
   if ($("s-video-hls-cold-cleanup-max-assets-per-run")) $("s-video-hls-cold-cleanup-max-assets-per-run").value = s.video_hls_cold_cleanup_max_assets_per_run ?? 25;
+  if ($("s-site-name")) $("s-site-name").value = s.site_name || "hackme_web";
+  if ($("s-site-document-title")) $("s-site-document-title").value = s.site_document_title || "hackme_web — 登入系統";
+  if ($("s-site-login-heading")) $("s-site-login-heading").value = s.site_login_heading || "Help me improve, hack me please.";
+  if ($("s-site-login-subtitle")) $("s-site-login-subtitle").value = s.site_login_subtitle || "簡單的帳號註冊與登入系統";
+  if ($("s-site-success-heading")) $("s-site-success-heading").value = s.site_success_heading || "恭喜登入成功";
+  if ($("s-site-success-message")) $("s-site-success-message").value = s.site_success_message || "歡迎回來！";
   if ($("s-site-bg")) $("s-site-bg").value = s.site_bg || "#11131d";
   if ($("s-site-theme-mode")) $("s-site-theme-mode").value = s.site_theme_mode || "dark";
   if ($("s-site-surface")) $("s-site-surface").value = s.site_surface || "#1b2030";
@@ -4954,6 +4960,12 @@ async function saveSettings() {
     video_hls_warm_keep_variants: ($("s-video-hls-warm-keep-variants")?.value || "original,480p").trim(),
     video_hls_mobile_floor_keep_variants: ($("s-video-hls-mobile-floor-keep-variants")?.value || "480p").trim(),
     video_hls_cold_cleanup_max_assets_per_run: parseInt($("s-video-hls-cold-cleanup-max-assets-per-run")?.value || "25", 10) || 25,
+    site_name: ($("s-site-name")?.value || "").trim() || "hackme_web",
+    site_document_title: ($("s-site-document-title")?.value || "").trim() || "hackme_web — 登入系統",
+    site_login_heading: ($("s-site-login-heading")?.value || "").trim() || "Help me improve, hack me please.",
+    site_login_subtitle: ($("s-site-login-subtitle")?.value || "").trim() || "簡單的帳號註冊與登入系統",
+    site_success_heading: ($("s-site-success-heading")?.value || "").trim() || "恭喜登入成功",
+    site_success_message: ($("s-site-success-message")?.value || "").trim() || "歡迎回來！",
     site_theme_mode: $("s-site-theme-mode")?.value || "dark",
     site_bg: $("s-site-bg")?.value || "#11131d",
     site_surface: $("s-site-surface")?.value || "#1b2030",

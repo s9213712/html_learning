@@ -1,13 +1,19 @@
 """UI schema regression for the ComfyUI template importer (§9)."""
 
+import json
+from pathlib import Path
+
 import pytest
 
-from services.comfyui.template.analyzer import analyze_workflow_json
+from services.comfyui.template.analyzer import FieldCategory, analyze_workflow_json, classify_input_field
 from services.comfyui.template.capability import CapabilityCheck
 from services.comfyui.template.ui_schema import (
     build_ui_schema,
     required_user_inputs,
 )
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 # Same minimal txt2img.
@@ -324,6 +330,56 @@ def test_ui_schema_shows_template_locked_model_loader_fields_as_readonly():
     assert "node:21:clip_name" not in ids
     assert "node:22:vae_name" not in ids
     assert "node:23:clip_name" not in ids
+
+
+def test_ui_schema_classifies_nonstandard_template_model_fields():
+    workflow = {
+        "10": {"class_type": "LTXVAudioVAELoader", "inputs": {"ckpt_name": "ltx-2.3-22b-dev-fp8.safetensors"}},
+        "11": {"class_type": "LTXAVTextEncoderLoader", "inputs": {"ckpt_name": "ltx-2.3-22b-dev-fp8.safetensors"}},
+        "12": {"class_type": "Qwen3_VQA", "inputs": {"model": "Qwen3-VL-4B-Instruct"}},
+    }
+    analysis = analyze_workflow_json(workflow)
+    schema = build_ui_schema(analysis=analysis)
+    all_fields = {f["id"]: f for p in schema.panels for f in p.get("fields", [])}
+
+    assert analysis.required_models["ckpt"] == ["ltx-2.3-22b-dev-fp8.safetensors"]
+    assert analysis.required_models["api_model"] == ["Qwen3-VL-4B-Instruct"]
+    assert all_fields["node:10:ckpt_name"]["category"] == "MODEL"
+    assert all_fields["node:10:ckpt_name"]["input_type"] == "select"
+    assert all_fields["node:11:ckpt_name"]["label"] == "LTX Text Encoder Checkpoint"
+    assert all_fields["node:12:model"]["label"] == "Qwen3 VQA 模型"
+
+
+def test_official_workflow_modelish_inputs_are_classified():
+    modelish_input_names = {
+        "ckpt_name",
+        "vae_name",
+        "lora_name",
+        "unet_name",
+        "control_net_name",
+        "model_name",
+        "clip_name",
+        "clip_name1",
+        "clip_name2",
+        "clip_name3",
+        "model",
+    }
+    missing = []
+    for workflow_path in sorted((PROJECT_ROOT / "workflows" / "comfyui").glob("origin_*/workflow.json")):
+        workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
+        for node_id, node in workflow.items():
+            if not isinstance(node, dict):
+                continue
+            class_type = str(node.get("class_type") or "")
+            inputs = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
+            for input_name, raw_value in inputs.items():
+                if input_name not in modelish_input_names:
+                    continue
+                if isinstance(raw_value, list) and len(raw_value) == 2:
+                    continue
+                if classify_input_field(class_type, input_name) != FieldCategory.MODEL:
+                    missing.append(f"{workflow_path.parent.name}:{node_id}:{class_type}.{input_name}")
+    assert missing == []
 
 
 def test_ui_schema_model_labels_distinguish_large_lora_and_upscale_models():

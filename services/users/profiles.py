@@ -27,8 +27,8 @@ PROFILE_ACCENTS = {"default", "ocean", "sunrise", "forest", "mono", "violet", "r
 PROFILE_DENSITIES = {"comfortable", "compact"}
 PROFILE_BANNERS = {"none", "aurora", "neon_grid", "paper", "night_sky", "terminal"}
 PROFILE_AVATAR_FRAMES = {"none", "soft_ring", "neon", "pixel", "botanical", "crown"}
-PROFILE_AVATAR_SHAPES = {"circle", "rounded", "squircle", "square"}
-PROFILE_AVATAR_SIZE_STEPS = {str(value) for value in range(100, 555, 5)}
+PROFILE_AVATAR_SHAPES = {"circle", "rounded", "squircle", "square", "star", "custom"}
+PROFILE_AVATAR_SIZE_STEPS = {str(value) for value in range(100, 605, 5)}
 PROFILE_AVATAR_SIZES = {"large", "xl", "hero", *PROFILE_AVATAR_SIZE_STEPS}
 PROFILE_NAME_FONTS = {"system", "rounded", "serif", "mono", "display"}
 PROFILE_NAME_SIZES = {"normal", "large", "hero"}
@@ -39,6 +39,7 @@ PROFILE_STYLE_DEFAULTS = {
     "banner": "none",
     "avatar_frame": "soft_ring",
     "avatar_shape": "circle",
+    "avatar_mask": "",
     "avatar_size": "140",
     "name_font": "system",
     "name_size": "large",
@@ -153,6 +154,22 @@ def _choice(value, allowed, fallback):
     return value if value in allowed else fallback
 
 
+def _avatar_mask(value):
+    value = str(value or "").strip()
+    if not value or len(value) > 240:
+        return ""
+    lowered = value.lower()
+    if any(token in lowered for token in ("url(", "var(", "@import", ";", "{", "}", "<", ">")):
+        return ""
+    if not any(lowered.startswith(prefix) for prefix in ("polygon(", "circle(", "ellipse(", "inset(", "path(")):
+        return ""
+    if not all(ch.isalnum() or ch in " #%.,()+-'\"/_-" for ch in value):
+        return ""
+    if value.count("(") != value.count(")"):
+        return ""
+    return value
+
+
 def sanitize_profile_style(data):
     data = data if isinstance(data, dict) else {}
     nested = data.get("profile_style")
@@ -162,6 +179,7 @@ def sanitize_profile_style(data):
         "banner": _choice(data.get("banner"), PROFILE_BANNERS, PROFILE_STYLE_DEFAULTS["banner"]),
         "avatar_frame": _choice(data.get("avatar_frame"), PROFILE_AVATAR_FRAMES, PROFILE_STYLE_DEFAULTS["avatar_frame"]),
         "avatar_shape": _choice(data.get("avatar_shape"), PROFILE_AVATAR_SHAPES, PROFILE_STYLE_DEFAULTS["avatar_shape"]),
+        "avatar_mask": _avatar_mask(data.get("avatar_mask")),
         "avatar_size": _choice(data.get("avatar_size"), PROFILE_AVATAR_SIZES, PROFILE_STYLE_DEFAULTS["avatar_size"]),
         "name_font": _choice(data.get("name_font"), PROFILE_NAME_FONTS, PROFILE_STYLE_DEFAULTS["name_font"]),
         "name_size": _choice(data.get("name_size"), PROFILE_NAME_SIZES, PROFILE_STYLE_DEFAULTS["name_size"]),

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>hackme_web — 登入系統</title>
   <!-- Security headers via HTTP (set by server/Talisman) -->
-  <link rel="stylesheet" href="/styles.css?v=20260606-hf-common-repos" />
+  <link rel="stylesheet" href="/styles.css?v=20260606-site-avatar-controls" />
   <link rel="stylesheet" href="/experiments.css?v=20260517-plane-view-angle" />
   <link rel="stylesheet" href="/i18n-language-switcher.css?v=20260520-deep-audit" />
 </head>
@@ -20,8 +20,8 @@
 <!-- ════════════════════ AUTH CARD ════════════════════ -->
 <div class="card" id="auth-card" data-login-autofill-block="__LOGIN_AUTOFILL_BLOCK__">
 
-  <h1>Help me improve, hack me please.</h1>
-  <p class="subtitle">簡單的帳號註冊與登入系統</p>
+  <h1 id="auth-site-heading">Help me improve, hack me please.</h1>
+  <p class="subtitle" id="auth-site-subtitle">簡單的帳號註冊與登入系統</p>
   <div class="auth-server-status" aria-live="polite">
     <span class="server-status-dot" id="auth-server-dot"></span>
     <span id="auth-server-label">檢查伺服器狀態中</span>
@@ -172,7 +172,7 @@
 <div id="success-screen">
   <div id="login-success-hero" class="login-success-hero">
     <div class="success-icon">🎉</div>
-    <h2>恭喜登入成功</h2>
+    <h2 id="login-success-title">恭喜登入成功</h2>
     <p id="welcome-msg" style="color:var(--muted); margin-top:.5rem">歡迎回來！</p>
   </div>
   <div class="app-action-bar" aria-label="快速操作">
@@ -224,7 +224,7 @@
       <div class="sidebar-head">
         <div class="sidebar-brand">
           <span class="sidebar-brand-icon">H</span>
-          <span class="sidebar-label">hackme_web</span>
+          <span class="sidebar-label" id="sidebar-brand-label">hackme_web</span>
         </div>
         <button class="sidebar-toggle" id="sidebar-toggle" type="button" aria-label="收合側邊欄" aria-expanded="true">‹</button>
       </div>
@@ -518,21 +518,28 @@
                 <option value="rounded">圓角方形</option>
                 <option value="squircle">超橢圓</option>
                 <option value="square">方形</option>
+                <option value="star">星形</option>
+                <option value="custom">自訂遮罩</option>
               </select>
+            </label>
+            <label class="field" id="profile-edit-avatar-mask-field" hidden>
+              <span>自訂遮罩 clip-path</span>
+              <input type="text" id="profile-edit-avatar-mask" maxlength="240" placeholder="polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%)" />
             </label>
             <label class="field profile-avatar-size-field">
               <span class="field-label-row">
                 <span>頭像大小</span>
                 <output id="profile-edit-avatar-size-value" for="profile-edit-avatar-size">140px</output>
               </span>
-              <input type="range" id="profile-edit-avatar-size" min="100" max="550" step="5" value="140" />
+              <input type="range" id="profile-edit-avatar-size" min="100" max="600" step="5" value="140" />
               <div class="profile-avatar-size-presets" aria-label="頭像大小快速選擇">
                 <button class="btn btn-sm" type="button" data-profile-avatar-size="110">小</button>
                 <button class="btn btn-sm" type="button" data-profile-avatar-size="140">中</button>
                 <button class="btn btn-sm" type="button" data-profile-avatar-size="180">大</button>
                 <button class="btn btn-sm" type="button" data-profile-avatar-size="220">220</button>
+                <button class="btn btn-sm" type="button" data-profile-avatar-size="320">320</button>
                 <button class="btn btn-sm" type="button" data-profile-avatar-size="500">500</button>
-                <button class="btn btn-sm" type="button" data-profile-avatar-size="550">550</button>
+                <button class="btn btn-sm" type="button" data-profile-avatar-size="600">600</button>
               </div>
               <small class="drive-card-sub">手機可拖曳或直接點大小按鈕；預覽會立刻套用到上方頭像。</small>
             </label>
@@ -5034,6 +5041,30 @@
                 <div class="drive-card-sub">只影響目前瀏覽器顯示語言，不會蓋住其他操作介面。</div>
               </div>
               <div class="field">
+                <label>站點名稱</label>
+                <input type="text" id="s-site-name" maxlength="80" placeholder="hackme_web" />
+              </div>
+              <div class="field">
+                <label>瀏覽器標題</label>
+                <input type="text" id="s-site-document-title" maxlength="120" placeholder="hackme_web — 登入系統" />
+              </div>
+              <div class="field">
+                <label>登入頁主標題</label>
+                <input type="text" id="s-site-login-heading" maxlength="120" placeholder="Help me improve, hack me please." />
+              </div>
+              <div class="field">
+                <label>登入頁副標題</label>
+                <input type="text" id="s-site-login-subtitle" maxlength="180" placeholder="簡單的帳號註冊與登入系統" />
+              </div>
+              <div class="field">
+                <label>登入成功標題</label>
+                <input type="text" id="s-site-success-heading" maxlength="120" placeholder="恭喜登入成功" />
+              </div>
+              <div class="field">
+                <label>登入成功訊息</label>
+                <input type="text" id="s-site-success-message" maxlength="180" placeholder="歡迎回來！" />
+              </div>
+              <div class="field">
                 <label>快速色系</label>
                 <select id="s-site-theme-mode">
                   <option value="dark">夜色</option>
@@ -7207,6 +7238,8 @@
           <option value="rounded">圓角方形</option>
           <option value="squircle">超橢圓</option>
           <option value="square">方形</option>
+          <option value="star">星形</option>
+          <option value="custom">自訂遮罩</option>
         </select>
         <div class="avatar-cropper-zoom-label">
           <label for="profile-avatar-crop-zoom">縮放</label>
@@ -7400,7 +7433,7 @@
 <script src="/js/56-trading.js?v=20260525-usdt-market-labels" defer></script>
 <script src="/js/56-trading-bots.js?v=20260601-trading-bot-module" defer></script>
 <script src="/js/57-platform-centers.js?v=20260524-trading-status-split" defer></script>
-<script src="/js/58-profile-friends.js?v=20260606-avatar-zoom-stepper" defer></script>
+<script src="/js/58-profile-friends.js?v=20260606-avatar-star-mask-600" defer></script>
 <script src="/js/90-bootstrap.js?v=20260602-transmission-test" defer></script>
 </body>
 </html>

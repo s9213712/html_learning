@@ -89,23 +89,34 @@ def test_direct_template_fields_are_editable_for_large_model_workflows():
 
 def test_template_loader_model_fields_do_not_reuse_global_vae_select():
     js = _read("public/js/36-comfyui-workflows.js")
+    comfyui_js = _read("public/js/36-comfyui.js")
+
     assert 'field?.class_type === "VAELoader" && field?.input_name === "vae_name") ||' in js
-    assert 'return { kind: "readonly", editableLockedModel: true };' in js
+    assert 'return { kind: "model_select", fieldId: field.id, optionKind: modelOptionKind, editableLockedModel: true };' in js
     assert 'field?.class_type === "VAELoader" && field?.input_name === "vae_name") return { kind: "field", targetId: "comfyui-vae-select" };' not in js
     assert 'binding.targetId === "comfyui-vae-select"' not in js
-    assert "comfyuiTemplateDisplayValue(field, field?.current_value)" in js
-    assert "留白代表使用各自大模型內建 VAE" in js
+    assert 'let comfyuiAvailableVaes = [];' in comfyui_js
+    assert "請從 ComfyUI 已列出的 VAE 候選中選擇" in js
 
 
-def test_template_checkpoint_model_fields_keep_template_defaults_until_user_edits():
+def test_template_model_fields_use_catalog_selects_instead_of_freeform_filenames():
     js = _read("public/js/36-comfyui-workflows.js")
+    comfyui_js = _read("public/js/36-comfyui.js")
 
     assert 'if ((field?.class_type === "LoraLoader" || field?.class_type === "LoraLoaderModelOnly") && field?.input_name === "lora_name") return false;' in js
     assert 'return !!(field?.locked || field?.read_only || field?.lock_reason === "template_default_model");' in js
-    assert 'if (field?.class_type === "CheckpointLoaderSimple" && field?.input_name === "ckpt_name") return { kind: "field", targetId: "comfyui-model-select" };' in js
-    assert 'if (comfyuiTemplateCanEditLockedModelField(field)) {\n    return { kind: "readonly", editableLockedModel: true };\n  }\n  if (' in js
-    assert 'if (comfyuiTemplateCanEditLockedModelField(field) && comfyuiTemplateLockedModelFieldIsEditing(field))' in js
-    assert 'data-comfyui-template-model-edit="${sanitize(field.id || "")}"' in js
+    assert "function comfyuiTemplateModelOptionKind(field = {})" in js
+    assert 'if (classType === "CheckpointLoaderSimple" && inputName === "ckpt_name") return "checkpoints";' in js
+    assert 'if (classType === "VAELoader" && inputName === "vae_name") return "vaes";' in js
+    assert 'return "diffusion_models";' in js
+    assert 'return "clip_models";' in js
+    assert 'data-comfyui-template-model-field="${sanitize(field.id || "")}"' in js
+    assert 'type="${sanitize(inputType)}" value="${sanitize(String(value ?? ""))}"' in js
+    assert "ensureComfyuiTemplateModelSelections" in js
+    assert "尚未選擇" in js
+    assert "let comfyuiAvailableCheckpoints = [];" in comfyui_js
+    assert "let comfyuiAvailableDiffusionModels = [];" in comfyui_js
+    assert "let comfyuiAvailableClipModels = [];" in comfyui_js
     assert 'data-comfyui-template-model-reset="${sanitize(field.id || "")}"' in js
 
 

@@ -594,6 +594,12 @@ def register_public_routes(app, deps):
                 "site_background_style": settings.get("site_background_style"),
                 "site_panel_style": settings.get("site_panel_style"),
                 "site_sidebar_width": settings.get("site_sidebar_width"),
+                "site_name": settings.get("site_name"),
+                "site_document_title": settings.get("site_document_title"),
+                "site_login_heading": settings.get("site_login_heading"),
+                "site_login_subtitle": settings.get("site_login_subtitle"),
+                "site_success_heading": settings.get("site_success_heading"),
+                "site_success_message": settings.get("site_success_message"),
                 "module_chat_min_role": settings.get("module_chat_min_role"),
                 "module_community_min_role": settings.get("module_community_min_role"),
                 "module_appeals_min_role": settings.get("module_appeals_min_role"),
@@ -1111,7 +1117,7 @@ def register_public_routes(app, deps):
                 sync_official_room_membership(user_row["id"])
 
                 audit("LOGIN_OK", ip, username, ua=ua, success=True)
-                login_msg = "恭喜登入成功"
+                login_msg = str(settings.get("site_success_heading") or "恭喜登入成功").strip()[:120] or "恭喜登入成功"
                 birthday_storage_created = bool(((birthday_gift or {}).get("storage_quota_gift") or {}).get("created"))
                 if birthday_gift and (birthday_gift.get("created") or birthday_storage_created):
                     login_msg = f"恭喜登入成功，生日禮金 {birthday_gift.get('amount', BIRTHDAY_GIFT_POINTS)} 點與 1GB 雲端硬碟 7 日已入帳"

@@ -7,7 +7,7 @@ import urllib.request
 
 from flask import request
 
-from services.platform.settings import DangerousChangeBlocked, FEATURE_FLAG_KEYS, enforce_dangerous_confirm
+from services.platform.settings import DEFAULT_SETTINGS, DangerousChangeBlocked, FEATURE_FLAG_KEYS, enforce_dangerous_confirm
 from services.platform.settings_metadata import (
     DANGEROUS_SETTINGS,
     SETTING_DETAILS,
@@ -578,6 +578,21 @@ def register_system_admin_settings_routes(app, ctx):
             if idle_timeout_minutes is None:
                 return json_resp({"ok":False,"msg":"session_idle_timeout_minutes 必須是 0-1440 分鐘；0 代表停用"}), 400
             data["session_idle_timeout_minutes"] = idle_timeout_minutes
+        site_text_limits = {
+            "site_name": 80,
+            "site_document_title": 120,
+            "site_login_heading": 120,
+            "site_login_subtitle": 180,
+            "site_success_heading": 120,
+            "site_success_message": 180,
+        }
+        for key, limit in site_text_limits.items():
+            if key not in data:
+                continue
+            value = str(data.get(key) or "").strip()
+            if len(value) > limit:
+                return json_resp({"ok":False,"msg":f"{key} 不可超過 {limit} 個字"}), 400
+            data[key] = value or DEFAULT_SETTINGS[key]
         backpressure_error = normalize_backpressure_updates(data)
         if backpressure_error:
             return json_resp({"ok":False,"msg":backpressure_error}), 400

@@ -49,6 +49,9 @@ def test_selected_template_lora_loader_exposes_weight_controls_and_run_inputs():
     assert 'data-comfyui-template-lora-strength' in workflow_js
     assert "updateComfyuiTemplateLoraStrength(nodeId, field, input.value)" in workflow_js
     assert "function collectComfyuiTemplateUserInputs(detail)" in workflow_js
-    assert "user_inputs: userInputs" in workflow_js
+    assert "user_inputs: requestUserInputs" in workflow_js
+    assert 'return selected?.name || field?.current_value || "";' not in workflow_js
+    assert 'return selected?.name || "";' in workflow_js
+    assert "模板預設 LoRA" in workflow_js
     assert "def _apply_legacy_workflow_user_inputs(workflow_json, user_inputs):" in route_py
     assert "key not in inputs or isinstance(inputs.get(key), list)" in route_py

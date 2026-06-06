@@ -21,10 +21,16 @@ let comfyuiMaxBatchSize = 1;
 let comfyuiBillingQuote = null;
 let comfyuiDefaultWidth = 1024;
 let comfyuiDefaultHeight = 1024;
+let comfyuiAvailableCheckpoints = [];
 let comfyuiAvailableLoras = [];
 let comfyuiLoraDetails = {};
 let comfyuiAvailableEmbeddings = [];
 let comfyuiAvailableVaes = [];
+let comfyuiAvailableDiffusionModels = [];
+let comfyuiAvailableClipModels = [];
+let comfyuiAvailableClipVisionModels = [];
+let comfyuiAvailableLatentUpscaleModels = [];
+let comfyuiAvailableControlnetModels = [];
 let comfyuiSelectedLoras = [];
 let comfyuiConnectionMode = "remote";
 let comfyuiActiveBackendFamily = "comfyui";
@@ -1567,7 +1573,7 @@ function fillComfyuiControlnetPreprocessorOptions() {
 }
 
 function fillComfyuiUpscaleModels(values = []) {
-  comfyuiUpscaleModels = Array.isArray(values) ? values.filter(Boolean).map(String) : [];
+  comfyuiUpscaleModels = normalizeComfyuiModelOptionValues(values);
   const select = $("comfyui-upscale-model");
   if (!select) return;
   const previous = select.value || "";
@@ -2410,8 +2416,20 @@ function fillComfyuiSelect(id, values, fallback) {
   select.innerHTML = options.map((value) => `<option value="${sanitize(value)}">${sanitize(value)}</option>`).join("");
 }
 
+function normalizeComfyuiModelOptionValues(values = []) {
+  const seen = new Set();
+  const options = [];
+  (Array.isArray(values) ? values : []).forEach((value) => {
+    const text = String(value || "").trim();
+    if (!text || seen.has(text)) return;
+    seen.add(text);
+    options.push(text);
+  });
+  return options;
+}
+
 function fillComfyuiVaeSelect(values = []) {
-  comfyuiAvailableVaes = Array.isArray(values) ? values.filter(Boolean).map(String) : [];
+  comfyuiAvailableVaes = normalizeComfyuiModelOptionValues(values);
   const select = $("comfyui-vae-select");
   if (!select) return;
   const options = [`<option value="${COMFYUI_VAE_BUILTIN}">使用各自大模型內建 VAE</option>`]
@@ -4306,7 +4324,13 @@ async function loadComfyuiModels(options = {}) {
     syncComfyuiPrimaryConnectionModeFromResponse(json);
     if (!res.ok || !json.ok) throw new Error(json.msg || `ComfyUI 連線失敗（HTTP ${res.status}）`);
     syncComfyuiPrimaryConnectionModeFromResponse(json);
-    fillComfyuiSelect("comfyui-model-select", json.models || [], "");
+    comfyuiAvailableCheckpoints = normalizeComfyuiModelOptionValues(json.models || []);
+    comfyuiAvailableDiffusionModels = normalizeComfyuiModelOptionValues(json.diffusion_models || []);
+    comfyuiAvailableClipModels = normalizeComfyuiModelOptionValues(json.clip_models || []);
+    comfyuiAvailableClipVisionModels = normalizeComfyuiModelOptionValues(json.clip_vision_models || []);
+    comfyuiAvailableLatentUpscaleModels = normalizeComfyuiModelOptionValues(json.latent_upscale_models || []);
+    comfyuiAvailableControlnetModels = normalizeComfyuiModelOptionValues(json.controlnet_models || []);
+    fillComfyuiSelect("comfyui-model-select", comfyuiAvailableCheckpoints, "");
     comfyuiLoraDetails = json.lora_details && typeof json.lora_details === "object" ? json.lora_details : {};
     fillComfyuiLoraSelect(json.loras || []);
     fillComfyuiVaeSelect(json.vaes || []);

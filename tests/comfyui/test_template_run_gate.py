@@ -361,6 +361,57 @@ def test_gate2_rechecks_model_fields_after_user_inputs():
     }
 
 
+def test_selected_checkpoint_model_overrides_template_default_without_fallback():
+    user_inputs = _full_user_inputs()
+    user_inputs["4"]["ckpt_name"] = "wrong-but-installed.safetensors"
+    result = run_workflow_through_gates(
+        raw_workflow=TXT2IMG,
+        user_inputs=user_inputs,
+        image_field_assignments={},
+        actor={"id": 1},
+        user_id=1,
+        run_id="r",
+        conn=None,
+        comfyui_client=_stub_client(
+            classes={
+                "CheckpointLoaderSimple", "EmptyLatentImage", "CLIPTextEncode",
+                "KSampler", "VAEDecode", "SaveImage",
+            },
+            models=["wrong-but-installed.safetensors"],
+        ),
+        upload_callback=_stub_upload,
+    )
+    assert result.workflow["4"]["inputs"]["ckpt_name"] == "wrong-but-installed.safetensors"
+    assert result.workflow["4"]["inputs"]["ckpt_name"] != TXT2IMG["4"]["inputs"]["ckpt_name"]
+    assert result.capability.overall == "SUPPORTED"
+
+
+def test_selected_locked_diffusion_model_overrides_anima_template_default_without_fallback():
+    workflow = {
+        "68": {
+            "class_type": "UNETLoader",
+            "inputs": {"unet_name": "anima-preview3-base.safetensors", "weight_dtype": "default"},
+        },
+    }
+    result = run_workflow_through_gates(
+        raw_workflow=workflow,
+        user_inputs={"68": {"unet_name": "wrong-family-but-installed.safetensors"}},
+        image_field_assignments={},
+        actor={"id": 1},
+        user_id=1,
+        run_id="r",
+        conn=None,
+        comfyui_client=_stub_client(
+            classes={"UNETLoader"},
+            diffusion_models=["wrong-family-but-installed.safetensors"],
+        ),
+        upload_callback=_stub_upload,
+    )
+    assert result.workflow["68"]["inputs"]["unet_name"] == "wrong-family-but-installed.safetensors"
+    assert result.workflow["68"]["inputs"]["unet_name"] != "anima-preview3-base.safetensors"
+    assert result.capability.overall == "SUPPORTED"
+
+
 def test_run_gate_rewrites_latent_upscale_model_to_local_subfolder_option():
     workflow = {
         "303": {

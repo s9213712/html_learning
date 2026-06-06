@@ -53,7 +53,7 @@ def test_comfyui_generation_results_lazy_load_output_previews():
     assert "const runMedia = await hydrateComfyuiGeneratedMedia(Array.isArray(json.media) ? json.media : [], jobId);" in js
     assert "const images = await hydrateComfyuiGeneratedImages(rawImages);" in workflow_js
     assert "const media = await hydrateComfyuiGeneratedMedia(Array.isArray(result.media) ? result.media : [], jobId);" in workflow_js
-    assert "updateComfyuiResultButtons(!!images.length);" in workflow_js
+    assert "updateComfyuiResultButtons(!!comfyuiGeneratedImages.length);" in workflow_js
     assert 'throw new Error("ComfyUI 未回傳圖片");' in js
     assert 'if (!comfyuiCurrentImage?.data_url) throw new Error("ComfyUI 未回傳圖片");' not in js
     assert "function openComfyuiGeneratedImage" in js

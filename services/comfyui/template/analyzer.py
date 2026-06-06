@@ -76,8 +76,11 @@ _FIELD_CATEGORY_TABLE: dict[tuple[str, str], FieldCategory] = {
     ("ControlNetLoader", "control_net_name"): FieldCategory.MODEL,
     ("UpscaleModelLoader", "model_name"): FieldCategory.MODEL,
     ("LatentUpscaleModelLoader", "model_name"): FieldCategory.MODEL,
+    ("LTXVAudioVAELoader", "ckpt_name"): FieldCategory.MODEL,
+    ("LTXAVTextEncoderLoader", "ckpt_name"): FieldCategory.MODEL,
     ("ByteDanceSeedreamNode", "model"): FieldCategory.MODEL,
     ("GrokImageEditNode", "model"): FieldCategory.MODEL,
+    ("Qwen3_VQA", "model"): FieldCategory.MODEL,
     # Numeric — KSampler
     ("KSampler", "seed"): FieldCategory.NUMERIC,
     ("KSampler", "steps"): FieldCategory.NUMERIC,

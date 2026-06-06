@@ -5488,6 +5488,16 @@
       border-radius: 8px !important;
     }
 
+    .profile-avatar-large.profile-avatar-shape-star {
+      border-radius: 0 !important;
+      clip-path: polygon(50% 3%, 61% 35%, 95% 35%, 67% 55%, 79% 91%, 50% 70%, 21% 91%, 33% 55%, 5% 35%, 39% 35%);
+    }
+
+    .profile-avatar-large.profile-avatar-shape-custom {
+      border-radius: 0 !important;
+      clip-path: var(--profile-avatar-mask, polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%));
+    }
+
     .profile-summary.profile-template-compact .profile-avatar-large {
       width: var(--profile-avatar-custom-size);
       height: var(--profile-avatar-custom-size);
@@ -7855,6 +7865,16 @@
 
     .avatar-crop-box.avatar-crop-shape-square {
       border-radius: 8px;
+    }
+
+    .avatar-crop-box.avatar-crop-shape-star {
+      border-radius: 0;
+      clip-path: polygon(50% 3%, 61% 35%, 95% 35%, 67% 55%, 79% 91%, 50% 70%, 21% 91%, 33% 55%, 5% 35%, 39% 35%);
+    }
+
+    .avatar-crop-box.avatar-crop-shape-custom {
+      border-radius: 0;
+      clip-path: var(--profile-avatar-mask, polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%));
     }
 
     .avatar-crop-box span {
@@ -15102,7 +15122,7 @@
   }
 }
 
-/* Profile avatar custom size stays literal on desktop; mobile clamps display size to 250px. */
+/* Profile avatar custom size stays literal on desktop; mobile clamps display size to 320px. */
 #profile-pane-home #profile-home-avatar.profile-avatar-large.profile-avatar-upload-button,
 #profile-pane-home #profile-home-avatar.profile-avatar-large.profile-avatar-preview-button,
 #profile-pane-home #profile-home-avatar.profile-avatar-large {
@@ -15130,7 +15150,7 @@
   }
 
   #profile-pane-home .profile-summary {
-    --profile-avatar-mobile-size: min(var(--profile-avatar-size, 140px), 250px);
+    --profile-avatar-mobile-size: min(var(--profile-avatar-size, 140px), 320px);
     grid-template-columns: minmax(0, 1fr) !important;
     justify-items: center !important;
     justify-content: center !important;
@@ -15162,12 +15182,21 @@
   }
 
   #profile-pane-home .profile-summary-main {
-    --profile-avatar-text-scale: 1 !important;
     width: 100% !important;
-    max-width: min(100%, 250px) !important;
+    max-width: min(100%, max(320px, var(--profile-avatar-mobile-size))) !important;
     justify-items: center !important;
     justify-content: center !important;
     text-align: center !important;
+  }
+
+  #profile-pane-home .profile-summary-main h3 {
+    font-size: clamp(1.35rem, calc(1.05rem * var(--profile-avatar-mobile-text-scale, 1)), 2.55rem) !important;
+  }
+
+  #profile-pane-home .profile-summary-main #profile-home-meta,
+  #profile-pane-home .profile-summary-main .profile-bio,
+  #profile-pane-home .profile-summary-main #profile-home-signature {
+    font-size: clamp(.9rem, calc(.86rem * var(--profile-avatar-mobile-text-scale, 1)), 1.35rem) !important;
   }
 
   #profile-pane-home .profile-summary-main h3,

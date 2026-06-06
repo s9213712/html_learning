@@ -110,6 +110,14 @@ const SITE_SIDEBAR_WIDTH_MAP = {
   standard: { expanded: 244, collapsed: 68 },
   wide: { expanded: 288, collapsed: 76 },
 };
+const SITE_TEXT_DEFAULTS = {
+  site_name: "hackme_web",
+  site_document_title: "hackme_web — 登入系統",
+  site_login_heading: "Help me improve, hack me please.",
+  site_login_subtitle: "簡單的帳號註冊與登入系統",
+  site_success_heading: "恭喜登入成功",
+  site_success_message: "歡迎回來！",
+};
 const SITE_THEME_MODE_PALETTES = {
   dark: {
     site_bg: "#11131d",
@@ -1267,6 +1275,32 @@ function getEffectiveSiteThemeMode() {
   return normalizeSiteThemeMode(userSiteAppearanceConfig.site_theme_mode, globalMode);
 }
 
+function siteTextConfigValue(key) {
+  const fallback = SITE_TEXT_DEFAULTS[key] || "";
+  const value = siteConfig && typeof siteConfig[key] === "string" ? siteConfig[key].trim() : "";
+  return value || fallback;
+}
+
+function renderSiteTextConfig() {
+  const title = siteTextConfigValue("site_document_title");
+  if (title) document.title = title;
+  const name = siteTextConfigValue("site_name");
+  const brand = $("sidebar-brand-label");
+  if (brand) brand.textContent = name;
+  const brandIcon = document.querySelector(".sidebar-brand-icon");
+  if (brandIcon) brandIcon.textContent = (name.trim()[0] || "H").toUpperCase();
+  const heading = $("auth-site-heading");
+  if (heading) heading.textContent = siteTextConfigValue("site_login_heading");
+  const subtitle = $("auth-site-subtitle");
+  if (subtitle) subtitle.textContent = siteTextConfigValue("site_login_subtitle");
+  const successTitle = $("login-success-title");
+  if (successTitle) successTitle.textContent = siteTextConfigValue("site_success_heading");
+  const welcomeMsg = $("welcome-msg");
+  if (welcomeMsg && !welcomeMsg.classList.contains("birthday-greeting")) {
+    welcomeMsg.textContent = siteTextConfigValue("site_success_message");
+  }
+}
+
 function renderEffectiveSiteConfig() {
   const themeMode = getEffectiveSiteThemeMode();
   siteConfig = {
@@ -1317,6 +1351,7 @@ function renderEffectiveSiteConfig() {
   document.body.dataset.sidebarWidth = sidebarWidthKey;
   if (typeof updateThemeQuickToggleUi === "function") updateThemeQuickToggleUi();
   if (typeof updateRecoveryModeUi === "function") updateRecoveryModeUi();
+  renderSiteTextConfig();
 }
 
 function updatePasswordPolicyHints() {
@@ -2386,7 +2421,7 @@ function setAuthState(json, showLoginHero = false) {
       void welcomeMsg.offsetWidth;
       welcomeMsg.classList.add("birthday-greeting");
     } else {
-      welcomeMsg.textContent = "歡迎回來！";
+      welcomeMsg.textContent = siteTextConfigValue("site_success_message");
     }
   }
   const adminWrap = $("admin-wrap");
@@ -2550,7 +2585,7 @@ function resetAuthState() {
   const welcomeMsg = $("welcome-msg");
   if (welcomeMsg) {
     welcomeMsg.classList.remove("birthday-greeting");
-    welcomeMsg.textContent = "歡迎回來！";
+    welcomeMsg.textContent = siteTextConfigValue("site_success_message");
   }
   const moduleChat = $("module-chat");
   const moduleProfile = $("module-profile");

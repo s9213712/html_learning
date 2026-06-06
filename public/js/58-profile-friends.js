@@ -12,7 +12,7 @@ const targetOptionCache = new Map();
 const PROFILE_AVATAR_DEFAULT_ZOOM = 1;
 const PROFILE_AVATAR_MIN_ZOOM = 0.1;
 const PROFILE_AVATAR_MAX_ZOOM = 10;
-const PROFILE_AVATAR_MAX_DISPLAY_SIZE = 550;
+const PROFILE_AVATAR_MAX_DISPLAY_SIZE = 600;
 const PROFILE_AVATAR_MIN_DISPLAY_SIZE = 100;
 const PROFILE_TEMPLATE_KEYS = ["classic", "creator", "compact", "showcase", "gallery", "neon"];
 const PROFILE_ACCENT_KEYS = ["default", "ocean", "sunrise", "forest", "mono", "violet", "ruby"];
@@ -22,6 +22,7 @@ const PROFILE_STYLE_FIELD_MAP = {
   "profile-edit-background-tone": "background_tone",
   "profile-edit-avatar-frame": "avatar_frame",
   "profile-edit-avatar-shape": "avatar_shape",
+  "profile-edit-avatar-mask": "avatar_mask",
   "profile-edit-avatar-size": "avatar_size",
   "profile-edit-name-font": "name_font",
   "profile-edit-name-size": "name_size",
@@ -33,6 +34,7 @@ const PROFILE_STYLE_DEFAULTS = {
   background_tone: "standard",
   avatar_frame: "soft_ring",
   avatar_shape: "circle",
+  avatar_mask: "",
   avatar_size: "140",
   name_font: "system",
   name_size: "large",
@@ -43,8 +45,8 @@ const PROFILE_STYLE_ALLOWED = {
   banner: ["none", "aurora", "neon_grid", "paper", "night_sky", "terminal"],
   background_tone: ["soft", "standard", "bold"],
   avatar_frame: ["none", "soft_ring", "neon", "pixel", "botanical", "crown"],
-  avatar_shape: ["circle", "rounded", "squircle", "square"],
-  avatar_size: [...Array.from({ length: 91 }, (_, index) => String(100 + index * 5)), "large", "xl", "hero"],
+  avatar_shape: ["circle", "rounded", "squircle", "square", "star", "custom"],
+  avatar_size: [...Array.from({ length: 101 }, (_, index) => String(100 + index * 5)), "large", "xl", "hero"],
   name_font: ["system", "rounded", "serif", "mono", "display"],
   name_size: ["normal", "large", "hero"],
   sticker: ["none", "sparkles", "star", "heart", "music", "game", "code", "crown"],
@@ -195,7 +197,11 @@ function syncProfileAvatarShapeControls(shape = currentProfileAvatarShape(), { p
   if (box) {
     box.classList.remove(...PROFILE_STYLE_ALLOWED.avatar_shape.map((key) => `avatar-crop-shape-${key}`));
     box.classList.add(`avatar-crop-shape-${normalized}`);
+    const mask = normalizeProfileAvatarMask($("profile-edit-avatar-mask")?.value || "");
+    if (normalized === "custom" && mask) box.style.setProperty("--profile-avatar-mask", mask);
+    else box.style.removeProperty("--profile-avatar-mask");
   }
+  syncProfileAvatarMaskField(normalized);
   if (preview) previewProfileAppearanceFromForm();
   return normalized;
 }
@@ -752,6 +758,24 @@ function profileChoice(value, allowed, fallback) {
   return Array.isArray(allowed) && allowed.includes(normalized) ? normalized : fallback;
 }
 
+function normalizeProfileAvatarMask(value) {
+  const text = String(value || "").trim();
+  if (!text || text.length > 240) return "";
+  const lower = text.toLowerCase();
+  if (["url(", "var(", "@import", ";", "{", "}", "<", ">"].some((token) => lower.includes(token))) return "";
+  if (!["polygon(", "circle(", "ellipse(", "inset(", "path("].some((prefix) => lower.startsWith(prefix))) return "";
+  if ((text.match(/\(/g) || []).length !== (text.match(/\)/g) || []).length) return "";
+  return /^[\w\s%#.,()+\-'"/_-]+$/u.test(text) ? text : "";
+}
+
+function syncProfileAvatarMaskField(shape = currentProfileAvatarShape()) {
+  const field = $("profile-edit-avatar-mask-field");
+  const input = $("profile-edit-avatar-mask");
+  const isCustom = shape === "custom";
+  if (field) field.hidden = !isCustom;
+  if (input) input.disabled = !isCustom;
+}
+
 function profileAvatarSizeValue(value) {
   const legacy = {
     large: "140",
@@ -773,10 +797,12 @@ function applyProfileAvatarElementSize(avatar, value) {
   const px = `${size}px`;
   const numericSize = Number(size) || Number(PROFILE_STYLE_DEFAULTS.avatar_size);
   const textScale = profileAvatarClamp(numericSize / Number(PROFILE_STYLE_DEFAULTS.avatar_size), 1, 2.4);
+  const mobileTextScale = profileAvatarClamp(Math.min(numericSize, 320) / Number(PROFILE_STYLE_DEFAULTS.avatar_size), 1, 2.15);
   const summary = avatar.closest?.(".profile-summary");
   if (summary) {
     summary.style.setProperty("--profile-avatar-size", px);
     summary.style.setProperty("--profile-avatar-text-scale", textScale.toFixed(3));
+    summary.style.setProperty("--profile-avatar-mobile-text-scale", mobileTextScale.toFixed(3));
   }
   avatar.style.setProperty("--profile-avatar-custom-size", px);
   avatar.style.setProperty("--profile-avatar-size", px);
@@ -816,7 +842,9 @@ function profileStyleFromProfile(profile = {}) {
   const raw = profile?.profile_style && typeof profile.profile_style === "object" ? profile.profile_style : {};
   const style = {};
   Object.entries(PROFILE_STYLE_DEFAULTS).forEach(([key, fallback]) => {
-    style[key] = profileChoice(raw[key], PROFILE_STYLE_ALLOWED[key], fallback);
+    style[key] = key === "avatar_mask"
+      ? normalizeProfileAvatarMask(raw[key])
+      : profileChoice(raw[key], PROFILE_STYLE_ALLOWED[key], fallback);
   });
   return style;
 }
@@ -824,9 +852,14 @@ function profileStyleFromProfile(profile = {}) {
 function collectProfileStyleFromForm() {
   const style = {};
   Object.entries(PROFILE_STYLE_FIELD_MAP).forEach(([id, key]) => {
+    if (key === "avatar_mask") {
+      style[key] = normalizeProfileAvatarMask($(id)?.value || "");
+      return;
+    }
     const raw = id === "profile-edit-avatar-size" ? profileAvatarSizeValue($(id)?.value) : $(id)?.value;
     style[key] = profileChoice(raw, PROFILE_STYLE_ALLOWED[key], PROFILE_STYLE_DEFAULTS[key]);
   });
+  if (style.avatar_shape !== "custom") style.avatar_mask = "";
   return style;
 }
 
@@ -941,6 +974,9 @@ function applyProfilePresentation(profile) {
     );
     const size = profileAvatarSizeValue(style.avatar_size);
     avatar.classList.add(`profile-avatar-frame-${style.avatar_frame}`, `profile-avatar-shape-${style.avatar_shape}`);
+    const mask = normalizeProfileAvatarMask(style.avatar_mask);
+    if (style.avatar_shape === "custom" && mask) avatar.style.setProperty("--profile-avatar-mask", mask);
+    else avatar.style.removeProperty("--profile-avatar-mask");
     applyProfileAvatarElementSize(avatar, size);
   }
   const name = $("profile-home-name");
@@ -1117,6 +1153,7 @@ function fillProfileEdit(profile, { force = false } = {}) {
     "profile-edit-background-tone": style.background_tone,
     "profile-edit-avatar-frame": style.avatar_frame,
     "profile-edit-avatar-shape": style.avatar_shape,
+    "profile-edit-avatar-mask": style.avatar_mask,
     "profile-edit-avatar-size": profileAvatarSizeValue(style.avatar_size),
     "profile-edit-name-font": style.name_font,
     "profile-edit-name-size": style.name_size,
@@ -1129,6 +1166,7 @@ function fillProfileEdit(profile, { force = false } = {}) {
     if (el) el.value = value;
   });
   updateProfileAvatarSizeControl(style.avatar_size);
+  syncProfileAvatarMaskField(style.avatar_shape);
   if (typeof setUserDisplayTimezone === "function") {
     setUserDisplayTimezone(profile?.display_timezone || "auto");
   }

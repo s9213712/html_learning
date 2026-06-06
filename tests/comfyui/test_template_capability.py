@@ -143,6 +143,25 @@ def test_capability_checks_diffusion_model_and_clip_buckets():
     assert cap.missing_models == {}
 
 
+def test_capability_checks_ltx_checkpoint_loader_buckets():
+    info = {
+        "LTXVAudioVAELoader": {
+            "input": {"required": {"ckpt_name": [["video/ltx-2.3-22b-dev-fp8.safetensors"]]}}
+        },
+        "LTXAVTextEncoderLoader": {
+            "input": {"required": {"ckpt_name": [["video/ltx-2.3-22b-dev-fp8.safetensors"]]}}
+        },
+    }
+    client = _StubClient(info)
+    analysis = _analysis(
+        class_types={"LTXVAudioVAELoader", "LTXAVTextEncoderLoader"},
+        models={"ckpt": ["ltx-2.3-22b-dev-fp8.safetensors"]},
+    )
+    cap = check_workflow_capability(analysis, client=client)
+    assert cap.overall == "SUPPORTED"
+    assert cap.missing_models == {}
+
+
 def test_capability_checks_comfyui_gguf_unet_loader_bucket():
     info = {
         "UnetLoaderGGUF": {

@@ -416,6 +416,30 @@ def test_root_can_configure_system_resource_board_refresh_seconds():
     assert state["system_resource_board_refresh_seconds"] == 7
 
 
+def test_root_can_configure_site_identity_text_settings():
+    app, state = _admin_app()
+    client = app.test_client()
+
+    res = client.put("/api/admin/settings", json={
+        "site_name": "BLOCKCHAIN Lab",
+        "site_document_title": "BLOCKCHAIN Lab Portal",
+        "site_login_heading": "Welcome to the lab",
+        "site_login_subtitle": "Private playground",
+        "site_success_heading": "登入完成",
+        "site_success_message": "回到控制台",
+    })
+
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["settings"]["site_name"] == "BLOCKCHAIN Lab"
+    assert data["settings"]["site_document_title"] == "BLOCKCHAIN Lab Portal"
+    assert state["site_success_message"] == "回到控制台"
+
+    bad = client.put("/api/admin/settings", json={"site_name": "x" * 81})
+    assert bad.status_code == 400
+    assert state["site_name"] == "BLOCKCHAIN Lab"
+
+
 def test_root_can_configure_dashboard_refresh_seconds():
     app, state = _admin_app()
     client = app.test_client()

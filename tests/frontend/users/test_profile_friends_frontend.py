@@ -31,16 +31,20 @@ def test_profile_friends_panel_is_wired_as_user_module():
     assert 'data-profile-avatar-zoom-step="-0.05"' in index_html
     assert 'data-profile-avatar-zoom-step="0.05"' in index_html
     assert 'type="number" id="profile-avatar-crop-zoom"' not in index_html
-    assert 'id="profile-edit-avatar-size" min="100" max="550" step="5" value="140"' in index_html
+    assert 'id="profile-edit-avatar-size" min="100" max="600" step="5" value="140"' in index_html
     assert 'data-profile-avatar-size="220">220</button>' in index_html
+    assert 'data-profile-avatar-size="320">320</button>' in index_html
     assert 'data-profile-avatar-size="500">500</button>' in index_html
-    assert 'data-profile-avatar-size="550">550</button>' in index_html
+    assert 'data-profile-avatar-size="600">600</button>' in index_html
     assert 'id="profile-edit-avatar-shape"' in index_html
     assert '<option value="circle">圓形</option>' in index_html
     assert '<option value="rounded">圓角方形</option>' in index_html
     assert '<option value="squircle">超橢圓</option>' in index_html
     assert '<option value="square">方形</option>' in index_html
-    assert '/styles.css?v=20260606-hf-common-repos' in index_html
+    assert '<option value="star">星形</option>' in index_html
+    assert '<option value="custom">自訂遮罩</option>' in index_html
+    assert 'id="profile-edit-avatar-mask"' in index_html
+    assert '/styles.css?v=20260606-site-avatar-controls' in index_html
     assert 'id="profile-edit-display-timezone"' in index_html
     assert 'id="profile-quick-customize-card"' in index_html
     assert 'id="profile-public-info-editor-list"' in index_html
@@ -50,7 +54,7 @@ def test_profile_friends_panel_is_wired_as_user_module():
     assert 'id="profile-edit-accent"' in index_html
     assert 'id="profile-edit-density"' in index_html
     assert "跟隨瀏覽器" in index_html
-    assert "/js/58-profile-friends.js?v=20260606-avatar-zoom-stepper" in index_html
+    assert "/js/58-profile-friends.js?v=20260606-avatar-star-mask-600" in index_html
     assert 'tabId: "tab-module-profile"' in core_js
     assert 'action: "profile:appearance"' in core_js
     assert 'action: "profile:friends"' in core_js
@@ -90,20 +94,21 @@ def test_profile_friends_panel_is_wired_as_user_module():
     assert "profile_style: collectProfileStyleFromForm()" in profile_js
     assert 'avatar_size: "140"' in profile_js
     profiles_py = (ROOT / "services" / "users" / "profiles.py").read_text(encoding="utf-8")
-    assert "range(100, 555, 5)" in profiles_py
+    assert "range(100, 605, 5)" in profiles_py
     assert '"avatar_size": "140"' in profiles_py
-    assert "const PROFILE_AVATAR_MAX_DISPLAY_SIZE = 550" in profile_js
+    assert "const PROFILE_AVATAR_MAX_DISPLAY_SIZE = 600" in profile_js
     assert "--profile-avatar-text-scale" in profile_js
     assert "numericSize / Number(PROFILE_STYLE_DEFAULTS.avatar_size)" in profile_js
-    assert "--profile-avatar-mobile-size: min(var(--profile-avatar-size, 140px), 250px)" in css
-    assert "--profile-avatar-text-scale: 1 !important" in css
+    assert "--profile-avatar-mobile-size: min(var(--profile-avatar-size, 140px), 320px)" in css
+    assert "--profile-avatar-mobile-text-scale" in profile_js
     assert "@media (min-width: 721px)" in css
     assert "const MAX_PROFILE_AVATAR_SIZE = PROFILE_AVATAR_MAX_DISPLAY_SIZE" in profile_js
     assert '"profile-edit-avatar-shape": "avatar_shape"' in profile_js
     assert "function syncProfileAvatarShapeControls" in profile_js
     assert "profile-avatar-crop-shape" in profile_js
     assert 'avatar_shape: "circle"' in profile_js
-    assert 'avatar_shape: ["circle", "rounded", "squircle", "square"]' in profile_js
+    assert 'avatar_shape: ["circle", "rounded", "squircle", "square", "star", "custom"]' in profile_js
+    assert "function normalizeProfileAvatarMask" in profile_js
     assert 'numeric <= 90' in profile_js
     assert "profile_public_info: profilePublicInfoFromForm()" in profile_js
     assert "function renderProfilePublicInfoEditor(items = [])" in profile_js
@@ -143,19 +148,23 @@ def test_profile_friends_panel_is_wired_as_user_module():
     assert ".profile-avatar-large.profile-avatar-shape-rounded" in css
     assert ".profile-avatar-large.profile-avatar-shape-squircle" in css
     assert ".profile-avatar-large.profile-avatar-shape-square" in css
+    assert ".profile-avatar-large.profile-avatar-shape-star" in css
+    assert ".profile-avatar-large.profile-avatar-shape-custom" in css
     assert ".avatar-crop-box.avatar-crop-shape-circle" in css
     assert ".avatar-crop-box.avatar-crop-shape-rounded" in css
     assert ".avatar-crop-box.avatar-crop-shape-squircle" in css
     assert ".avatar-crop-box.avatar-crop-shape-square" in css
+    assert ".avatar-crop-box.avatar-crop-shape-star" in css
+    assert ".avatar-crop-box.avatar-crop-shape-custom" in css
     assert ".avatar-cropper-zoom-row" in css
     assert ".avatar-cropper-zoom-value" in css
     assert "grid-template-columns: minmax(150px, 180px) minmax(0, 1fr);" in css
     assert "--profile-avatar-custom-size: var(--profile-avatar-size, 140px)" in css
-    assert "--profile-avatar-mobile-size: min(var(--profile-avatar-size, 140px), 250px)" in css
-    assert "mobile clamps display size to 250px" in css
+    assert "--profile-avatar-mobile-size: min(var(--profile-avatar-size, 140px), 320px)" in css
+    assert "mobile clamps display size to 320px" in css
     assert "grid-template-columns: minmax(0, 1fr) !important;" in css
     assert "text-align: center !important;" in css
-    assert "max-width: min(100%, 250px) !important;" in css
+    assert "max-width: min(100%, max(320px, var(--profile-avatar-mobile-size))) !important;" in css
     assert "#profile-home-avatar {\n    width: 5.5rem !important;" not in css
     assert "function applyProfileAvatarElementSize(avatar, value)" in profile_js
     assert 'avatar.style.setProperty("--profile-avatar-custom-size", px);' in profile_js

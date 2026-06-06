@@ -108,7 +108,11 @@ class CapabilityCheck:
 # locally. Aligned with services/comfyui/client.py helpers (get_models,
 # get_loras, get_vaes …).
 _MODEL_BUCKET_OBJECT_INFO_PATHS: dict[str, tuple[tuple[str, str], ...]] = {
-    "ckpt": (("CheckpointLoaderSimple", "ckpt_name"),),
+    "ckpt": (
+        ("CheckpointLoaderSimple", "ckpt_name"),
+        ("LTXVAudioVAELoader", "ckpt_name"),
+        ("LTXAVTextEncoderLoader", "ckpt_name"),
+    ),
     "vae": (("VAELoader", "vae_name"),),
     "lora": (("LoraLoader", "lora_name"), ("LoraLoaderModelOnly", "lora_name")),
     "controlnet": (("ControlNetLoader", "control_net_name"),),
