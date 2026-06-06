@@ -1,4 +1,5 @@
 from routes.appeals import register_appeal_routes
+from routes.ai_agent import register_ai_agent_routes
 from routes.bug_reports import register_bug_report_routes
 from routes.community import register_community_routes
 from routes.comfyui import register_comfyui_routes
@@ -24,6 +25,7 @@ def register_operation_routes(app, deps):
     register_job_routes(app, deps)
     register_share_management_routes(app, deps)
     register_games_routes(app, deps)
+    register_ai_agent_routes(app, deps)
     register_comfyui_routes(app, deps)
     register_appeal_routes(app, deps)
     register_reports_notification_routes(app, deps)

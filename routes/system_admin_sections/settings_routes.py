@@ -7,7 +7,13 @@ import urllib.request
 
 from flask import request
 
-from services.platform.settings import DEFAULT_SETTINGS, DangerousChangeBlocked, FEATURE_FLAG_KEYS, enforce_dangerous_confirm
+from services.platform.settings import DangerousChangeBlocked, FEATURE_FLAG_KEYS, enforce_dangerous_confirm
+from services.ai_agent.hermes import (
+    normalize_ai_agent_api_base_url,
+    normalize_ai_agent_model,
+    normalize_ai_agent_provider,
+    validate_ai_agent_api_key,
+)
 from services.platform.settings_metadata import (
     DANGEROUS_SETTINGS,
     SETTING_DETAILS,
@@ -121,6 +127,9 @@ def register_system_admin_settings_routes(app, ctx):
         comfyui_account_key = str(payload.get("comfyui_account_api_key") or "").strip()
         payload["comfyui_account_api_key"] = ""
         payload["comfyui_account_api_key_configured"] = bool(comfyui_account_key)
+        ai_agent_api_key = str(payload.get("ai_agent_api_key") or "").strip()
+        payload["ai_agent_api_key"] = ""
+        payload["ai_agent_api_key_configured"] = bool(ai_agent_api_key)
         huggingface_token = str(payload.get("comfyui_huggingface_api_token") or "").strip()
         payload["comfyui_huggingface_api_token"] = ""
         payload["comfyui_huggingface_api_token_configured"] = bool(huggingface_token)
@@ -334,6 +343,47 @@ def register_system_admin_settings_routes(app, ctx):
             if api_url is None:
                 return json_resp({"ok":False,"msg":"comfyui_remote_api_url 必須是 http(s)://host:port，不可包含帳密、路徑或參數"}), 400
             data["comfyui_remote_api_url"] = api_url
+        if "ai_agent_provider" in data:
+            provider = normalize_ai_agent_provider(data.get("ai_agent_provider"))
+            if provider is None:
+                return json_resp({"ok":False,"msg":"ai_agent_provider 必須是 hermes 或 openai_compatible"}), 400
+            data["ai_agent_provider"] = provider
+        if "ai_agent_api_base_url" in data:
+            api_url = normalize_ai_agent_api_base_url(data.get("ai_agent_api_base_url"), allow_blank=False)
+            if api_url is None:
+                return json_resp({"ok":False,"msg":"ai_agent_api_base_url 必須是 http(s) URL，不可包含帳密、query 或 fragment"}), 400
+            data["ai_agent_api_base_url"] = api_url
+        if "ai_agent_model" in data:
+            model = normalize_ai_agent_model(data.get("ai_agent_model"))
+            if model is None:
+                return json_resp({"ok":False,"msg":"ai_agent_model 不可包含換行或控制字元，長度不可超過 200"}), 400
+            data["ai_agent_model"] = model
+        if "ai_agent_request_timeout_seconds" in data:
+            timeout_seconds = parse_int_in_range(data.get("ai_agent_request_timeout_seconds"), 5, 600)
+            if timeout_seconds is None:
+                return json_resp({"ok":False,"msg":"ai_agent_request_timeout_seconds 必須是 5-600 秒"}), 400
+            data["ai_agent_request_timeout_seconds"] = timeout_seconds
+        if "ai_agent_max_prompt_chars" in data:
+            max_prompt_chars = parse_int_in_range(data.get("ai_agent_max_prompt_chars"), 1000, 200000)
+            if max_prompt_chars is None:
+                return json_resp({"ok":False,"msg":"ai_agent_max_prompt_chars 必須是 1000-200000"}), 400
+            data["ai_agent_max_prompt_chars"] = max_prompt_chars
+        clear_ai_agent_api_key = False
+        if "ai_agent_api_key_clear" in data:
+            clear_key = parse_strict_bool(data.pop("ai_agent_api_key_clear"))
+            if clear_key is None:
+                return json_resp({"ok":False,"msg":"ai_agent_api_key_clear 必須是布林值 true/false"}), 400
+            if clear_key:
+                clear_ai_agent_api_key = True
+                data["ai_agent_api_key"] = ""
+        if "ai_agent_api_key" in data:
+            api_key = validate_ai_agent_api_key(data.get("ai_agent_api_key"), allow_blank=True)
+            if api_key is None:
+                return json_resp({"ok":False,"msg":"ai_agent_api_key 不可包含空白，且長度不可超過 2048"}), 400
+            if api_key:
+                data["ai_agent_api_key"] = api_key
+            elif not clear_ai_agent_api_key:
+                data.pop("ai_agent_api_key", None)
         if "comfyui_base_dir" in data:
             raw_base = str(data.get("comfyui_base_dir") or "").strip()
             if raw_base:
@@ -578,21 +628,6 @@ def register_system_admin_settings_routes(app, ctx):
             if idle_timeout_minutes is None:
                 return json_resp({"ok":False,"msg":"session_idle_timeout_minutes 必須是 0-1440 分鐘；0 代表停用"}), 400
             data["session_idle_timeout_minutes"] = idle_timeout_minutes
-        site_text_limits = {
-            "site_name": 80,
-            "site_document_title": 120,
-            "site_login_heading": 120,
-            "site_login_subtitle": 180,
-            "site_success_heading": 120,
-            "site_success_message": 180,
-        }
-        for key, limit in site_text_limits.items():
-            if key not in data:
-                continue
-            value = str(data.get(key) or "").strip()
-            if len(value) > limit:
-                return json_resp({"ok":False,"msg":f"{key} 不可超過 {limit} 個字"}), 400
-            data[key] = value or DEFAULT_SETTINGS[key]
         backpressure_error = normalize_backpressure_updates(data)
         if backpressure_error:
             return json_resp({"ok":False,"msg":backpressure_error}), 400

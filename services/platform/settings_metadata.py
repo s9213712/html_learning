@@ -197,6 +197,12 @@ SETTING_GROUPS = (
         "settings": tuple(key for key in DEFAULT_SETTINGS if key.startswith("comfyui_")),
     },
     {
+        "key": "ai_agent",
+        "title": "AI Agent / LLM",
+        "description": "Hermes / OpenAI-compatible API 連線、模型、逾時與輸入限制。",
+        "settings": tuple(key for key in DEFAULT_SETTINGS if key.startswith("ai_agent_")),
+    },
+    {
         "key": "video",
         "title": "影音 / 打賞 / E2EE 串流",
         "description": "影音打賞抽成、strict E2EE 本機省流量版本與快取配額政策。",
@@ -319,6 +325,38 @@ SETTING_DETAILS = {
     "comfyui_job_poll_seconds": {
         "label": "ComfyUI 工作進度更新頻率",
         "description": "ComfyUI 產圖或 workflow 執行中才輪詢 job 進度；預設每 1 秒。",
+    },
+    "ai_agent_provider": {
+        "label": "AI Agent Provider",
+        "description": "目前支援 hermes 或 OpenAI-compatible API；預設 hermes。",
+    },
+    "ai_agent_api_base_url": {
+        "label": "AI Agent API Base URL",
+        "description": "Hermes API server / OpenAI-compatible endpoint，例如 http://127.0.0.1:8642/v1。",
+    },
+    "ai_agent_api_key": {
+        "label": "AI Agent API Key",
+        "description": "送往 AI Agent backend 的 Bearer token；回傳給前端時會遮蔽。",
+    },
+    "ai_agent_model": {
+        "label": "AI Agent 模型",
+        "description": "預設送往 /v1/chat/completions 的 model 名稱。",
+    },
+    "ai_agent_request_timeout_seconds": {
+        "label": "AI Agent 逾時秒數",
+        "description": "等待 Hermes / OpenAI-compatible API 回應的最長時間。",
+    },
+    "ai_agent_max_prompt_chars": {
+        "label": "AI Agent 文字上限",
+        "description": "單次請求文字內容的最大字元數，避免用戶把主 server thread 卡住太久。",
+    },
+    "ai_agent_allow_image_input": {
+        "label": "允許圖片理解",
+        "description": "開啟後前端可送 data:image 到 multimodal chat completion；關閉時只允許 t2t。",
+    },
+    "ai_agent_allow_tool_runs": {
+        "label": "允許工具型任務",
+        "description": "預留給後續 Hermes runs / approvals 流程；MVP chat route 不會自動開工具任務。",
     },
     "notification_poll_seconds": {
         "label": "通知更新頻率",

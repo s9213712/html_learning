@@ -4,6 +4,11 @@ import threading
 from datetime import datetime
 
 from services.comfyui.settings import COMFYUI_DEFAULT_SETTINGS
+from services.ai_agent.hermes import (
+    DEFAULT_AI_AGENT_API_BASE_URL,
+    DEFAULT_AI_AGENT_MODEL,
+    DEFAULT_AI_AGENT_PROVIDER,
+)
 
 SYSTEM_SETTINGS_TABLE = "system_settings"
 
@@ -133,9 +138,18 @@ DEFAULT_SETTINGS = {
     "module_appeals_min_role": "user",
     "module_accounts_min_role": "manager",
     "module_comfyui_min_role": "user",
+    "module_ai_agent_min_role": "manager",
     "module_games_min_role": "user",
     "module_videos_min_role": "user",
     **COMFYUI_DEFAULT_SETTINGS,
+    "ai_agent_provider": DEFAULT_AI_AGENT_PROVIDER,
+    "ai_agent_api_base_url": DEFAULT_AI_AGENT_API_BASE_URL,
+    "ai_agent_api_key": os.environ.get("HACKME_AI_AGENT_API_KEY", ""),
+    "ai_agent_model": DEFAULT_AI_AGENT_MODEL,
+    "ai_agent_request_timeout_seconds": 120,
+    "ai_agent_max_prompt_chars": 20000,
+    "ai_agent_allow_image_input": True,
+    "ai_agent_allow_tool_runs": False,
     "chat_filter_rules_json": "",
     "feature_chat_enabled": False,
     "feature_community_enabled": False,
@@ -168,6 +182,7 @@ DEFAULT_SETTINGS = {
     "feature_advanced_security_enabled": False,
     "feature_privacy_uploads_enabled": False,
     "feature_comfyui_enabled": False,
+    "feature_ai_agent_enabled": False,
     # ComfyUI Template Importer rollout flags (§15)
     # - legacy_import_enabled: keep the old sanitize-only POST /api/comfyui/workflows/import
     #   path alive during migration. When false, that endpoint must require a preview_token
@@ -243,6 +258,7 @@ FEATURE_SETTING_LABELS = {
     "feature_games_enabled": "遊戲區 / 西洋棋",
     "feature_experiments_enabled": "實驗區",
     "feature_comfyui_enabled": "ComfyUI AI 產圖",
+    "feature_ai_agent_enabled": "AI Agent / LLM",
     "feature_economy_enabled": "基本積分系統",
     "feature_points_chain_enabled": "PointsChain 私有鏈",
     "feature_trading_enabled": "積分交易所",

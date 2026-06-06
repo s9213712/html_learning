@@ -935,6 +935,7 @@ function switchModuleTab(tab) {
   const canAccessShareCenter = !!currentUser && canAccessModule("shares");
   const canUseComfyuiTab = typeof isComfyuiAvailableForNavigation !== "function" || isComfyuiAvailableForNavigation();
   const canAccessComfyui = !!currentUser && canAccessModule("comfyui") && canUseComfyuiTab;
+  const canAccessAiAgent = !!currentUser && canAccessModule("ai-agent");
   const canAccessEconomy = !!currentUser && canAccessModule("economy");
   const canAccessTrading = canAccessEconomy && canAccessModule("trading");
 
@@ -949,6 +950,7 @@ function switchModuleTab(tab) {
     [canAccessExperiments, "experiments"],
     [canAccessJobs, "jobs"],
     [canAccessComfyui, "comfyui"],
+    [canAccessAiAgent, "ai-agent"],
     [canAccessEconomy, "economy"],
     [canAccessAppeals, "appeals"],
     [canAccessAccounts, "accounts"],
@@ -966,6 +968,7 @@ function switchModuleTab(tab) {
   if (tab === "jobs" && !canAccessJobs) normTab = fallbackModule();
   if (tab === "shares" && !canAccessShareCenter) normTab = fallbackModule();
   if (tab === "comfyui" && !canAccessComfyui) normTab = fallbackModule();
+  if (tab === "ai-agent" && !canAccessAiAgent) normTab = fallbackModule();
   if (tab === "economy" && !canAccessEconomy) normTab = fallbackModule();
   if (tab === "trading" && !canAccessTrading) normTab = fallbackModule();
   if (tab === "accounts" && !canAccessAccounts) normTab = fallbackModule();
@@ -987,6 +990,7 @@ function switchModuleTab(tab) {
   const modJobs = $("module-jobs");
   const modShares = $("module-shares");
   const modComfyui = $("module-comfyui");
+  const modAiAgent = $("module-ai-agent");
   const modEconomy = $("module-economy");
   const modTrading = $("module-trading");
   const modAccounts = $("module-accounts");
@@ -1005,6 +1009,7 @@ function switchModuleTab(tab) {
   const mJobs = $("tab-module-jobs");
   const mShares = $("tab-module-shares");
   const mComfyui = $("tab-module-comfyui");
+  const mAiAgent = $("tab-module-ai-agent");
   const mEconomy = $("tab-module-economy");
   const mTrading = $("tab-module-trading");
   const mAccounts = $("tab-module-accounts");
@@ -1024,6 +1029,7 @@ function switchModuleTab(tab) {
   if (modJobs) modJobs.classList.toggle("active", normTab === "jobs");
   if (modShares) modShares.classList.toggle("active", normTab === "shares");
   if (modComfyui) modComfyui.classList.toggle("active", normTab === "comfyui");
+  if (modAiAgent) modAiAgent.classList.toggle("active", normTab === "ai-agent");
   if (modEconomy) modEconomy.classList.toggle("active", normTab === "economy");
   if (modTrading) modTrading.classList.toggle("active", normTab === "trading");
   if (modAccounts) modAccounts.classList.toggle("active", normTab === "accounts");
@@ -1042,6 +1048,7 @@ function switchModuleTab(tab) {
   if (mJobs) mJobs.classList.toggle("active", normTab === "jobs");
   if (mShares) mShares.classList.toggle("active", normTab === "shares");
   if (mComfyui) mComfyui.classList.toggle("active", normTab === "comfyui");
+  if (mAiAgent) mAiAgent.classList.toggle("active", normTab === "ai-agent");
   if (mEconomy) mEconomy.classList.toggle("active", normTab === "economy");
   if (mTrading) mTrading.classList.toggle("active", normTab === "trading");
   if (mAccounts) mAccounts.classList.toggle("active", normTab === "accounts");
@@ -1109,6 +1116,9 @@ function switchModuleTab(tab) {
   if (normTab === "comfyui" && canAccessComfyui && typeof loadComfyuiModels === "function") {
     loadComfyuiModels();
     if (typeof refreshComfyuiStatus === "function") refreshComfyuiStatus({ switchAway: true });
+  }
+  if (normTab === "ai-agent" && canAccessAiAgent && typeof loadAiAgentStatus === "function") {
+    loadAiAgentStatus();
   }
   if (normTab === "economy" && canAccessEconomy && typeof loadEconomyDashboard === "function") {
     loadEconomyDashboard();
@@ -2622,6 +2632,20 @@ async function loadSettings() {
       ? "目前已儲存 ComfyUI Account API Key；留空儲存不會變更。"
       : "目前未儲存 ComfyUI Account API Key。";
   }
+  if ($("s-ai-agent-provider")) $("s-ai-agent-provider").value = s.ai_agent_provider || "hermes";
+  if ($("s-ai-agent-api-base-url")) $("s-ai-agent-api-base-url").value = s.ai_agent_api_base_url || "http://127.0.0.1:8642/v1";
+  if ($("s-ai-agent-api-key")) $("s-ai-agent-api-key").value = "";
+  if ($("s-ai-agent-api-key-clear")) $("s-ai-agent-api-key-clear").checked = false;
+  if ($("ai-agent-api-key-state")) {
+    $("ai-agent-api-key-state").textContent = s.ai_agent_api_key_configured
+      ? "目前已儲存 AI Agent API Key；留空儲存不會變更。"
+      : "目前未儲存 AI Agent API Key。本機 Hermes local-only 模式可不填。";
+  }
+  if ($("s-ai-agent-model")) $("s-ai-agent-model").value = s.ai_agent_model || "hermes-agent";
+  if ($("s-ai-agent-request-timeout-seconds")) $("s-ai-agent-request-timeout-seconds").value = s.ai_agent_request_timeout_seconds || 120;
+  if ($("s-ai-agent-max-prompt-chars")) $("s-ai-agent-max-prompt-chars").value = s.ai_agent_max_prompt_chars || 20000;
+  if ($("s-ai-agent-allow-image-input")) $("s-ai-agent-allow-image-input").checked = s.ai_agent_allow_image_input !== false;
+  if ($("s-ai-agent-allow-tool-runs")) $("s-ai-agent-allow-tool-runs").checked = !!s.ai_agent_allow_tool_runs;
   updateComfyuiConnectionModeFields();
   if ($("s-comfyui-max-batch-size")) $("s-comfyui-max-batch-size").value = s.comfyui_max_batch_size || 1;
   if ($("s-comfyui-default-width")) $("s-comfyui-default-width").value = s.comfyui_default_width || 1024;
@@ -2687,6 +2711,7 @@ async function loadSettings() {
   if ($("s-module-appeals-min-role")) $("s-module-appeals-min-role").value = s.module_appeals_min_role || "user";
   if ($("s-module-accounts-min-role")) $("s-module-accounts-min-role").value = s.module_accounts_min_role || "manager";
   if ($("s-module-comfyui-min-role")) $("s-module-comfyui-min-role").value = s.module_comfyui_min_role || "user";
+  if ($("s-module-ai-agent-min-role")) $("s-module-ai-agent-min-role").value = s.module_ai_agent_min_role || "manager";
   if ($("s-module-games-min-role")) $("s-module-games-min-role").value = s.module_games_min_role || "user";
   if ($("s-module-videos-min-role")) $("s-module-videos-min-role").value = s.module_videos_min_role || "user";
   if ($("s-video-tip-fee-percent")) $("s-video-tip-fee-percent").value = s.video_tip_fee_percent ?? 5;
@@ -2765,6 +2790,7 @@ const FEATURE_SETTING_KEYS = [
   "feature_privacy_uploads_enabled",
   "feature_experiments_enabled",
   "feature_comfyui_enabled",
+  "feature_ai_agent_enabled",
   "feature_economy_enabled",
   "feature_points_chain_enabled",
   "feature_trading_enabled",
@@ -2795,6 +2821,7 @@ const FEATURE_SETTING_LABELS = {
   feature_videos_enabled: "影音分享",
   feature_games_enabled: "遊戲區 / 西洋棋",
   feature_comfyui_enabled: "ComfyUI AI 產圖",
+  feature_ai_agent_enabled: "AI Agent / LLM",
   feature_economy_enabled: "基本積分系統",
   feature_points_chain_enabled: "PointsChain 私有鏈",
   feature_trading_enabled: "積分交易所",
@@ -2825,6 +2852,10 @@ const FEATURE_DEPENDENCY_RULES = {
   feature_comfyui_enabled: {
     recommended: ["feature_privacy_uploads_enabled"],
     description: "ComfyUI 若搭配雲端硬碟，可直接保存與分享產圖結果。",
+  },
+  feature_ai_agent_enabled: {
+    recommended: ["feature_chat_enabled"],
+    description: "AI Agent 可獨立使用；若搭配聊天室，未來可延伸成對話摘要與輔助回覆。",
   },
   feature_chat_enabled: {
     recommended: ["feature_attachments_enabled", "feature_reports_enabled", "feature_reports_notifications_enabled"],
@@ -2944,6 +2975,7 @@ const FEATURE_SETTING_GROUPS = [
       "feature_games_enabled",
       "feature_experiments_enabled",
       "feature_comfyui_enabled",
+      "feature_ai_agent_enabled",
       "feature_forum_core_enabled",
       "feature_ui_rebuild_enabled",
       "feature_personalization_enabled",
@@ -4917,6 +4949,15 @@ async function saveSettings() {
     comfyui_paid_api_nodes_enabled: !!$("s-comfyui-paid-api-nodes-enabled")?.checked,
     comfyui_account_api_key: ($("s-comfyui-account-api-key")?.value || "").trim(),
     comfyui_account_api_key_clear: !!$("s-comfyui-account-api-key-clear")?.checked,
+    ai_agent_provider: $("s-ai-agent-provider")?.value || "hermes",
+    ai_agent_api_base_url: ($("s-ai-agent-api-base-url")?.value || "http://127.0.0.1:8642/v1").trim(),
+    ai_agent_api_key: ($("s-ai-agent-api-key")?.value || "").trim(),
+    ai_agent_api_key_clear: !!$("s-ai-agent-api-key-clear")?.checked,
+    ai_agent_model: ($("s-ai-agent-model")?.value || "hermes-agent").trim(),
+    ai_agent_request_timeout_seconds: parseInt($("s-ai-agent-request-timeout-seconds")?.value || "120", 10) || 120,
+    ai_agent_max_prompt_chars: parseInt($("s-ai-agent-max-prompt-chars")?.value || "20000", 10) || 20000,
+    ai_agent_allow_image_input: $("s-ai-agent-allow-image-input") ? !!$("s-ai-agent-allow-image-input").checked : true,
+    ai_agent_allow_tool_runs: !!$("s-ai-agent-allow-tool-runs")?.checked,
     comfyui_max_batch_size: parseInt($("s-comfyui-max-batch-size")?.value || "1"),
     comfyui_default_width: parseInt($("s-comfyui-default-width")?.value || "1024"),
     comfyui_default_height: parseInt($("s-comfyui-default-height")?.value || "1024"),
@@ -4941,6 +4982,7 @@ async function saveSettings() {
     module_appeals_min_role: $("s-module-appeals-min-role")?.value || "user",
     module_accounts_min_role: $("s-module-accounts-min-role")?.value || "manager",
     module_comfyui_min_role: $("s-module-comfyui-min-role")?.value || "user",
+    module_ai_agent_min_role: $("s-module-ai-agent-min-role")?.value || "manager",
     module_games_min_role: $("s-module-games-min-role")?.value || "user",
     module_videos_min_role: $("s-module-videos-min-role")?.value || "user",
     video_tip_fee_percent: Number($("s-video-tip-fee-percent")?.value || 5),

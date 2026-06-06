@@ -169,6 +169,19 @@ const ROOT_MODULE_QUICK_SETTINGS = {
       { id: "s-comfyui-default-height", label: "預設高度" },
     ],
   },
+  "ai-agent": {
+    label: "AI 助理",
+    section: "features",
+    pricingKeys: ["ai_agent_task_basic"],
+    fields: [
+      { id: "s-feature-ai-agent-enabled", label: "開放 AI Agent / LLM" },
+      { id: "s-module-ai-agent-min-role", label: "最低可用角色" },
+      { id: "s-ai-agent-provider", label: "Provider" },
+      { id: "s-ai-agent-api-base-url", label: "API Base URL" },
+      { id: "s-ai-agent-model", label: "模型" },
+      { id: "s-ai-agent-allow-image-input", label: "允許圖片理解" },
+    ],
+  },
   economy: {
     label: "積分系統",
     section: "features",

@@ -1,6 +1,42 @@
 # Update Summary
 
-Release ID: `04_2026.06.06-007`
+Release ID: `05_2026.06.06-007`
+
+## 05_2026.06.06-007
+
+- Rebased 05.AI_Agent onto 04.BLOCKCHAIN_RC1 `04_2026.06.06-007`, keeping the
+  05 AI Agent prototype while inheriting workflow-template execution fidelity,
+  SDXL skip-refiner custom checkpoint fixes, random-by-default workflow seed
+  mode, and workflow `run_count` handling that stays separate from batches.
+
+## 05_2026.06.06-005
+
+- Rebased 05.AI_Agent onto 04.BLOCKCHAIN_RC1 `04_2026.06.06-005`, keeping the
+  05 AI Agent prototype while inheriting request-scope SQLite connection
+  cleanup that prevents leaked route connections from holding write locks and
+  surfacing repeated `目前資料庫忙碌，請稍候再試` responses.
+
+## 05_2026.06.06-004
+
+- Rebased 05.AI_Agent onto 04.BLOCKCHAIN_RC1 `04_2026.06.06-004`, keeping the
+  05 AI Agent prototype while inheriting the fixed always-visible `Civitai /
+  模型管理` AI image-generation subtab.
+- Inherited the ComfyUI history restore/rerun fix that preserves and reapplies
+  the full normalized generation payload, including HF repo/variant, UI
+  batch/run count, seed-after-generate mode, source/mask refs, and ControlNet
+  image refs.
+
+## 05_2026.06.06-003
+
+- Rebased 05.AI_Agent onto 04.BLOCKCHAIN_RC1 `04_2026.06.06-003`, keeping the
+  05 AI Agent prototype while inheriting the live Playwright fix that refreshes
+  Civitai/root-panel visibility when switching to the active HF surface.
+
+## 05_2026.06.06-002
+
+- Rebased 05.AI_Agent onto 04.BLOCKCHAIN_RC1 `04_2026.06.06-002`, keeping the
+  05 AI Agent prototype while inheriting the cleaned HF/ComfyUI settings split
+  and explicit Civitai model-import entry.
 
 ## 04_2026.06.06-007
 

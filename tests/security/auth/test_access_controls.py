@@ -709,6 +709,53 @@ def test_comfyui_account_api_key_rejects_whitespace():
     assert "comfyui_account_api_key" not in state
 
 
+def test_ai_agent_api_key_is_write_only_and_clearable():
+    app, state = _admin_app()
+    client = app.test_client()
+
+    saved = client.put(
+        "/api/admin/settings",
+        json={
+            "ai_agent_provider": "hermes",
+            "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
+            "ai_agent_api_key": "hermes-secret-key",
+            "ai_agent_model": "hermes-agent",
+            "ai_agent_allow_image_input": True,
+        },
+    )
+
+    assert saved.status_code == 200, saved.get_json()
+    assert state["ai_agent_api_key"] == "hermes-secret-key"
+    payload = saved.get_json()["settings"]
+    assert payload["ai_agent_api_key"] == ""
+    assert payload["ai_agent_api_key_configured"] is True
+    assert "hermes-secret-key" not in json.dumps(saved.get_json(), ensure_ascii=False)
+
+    unchanged = client.put("/api/admin/settings", json={"ai_agent_api_key": "", "ai_agent_model": "hermes-agent-v2"})
+    assert unchanged.status_code == 200, unchanged.get_json()
+    assert state["ai_agent_api_key"] == "hermes-secret-key"
+    assert state["ai_agent_model"] == "hermes-agent-v2"
+    assert unchanged.get_json()["settings"]["ai_agent_api_key_configured"] is True
+
+    cleared = client.put("/api/admin/settings", json={"ai_agent_api_key_clear": True})
+    assert cleared.status_code == 200, cleared.get_json()
+    assert state["ai_agent_api_key"] == ""
+    assert cleared.get_json()["settings"]["ai_agent_api_key_configured"] is False
+
+
+def test_ai_agent_settings_validate_url_and_key_shape():
+    app, state = _admin_app()
+    client = app.test_client()
+
+    bad_url = client.put("/api/admin/settings", json={"ai_agent_api_base_url": "http://user:pass@127.0.0.1:8642/v1"})
+    assert bad_url.status_code == 400
+    assert "ai_agent_api_base_url" not in state
+
+    bad_key = client.put("/api/admin/settings", json={"ai_agent_api_key": "bad key with spaces"})
+    assert bad_key.status_code == 400
+    assert "ai_agent_api_key" not in state
+
+
 def test_root_can_configure_diffusers_backend_and_hf_token_write_only():
     app, state = _admin_app()
     client = app.test_client()

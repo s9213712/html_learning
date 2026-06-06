@@ -76,6 +76,7 @@ FEATURE_ROUTE_GATES = (
     ("feature_privacy_uploads_enabled", ("/api/files/", "/api/files", "/api/cloud-drive/", "/api/cloud-drive", "/api/root/announcement-attachment-requests", "/api/crypto/")),
     ("feature_storage_albums_enabled", ("/api/storage/", "/api/storage", "/api/admin/storage/", "/api/admin/storage")),
     ("feature_comfyui_enabled", ("/api/comfyui/", "/api/comfyui")),
+    ("feature_ai_agent_enabled", ("/api/ai-agent/", "/api/ai-agent")),
     ("feature_videos_enabled", ("/api/videos/", "/api/videos")),
     ("feature_economy_enabled", ("/api/points/", "/api/points", "/api/admin/points/", "/api/admin/points", "/api/root/points/", "/api/root/points")),
     ("feature_trading_enabled", ("/api/trading/", "/api/trading", "/api/admin/trading/", "/api/admin/trading", "/api/root/trading/", "/api/root/trading")),

@@ -40,6 +40,7 @@ function bindUiEvents() {
   const tabModuleJobs = $("tab-module-jobs");
   const tabModuleShares = $("tab-module-shares");
   const tabModuleComfyui = $("tab-module-comfyui");
+  const tabModuleAiAgent = $("tab-module-ai-agent");
   const tabModuleEconomy = $("tab-module-economy");
   const tabModuleTrading = $("tab-module-trading");
   const tabModuleAccounts = $("tab-module-accounts");
@@ -252,6 +253,10 @@ function bindUiEvents() {
   const comfyuiCivitaiInspectBtn = $("comfyui-civitai-inspect-btn");
   const comfyuiCivitaiVersion = $("comfyui-civitai-version");
   const comfyuiModelDownloadBtn = $("comfyui-model-download-btn");
+  const aiAgentRefreshBtn = $("ai-agent-refresh-btn");
+  const aiAgentSendBtn = $("ai-agent-send-btn");
+  const aiAgentClearBtn = $("ai-agent-clear-btn");
+  const aiAgentImageFile = $("ai-agent-image-file");
   const economyRefreshBtn = $("economy-refresh-btn");
   const economyAdminRefreshBtn = $("economy-admin-refresh-btn");
   const economyAdjustBtn = $("economy-adjust-btn");
@@ -280,6 +285,7 @@ function bindUiEvents() {
   if (tabModuleJobs) tabModuleJobs.addEventListener("click", () => switchModuleTab("jobs"));
   if (tabModuleShares) tabModuleShares.addEventListener("click", () => switchModuleTab("shares"));
   if (tabModuleComfyui) tabModuleComfyui.addEventListener("click", () => switchModuleTab("comfyui"));
+  if (tabModuleAiAgent) tabModuleAiAgent.addEventListener("click", () => switchModuleTab("ai-agent"));
   if (tabModuleEconomy) tabModuleEconomy.addEventListener("click", () => switchModuleTab("economy"));
   if (tabModuleTrading) tabModuleTrading.addEventListener("click", () => {
     switchModuleTab("trading");
@@ -319,6 +325,10 @@ function bindUiEvents() {
     else if (typeof loadJobCenter === "function") loadJobCenter();
   });
   if (shareCenterRefreshBtn) shareCenterRefreshBtn.addEventListener("click", () => loadShareCenter());
+  if (aiAgentRefreshBtn && typeof loadAiAgentStatus === "function") aiAgentRefreshBtn.addEventListener("click", () => loadAiAgentStatus({ force: true }));
+  if (aiAgentSendBtn && typeof sendAiAgentMessage === "function") aiAgentSendBtn.addEventListener("click", () => sendAiAgentMessage());
+  if (aiAgentClearBtn && typeof clearAiAgentConversation === "function") aiAgentClearBtn.addEventListener("click", () => clearAiAgentConversation());
+  if (aiAgentImageFile && typeof handleAiAgentImagePick === "function") aiAgentImageFile.addEventListener("change", handleAiAgentImagePick);
   bindAuthSubmitEvents();
   if (typeof bindRegisterFieldHelpers === "function") bindRegisterFieldHelpers();
   if (typeof bindAuthRecoveryControls === "function") bindAuthRecoveryControls();

@@ -12,11 +12,11 @@ from services.platform import settings
 from services.server.request_guards import (
     enforce_feature_flags,
     enforce_required_password_change,
+    feature_gate_for_path,
     should_require_password_change_flag,
 )
 from services.users.member_levels import ensure_member_level_rules_schema
 from services.security.upload_security import ensure_upload_security_schema
-from server import feature_gate_for_path
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -123,6 +123,7 @@ def test_feature_gate_maps_existing_modules():
     assert feature_gate_for_path("/api/files/quota") == "feature_privacy_uploads_enabled"
     assert feature_gate_for_path("/api/crypto/init") == "feature_privacy_uploads_enabled"
     assert feature_gate_for_path("/api/comfyui/generate") == "feature_comfyui_enabled"
+    assert feature_gate_for_path("/api/ai-agent/chat") == "feature_ai_agent_enabled"
 
 
 def test_external_chain_features_remain_disabled_by_rc1_scope():

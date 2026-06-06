@@ -35,6 +35,7 @@ def test_initial_deploy_defaults_only_enable_management_and_security_modules():
     }
     assert DEFAULT_SETTINGS["feature_forum_core_enabled"] is False
     assert DEFAULT_SETTINGS["feature_comfyui_enabled"] is False
+    assert DEFAULT_SETTINGS["feature_ai_agent_enabled"] is False
     assert DEFAULT_SETTINGS["feature_games_enabled"] is False
     assert DEFAULT_SETTINGS["feature_privacy_uploads_enabled"] is False
     assert DEFAULT_SETTINGS["feature_storage_albums_enabled"] is False

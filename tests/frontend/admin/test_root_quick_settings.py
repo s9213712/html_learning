@@ -23,6 +23,7 @@ def test_root_quick_settings_expose_service_fee_pricing_for_feature_pages():
         "videos": ["video_publish_basic", "video_boost_24h"],
         "games": ["game_entry_standard", "game_virtual_item_common"],
         "comfyui": ["comfyui_txt2img_basic", "comfyui_txt2img_highres", "comfyui_batch_10"],
+        '"ai-agent"': ["ai_agent_task_basic"],
         "accounts": ["username_change", "profile_decoration", "violation_fine"],
     }
     unpriced_tabs = ["chat", "jobs", "experiments", "economy", "trading", "server"]
