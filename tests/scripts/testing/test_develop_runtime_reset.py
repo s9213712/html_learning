@@ -143,3 +143,13 @@ def test_runtime_maintenance_conflict_is_checked_before_dry_run():
     pre_dry_run = text[:dry_run_index]
     assert "ensure_single_runtime_maintenance_action" in pre_dry_run
     assert "choose exactly one of --backup, --restore, --reset, or --delete" in text
+
+
+def test_restart_shortcut_pins_effective_runtime_root():
+    text = SCRIPT.read_text(encoding="utf-8")
+    start = text.index("write_restart_shortcut_script() {")
+    end = text.index("load_local_capacity_defaults() {", start)
+    body = text[start:end]
+
+    assert 'append_arg_if_value restart_args --runtime-root "$RUNTIME_ROOT"' in body
+    assert 'append_arg_if_value restart_args --runtime-root "$CUSTOM_RUNTIME_ROOT"' not in body

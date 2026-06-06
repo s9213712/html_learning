@@ -384,7 +384,7 @@
     '尚未選擇要隨訊息送出的附件': 'No attachments selected for this message',
     '聊天室共用附件': 'Room shared attachments',
     '管理自己的主頁、資料與好友。': 'Manage your profile, information, and friends.',
-    '尚未填寫個人簡介。': 'No bio has been added yet.',
+    '這個人很懶什麼都沒寫': 'This person is too lazy to write anything.',
     '好友狀態': 'Friend status',
     '本人': 'You',
     '主頁可見性': 'Profile visibility',

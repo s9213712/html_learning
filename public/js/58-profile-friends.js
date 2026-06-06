@@ -143,6 +143,8 @@ function profileAvatarCropperElements() {
     box: $("profile-avatar-crop-box"),
     shape: $("profile-avatar-crop-shape"),
     zoom: $("profile-avatar-crop-zoom"),
+    zoomValue: $("profile-avatar-crop-zoom-value"),
+    zoomSteps: Array.from(document.querySelectorAll("[data-profile-avatar-zoom-step]")),
     center: $("profile-avatar-crop-center"),
     file: $("profile-avatar-file"),
     cloudSelect: $("profile-avatar-cloud-file"),
@@ -160,6 +162,19 @@ function normalizeProfileAvatarZoom(value) {
   const numeric = Number.parseFloat(String(value ?? ""));
   const safe = Number.isFinite(numeric) ? numeric : PROFILE_AVATAR_DEFAULT_ZOOM;
   return profileAvatarClamp(safe, PROFILE_AVATAR_MIN_ZOOM, PROFILE_AVATAR_MAX_ZOOM);
+}
+
+function profileAvatarZoomLabel(value) {
+  return `${normalizeProfileAvatarZoom(value).toFixed(2)}x`;
+}
+
+function syncProfileAvatarZoomControl(value = profileAvatarCropState.zoom) {
+  const els = profileAvatarCropperElements();
+  const zoom = normalizeProfileAvatarZoom(value);
+  profileAvatarCropState.zoom = zoom;
+  if (els.zoom) els.zoom.value = String(zoom);
+  if (els.zoomValue) els.zoomValue.textContent = profileAvatarZoomLabel(zoom);
+  return zoom;
 }
 
 function currentProfileAvatarShape() {
@@ -223,7 +238,7 @@ function resetProfileAvatarCropper({ keepFile = false } = {}) {
     els.image.style.height = "";
   }
   if (els.stage) els.stage.classList.remove("is-dragging");
-  if (els.zoom) els.zoom.value = "1";
+  syncProfileAvatarZoomControl(PROFILE_AVATAR_DEFAULT_ZOOM);
   syncProfileAvatarShapeControls(currentProfileAvatarShape(), { preview: false });
   setProfileAvatarCropHidden();
 }
@@ -288,16 +303,15 @@ function currentProfileAvatarCropPayload() {
 
 function renderProfileAvatarCropper() {
   const els = profileAvatarCropperElements();
+  const zoom = syncProfileAvatarZoomControl(profileAvatarCropState.zoom);
   const metrics = profileAvatarStageMetrics();
   if (!els.image || !els.box || !metrics || !profileAvatarCropState.hasImage) return;
   profileAvatarCropState.baseScale = Math.max(
     metrics.width / profileAvatarCropState.naturalWidth,
     metrics.height / profileAvatarCropState.naturalHeight
   );
-  profileAvatarCropState.zoom = normalizeProfileAvatarZoom(profileAvatarCropState.zoom);
-  if (els.zoom) els.zoom.value = String(profileAvatarCropState.zoom);
   clampProfileAvatarOffsets(metrics);
-  const scale = profileAvatarCropState.baseScale * normalizeProfileAvatarZoom(profileAvatarCropState.zoom);
+  const scale = profileAvatarCropState.baseScale * zoom;
   const imageWidth = profileAvatarCropState.naturalWidth * scale;
   const imageHeight = profileAvatarCropState.naturalHeight * scale;
   els.image.style.width = `${imageWidth}px`;
@@ -345,7 +359,7 @@ function loadProfileAvatarObjectUrl(nextUrl, cloudFile = null) {
     profileAvatarCropState.offsetX = 0;
     profileAvatarCropState.offsetY = 0;
     profileAvatarCropState.hasImage = true;
-    if (els.zoom) els.zoom.value = "1";
+    syncProfileAvatarZoomControl(PROFILE_AVATAR_DEFAULT_ZOOM);
     els.cropper.hidden = false;
     requestAnimationFrame(renderProfileAvatarCropper);
   };
@@ -952,7 +966,7 @@ function renderProfileHome(profile) {
     meta.textContent = `@${profile?.username || "-"} · ${role}${level}`;
   }
   const bio = $("profile-home-bio");
-  if (bio) bio.textContent = profile?.bio || "尚未填寫個人簡介。";
+  if (bio) bio.textContent = profile?.bio || "這個人很懶什麼都沒寫";
   const signature = $("profile-home-signature");
   if (signature) signature.textContent = profile?.signature || "";
   renderProfileHomePublicAccountFields(profile);
@@ -1604,10 +1618,18 @@ function bindProfileAvatarUploaderControls() {
   }
   if (els.zoom) {
     els.zoom.addEventListener("input", () => {
-      profileAvatarCropState.zoom = normalizeProfileAvatarZoom(els.zoom.value);
+      syncProfileAvatarZoomControl(els.zoom.value);
       renderProfileAvatarCropper();
     });
   }
+  els.zoomSteps.forEach((button) => {
+    button.addEventListener("click", () => {
+      const delta = Number.parseFloat(button.dataset.profileAvatarZoomStep || "0");
+      if (!Number.isFinite(delta) || delta === 0) return;
+      syncProfileAvatarZoomControl(profileAvatarCropState.zoom + delta);
+      renderProfileAvatarCropper();
+    });
+  });
   if (els.shape) {
     els.shape.addEventListener("change", () => {
       syncProfileAvatarShapeControls(els.shape.value, { preview: true });
@@ -1616,10 +1638,9 @@ function bindProfileAvatarUploaderControls() {
   }
   if (els.center) {
     els.center.addEventListener("click", () => {
-      profileAvatarCropState.zoom = 1;
+      syncProfileAvatarZoomControl(PROFILE_AVATAR_DEFAULT_ZOOM);
       profileAvatarCropState.offsetX = 0;
       profileAvatarCropState.offsetY = 0;
-      if (els.zoom) els.zoom.value = "1";
       renderProfileAvatarCropper();
     });
   }

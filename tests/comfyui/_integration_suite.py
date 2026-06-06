@@ -1239,9 +1239,16 @@ def test_comfyui_history_rerun_reuses_saved_assets(tmp_path):
       time.sleep(0.05)
       body = client.get(f"/api/comfyui/jobs/{job_id}").get_json()
     assert body["job"]["status"] == "completed"
+    rerun_history_id = body["job"]["result"]["history_id"]
+    assert rerun_history_id > 0
+    assert rerun_history_id != history_id
     assert FakeComfyUIClient.uploaded_images == []
     assert FakeComfyUIClient.last_params["generation_mode"] == "upscale"
     assert FakeComfyUIClient.last_params["source_image_ref"]["filename"] == "source.png"
+    history = client.get("/api/comfyui/history")
+    assert history.status_code == 200
+    history_ids = [item["id"] for item in history.get_json()["history"]]
+    assert history_ids.index(rerun_history_id) < history_ids.index(history_id)
 
 
 def test_comfyui_workflow_import_rejects_bad_json_and_unsafe_paths(tmp_path):
@@ -6241,7 +6248,7 @@ def test_comfyui_frontend_is_wired():
     assert "if (modelsTab) modelsTab.hidden = !showLocalModels;" in comfyui_js
     assert '目前是雲端 / 遠端模式，所以這個區塊只保留說明。若要管理本站的本地 ComfyUI 模型，請先把 backend 切回本地模式。' in comfyui_js
     assert "/js/36-comfyui.js?v=20260605-hf-textonly-repo-sanitize" in index_html
-    assert "/styles.css?v=20260605-avatar-1000-mobile" in index_html
+    assert "/styles.css?v=20260606-avatar-zoom-stepper" in index_html
     assert "width: min(420px, 100%);" in css
     assert "max-height: 320px;" in css
     assert ".comfyui-root-details" in css

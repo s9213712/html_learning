@@ -17,7 +17,10 @@ def test_avatar_upload_ui_is_wired():
     assert 'id="profile-avatar-file"' in index_html
     assert 'id="profile-avatar-upload-btn"' in index_html
     assert 'id="profile-avatar-crop-width"' in index_html
+    assert 'id="profile-avatar-crop-zoom-value" for="profile-avatar-crop-zoom"' in index_html
     assert 'id="profile-avatar-crop-zoom" min="0.1" max="10" step="0.01" value="1"' in index_html
+    assert 'data-profile-avatar-zoom-step="-0.05"' in index_html
+    assert 'data-profile-avatar-zoom-step="0.05"' in index_html
     zoom_pos = index_html.index('id="profile-avatar-crop-zoom"')
     assert 'max="6"' not in index_html[zoom_pos - 80:zoom_pos + 160]
     assert 'type="number" id="profile-avatar-crop-zoom"' not in index_html
@@ -36,6 +39,8 @@ def test_avatar_upload_ui_is_wired():
     assert "if (typeof bindProfileFriendsControls === \"function\") bindProfileFriendsControls();" in bootstrap_js
     assert "function bindProfileAvatarUploaderControls()" in profile_js
     assert "bindProfileAvatarUploaderControls();" in profile_js
+    assert "function profileAvatarZoomLabel(value)" in profile_js
+    assert "function syncProfileAvatarZoomControl(value = profileAvatarCropState.zoom)" in profile_js
     assert "function avatarUrlForUser(userId, avatarFileId = \"\")" in core_js
     assert "function userAvatarMarkup(userId, username, extraClass = \"\", avatarFileId = \"\")" in core_js
     assert "currentUserAvatarFileId = json.avatar_file_id || \"\";" in core_js

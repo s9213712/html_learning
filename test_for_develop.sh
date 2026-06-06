@@ -216,7 +216,7 @@ write_restart_shortcut_script() {
   append_arg_if_value restart_args --cloud-drive-storage-root "$CLOUD_DRIVE_STORAGE_ROOT"
   append_arg_if_value restart_args --cloud-drive-global-capacity-limit-mb "$CLOUD_DRIVE_GLOBAL_CAPACITY_LIMIT_MB"
   append_arg_if_value restart_args --max-content-mb "$MAX_CONTENT_MB"
-  append_arg_if_value restart_args --runtime-root "$CUSTOM_RUNTIME_ROOT"
+  append_arg_if_value restart_args --runtime-root "$RUNTIME_ROOT"
   append_arg_if_value restart_args --transmission-rpc-username "$TRANSMISSION_RPC_USERNAME"
   append_arg_if_value restart_args --transmission-rpc-password "$TRANSMISSION_RPC_PASSWORD"
   append_arg_if_value restart_args --transmission-setup-script "$TRANSMISSION_SETUP_SCRIPT"

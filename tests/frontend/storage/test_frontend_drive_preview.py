@@ -626,7 +626,7 @@ def test_cloud_drive_toolbar_buttons_wrap_on_mobile():
     index_html = (ROOT / "public" / "index.html").read_text(encoding="utf-8")
     css = (ROOT / "public" / "styles.css").read_text(encoding="utf-8")
 
-    assert '/styles.css?v=20260605-avatar-1000-mobile' in index_html
+    assert '/styles.css?v=20260606-avatar-zoom-stepper' in index_html
     assert 'data-drive-action="open-text-document-modal">新增文檔</button>' in index_html
     assert 'data-drive-action="set-drive-e2ee-session-passphrase">套用到本次瀏覽器</button>' in index_html
     assert 'data-drive-action="clear-drive-e2ee-session-passphrase">清除</button>' in index_html

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>hackme_web — 登入系統</title>
   <!-- Security headers via HTTP (set by server/Talisman) -->
-  <link rel="stylesheet" href="/styles.css?v=20260605-avatar-1000-mobile" />
+  <link rel="stylesheet" href="/styles.css?v=20260606-avatar-zoom-stepper" />
   <link rel="stylesheet" href="/experiments.css?v=20260517-plane-view-angle" />
   <link rel="stylesheet" href="/i18n-language-switcher.css?v=20260520-deep-audit" />
 </head>
@@ -430,7 +430,7 @@
           <div class="profile-summary-main">
             <h3 id="profile-home-name">-</h3>
             <p id="profile-home-meta">-</p>
-            <p class="profile-bio" id="profile-home-bio">尚未填寫個人簡介。</p>
+            <p class="profile-bio" id="profile-home-bio">這個人很懶什麼都沒寫</p>
             <p class="drive-card-sub" id="profile-home-signature"></p>
             <div class="profile-public-info" id="profile-home-public-account-fields"></div>
             <div class="profile-home-actions" id="profile-home-actions"></div>
@@ -7206,9 +7206,16 @@
           <option value="squircle">超橢圓</option>
           <option value="square">方形</option>
         </select>
-        <label for="profile-avatar-crop-zoom">縮放</label>
-        <input type="range" id="profile-avatar-crop-zoom" min="0.1" max="10" step="0.01" value="1" />
-        <button type="button" id="profile-avatar-crop-center" class="btn btn-sm">置中</button>
+        <div class="avatar-cropper-zoom-label">
+          <label for="profile-avatar-crop-zoom">縮放</label>
+          <output id="profile-avatar-crop-zoom-value" for="profile-avatar-crop-zoom" class="avatar-cropper-zoom-value">1.00x</output>
+        </div>
+        <div class="avatar-cropper-zoom-row">
+          <button type="button" class="btn btn-sm avatar-cropper-zoom-step" data-profile-avatar-zoom-step="-0.05" aria-label="縮小頭像裁切">-</button>
+          <input type="range" id="profile-avatar-crop-zoom" min="0.1" max="10" step="0.01" value="1" />
+          <button type="button" class="btn btn-sm avatar-cropper-zoom-step" data-profile-avatar-zoom-step="0.05" aria-label="放大頭像裁切">+</button>
+          <button type="button" id="profile-avatar-crop-center" class="btn btn-sm">置中</button>
+        </div>
       </div>
       <div class="avatar-cropper-hint">不用輸入座標；拖曳圖片、調整縮放後直接上傳。</div>
       <input type="hidden" id="profile-avatar-crop-x" value="0" />
@@ -7391,7 +7398,7 @@
 <script src="/js/56-trading.js?v=20260525-usdt-market-labels" defer></script>
 <script src="/js/56-trading-bots.js?v=20260601-trading-bot-module" defer></script>
 <script src="/js/57-platform-centers.js?v=20260524-trading-status-split" defer></script>
-<script src="/js/58-profile-friends.js?v=20260605-avatar-1000-mobile" defer></script>
+<script src="/js/58-profile-friends.js?v=20260606-avatar-zoom-stepper" defer></script>
 <script src="/js/90-bootstrap.js?v=20260602-transmission-test" defer></script>
 </body>
 </html>
