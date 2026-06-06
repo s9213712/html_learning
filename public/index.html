@@ -2214,7 +2214,7 @@
         <button class="btn comfyui-subtab" type="button" role="tab" aria-selected="false" data-comfyui-view="hf">HF / Diffusers</button>
         <button class="btn comfyui-subtab" type="button" role="tab" aria-selected="false" data-comfyui-view="history">歷史重跑</button>
         <button class="btn comfyui-subtab" type="button" role="tab" aria-selected="false" data-comfyui-view="workflow">Workflow</button>
-        <button class="btn comfyui-subtab" type="button" role="tab" aria-selected="false" data-comfyui-view="models" hidden>模型管理</button>
+        <button class="btn comfyui-subtab" type="button" role="tab" aria-selected="false" data-comfyui-view="models" hidden>Civitai / 模型管理</button>
         <button class="btn comfyui-subtab" type="button" role="tab" aria-selected="false" data-comfyui-view="settings" hidden>AI 後端設定</button>
       </div>
       <div class="comfyui-subview active" id="comfyui-view-generate" data-comfyui-view-panel="generate" role="tabpanel">
@@ -2232,6 +2232,7 @@
             </div>
             <button class="btn" id="comfyui-refresh-btn" type="button">重新整理模型</button>
             <button class="btn" id="comfyui-load-draft-btn" type="button">載入上次設定</button>
+            <button class="btn" id="comfyui-open-civitai-panel-btn" type="button" style="display:none;">Civitai / 模型匯入</button>
             <button class="btn" id="comfyui-template-import-btn" type="button">匯入 workflow 模板檔（JSON）</button>
             <button class="btn btn-primary" id="comfyui-start-btn" type="button" style="display:none;">啟動 ComfyUI</button>
             <button class="btn" id="comfyui-stop-btn" type="button" style="display:none;">停止 ComfyUI</button>
@@ -5710,32 +5711,32 @@
               </details>
               <div style="font-size:.78rem;color:var(--muted);margin:.25rem 0 .75rem;">以 Linux/WSL 腳本為例：資料夾填你的 ComfyUI portable 或專案資料夾，腳本填 <code>run_in_linux.sh</code>。本地模式會下載模型到 <code>ComfyUI/models/checkpoints</code> 或 <code>ComfyUI/models/loras</code>，丟棄預覽時可刪除 output 原始檔。</div>
             </div>
-            <div class="field" id="comfyui-civitai-settings" style="display:none;">
+            <div class="field" id="comfyui-civitai-settings" data-comfyui-settings-family-panel="comfyui" style="display:none;">
               <label>Civitai API Key</label>
               <input type="password" id="s-comfyui-civitai-api-key" placeholder="用於 root 模型下載面板讀取版本與下載" autocomplete="off" />
               <div class="drive-card-sub">不論本地或遠端模式都可保存，供 root 使用 Civitai 模型匯入區讀取版本與下載；不會改變上方 ComfyUI / HF 產圖 backend。</div>
             </div>
-            <div class="field">
+            <div class="field" data-comfyui-settings-family-panel="comfyui">
               <label><input type="checkbox" id="s-comfyui-paid-api-nodes-enabled" /> 允許 ComfyUI 付費 / API nodes</label>
               <div class="drive-card-sub">僅允許後端在執行 workflow 時注入 ComfyUI Account API Key；前端 workflow JSON、匯出檔與 audit 不會包含明文 key。</div>
               <div class="drive-card-sub">ComfyUI 官方 credits 不是本站積分；本站錢包、交易所體驗金與任務獎勵不能支付 ComfyUI 官方 Partner/API nodes。</div>
             </div>
-            <div class="field">
+            <div class="field" data-comfyui-settings-family-panel="comfyui">
               <label>ComfyUI Account API Key</label>
               <input type="password" id="s-comfyui-account-api-key" placeholder="留空代表不變更；只供付費/API nodes 執行時使用" autocomplete="off" />
               <div class="drive-card-sub" id="comfyui-account-api-key-state">尚未讀取 key 狀態。</div>
               <div class="drive-card-sub">餘額與購買請到 ComfyUI UI 的 Settings / Credits；本站目前只顯示 key 是否已設定與執行風險提示。</div>
               <label style="margin-top:.35rem;"><input type="checkbox" id="s-comfyui-account-api-key-clear" /> 清除已儲存的 ComfyUI Account API Key</label>
             </div>
-            <div class="field">
+            <div class="field" data-comfyui-settings-family-panel="comfyui">
               <label>單次產圖張數上限</label>
               <input type="number" id="s-comfyui-max-batch-size" min="1" max="8" value="1" />
             </div>
-            <div class="field">
+            <div class="field" data-comfyui-settings-family-panel="comfyui">
               <label>預設產圖寬度</label>
               <input type="number" id="s-comfyui-default-width" min="64" max="2048" step="8" value="1024" />
             </div>
-            <div class="field">
+            <div class="field" data-comfyui-settings-family-panel="comfyui">
               <label>預設產圖高度</label>
               <input type="number" id="s-comfyui-default-height" min="64" max="2048" step="8" value="1024" />
             </div>

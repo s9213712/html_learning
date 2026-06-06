@@ -2259,8 +2259,8 @@ function updateComfyuiConnectionModeFields() {
   if (localBox) localBox.style.display = mode === "local" && settingsFamily === "comfyui" ? "" : "none";
   if (remoteBox) remoteBox.style.display = mode === "remote" && settingsFamily === "comfyui" ? "" : "none";
   if (diffusersBox) diffusersBox.style.display = settingsFamily === "hf" ? "" : "none";
-  if (civitaiBox) civitaiBox.style.display = "";
-  if (civitaiInput) civitaiInput.disabled = false;
+  if (civitaiBox) civitaiBox.style.display = settingsFamily === "comfyui" ? "" : "none";
+  if (civitaiInput) civitaiInput.disabled = settingsFamily !== "comfyui";
   if (hfTokenInput) hfTokenInput.disabled = settingsFamily !== "hf";
   if (hfTokenClear) hfTokenClear.disabled = settingsFamily !== "hf";
   if (allowInProcessDiffusers) allowInProcessDiffusers.disabled = settingsFamily !== "hf";

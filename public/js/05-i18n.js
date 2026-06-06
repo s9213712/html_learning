@@ -651,6 +651,8 @@
     '尚未讀取 chess engine dashboard。': 'Chess engine dashboard has not been loaded yet.',
     '生成': 'Generate',
     '歷史重跑': 'History rerun',
+    'Civitai / 模型管理': 'Civitai / model management',
+    'Civitai / 模型匯入': 'Civitai / model import',
     '模型管理': 'Model management',
     '模式讀取中': 'Loading mode',
     '目前模式：讀取中': 'Current mode: loading',

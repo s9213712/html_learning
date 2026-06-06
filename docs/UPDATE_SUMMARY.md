@@ -1,6 +1,18 @@
 # Update Summary
 
-Release ID: `04_2026.06.06-001`
+Release ID: `04_2026.06.06-002`
+
+## 04_2026.06.06-002
+
+- Cleaned up the AI backend settings split: the HF family now only shows
+  Hugging Face / Diffusers fields, while Civitai, ComfyUI Account API Key,
+  local/remote ComfyUI settings, batch limits, and default dimensions stay in
+  the ComfyUI family.
+- Added an explicit root-only `Civitai / 模型匯入` button on the ComfyUI
+  generation surface and renamed the model-management subtab to
+  `Civitai / 模型管理`, so the Civitai import tools are discoverable without
+  guessing that they live behind a generic model tab. The shortcut is hidden
+  while the active surface is HF to keep the HF view clean.
 
 ## 04_2026.06.06-001
 

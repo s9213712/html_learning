@@ -26,6 +26,7 @@ def _hf_settings_block(html):
 def test_diffusers_generation_page_accepts_repo_and_variant_selection():
     html = _read("public/index.html")
     hf_block = _hf_repo_block(html)
+    hf_settings = _hf_settings_block(html)
     assert 'id="comfyui-diffusers-model-repo"' in html
     assert 'id="comfyui-diffusers-model-repo" placeholder="dhead/waiIllustriousSDXL_v150 或 Heartsync/NSFW-Uncensored"' in html
     assert 'id="comfyui-diffusers-inspect-btn"' in html
@@ -56,6 +57,11 @@ def test_diffusers_generation_page_accepts_repo_and_variant_selection():
     assert 'id="comfyui-diffusers-gguf-base-repo"' not in html
     assert 'id="comfyui-installed-gguf-list"' in html
     assert 'id="comfyui-installed-gguf-list" class="comfyui-installed-gguf-list" hidden' in html
+    assert 'id="comfyui-civitai-settings"' not in hf_settings
+    assert 'id="s-comfyui-civitai-api-key"' not in hf_settings
+    assert 'id="s-comfyui-account-api-key"' not in hf_settings
+    assert 'id="s-comfyui-max-batch-size"' not in hf_settings
+    assert 'id="s-comfyui-default-width"' not in hf_settings
 
 
 def test_diffusers_repo_examples_do_not_use_weight_filenames():
@@ -148,6 +154,24 @@ def test_diffusers_js_preflights_huggingface_repo_before_generation():
     assert "本站可執行：" in js
     assert "此 HF pipeline 目前只能辨識" in js
     assert "allOptions.filter((option) => option?.kind !== \"gguf\")" in js
+
+
+def test_civitai_frontend_entry_is_explicit_and_not_hf_settings_family():
+    html = _read("public/index.html")
+    admin_js = _read("public/js/50-admin.js")
+    comfyui_js = _read("public/js/36-comfyui.js")
+
+    assert 'data-comfyui-view="models" hidden>Civitai / 模型管理</button>' in html
+    assert 'id="comfyui-open-civitai-panel-btn"' in html
+    assert 'Civitai / 模型匯入' in html
+    assert 'id="comfyui-civitai-settings" data-comfyui-settings-family-panel="comfyui"' in html
+    assert 'id="s-comfyui-paid-api-nodes-enabled"' in html
+    assert 'id="s-comfyui-account-api-key"' in html
+    assert 'if (civitaiBox) civitaiBox.style.display = settingsFamily === "comfyui" ? "" : "none";' in admin_js
+    assert 'if (civitaiInput) civitaiInput.disabled = settingsFamily !== "comfyui";' in admin_js
+    assert "function openComfyuiCivitaiPanel()" in comfyui_js
+    assert 'const civitaiShortcut = $("comfyui-open-civitai-panel-btn");' in comfyui_js
+    assert 'civitaiShortcut.style.display = showLocalModels && comfyuiActiveBackendFamily !== "hf" ? "" : "none";' in comfyui_js
 
 
 def test_diffusers_text_only_repo_hides_image_cards_and_omits_image_payloads():

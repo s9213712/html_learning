@@ -293,12 +293,13 @@ Root can configure ComfyUI in two modes from server settings:
   experiment where main-process resource risk is acceptable.
 - In the root settings page, token-like fields are grouped by the setting they
   control: the `Turnstile site key` only appears when CAPTCHA mode is
-  `turnstile`, while `Civitai API Key` and `Hugging Face Token` live under the
-  AI image settings.
+  `turnstile`; `Hugging Face Token` appears only in the HF / Diffusers AI
+  settings family; `Civitai API Key` appears in the ComfyUI AI settings family
+  because it feeds the ComfyUI model-import tools.
 - The AI page keeps the main ComfyUI generation form focused on generation
-  only. Root's Civitai model-download tools now live in a separate collapsed
-  panel at the bottom of the page so downloading models does not crowd the
-  generation controls.
+  only. Root gets an explicit `Civitai / model import` button on the ComfyUI
+  surface and a `Civitai / model management` subtab for model-download tools,
+  while the active HF surface stays limited to Hugging Face / Diffusers controls.
 - Each selected LoRA now exposes separate `Model` and `CLIP` strength fields in
   the page. The frontend stores those values in the local draft, and the
   backend still re-validates them into the allowed range before they reach the

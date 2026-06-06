@@ -20,6 +20,12 @@
 - 依 21:xx 追加需求，root 的 Civitai / model import 面板在 local、remote、Diffusers 模式都常駐可見；遠端模式文案明確說明檔案寫入本站設定的 ComfyUI models 目錄。Hugging Face Token 快速設定已從 HF 生圖表單移到右上角螺母的 AI 產圖設定。
 - Release ID 已改成分支辨識格式：04 分支使用 `04_2026.06.06-001`，並更新 release policy / pre-push hook 以保留 `04_` / `05_` 前綴。
 
+2026-06-06 23:xx CST 追加 UI 收尾：
+
+- 使用者實測指出 AI 後端設定切到 HF 時仍混入 ComfyUI 相關欄位，且前台不容易看到 Civitai。已將 gear 的 `HF` family 限定為 Hugging Face / Diffusers 欄位；`Civitai API Key`、ComfyUI Account API Key、batch/default-size 等 ComfyUI 專屬欄位只留在 `ComfyUI` family。
+- root 前台新增 `Civitai / 模型匯入` 快捷按鈕，並將模型子頁籤改名為 `Civitai / 模型管理`。Civitai 仍是 ComfyUI 模型匯入工具，會在 ComfyUI 本地/遠端模式常駐可見；HF active surface 與 HF 設定 family 不再混入 ComfyUI/Civitai 專屬欄位。
+- Release ID 往前推進為 `04_2026.06.06-002`。
+
 ## 已補驗證
 
 - 新增 `tests/comfyui/test_diffusers_client.py::test_huggingface_diffusers_metadata_accumulates_multiple_pipeline_capabilities`

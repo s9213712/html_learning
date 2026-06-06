@@ -6253,6 +6253,9 @@ def test_comfyui_frontend_is_wired():
     assert 'id="comfyui-root-model-details"' in index_html
     assert 'id="comfyui-root-model-mode-hint"' in index_html
     assert 'root 模型匯入（Civitai / 檔案上傳）' in index_html
+    assert 'data-comfyui-view="models" hidden>Civitai / 模型管理</button>' in index_html
+    assert 'id="comfyui-open-civitai-panel-btn"' in index_html
+    assert 'Civitai / 模型匯入' in index_html
     assert '和上方生圖表單分開' in index_html
     assert 'Civitai 模型匯入區會在本地與遠端模式常駐可見' in index_html
     assert '<option value="embedding">Embedding / TI</option>' in index_html
@@ -6278,6 +6281,7 @@ def test_comfyui_frontend_is_wired():
     assert 'id="comfyui-local-start-template-link"' in index_html
     assert 'href="/api/root/comfyui/local-start-template"' in index_html
     assert 'id="comfyui-civitai-settings"' in index_html
+    assert 'id="comfyui-civitai-settings" data-comfyui-settings-family-panel="comfyui"' in index_html
     assert 'id="s-comfyui-civitai-api-key"' in index_html
     assert "function canManageComfyuiLocalModels" in comfyui_js
     assert 'return currentUser === "root";' in comfyui_js
@@ -6298,7 +6302,11 @@ def test_comfyui_frontend_is_wired():
     assert 'normTab === "comfyui"' in admin_js
     assert '本地模式會測試本地 API；若產圖時 API 未啟動，後端會嘗試執行啟動腳本。' in admin_js
     assert 'ComfyUI / GGUF 遠端模式只負責呼叫指定 API 生圖；Civitai API Key 與模型匯入區會常駐可見' in admin_js
+    assert 'if (civitaiBox) civitaiBox.style.display = settingsFamily === "comfyui" ? "" : "none";' in admin_js
+    assert 'if (civitaiInput) civitaiInput.disabled = settingsFamily !== "comfyui";' in admin_js
     assert 'HF 頁籤會檢查 Hugging Face repo 與 Python / Diffusers 套件' in admin_js
+    assert "function openComfyuiCivitaiPanel()" in comfyui_js
+    assert 'civitaiShortcut.style.display = showLocalModels && comfyuiActiveBackendFamily !== "hf" ? "" : "none";' in comfyui_js
     assert 'apiFetch(API + "/comfyui/generate"' in comfyui_js
     assert 'apiFetch(API + "/comfyui/billing-quote"' in comfyui_js
     assert 'apiFetch(API + "/root/comfyui/civitai/search"' in comfyui_js

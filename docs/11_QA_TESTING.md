@@ -414,7 +414,9 @@ python3 scripts/on_live_reports/snapshot_restore.py
   - 離線 recovery 後是否留下審計紀錄；若 runtime 缺審計 secret，是否至少不會把 recovery 本身做失敗
   - `scripts/security/pentest/run_functional_smoke.sh` 是否仍能驗證 offline root recovery CLI 可執行
 - 若本次改到 ComfyUI，至少補：
-  - 設定頁的 `Civitai API Key`、`Hugging Face Token` 與 root 模型匯入工具是否都在 AI 產圖設定與 root 模型匯入區維持可見；切到 `remote` 時文案需明確說明會寫入本站設定的 ComfyUI models 目錄
+  - 設定頁切到 `HF` family 時是否只顯示 Hugging Face / Diffusers 欄位，不混入 `Civitai API Key`、ComfyUI Account API Key、batch/default-size 等 ComfyUI 專屬欄位
+  - 設定頁切到 `ComfyUI` family 時，`Civitai API Key` 與 root 模型匯入工具是否在本地/遠端模式都維持可見；切到 `remote` 時文案需明確說明會寫入本站設定的 ComfyUI models 目錄
+  - AI 產圖前台 root 是否看得到明確的 `Civitai / 模型匯入` 或 `Civitai / 模型管理` 入口，而不是只能猜在一般模型管理頁
   - model list 是否回傳 `models / loras / embeddings / vaes / generation_modes / controlnet_types / controlnet_models / upscale_models`
   - LoRA metadata / `trained_words` 是否會在重新整理後仍存在，不是只在下載當下有
   - 使用者加入 LoRA 時，是否只會補上缺少的 trigger words，而不會每次重複疊加

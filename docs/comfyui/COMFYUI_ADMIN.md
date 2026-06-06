@@ -60,7 +60,7 @@
 
 ### Civitai API Key
 
-`Civitai API Key` 只用於 root 的模型搜尋 / inspect / 下載區。它不是生圖 backend 的 ComfyUI API 位址，也不是 ComfyUI Account API Key；遠端模式下仍可保存與使用，但檔案會寫入本站設定的 ComfyUI models 目錄。
+`Civitai API Key` 只用於 root 的模型搜尋 / inspect / 下載區。它不是生圖 backend 的 ComfyUI API 位址，也不是 ComfyUI Account API Key；遠端模式下仍可保存與使用，但檔案會寫入本站設定的 ComfyUI models 目錄。它顯示在 AI 後端設定的 `ComfyUI` family，不會混在 `HF` family；前台 root 會在 ComfyUI surface 看到明確的 `Civitai / 模型匯入` 入口，HF active surface 則維持 Hugging Face / Diffusers 控制。
 
 ### ComfyUI Account API Key
 

@@ -2776,6 +2776,7 @@ function updateComfyuiRootPanelVisibility(modeOverride = null) {
   const hint = $("comfyui-root-model-mode-hint");
   const modelsTab = document.querySelector('[data-comfyui-view="models"]');
   const settingsTab = document.querySelector('[data-comfyui-view="settings"]');
+  const civitaiShortcut = $("comfyui-open-civitai-panel-btn");
   const mode = comfyuiEffectiveConnectionMode(modeOverride);
   const localReady = mode === "local";
   const showLocalModels = canManageComfyuiLocalModels(mode);
@@ -2783,6 +2784,7 @@ function updateComfyuiRootPanelVisibility(modeOverride = null) {
   updateComfyuiModeNote(mode);
   if (panel) panel.style.display = showLocalModels ? "" : "none";
   if (modelsTab) modelsTab.hidden = !showLocalModels;
+  if (civitaiShortcut) civitaiShortcut.style.display = showLocalModels && comfyuiActiveBackendFamily !== "hf" ? "" : "none";
   if (settingsPanel) settingsPanel.style.display = canManageSettings ? "" : "none";
   if (settingsTab) settingsTab.hidden = !canManageSettings;
   if ((!showLocalModels && document.querySelector('[data-comfyui-view-panel="models"]')?.classList.contains("active"))
@@ -2803,6 +2805,17 @@ function updateComfyuiRootPanelVisibility(modeOverride = null) {
         : "目前是雲端 / 遠端模式；Civitai 匯入區仍可使用，但下載會寫入本站設定的 ComfyUI models 目錄。若遠端主機不是同一路徑，請在遠端自行同步或掛載。");
   }
   updateComfyuiModelSourceMode();
+}
+
+function openComfyuiCivitaiPanel() {
+  if (!canManageComfyuiLocalModels()) return;
+  setComfyuiView("models");
+  const details = $("comfyui-root-model-details");
+  if (details) details.open = true;
+  const sourceMode = $("comfyui-model-source-mode");
+  if (sourceMode) sourceMode.value = "civitai";
+  updateComfyuiModelSourceMode();
+  $("comfyui-civitai-url")?.focus();
 }
 
 function renderComfyuiSelectedLoras() {
@@ -3301,6 +3314,11 @@ function bindComfyuiAdvancedUi() {
   if (modelSourceMode && modelSourceMode.dataset.comfyuiBound !== "1") {
     modelSourceMode.dataset.comfyuiBound = "1";
     modelSourceMode.addEventListener("change", updateComfyuiModelSourceMode);
+  }
+  const civitaiPanelBtn = $("comfyui-open-civitai-panel-btn");
+  if (civitaiPanelBtn && civitaiPanelBtn.dataset.comfyuiBound !== "1") {
+    civitaiPanelBtn.dataset.comfyuiBound = "1";
+    civitaiPanelBtn.addEventListener("click", openComfyuiCivitaiPanel);
   }
   const modelDownloadType = $("comfyui-model-download-type");
   if (modelDownloadType && modelDownloadType.dataset.comfyuiBound !== "1") {
