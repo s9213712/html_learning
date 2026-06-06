@@ -1482,11 +1482,11 @@ def register_video_routes(app, deps):
         stem = Path(filename).stem.strip()
         return stem or "未命名影音"
 
-    VIDEO_STREAMING_MODE_CHOICES = {"prepared_hls", "realtime_proxy"}
+    VIDEO_STREAMING_MODE_CHOICES = {"direct", "prepared_hls", "realtime_proxy"}
 
     def _parse_streaming_modes(raw, *, default_auto=True):
         if raw in (None, ""):
-            return {"prepared_hls", "realtime_proxy"} if default_auto else {"realtime_proxy"}
+            return {"direct", "prepared_hls", "realtime_proxy"} if default_auto else {"realtime_proxy"}
         if isinstance(raw, str):
             try:
                 parsed = json.loads(raw)
@@ -1501,10 +1501,12 @@ def register_video_routes(app, deps):
         return modes or {"realtime_proxy"}
 
     def _streaming_modes_payload(modes):
-        ordered = [mode for mode in ("prepared_hls", "realtime_proxy") if mode in set(modes or [])]
+        ordered = [mode for mode in ("direct", "prepared_hls", "realtime_proxy") if mode in set(modes or [])]
         return ordered or ["realtime_proxy"]
 
     def _default_streaming_modes_for_privacy(privacy_mode):
+        if str(privacy_mode or "").strip().lower() == "standard_plain":
+            return {"direct"}
         return {"prepared_hls", "realtime_proxy"}
 
     def _stored_video_streaming_modes(conn, video_id):

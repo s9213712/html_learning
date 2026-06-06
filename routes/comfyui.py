@@ -2869,9 +2869,11 @@ def register_comfyui_routes(app, deps):
         diffusion_options = list((capabilities or {}).get("diffusion_models") or [])
         gguf_option = resolve_model_option(gguf_file, diffusion_options)
         if native_binding.get("connection_mode") == "remote" and not gguf_option:
+            filename = Path(gguf_file.replace("\\", "/")).name
             raise ComfyUIError(
                 f"遠端 ComfyUI 未安裝 GGUF UNet：{gguf_file}。"
-                "遠端模式不會自動下載或寫入模型檔，請先由遠端 ComfyUI 管理人安裝後再執行。"
+                "遠端 ComfyUI API 無法由本站直接寫入模型檔。"
+                f"請聯絡遠端 ComfyUI 管理人把檔案放到 models/unet/{filename} 後再執行。"
             )
         if native_binding.get("connection_mode") != "remote" and gguf_option:
             prepared = {
