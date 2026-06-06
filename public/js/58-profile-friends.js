@@ -12,7 +12,7 @@ const targetOptionCache = new Map();
 const PROFILE_AVATAR_DEFAULT_ZOOM = 1;
 const PROFILE_AVATAR_MIN_ZOOM = 0.1;
 const PROFILE_AVATAR_MAX_ZOOM = 10;
-const PROFILE_AVATAR_MAX_DISPLAY_SIZE = 1000;
+const PROFILE_AVATAR_MAX_DISPLAY_SIZE = 550;
 const PROFILE_AVATAR_MIN_DISPLAY_SIZE = 100;
 const PROFILE_TEMPLATE_KEYS = ["classic", "creator", "compact", "showcase", "gallery", "neon"];
 const PROFILE_ACCENT_KEYS = ["default", "ocean", "sunrise", "forest", "mono", "violet", "ruby"];
@@ -44,7 +44,7 @@ const PROFILE_STYLE_ALLOWED = {
   background_tone: ["soft", "standard", "bold"],
   avatar_frame: ["none", "soft_ring", "neon", "pixel", "botanical", "crown"],
   avatar_shape: ["circle", "rounded", "squircle", "square"],
-  avatar_size: [...Array.from({ length: 181 }, (_, index) => String(100 + index * 5)), "large", "xl", "hero"],
+  avatar_size: [...Array.from({ length: 91 }, (_, index) => String(100 + index * 5)), "large", "xl", "hero"],
   name_font: ["system", "rounded", "serif", "mono", "display"],
   name_size: ["normal", "large", "hero"],
   sticker: ["none", "sparkles", "star", "heart", "music", "game", "code", "crown"],
@@ -771,6 +771,13 @@ function applyProfileAvatarElementSize(avatar, value) {
   if (!avatar) return "";
   const size = profileAvatarSizeValue(value);
   const px = `${size}px`;
+  const numericSize = Number(size) || Number(PROFILE_STYLE_DEFAULTS.avatar_size);
+  const textScale = profileAvatarClamp(numericSize / Number(PROFILE_STYLE_DEFAULTS.avatar_size), 1, 2.4);
+  const summary = avatar.closest?.(".profile-summary");
+  if (summary) {
+    summary.style.setProperty("--profile-avatar-size", px);
+    summary.style.setProperty("--profile-avatar-text-scale", textScale.toFixed(3));
+  }
   avatar.style.setProperty("--profile-avatar-custom-size", px);
   avatar.style.setProperty("--profile-avatar-size", px);
   avatar.style.width = px;
