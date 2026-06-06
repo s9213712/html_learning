@@ -381,9 +381,10 @@ def test_comfyui_tools_are_split_into_subviews():
     css = _read("public/styles.css")
 
     assert 'data-comfyui-view="generate"' in html
+    assert 'data-comfyui-view="models">Civitai / 模型管理</button>' in html
     assert 'data-comfyui-view="history"' in html
     assert 'data-comfyui-view="workflow"' in html
-    assert 'data-comfyui-view="models" hidden' in html
+    assert 'data-comfyui-view="models" hidden' not in html
     assert 'data-comfyui-view-panel="generate"' in html
     assert 'data-comfyui-view-panel="history"' in html
     assert 'data-comfyui-view-panel="workflow"' in html
@@ -398,14 +399,16 @@ def test_root_model_management_stays_visible_across_comfyui_modes():
     js = _read("public/js/36-comfyui.js")
     css = _read("public/styles.css")
 
-    assert 'data-comfyui-view="models" hidden' in html
+    assert 'data-comfyui-view="models">Civitai / 模型管理</button>' in html
+    assert 'data-comfyui-view="models" hidden' not in html
     assert "function canManageComfyuiLocalModels" in js
     assert 'return currentUser === "root";' in js
-    assert 'const modelsUnavailable = selected === "models" && (!canManageComfyuiLocalModels() || (modelTab && modelTab.hidden));' in js
+    assert "modelsUnavailable" not in js
     assert "const showLocalModels = canManageComfyuiLocalModels(mode);" in js
     assert 'if (panel) panel.style.display = showLocalModels ? "" : "none";' in js
-    assert "if (modelsTab) modelsTab.hidden = !showLocalModels;" in js
-    assert "if (details && !showLocalModels) details.open = false;" in js
+    assert "if (modelsTab) modelsTab.hidden = false;" in js
+    assert 'if (accessNote) accessNote.style.display = showLocalModels ? "none" : "";' in js
+    assert "if (details) details.open = !!showLocalModels;" in js
     assert "Civitai 匯入區仍可使用" in js
     assert 'document.addEventListener("hackme:account-context-changed"' in js
     assert ".comfyui-subtab[hidden]" in css

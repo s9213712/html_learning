@@ -17,6 +17,11 @@ HF / Diffusers frontend tab.
   run snapshot.
 - Regular generation history rerun continues to load through the actor-scoped
   history loader.
+- Regular generation history payloads preserve the full normalized request,
+  including Diffusers repo/variant metadata, UI batch/run count,
+  seed-after-generate mode, source/mask refs, and ControlNet image refs. The
+  frontend merges legacy `input_assets`/`controlnet` fields back into that
+  payload before applying a history row to the form.
 
 QA checklist:
 

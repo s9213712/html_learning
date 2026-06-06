@@ -1,6 +1,17 @@
 # Update Summary
 
-Release ID: `04_2026.06.06-003`
+Release ID: `04_2026.06.06-004`
+
+## 04_2026.06.06-004
+
+- Promoted `Civitai / 模型管理` to the same AI image-generation subnav row as
+  `Workflow` and `歷史重跑`. The tab is no longer hidden behind root-mode state
+  detection; non-root users see the fixed entry with a permission note, while
+  root gets the Civitai search/download/upload form in local and remote ComfyUI
+  modes.
+- Fixed regular ComfyUI history restore/rerun to preserve and reapply the full
+  normalized generation payload, including HF repo/variant, UI batch/run count,
+  seed-after-generate mode, source/mask refs, and ControlNet image refs.
 
 ## 04_2026.06.06-003
 

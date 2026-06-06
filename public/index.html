@@ -2212,9 +2212,9 @@
       <div class="comfyui-subnav" role="tablist" aria-label="AI 產圖功能分頁">
         <button class="btn comfyui-subtab active" type="button" role="tab" aria-selected="true" data-comfyui-view="generate">ComfyUI / GGUF</button>
         <button class="btn comfyui-subtab" type="button" role="tab" aria-selected="false" data-comfyui-view="hf">HF / Diffusers</button>
+        <button class="btn comfyui-subtab" type="button" role="tab" aria-selected="false" data-comfyui-view="models">Civitai / 模型管理</button>
         <button class="btn comfyui-subtab" type="button" role="tab" aria-selected="false" data-comfyui-view="history">歷史重跑</button>
         <button class="btn comfyui-subtab" type="button" role="tab" aria-selected="false" data-comfyui-view="workflow">Workflow</button>
-        <button class="btn comfyui-subtab" type="button" role="tab" aria-selected="false" data-comfyui-view="models" hidden>Civitai / 模型管理</button>
         <button class="btn comfyui-subtab" type="button" role="tab" aria-selected="false" data-comfyui-view="settings" hidden>AI 後端設定</button>
       </div>
       <div class="comfyui-subview active" id="comfyui-view-generate" data-comfyui-view-panel="generate" role="tabpanel">
@@ -2232,7 +2232,6 @@
             </div>
             <button class="btn" id="comfyui-refresh-btn" type="button">重新整理模型</button>
             <button class="btn" id="comfyui-load-draft-btn" type="button">載入上次設定</button>
-            <button class="btn" id="comfyui-open-civitai-panel-btn" type="button" style="display:none;">Civitai / 模型匯入</button>
             <button class="btn" id="comfyui-template-import-btn" type="button">匯入 workflow 模板檔（JSON）</button>
             <button class="btn btn-primary" id="comfyui-start-btn" type="button" style="display:none;">啟動 ComfyUI</button>
             <button class="btn" id="comfyui-stop-btn" type="button" style="display:none;">停止 ComfyUI</button>
@@ -2707,8 +2706,12 @@
       </div>
       </div>
       <div class="comfyui-subview" id="comfyui-view-models" data-comfyui-view-panel="models" role="tabpanel" hidden>
+      <div class="drive-card comfyui-root-panel" id="comfyui-root-model-access-note" style="display:none;">
+        <div class="drive-card-title">Civitai / 模型管理</div>
+        <div class="drive-card-sub">此分頁固定顯示；Civitai 搜尋、下載與模型檔上傳需要 root 帳號。</div>
+      </div>
       <div class="drive-card comfyui-root-panel" id="comfyui-root-model-panel" style="display:none;">
-        <details class="comfyui-root-details" id="comfyui-root-model-details">
+        <details class="comfyui-root-details" id="comfyui-root-model-details" open>
           <summary class="comfyui-root-summary">
             <span class="comfyui-root-summary-title">root 模型匯入（Civitai / 檔案上傳）</span>
             <span class="comfyui-root-summary-sub">展開後可從 Civitai 下載，或直接上傳模型檔到本站設定的 ComfyUI models 目錄；和上方生圖表單分開。</span>
@@ -7378,7 +7381,7 @@
 <script src="/js/35-drive.js?v=20260604-storage-bulk-clarity" defer></script>
   <script src="/js/35-drive-preview-share.js?v=20260507-drive-preview-share-split" defer></script>
 <!-- cache marker retained for template-import regression: /js/36-comfyui.js?v=20260509-comfyui-template-embeddings -->
-<script src="/js/36-comfyui.js?v=20260606-hf-common-repos-modes" defer></script>
+<script src="/js/36-comfyui.js?v=20260606-civitai-history-restore" defer></script>
 <script src="/js/36-comfyui-workflows.js?v=20260605-history-gguf-rehydrate" defer></script>
 <script src="/js/37-bug-report.js?v=20260502-device-feature" defer></script>
 <script src="/js/41-game-modules.js?v=20260601-rubiks-visible" defer></script>

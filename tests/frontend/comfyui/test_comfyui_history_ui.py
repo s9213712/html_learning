@@ -21,6 +21,26 @@ def test_history_apply_returns_to_generate_form_and_reports_errors():
     assert "找不到這筆 ComfyUI 歷史紀錄，請重新整理歷史。" in js
 
 
+def test_history_apply_restores_full_generation_payload():
+    js = _read("public/js/36-comfyui.js")
+
+    assert "function comfyuiHistoryPayload(item = {})" in js
+    assert "function comfyuiHistoryInputAssets(item = {}, payload = null)" in js
+    assert '["comfyui-diffusers-model-repo", payload.diffusers_model_repo || ""],' in js
+    assert 'function setComfyuiFieldValue(id, value, { preserveMissingOption = false } = {})' in js
+    assert 'option.dataset.historyValue = "1";' in js
+    assert '["comfyui-diffusers-model-variant", payload.diffusers_model_variant || "", true],' in js
+    assert '["comfyui-batch-size", payload.ui_batch_size || payload.batch_size || 1],' in js
+    assert '["comfyui-run-count", payload.run_count || 1],' in js
+    assert '["comfyui-seed-after-generate", payload.seed_after_generate || "fixed"],' in js
+    assert 'await applyComfyuiHistoryAssets(comfyuiHistoryInputAssets(item, payload));' in js
+    assert 'const targetView = payload.diffusers_model_repo ? "hf" : "generate";' in js
+    assert 'setComfyuiView(targetView);' in js
+    assert 'checked = targetView !== "hf" && controlEnabled' in js
+    assert 'setComfyuiFieldValue("comfyui-controlnet-model", controlnet.model_name || "", { preserveMissingOption: true });' in js
+    assert 'setComfyuiFieldValue("comfyui-controlnet-preprocessor", controlnet.preprocessor || "", { preserveMissingOption: true });' in js
+
+
 def test_history_rerun_opens_generate_view_for_visible_progress():
     js = _read("public/js/36-comfyui.js")
 

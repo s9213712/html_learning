@@ -20,7 +20,7 @@ Related technical references:
 
 ## Release and Schema
 
-- Release ID: `04_2026.06.06-003`
+- Release ID: `04_2026.06.06-004`
 - Schema version: `30`
 - Release ID source: `services/platform/release_info.py`
 - Runtime version endpoint: `GET /api/version`
@@ -760,9 +760,10 @@ ComfyUI notes:
   generation modes, ControlNet types, ControlNet models, preprocessors, and
   upscale models through `GET /api/comfyui/models`; generate requests are
   rejected up front when the required node/model/preprocessor is unavailable.
-- History replay stores prompt, LoRA, generation mode, source/mask/control
-  image refs, ControlNet settings, outpaint extents, and upscale model so the
-  frontend can offer one-click restore and rerun.
+- History replay stores the full normalized generation payload plus legacy
+  source/mask/control image refs, so the frontend can restore HF repo/variant,
+  batch/run metadata, seed-after-generate mode, ControlNet settings, outpaint
+  extents, upscale model, and one-click rerun inputs.
 - Workflow history replay stores and returns the workflow snapshot so the
   frontend can restore template-specific node inputs. Workflow run rerun is
   actor-scoped: official/public preset visibility does not allow rerunning
@@ -775,8 +776,9 @@ ComfyUI notes:
   stay separate from download execution: they summarize version/file/hash
   metadata and only populate the inspect/download controls after an explicit
   “帶入下載區” action.
-  The model-download UI is intentionally separated from the main generation form
-  and rendered as a collapsed panel at the bottom of the AI page.
+  The model-download UI is intentionally separated from the main generation
+  form and rendered as a fixed `Civitai / 模型管理` subtab beside `Workflow` and
+  `歷史重跑`.
 - The same root-only panel now also supports direct file uploads into the local
   ComfyUI `models/` tree for checkpoint / LoRA / embedding / VAE management
   without going through Civitai metadata first.

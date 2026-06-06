@@ -85,7 +85,9 @@ def test_privileged_surfaces_are_hidden_in_initial_markup_and_revealed_by_role()
     assert 'id="tab-module-server" style="display:none;"' in index_html
     assert 'id="tab-module-accounts" style="display:none;"' in index_html
     assert 'id="tab-module-jobs" style="display:none;"' in index_html
-    assert 'data-comfyui-view="models" hidden' in index_html
+    assert 'data-comfyui-view="models">Civitai / 模型管理</button>' in index_html
+    assert 'data-comfyui-view="models" hidden' not in index_html
+    assert 'id="comfyui-root-model-access-note" style="display:none;"' in index_html
     assert 'id="comfyui-root-model-panel" style="display:none;"' in index_html
     assert 'id="game-root-chess-panel" style="display:none;margin-top:1rem;"' in index_html
     assert 'id="game-award-btn" type="button" style="display:none;"' in index_html
@@ -100,7 +102,7 @@ def test_privileged_surfaces_are_hidden_in_initial_markup_and_revealed_by_role()
     assert 'adminWrap.classList.remove("show");' in core_js
     assert 'if (addPanel) addPanel.style.display = canManageUsers ? "block" : "none";' in core_js
     assert "function canManageComfyuiLocalModels" in comfyui_js
-    assert "modelsTab.hidden = !showLocalModels" in comfyui_js
+    assert "modelsTab.hidden = false" in comfyui_js
     assert 'awardBtn.style.display = currentUser === "root" && key === "chess" ? "" : "none";' in games_js
     assert 'panel.style.display = gameRootChessPanelVisible() ? "" : "none";' in chess_js
     assert 'const rootMode = currentUser === "root";' in root_quick_settings_js

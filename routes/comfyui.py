@@ -449,9 +449,20 @@ def register_comfyui_routes(app, deps):
     def _record_generation_history(conn, *, actor, params, backend_url="", result_payload=None):
         _ensure_comfyui_generation_history_schema(conn)
         now = datetime.now().isoformat()
-        payload = {
+        params = dict(params or {})
+        try:
+            payload = json.loads(json.dumps(params, ensure_ascii=False, default=str))
+        except Exception:
+            payload = {}
+        payload.update({
             "generation_mode": params.get("generation_mode") or "txt2img",
             "model": params.get("model") or "",
+            "diffusers_model_repo": params.get("diffusers_model_repo") or "",
+            "diffusers_model_variant": params.get("diffusers_model_variant") or "",
+            "diffusers_gguf_file": params.get("diffusers_gguf_file") or "",
+            "diffusers_gguf_base_repo": params.get("diffusers_gguf_base_repo") or "",
+            "diffusers_gguf_profile": params.get("diffusers_gguf_profile") or "",
+            "diffusers_gguf_variant": params.get("diffusers_gguf_variant") or "",
             "prompt": params.get("prompt") or "",
             "negative_prompt": params.get("negative_prompt") or "",
             "width": int(params.get("width") or 0),
@@ -462,13 +473,16 @@ def register_comfyui_routes(app, deps):
             "scheduler": params.get("scheduler") or "",
             "seed": int(params.get("seed") or 0),
             "batch_size": int(params.get("batch_size") or 1),
+            "ui_batch_size": int(params.get("ui_batch_size") or params.get("batch_size") or 1),
+            "run_count": int(params.get("run_count") or 1),
+            "seed_after_generate": params.get("seed_after_generate") or "fixed",
             "filename_prefix": params.get("filename_prefix") or "hackme_web",
             "loras": list(params.get("loras") or []),
             "vae": params.get("vae") or "",
             "denoise_strength": float(params.get("denoise_strength") or 0),
             "upscale_model": params.get("upscale_model") or "",
             "outpaint": dict(params.get("outpaint") or {}),
-        }
+        })
         input_assets = {
             "source_image_ref": params.get("source_image_ref"),
             "mask_image_ref": params.get("mask_image_ref"),
@@ -3656,6 +3670,10 @@ def register_comfyui_routes(app, deps):
             "feathering": _int_range(data.get("outpaint_feathering"), 24, 0, 256),
         }
 
+    def _normalize_seed_after_generate(value):
+        mode = str(value or "fixed").strip().lower()
+        return mode if mode in {"random", "fixed", "increment", "decrement"} else "fixed"
+
     def _normalize_generation_payload(data):
         mode = _normalized_generation_mode(data.get("generation_mode"))
         if not mode:
@@ -3761,6 +3779,14 @@ def register_comfyui_routes(app, deps):
             "scheduler": str(data.get("scheduler") or SAFE_SCHEDULER_FALLBACK).strip() or SAFE_SCHEDULER_FALLBACK,
             "seed": seed,
             "batch_size": _int_range(data.get("batch_size"), 1, 1, _configured_max_batch_size()),
+            "ui_batch_size": _int_range(
+                data.get("ui_batch_size") or data.get("requested_batch_size") or data.get("history_batch_size") or data.get("batch_size"),
+                1,
+                1,
+                _configured_max_batch_size(),
+            ),
+            "run_count": _int_range(data.get("run_count") or data.get("history_run_count"), 1, 1, 10),
+            "seed_after_generate": _normalize_seed_after_generate(data.get("seed_after_generate") or data.get("seed_after_generate_mode")),
             "filename_prefix": _clean_filename(data.get("filename_prefix") or "hackme_web", fallback="hackme_web").rsplit(".", 1)[0],
             "loras": loras,
             "vae": vae,

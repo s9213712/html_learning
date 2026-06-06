@@ -721,10 +721,13 @@ def register_comfyui_runtime_routes(app, ctx):
         input_assets = dict(item.get("input_assets") or {})
         controlnet = dict(item.get("controlnet") or {})
         if controlnet:
-            controlnet["image_ref"] = input_assets.get("control_image_ref")
+            if input_assets.get("control_image_ref") and not controlnet.get("image_ref"):
+                controlnet["image_ref"] = input_assets.get("control_image_ref")
             payload["controlnet"] = controlnet
-        payload["source_image_ref"] = input_assets.get("source_image_ref")
-        payload["mask_image_ref"] = input_assets.get("mask_image_ref")
+        if input_assets.get("source_image_ref") and not payload.get("source_image_ref"):
+            payload["source_image_ref"] = input_assets.get("source_image_ref")
+        if input_assets.get("mask_image_ref") and not payload.get("mask_image_ref"):
+            payload["mask_image_ref"] = input_assets.get("mask_image_ref")
         payload["async_progress"] = True
         payload["confirm_billing"] = True
         payload["timeout_seconds"] = DEFAULT_GENERATION_TIMEOUT_SECONDS

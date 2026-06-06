@@ -1418,12 +1418,10 @@ function canManageComfyuiLocalModels(modeOverride = null) {
 
 function setComfyuiView(view, { persist = true } = {}) {
   const selected = normalizeComfyuiView(view);
-  const modelTab = document.querySelector('[data-comfyui-view="models"]');
   const settingsTab = document.querySelector('[data-comfyui-view="settings"]');
   if (settingsTab) settingsTab.hidden = currentUser !== "root";
-  const modelsUnavailable = selected === "models" && (!canManageComfyuiLocalModels() || (modelTab && modelTab.hidden));
   const settingsUnavailable = selected === "settings" && currentUser !== "root";
-  const activeView = (selected === "models" && modelsUnavailable) || settingsUnavailable ? "generate" : selected;
+  const activeView = settingsUnavailable ? "generate" : selected;
   comfyuiActiveBackendFamily = activeView === "hf" ? "hf" : "comfyui";
   document.querySelectorAll("[data-comfyui-view]").forEach((button) => {
     const isActive = button.dataset.comfyuiView === activeView;
@@ -2723,7 +2721,7 @@ function writeComfyuiDraft() {
   }
 }
 
-function setComfyuiFieldValue(id, value) {
+function setComfyuiFieldValue(id, value, { preserveMissingOption = false } = {}) {
   const el = $(id);
   if (!el || value === undefined || value === null) return;
   if (id === "comfyui-diffusers-model-repo") {
@@ -2733,7 +2731,14 @@ function setComfyuiFieldValue(id, value) {
   }
   if (el.tagName === "SELECT") {
     const exists = Array.from(el.options || []).some((option) => option.value === String(value));
-    if (!exists && String(value)) return;
+    if (!exists && String(value)) {
+      if (!preserveMissingOption) return;
+      const option = document.createElement("option");
+      option.value = String(value);
+      option.textContent = `歷史：${String(value)}`;
+      option.dataset.historyValue = "1";
+      el.appendChild(option);
+    }
   }
   el.value = String(value);
 }
@@ -2772,27 +2777,26 @@ function restoreComfyuiDraft({ includeDynamicSelects = true } = {}) {
 
 function updateComfyuiRootPanelVisibility(modeOverride = null) {
   const panel = $("comfyui-root-model-panel");
+  const accessNote = $("comfyui-root-model-access-note");
   const settingsPanel = $("comfyui-root-settings-panel");
   const details = $("comfyui-root-model-details");
   const hint = $("comfyui-root-model-mode-hint");
   const modelsTab = document.querySelector('[data-comfyui-view="models"]');
   const settingsTab = document.querySelector('[data-comfyui-view="settings"]');
-  const civitaiShortcut = $("comfyui-open-civitai-panel-btn");
   const mode = comfyuiEffectiveConnectionMode(modeOverride);
   const localReady = mode === "local";
   const showLocalModels = canManageComfyuiLocalModels(mode);
   const canManageSettings = currentUser === "root";
   updateComfyuiModeNote(mode);
+  if (accessNote) accessNote.style.display = showLocalModels ? "none" : "";
   if (panel) panel.style.display = showLocalModels ? "" : "none";
-  if (modelsTab) modelsTab.hidden = !showLocalModels;
-  if (civitaiShortcut) civitaiShortcut.style.display = showLocalModels && comfyuiActiveBackendFamily !== "hf" ? "" : "none";
+  if (modelsTab) modelsTab.hidden = false;
   if (settingsPanel) settingsPanel.style.display = canManageSettings ? "" : "none";
   if (settingsTab) settingsTab.hidden = !canManageSettings;
-  if ((!showLocalModels && document.querySelector('[data-comfyui-view-panel="models"]')?.classList.contains("active"))
-      || (!canManageSettings && document.querySelector('[data-comfyui-view-panel="settings"]')?.classList.contains("active"))) {
+  if (!canManageSettings && document.querySelector('[data-comfyui-view-panel="settings"]')?.classList.contains("active")) {
     setComfyuiView("generate");
   }
-  if (details && !showLocalModels) details.open = false;
+  if (details) details.open = !!showLocalModels;
   if (!panel) return;
   panel.querySelectorAll("input, select, button").forEach((el) => {
     el.disabled = !showLocalModels;
@@ -2809,8 +2813,8 @@ function updateComfyuiRootPanelVisibility(modeOverride = null) {
 }
 
 function openComfyuiCivitaiPanel() {
-  if (!canManageComfyuiLocalModels()) return;
   setComfyuiView("models");
+  if (!canManageComfyuiLocalModels()) return;
   const details = $("comfyui-root-model-details");
   if (details) details.open = true;
   const sourceMode = $("comfyui-model-source-mode");
@@ -3316,11 +3320,6 @@ function bindComfyuiAdvancedUi() {
     modelSourceMode.dataset.comfyuiBound = "1";
     modelSourceMode.addEventListener("change", updateComfyuiModelSourceMode);
   }
-  const civitaiPanelBtn = $("comfyui-open-civitai-panel-btn");
-  if (civitaiPanelBtn && civitaiPanelBtn.dataset.comfyuiBound !== "1") {
-    civitaiPanelBtn.dataset.comfyuiBound = "1";
-    civitaiPanelBtn.addEventListener("click", openComfyuiCivitaiPanel);
-  }
   const modelDownloadType = $("comfyui-model-download-type");
   if (modelDownloadType && modelDownloadType.dataset.comfyuiBound !== "1") {
     modelDownloadType.dataset.comfyuiBound = "1";
@@ -3810,6 +3809,31 @@ async function applyComfyuiHistoryAssets(inputAssets = {}) {
   ]);
 }
 
+function comfyuiHistoryPayload(item = {}) {
+  const payload = item?.payload && typeof item.payload === "object" ? { ...item.payload } : {};
+  const inputAssets = item?.input_assets && typeof item.input_assets === "object" ? item.input_assets : {};
+  if (!payload.generation_mode && item?.generation_mode) payload.generation_mode = item.generation_mode;
+  if (!payload.source_image_ref && inputAssets.source_image_ref) payload.source_image_ref = inputAssets.source_image_ref;
+  if (!payload.mask_image_ref && inputAssets.mask_image_ref) payload.mask_image_ref = inputAssets.mask_image_ref;
+  const controlnet = payload.controlnet && typeof payload.controlnet === "object"
+    ? { ...payload.controlnet }
+    : (item?.controlnet && typeof item.controlnet === "object" ? { ...item.controlnet } : {});
+  if (Object.keys(controlnet).length) {
+    if (!controlnet.image_ref && inputAssets.control_image_ref) controlnet.image_ref = inputAssets.control_image_ref;
+    payload.controlnet = controlnet;
+  }
+  return payload;
+}
+
+function comfyuiHistoryInputAssets(item = {}, payload = null) {
+  const source = item?.input_assets && typeof item.input_assets === "object" ? { ...item.input_assets } : {};
+  const mergedPayload = payload || comfyuiHistoryPayload(item);
+  if (!source.source_image_ref && mergedPayload?.source_image_ref) source.source_image_ref = mergedPayload.source_image_ref;
+  if (!source.mask_image_ref && mergedPayload?.mask_image_ref) source.mask_image_ref = mergedPayload.mask_image_ref;
+  if (!source.control_image_ref && mergedPayload?.controlnet?.image_ref) source.control_image_ref = mergedPayload.controlnet.image_ref;
+  return source;
+}
+
 async function applyComfyuiHistoryToForm(historyId) {
   const item = comfyuiHistoryItemById(historyId);
   if (!item) {
@@ -3817,8 +3841,8 @@ async function applyComfyuiHistoryToForm(historyId) {
     return;
   }
   const displayId = comfyuiHistoryItemId(item) || historyId;
-  const payload = item.payload || {};
-  const controlnet = item.controlnet || {};
+  const payload = comfyuiHistoryPayload(item);
+  const controlnet = payload.controlnet || {};
   const loras = Array.isArray(payload.loras) ? payload.loras : [];
   const workflowPresetId = item.history_source === "workflow" ? Number(item.preset_id || 0) : 0;
   if (workflowPresetId > 0) {
@@ -3853,23 +3877,25 @@ async function applyComfyuiHistoryToForm(historyId) {
   renderComfyuiSelectedLoras();
   [
     ["comfyui-generation-mode", payload.generation_mode || item.generation_mode || "txt2img"],
-    ["comfyui-model-select", payload.model || ""],
-    ["comfyui-vae-select", payload.vae || COMFYUI_VAE_BUILTIN],
+    ["comfyui-model-select", payload.model || "", true],
+    ["comfyui-diffusers-model-repo", payload.diffusers_model_repo || ""],
+    ["comfyui-diffusers-model-variant", payload.diffusers_model_variant || "", true],
+    ["comfyui-vae-select", payload.vae || COMFYUI_VAE_BUILTIN, true],
     ["comfyui-prompt", payload.prompt || ""],
     ["comfyui-negative-prompt", payload.negative_prompt || ""],
     ["comfyui-width", payload.width || comfyuiDefaultWidth],
     ["comfyui-height", payload.height || comfyuiDefaultHeight],
     ["comfyui-steps", payload.steps || 20],
     ["comfyui-cfg", payload.cfg || 7],
-    ["comfyui-batch-size", payload.batch_size || 1],
+    ["comfyui-batch-size", payload.ui_batch_size || payload.batch_size || 1],
+    ["comfyui-run-count", payload.run_count || 1],
     ["comfyui-seed", payload.seed ?? ""],
-    ["comfyui-sampler", payload.sampler_name || "euler"],
-    ["comfyui-scheduler", payload.scheduler || "normal"],
+    ["comfyui-seed-after-generate", payload.seed_after_generate || "fixed"],
+    ["comfyui-sampler", payload.sampler_name || "euler", true],
+    ["comfyui-scheduler", payload.scheduler || "normal", true],
     ["comfyui-denoise-strength", payload.denoise_strength ?? 0.65],
-    ["comfyui-upscale-model", payload.upscale_model || ""],
-    ["comfyui-controlnet-type", controlnet.type || "canny"],
-    ["comfyui-controlnet-model", controlnet.model_name || ""],
-    ["comfyui-controlnet-preprocessor", controlnet.preprocessor || ""],
+    ["comfyui-upscale-model", payload.upscale_model || "", true],
+    ["comfyui-controlnet-type", controlnet.type || "canny", true],
     ["comfyui-control-strength", controlnet.strength ?? 1],
     ["comfyui-control-start", controlnet.start_percent ?? 0],
     ["comfyui-control-end", controlnet.end_percent ?? 1],
@@ -3878,18 +3904,22 @@ async function applyComfyuiHistoryToForm(historyId) {
     ["comfyui-outpaint-right", payload.outpaint?.right ?? 128],
     ["comfyui-outpaint-bottom", payload.outpaint?.bottom ?? 128],
     ["comfyui-outpaint-feathering", payload.outpaint?.feathering ?? 48],
-  ].forEach(([id, value]) => setComfyuiFieldValue(id, value));
-  const controlEnabled = !!controlnet?.type;
-  if ($("comfyui-controlnet-enabled")) $("comfyui-controlnet-enabled").checked = controlEnabled;
+  ].forEach(([id, value, preserveMissingOption]) => setComfyuiFieldValue(id, value, { preserveMissingOption: !!preserveMissingOption }));
+  const targetView = payload.diffusers_model_repo ? "hf" : "generate";
+  setComfyuiView(targetView);
+  const controlEnabled = !!(controlnet?.enabled || controlnet?.type);
+  if ($("comfyui-controlnet-enabled")) $("comfyui-controlnet-enabled").checked = targetView !== "hf" && controlEnabled;
+  setComfyuiSeedAfterGenerateMode(payload.seed_after_generate || "fixed");
   fillComfyuiControlnetModelOptions();
   fillComfyuiControlnetPreprocessorOptions();
+  setComfyuiFieldValue("comfyui-controlnet-model", controlnet.model_name || "", { preserveMissingOption: true });
+  setComfyuiFieldValue("comfyui-controlnet-preprocessor", controlnet.preprocessor || "", { preserveMissingOption: true });
   if (workflowPresetId > 0 && typeof applyComfyuiTemplateHistorySnapshotToForm === "function") {
     applyComfyuiTemplateHistorySnapshotToForm(item.workflow_json || {}, payload);
   }
-  await applyComfyuiHistoryAssets(item.input_assets || {});
+  await applyComfyuiHistoryAssets(comfyuiHistoryInputAssets(item, payload));
   updateComfyuiModeVisibility();
   writeComfyuiDraft();
-  setComfyuiView("generate");
   setComfyuiMessage(`已套回第 ${displayId} 筆 ComfyUI 歷史，可直接再調整後重跑。`, true);
 }
 
@@ -4530,6 +4560,7 @@ function comfyuiPayload() {
     : normalizeComfyuiHuggingFaceRepoInput($("comfyui-diffusers-model-repo")?.value || "");
   const diffusersVariant = $("comfyui-diffusers-model-variant")?.value || "";
   const diffusersMode = isComfyuiDiffusersMode();
+  const batchSize = Math.max(1, Math.min(comfyuiMaxBatchSize, comfyuiNumberValue("comfyui-batch-size", 1)));
   const payload = {
     generation_mode: mode,
     model: diffusersMode && diffusersRepo ? diffusersRepo : ($("comfyui-model-select")?.value || ""),
@@ -4539,13 +4570,16 @@ function comfyuiPayload() {
     diffusers_gguf_base_repo: "",
     diffusers_gguf_profile: "",
     diffusers_gguf_variant: "",
+    seed_after_generate: comfyuiSeedAfterGenerateMode(),
+    run_count: comfyuiRunCount(),
     prompt: $("comfyui-prompt")?.value || "",
     negative_prompt: $("comfyui-negative-prompt")?.value || "",
     width: comfyuiNumberValue("comfyui-width", comfyuiDefaultWidth),
     height: comfyuiNumberValue("comfyui-height", comfyuiDefaultHeight),
     steps: comfyuiNumberValue("comfyui-steps", 20),
     cfg: comfyuiNumberValue("comfyui-cfg", 7),
-    batch_size: Math.max(1, Math.min(comfyuiMaxBatchSize, comfyuiNumberValue("comfyui-batch-size", 1))),
+    batch_size: batchSize,
+    ui_batch_size: batchSize,
     seed: $("comfyui-seed")?.value ? comfyuiNumberValue("comfyui-seed", 0) : undefined,
     sampler_name: $("comfyui-sampler")?.value || "euler",
     scheduler: $("comfyui-scheduler")?.value || "normal",
@@ -4646,6 +4680,9 @@ function comfyuiBuildGenerateRequest(payload) {
   appendScalar("diffusers_gguf_base_repo", payload.diffusers_gguf_base_repo);
   appendScalar("diffusers_gguf_profile", payload.diffusers_gguf_profile);
   appendScalar("diffusers_gguf_variant", payload.diffusers_gguf_variant);
+  appendScalar("seed_after_generate", payload.seed_after_generate);
+  appendScalar("run_count", payload.run_count);
+  appendScalar("ui_batch_size", payload.ui_batch_size);
   appendScalar("prompt", payload.prompt);
   appendScalar("negative_prompt", payload.negative_prompt);
   appendScalar("width", payload.width);

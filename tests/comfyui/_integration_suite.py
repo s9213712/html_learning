@@ -991,6 +991,8 @@ def test_comfyui_img2img_controlnet_generate_uploads_assets_and_records_history(
         data={
             "generation_mode": "img2img",
             "model": "dream.safetensors",
+            "diffusers_model_repo": "black-forest-labs/FLUX.1-schnell",
+            "diffusers_model_variant": "fp16",
             "prompt": "repaint the scene",
             "negative_prompt": "blurry",
             "width": "512",
@@ -1001,10 +1003,15 @@ def test_comfyui_img2img_controlnet_generate_uploads_assets_and_records_history(
             "scheduler": "normal",
             "seed": "123",
             "batch_size": "1",
+            "ui_batch_size": "1",
+            "run_count": "3",
+            "seed_after_generate": "increment",
             "confirm_billing": "true",
             "denoise_strength": "0.55",
             "controlnet_enabled": "true",
             "controlnet_type": "canny",
+            "controlnet_model": "control_v11p_sd15_canny.safetensors",
+            "controlnet_preprocessor": "CannyEdgePreprocessor",
             "control_strength": "0.9",
             "control_start": "0.1",
             "control_end": "0.8",
@@ -1025,9 +1032,30 @@ def test_comfyui_img2img_controlnet_generate_uploads_assets_and_records_history(
     history = client.get("/api/comfyui/history")
     assert history.status_code == 200
     history_body = history.get_json()
-    assert history_body["history"][0]["generation_mode"] == "img2img"
-    assert history_body["history"][0]["controlnet"]["type"] == "canny"
-    assert history_body["history"][0]["input_assets"]["source_image_ref"]["filename"] == "source.png"
+    history_item = history_body["history"][0]
+    assert history_item["generation_mode"] == "img2img"
+    assert history_item["controlnet"]["type"] == "canny"
+    assert history_item["input_assets"]["source_image_ref"]["filename"] == "source.png"
+    assert history_item["payload"]["diffusers_model_repo"] == "black-forest-labs/FLUX.1-schnell"
+    assert history_item["payload"]["diffusers_model_variant"] == "fp16"
+    assert history_item["payload"]["ui_batch_size"] == 1
+    assert history_item["payload"]["run_count"] == 3
+    assert history_item["payload"]["seed_after_generate"] == "increment"
+    assert history_item["payload"]["source_image_ref"]["filename"] == "source.png"
+    assert history_item["payload"]["controlnet"]["image_ref"]["filename"] == "control.png"
+
+    FakeComfyUIClient.last_params = {}
+    rerun = client.post(f"/api/comfyui/history/{body['history_id']}/rerun", json={})
+    assert rerun.status_code == 200
+    _await_comfyui_result(client, rerun)
+    assert FakeComfyUIClient.last_params["generation_mode"] == "img2img"
+    assert FakeComfyUIClient.last_params["diffusers_model_repo"] == "black-forest-labs/FLUX.1-schnell"
+    assert FakeComfyUIClient.last_params["diffusers_model_variant"] == "fp16"
+    assert FakeComfyUIClient.last_params["ui_batch_size"] == 1
+    assert FakeComfyUIClient.last_params["run_count"] == 3
+    assert FakeComfyUIClient.last_params["seed_after_generate"] == "increment"
+    assert FakeComfyUIClient.last_params["source_image_ref"]["filename"] == "source.png"
+    assert FakeComfyUIClient.last_params["controlnet"]["image_ref"]["filename"] == "control.png"
 
 
 def test_comfyui_generate_rejects_controlnet_strength_out_of_range(tmp_path):
@@ -6253,9 +6281,10 @@ def test_comfyui_frontend_is_wired():
     assert 'id="comfyui-root-model-details"' in index_html
     assert 'id="comfyui-root-model-mode-hint"' in index_html
     assert 'root 模型匯入（Civitai / 檔案上傳）' in index_html
-    assert 'data-comfyui-view="models" hidden>Civitai / 模型管理</button>' in index_html
-    assert 'id="comfyui-open-civitai-panel-btn"' in index_html
-    assert 'Civitai / 模型匯入' in index_html
+    assert 'data-comfyui-view="models">Civitai / 模型管理</button>' in index_html
+    assert 'data-comfyui-view="models" hidden' not in index_html
+    assert 'id="comfyui-open-civitai-panel-btn"' not in index_html
+    assert 'id="comfyui-root-model-access-note"' in index_html
     assert '和上方生圖表單分開' in index_html
     assert 'Civitai 模型匯入區會在本地與遠端模式常駐可見' in index_html
     assert '<option value="embedding">Embedding / TI</option>' in index_html
@@ -6286,9 +6315,10 @@ def test_comfyui_frontend_is_wired():
     assert "function canManageComfyuiLocalModels" in comfyui_js
     assert 'return currentUser === "root";' in comfyui_js
     assert 'if (panel) panel.style.display = showLocalModels ? "" : "none";' in comfyui_js
-    assert "if (modelsTab) modelsTab.hidden = !showLocalModels;" in comfyui_js
+    assert "if (modelsTab) modelsTab.hidden = false;" in comfyui_js
+    assert 'if (accessNote) accessNote.style.display = showLocalModels ? "none" : "";' in comfyui_js
     assert '目前是雲端 / 遠端模式；Civitai 匯入區仍可使用' in comfyui_js
-    assert "/js/36-comfyui.js?v=20260606-hf-common-repos" in index_html
+    assert "/js/36-comfyui.js?v=20260606-civitai-history-restore" in index_html
     assert "/styles.css?v=20260606-hf-common-repos" in index_html
     assert "width: min(420px, 100%);" in css
     assert "max-height: 320px;" in css
@@ -6306,7 +6336,7 @@ def test_comfyui_frontend_is_wired():
     assert 'if (civitaiInput) civitaiInput.disabled = settingsFamily !== "comfyui";' in admin_js
     assert 'HF 頁籤會檢查 Hugging Face repo 與 Python / Diffusers 套件' in admin_js
     assert "function openComfyuiCivitaiPanel()" in comfyui_js
-    assert 'civitaiShortcut.style.display = showLocalModels && comfyuiActiveBackendFamily !== "hf" ? "" : "none";' in comfyui_js
+    assert "comfyui-open-civitai-panel-btn" not in comfyui_js
     assert "updateComfyuiRootPanelVisibility();" in comfyui_js
     assert 'apiFetch(API + "/comfyui/generate"' in comfyui_js
     assert 'apiFetch(API + "/comfyui/billing-quote"' in comfyui_js
@@ -6528,7 +6558,8 @@ def test_comfyui_frontend_is_wired():
     assert "setComfyuiMessage(`正在產生第 ${requestIndex + 1} / ${totalRequests} 張圖片...`, true)" in comfyui_js
     assert "confirm_billing: billingConfirmation.required" in comfyui_js
     assert "json.billing?.charged" in comfyui_js
-    assert 'batch_size: Math.max(1, Math.min(comfyuiMaxBatchSize, comfyuiNumberValue("comfyui-batch-size", 1)))' in comfyui_js
+    assert 'const batchSize = Math.max(1, Math.min(comfyuiMaxBatchSize, comfyuiNumberValue("comfyui-batch-size", 1)));' in comfyui_js
+    assert "ui_batch_size: batchSize" in comfyui_js
     assert "comfyuiGeneratedImages" in comfyui_js
     assert "renderComfyuiGeneratedImages" in comfyui_js
     assert 'savePath.value = `/output/${comfyuiCurrentImage.image_ref.filename}`;' in comfyui_js

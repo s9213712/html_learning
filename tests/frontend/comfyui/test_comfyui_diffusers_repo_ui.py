@@ -161,17 +161,19 @@ def test_civitai_frontend_entry_is_explicit_and_not_hf_settings_family():
     admin_js = _read("public/js/50-admin.js")
     comfyui_js = _read("public/js/36-comfyui.js")
 
-    assert 'data-comfyui-view="models" hidden>Civitai / 模型管理</button>' in html
-    assert 'id="comfyui-open-civitai-panel-btn"' in html
-    assert 'Civitai / 模型匯入' in html
+    assert 'data-comfyui-view="models">Civitai / 模型管理</button>' in html
+    assert 'data-comfyui-view="models" hidden' not in html
+    assert 'id="comfyui-open-civitai-panel-btn"' not in html
+    assert 'id="comfyui-root-model-access-note"' in html
     assert 'id="comfyui-civitai-settings" data-comfyui-settings-family-panel="comfyui"' in html
     assert 'id="s-comfyui-paid-api-nodes-enabled"' in html
     assert 'id="s-comfyui-account-api-key"' in html
     assert 'if (civitaiBox) civitaiBox.style.display = settingsFamily === "comfyui" ? "" : "none";' in admin_js
     assert 'if (civitaiInput) civitaiInput.disabled = settingsFamily !== "comfyui";' in admin_js
     assert "function openComfyuiCivitaiPanel()" in comfyui_js
-    assert 'const civitaiShortcut = $("comfyui-open-civitai-panel-btn");' in comfyui_js
-    assert 'civitaiShortcut.style.display = showLocalModels && comfyuiActiveBackendFamily !== "hf" ? "" : "none";' in comfyui_js
+    assert "comfyui-open-civitai-panel-btn" not in comfyui_js
+    assert "if (modelsTab) modelsTab.hidden = false;" in comfyui_js
+    assert 'if (accessNote) accessNote.style.display = showLocalModels ? "none" : "";' in comfyui_js
     assert "updateComfyuiRootPanelVisibility();" in comfyui_js
 
 
@@ -197,7 +199,7 @@ def test_diffusers_text_only_repo_hides_image_cards_and_omits_image_payloads():
 
 def test_diffusers_cache_busts_preflight_ui_assets():
     html = _read("public/index.html")
-    assert "/js/36-comfyui.js?v=20260606-hf-common-repos-modes" in html
+    assert "/js/36-comfyui.js?v=20260606-civitai-history-restore" in html
     assert "/js/36-comfyui-workflows.js?v=20260605-history-gguf-rehydrate" in html
 
 
