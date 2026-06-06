@@ -124,6 +124,40 @@ def register_comfyui_runtime_routes(app, ctx):
             return fallback
         return parsed if isinstance(parsed, type(fallback)) else fallback
 
+    def _runtime_randomize_workflow_seed_inputs(workflow_json, params):
+        if str((params or {}).get("seed_after_generate") or "").strip().lower() != "random":
+            return workflow_json, params
+        if not isinstance(workflow_json, dict):
+            return workflow_json, params
+        import json
+        import secrets
+
+        patched_workflow = json.loads(json.dumps(workflow_json))
+        seed = secrets.randbits(32)
+        changed = False
+        for node in patched_workflow.values():
+            if not isinstance(node, dict):
+                continue
+            class_type = str(node.get("class_type") or "")
+            if class_type not in {"KSampler", "KSamplerAdvanced"}:
+                continue
+            inputs = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
+            seed_keys = []
+            if "noise_seed" in inputs or class_type == "KSamplerAdvanced":
+                seed_keys.append("noise_seed")
+            if "seed" in inputs or class_type == "KSampler":
+                seed_keys.append("seed")
+            for key in seed_keys:
+                if key not in inputs:
+                    continue
+                inputs[key] = seed
+                changed = True
+        if not changed:
+            return workflow_json, params
+        next_params = dict(params or {})
+        next_params["seed"] = seed
+        return patched_workflow, next_params
+
     @app.route("/api/comfyui/status", methods=["GET"])
     @require_csrf_safe
     def comfyui_status():
@@ -659,10 +693,13 @@ def register_comfyui_runtime_routes(app, ctx):
                     "updated_at": row["updated_at"],
                     "payload": {
                         **params,
+                        "workflow_preset_id": int(row["preset_id"]),
+                        "workflow_preset_title": row["preset_title"] or "Workflow",
                         "prompt": prompt,
                         "negative_prompt": row["negative_prompt"] or params.get("negative_prompt") or "",
                         "model": params.get("model") or row["preset_title"] or "Workflow",
                     },
+                    "params": params,
                     "input_assets": {},
                     "controlnet": {},
                     "workflow_json": workflow_json,
@@ -879,6 +916,7 @@ def register_comfyui_runtime_routes(app, ctx):
                         params["diffusion_model"] = params["model"]
             except Exception:
                 pass
+            workflow_json, params = _runtime_randomize_workflow_seed_inputs(workflow_json, params)
             new_run_id = _create_workflow_run(
                 conn,
                 preset_id=int(row["preset_id"]),

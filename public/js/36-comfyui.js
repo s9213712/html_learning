@@ -3810,9 +3810,12 @@ async function applyComfyuiHistoryAssets(inputAssets = {}) {
 }
 
 function comfyuiHistoryPayload(item = {}) {
-  const payload = item?.payload && typeof item.payload === "object" ? { ...item.payload } : {};
+  const params = item?.params && typeof item.params === "object" ? item.params : {};
+  const payload = item?.payload && typeof item.payload === "object" ? { ...params, ...item.payload } : { ...params };
   const inputAssets = item?.input_assets && typeof item.input_assets === "object" ? item.input_assets : {};
   if (!payload.generation_mode && item?.generation_mode) payload.generation_mode = item.generation_mode;
+  if (!payload.workflow_preset_id && item?.preset_id) payload.workflow_preset_id = item.preset_id;
+  if (!payload.workflow_run_id && item?.workflow_run_id) payload.workflow_run_id = item.workflow_run_id;
   if (!payload.source_image_ref && inputAssets.source_image_ref) payload.source_image_ref = inputAssets.source_image_ref;
   if (!payload.mask_image_ref && inputAssets.mask_image_ref) payload.mask_image_ref = inputAssets.mask_image_ref;
   const controlnet = payload.controlnet && typeof payload.controlnet === "object"
@@ -3823,6 +3826,21 @@ function comfyuiHistoryPayload(item = {}) {
     payload.controlnet = controlnet;
   }
   return payload;
+}
+
+function ensureComfyuiHistoryWorkflowSelectOption(presetId, label = "") {
+  const select = $("comfyui-template-select");
+  if (!select || !presetId) return;
+  const value = String(presetId);
+  const exists = Array.from(select.options || []).some((option) => String(option.value || "") === value);
+  if (!exists) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label || `Workflow #${value}`;
+    option.dataset.historyValue = "1";
+    select.appendChild(option);
+  }
+  select.value = value;
 }
 
 function comfyuiHistoryInputAssets(item = {}, payload = null) {
@@ -3844,7 +3862,7 @@ async function applyComfyuiHistoryToForm(historyId) {
   const payload = comfyuiHistoryPayload(item);
   const controlnet = payload.controlnet || {};
   const loras = Array.isArray(payload.loras) ? payload.loras : [];
-  const workflowPresetId = item.history_source === "workflow" ? Number(item.preset_id || 0) : 0;
+  const workflowPresetId = item.history_source === "workflow" ? Number(item.preset_id || payload.workflow_preset_id || 0) : 0;
   if (workflowPresetId > 0) {
     try {
       const needsGgufProfiles = payload.gguf_profile || payload.gguf_variant || payload.diffusion_model || payload.diffusers_gguf_file
@@ -3855,11 +3873,11 @@ async function applyComfyuiHistoryToForm(historyId) {
       if (typeof loadComfyuiWorkflowPresets === "function" && Array.isArray(comfyuiWorkflowPresets) && !comfyuiWorkflowPresets.length) {
         await loadComfyuiWorkflowPresets({ silentTemplateReload: true });
       }
-      const select = $("comfyui-template-select");
-      if (select) select.value = String(workflowPresetId);
+      ensureComfyuiHistoryWorkflowSelectOption(workflowPresetId, item.preset_title || payload.workflow_preset_title || "");
       if (typeof loadComfyuiSelectedTemplateDetail === "function") {
         await loadComfyuiSelectedTemplateDetail(workflowPresetId, { silent: true, applyDefaults: false });
       }
+      ensureComfyuiHistoryWorkflowSelectOption(workflowPresetId, item.preset_title || payload.workflow_preset_title || "");
     } catch (err) {
       setComfyuiHistoryActionMessage(err.message || "Workflow 模板讀取失敗，無法完整套回歷史。", false);
       throw err;
@@ -3875,7 +3893,7 @@ async function applyComfyuiHistoryToForm(historyId) {
       template_node_id: entry.template_node_id ? String(entry.template_node_id) : "",
     }));
   renderComfyuiSelectedLoras();
-  [
+  const historyFieldRestores = [
     ["comfyui-generation-mode", payload.generation_mode || item.generation_mode || "txt2img"],
     ["comfyui-model-select", payload.model || "", true],
     ["comfyui-diffusers-model-repo", payload.diffusers_model_repo || ""],
@@ -3890,7 +3908,7 @@ async function applyComfyuiHistoryToForm(historyId) {
     ["comfyui-batch-size", payload.ui_batch_size || payload.batch_size || 1],
     ["comfyui-run-count", payload.run_count || 1],
     ["comfyui-seed", payload.seed ?? ""],
-    ["comfyui-seed-after-generate", payload.seed_after_generate || "fixed"],
+    ["comfyui-seed-after-generate", payload.seed_after_generate || (workflowPresetId > 0 ? "random" : "fixed")],
     ["comfyui-sampler", payload.sampler_name || "euler", true],
     ["comfyui-scheduler", payload.scheduler || "normal", true],
     ["comfyui-denoise-strength", payload.denoise_strength ?? 0.65],
@@ -3904,12 +3922,15 @@ async function applyComfyuiHistoryToForm(historyId) {
     ["comfyui-outpaint-right", payload.outpaint?.right ?? 128],
     ["comfyui-outpaint-bottom", payload.outpaint?.bottom ?? 128],
     ["comfyui-outpaint-feathering", payload.outpaint?.feathering ?? 48],
-  ].forEach(([id, value, preserveMissingOption]) => setComfyuiFieldValue(id, value, { preserveMissingOption: !!preserveMissingOption }));
+  ];
+  historyFieldRestores
+    .filter(([id]) => !(workflowPresetId > 0 && id === "comfyui-model-select"))
+    .forEach(([id, value, preserveMissingOption]) => setComfyuiFieldValue(id, value, { preserveMissingOption: !!preserveMissingOption }));
   const targetView = payload.diffusers_model_repo ? "hf" : "generate";
   setComfyuiView(targetView);
   const controlEnabled = !!(controlnet?.enabled || controlnet?.type);
   if ($("comfyui-controlnet-enabled")) $("comfyui-controlnet-enabled").checked = targetView !== "hf" && controlEnabled;
-  setComfyuiSeedAfterGenerateMode(payload.seed_after_generate || "fixed");
+  setComfyuiSeedAfterGenerateMode(payload.seed_after_generate || (workflowPresetId > 0 ? "random" : "fixed"));
   fillComfyuiControlnetModelOptions();
   fillComfyuiControlnetPreprocessorOptions();
   setComfyuiFieldValue("comfyui-controlnet-model", controlnet.model_name || "", { preserveMissingOption: true });

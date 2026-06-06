@@ -914,6 +914,23 @@ def register_comfyui_routes(app, deps):
             "updated_at": row["updated_at"],
         } for row in rows]
 
+    def _load_workflow_run_snapshot(conn, *, run_id):
+        _ensure_comfyui_workflow_schema(conn)
+        row = conn.execute(
+            """
+            SELECT params_json, workflow_json
+            FROM comfyui_workflow_runs
+            WHERE id=?
+            """,
+            (int(run_id),),
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "params": _parse_json_field(row["params_json"], {}) or {},
+            "workflow_json": _parse_json_field(row["workflow_json"], {}) or {},
+        }
+
     def _list_workflow_presets(conn, *, actor, active_client=None):
         _ensure_comfyui_workflow_schema(conn)
         if _sync_runtime_official_workflow_presets(conn):
@@ -3185,6 +3202,23 @@ def register_comfyui_routes(app, deps):
         })
         workflow_json = workflow_override if isinstance(workflow_override, dict) else (_parse_json_field(row["workflow_json"], {}) or {})
         default_params = _parse_json_field(row["default_params_json"], {}) or {}
+        try:
+            conn = get_db()
+            try:
+                snapshot = _load_workflow_run_snapshot(conn, run_id=run_id)
+            finally:
+                conn.close()
+        except Exception:
+            snapshot = None
+        if isinstance(snapshot, dict):
+            snapshot_params = snapshot.get("params") if isinstance(snapshot.get("params"), dict) else {}
+            snapshot_workflow = snapshot.get("workflow_json") if isinstance(snapshot.get("workflow_json"), dict) else {}
+            if snapshot_params:
+                merged_params = dict(default_params)
+                merged_params.update(snapshot_params)
+                default_params = merged_params
+            if snapshot_workflow:
+                workflow_json = snapshot_workflow
         prompt = str(default_params.get("prompt") or "")
         negative_prompt = str(default_params.get("negative_prompt") or "")
         expected_count = _workflow_expected_image_count(workflow_json, default_params)

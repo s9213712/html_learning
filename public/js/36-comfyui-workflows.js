@@ -1261,6 +1261,14 @@ function comfyuiTemplateSummaryMarkup(detail) {
   `;
 }
 
+function comfyuiTemplateEffectiveFieldValue(field = {}) {
+  const key = comfyuiTemplateOverrideKey(field);
+  if (key && Object.prototype.hasOwnProperty.call(comfyuiTemplateFieldOverrides, key)) {
+    return comfyuiTemplateFieldOverrides[key];
+  }
+  return field?.current_value;
+}
+
 function comfyuiTemplateSelectOptions(targetId, field = {}) {
   const target = $(targetId);
   const options = [];
@@ -1275,8 +1283,8 @@ function comfyuiTemplateSelectOptions(targetId, field = {}) {
       disabled: !!disabled,
     });
   };
-  const current = field?.current_value !== undefined && field?.current_value !== null
-    ? String(field.current_value || "")
+  const current = comfyuiTemplateEffectiveFieldValue(field) !== undefined && comfyuiTemplateEffectiveFieldValue(field) !== null
+    ? String(comfyuiTemplateEffectiveFieldValue(field) || "")
     : "";
   if (target && target.options && target.options.length) {
     Array.from(target.options).forEach((option) => {
@@ -1301,7 +1309,7 @@ function comfyuiTemplateSelectOptions(targetId, field = {}) {
 }
 
 function comfyuiTemplateSelectCurrentValue(targetId, field = {}, options = []) {
-  const current = String(field?.current_value ?? "");
+  const current = String(comfyuiTemplateEffectiveFieldValue(field) ?? "");
   if (current && options.some((option) => option.value === current && !option.disabled)) return current;
   const fallback = options.find((option) => option.value && !option.disabled)?.value || "";
   if (targetId === "comfyui-model-select" && field?.class_type === "CheckpointLoaderSimple" && fallback) return fallback;
@@ -1553,11 +1561,12 @@ function comfyuiTemplateFieldBinding(field, detail, ctx) {
   if (field?.class_type === "UpscaleModelLoader" && field?.input_name === "model_name") return { kind: "field", targetId: "comfyui-upscale-model" };
   if (field?.class_type === "ControlNetLoader" && field?.input_name === "control_net_name") return { kind: "field", targetId: "comfyui-controlnet-model", enableControlnet: true };
   if (field?.class_type === "KSampler" && field?.input_name === "seed") return withCompareSharing({ kind: "field", targetId: "comfyui-seed" });
-  if (field?.class_type === "KSampler" && field?.input_name === "steps") return withCompareSharing({ kind: "field", targetId: "comfyui-steps" });
-  if (field?.class_type === "KSampler" && field?.input_name === "cfg") return withCompareSharing({ kind: "field", targetId: "comfyui-cfg" });
-  if (field?.class_type === "KSampler" && field?.input_name === "sampler_name") return withCompareSharing({ kind: "field", targetId: "comfyui-sampler" });
-  if (field?.class_type === "KSampler" && field?.input_name === "scheduler") return withCompareSharing({ kind: "field", targetId: "comfyui-scheduler" });
-  if (field?.class_type === "KSampler" && field?.input_name === "denoise") return withCompareSharing({ kind: "field", targetId: "comfyui-denoise-strength" });
+  if (field?.class_type === "KSamplerAdvanced" && field?.input_name === "noise_seed") return withCompareSharing({ kind: "field", targetId: "comfyui-seed" });
+  if ((field?.class_type === "KSampler" || field?.class_type === "KSamplerAdvanced") && field?.input_name === "steps") return withCompareSharing({ kind: "field", targetId: "comfyui-steps" });
+  if ((field?.class_type === "KSampler" || field?.class_type === "KSamplerAdvanced") && field?.input_name === "cfg") return withCompareSharing({ kind: "field", targetId: "comfyui-cfg" });
+  if ((field?.class_type === "KSampler" || field?.class_type === "KSamplerAdvanced") && field?.input_name === "sampler_name") return withCompareSharing({ kind: "field", targetId: "comfyui-sampler" });
+  if ((field?.class_type === "KSampler" || field?.class_type === "KSamplerAdvanced") && field?.input_name === "scheduler") return withCompareSharing({ kind: "field", targetId: "comfyui-scheduler" });
+  if ((field?.class_type === "KSampler" || field?.class_type === "KSamplerAdvanced") && field?.input_name === "denoise") return withCompareSharing({ kind: "field", targetId: "comfyui-denoise-strength" });
   if (field?.class_type === "EmptyLatentImage" && field?.input_name === "width") return { kind: "field", targetId: "comfyui-width" };
   if (field?.class_type === "EmptyLatentImage" && field?.input_name === "height") return { kind: "field", targetId: "comfyui-height" };
   if (field?.class_type === "EmptyLatentImage" && field?.input_name === "batch_size") return { kind: "field", targetId: "comfyui-batch-size" };
@@ -1760,6 +1769,13 @@ function applyComfyuiTemplateHistorySnapshotToForm(workflowJson = {}, payload = 
   const detail = comfyuiSelectedTemplateDetail;
   if (!detail?.ui_schema?.panels || !workflowJson || typeof workflowJson !== "object") return false;
   let changed = false;
+  if (comfyuiTemplateIsSdxlRefinerWorkflow(detail)) {
+    const skipRefiner = payload?.skip_refiner === true || payload?.skip_refiner === "true" || payload?.skip_refiner === 1 || payload?.skip_refiner === "1";
+    if (comfyuiTemplateSdxlSkipRefiner !== skipRefiner) {
+      comfyuiTemplateSdxlSkipRefiner = skipRefiner;
+      changed = true;
+    }
+  }
   if (comfyuiTemplateIsGgufWorkflow(detail)) {
     const state = ensureComfyuiGgufWorkflowState(detail);
     const { profile, variant } = comfyuiGgufProfileVariantForSnapshot(workflowJson, payload);
@@ -1776,6 +1792,32 @@ function applyComfyuiTemplateHistorySnapshotToForm(workflowJson = {}, payload = 
     const value = inputs[String(field.input_name)];
     return Array.isArray(value) ? undefined : value;
   };
+  const payloadValueForBinding = (binding, field) => {
+    const targetId = String(binding?.targetId || "");
+    if (targetId === "comfyui-prompt") return payload.prompt;
+    if (targetId === "comfyui-negative-prompt") return payload.negative_prompt;
+    if (targetId === "comfyui-model-select") return payload.model || payload.checkpoint;
+    if (targetId === "comfyui-width") return payload.width;
+    if (targetId === "comfyui-height") return payload.height;
+    if (targetId === "comfyui-steps") return payload.steps;
+    if (targetId === "comfyui-cfg") return payload.cfg;
+    if (targetId === "comfyui-seed") return payload.seed;
+    if (targetId === "comfyui-batch-size") return payload.ui_batch_size ?? payload.batch_size;
+    if (targetId === "comfyui-sampler") return payload.sampler_name;
+    if (targetId === "comfyui-scheduler") return payload.scheduler;
+    if (targetId === "comfyui-denoise-strength") return payload.denoise_strength;
+    if (targetId === "comfyui-upscale-model") return payload.upscale_model;
+    if (targetId === "comfyui-controlnet-model") return payload.controlnet?.model_name;
+    if (targetId === "comfyui-control-strength") return payload.controlnet?.strength;
+    if (targetId === "comfyui-control-start") return payload.controlnet?.start_percent;
+    if (targetId === "comfyui-control-end") return payload.controlnet?.end_percent;
+    if (binding?.kind === "direct") {
+      const inputName = String(field?.input_name || "");
+      if (inputName === "noise_seed" || inputName === "seed") return payload.seed;
+      if (Object.prototype.hasOwnProperty.call(payload, inputName)) return payload[inputName];
+    }
+    return undefined;
+  };
   const firstCtx = { textFieldIndex: 0, loadImageIndex: 0 };
   comfyuiTemplateAllFields(detail).forEach((field) => {
     if (!field || field.synthetic || field.input_type === "embedding_shortcuts" || !field.node_id || !field.input_name) return;
@@ -1785,6 +1827,7 @@ function applyComfyuiTemplateHistorySnapshotToForm(workflowJson = {}, payload = 
       const normalized = normalizeComfyuiTemplateRuntimeValue(field, value);
       if (String(normalized ?? "") !== String(field.current_value ?? "")) {
         comfyuiTemplateEditableModelFields[comfyuiTemplateOverrideKey(field)] = true;
+        changed = true;
       }
     }
     comfyuiTemplateFieldBinding(field, detail, firstCtx);
@@ -1795,12 +1838,12 @@ function applyComfyuiTemplateHistorySnapshotToForm(workflowJson = {}, payload = 
     if (comfyuiTemplateIsHiddenSdxlRefinerField(detail, field)) return;
     if (comfyuiTemplateIsHiddenGgufProfileField(detail, field)) return;
     if (comfyuiTemplateIsHiddenUpscaleBreakpointField(detail, field)) return;
-    const rawValue = snapshotValueForField(field);
+    const binding = comfyuiTemplateFieldBinding(field, detail, ctx);
+    let rawValue = snapshotValueForField(field);
+    if (rawValue === undefined) rawValue = payloadValueForBinding(binding, field);
     if (rawValue === undefined) {
-      comfyuiTemplateFieldBinding(field, detail, ctx);
       return;
     }
-    const binding = comfyuiTemplateFieldBinding(field, detail, ctx);
     if (COMFYUI_TEMPLATE_MEDIA_BINDING_KINDS.has(binding.kind) || binding.kind === "readonly") return;
     const value = normalizeComfyuiTemplateRuntimeValue(field, rawValue);
     if (binding.kind === "lora") {
@@ -2065,7 +2108,7 @@ function currentSelectedComfyuiTemplateSeedValue() {
 function renderComfyuiTemplateSeedAfterGenerateControl() {
   const mode = typeof comfyuiSeedAfterGenerateMode === "function"
     ? comfyuiSeedAfterGenerateMode()
-    : ($("comfyui-seed-after-generate")?.value || "fixed");
+    : ($("comfyui-seed-after-generate")?.value || "random");
   const options = [
     ["random", "隨機"],
     ["fixed", "固定"],
@@ -2979,7 +3022,9 @@ function applyComfyuiWorkflowPresetDefaults(defaults = {}) {
     ["comfyui-steps", payload.steps || 20],
     ["comfyui-cfg", payload.cfg || 7],
     ["comfyui-batch-size", payload.batch_size || 1],
+    ["comfyui-run-count", payload.run_count || 1],
     ["comfyui-seed", payload.seed ?? ""],
+    ["comfyui-seed-after-generate", payload.seed_after_generate || "random"],
     ["comfyui-sampler", payload.sampler_name || "euler"],
     ["comfyui-scheduler", payload.scheduler || "normal"],
     ["comfyui-denoise-strength", payload.denoise_strength ?? 0.65],
@@ -2991,6 +3036,9 @@ function applyComfyuiWorkflowPresetDefaults(defaults = {}) {
     ["comfyui-control-start", controlnet.start_percent ?? 0],
     ["comfyui-control-end", controlnet.end_percent ?? 1],
   ].forEach(([id, value]) => setComfyuiFieldValue(id, value));
+  if (typeof setComfyuiSeedAfterGenerateMode === "function") {
+    setComfyuiSeedAfterGenerateMode(payload.seed_after_generate || "random");
+  }
   if ($("comfyui-controlnet-enabled")) $("comfyui-controlnet-enabled").checked = !!controlnet?.type;
   updateComfyuiModeVisibility();
   writeComfyuiDraft();
@@ -3147,7 +3195,7 @@ async function runComfyuiWorkflowPreset(presetId) {
   const preset = comfyuiWorkflowPresetById(presetId);
   const templateDetail = Number(comfyuiSelectedTemplateDetail?.id || 0) === Number(presetId) ? comfyuiSelectedTemplateDetail : null;
   if (templateDetail && !ensureComfyuiTemplatePromptSharingChoice(templateDetail)) return;
-  const userInputs = templateDetail ? collectComfyuiTemplateUserInputs(templateDetail) : {};
+  const collectRunUserInputs = () => (templateDetail ? collectComfyuiTemplateUserInputs(templateDetail) : {});
   let imageAssignmentState = { assignments: {}, missing: [] };
   try {
     imageAssignmentState = templateDetail ? await ensureComfyuiTemplateImageAssignments(templateDetail) : imageAssignmentState;
@@ -3203,10 +3251,12 @@ async function runComfyuiWorkflowPreset(presetId) {
   setComfyuiBusy(true);
   setComfyuiMessage("正在建立 workflow 執行工作...", true);
   const workflowTimeoutSeconds = comfyuiWorkflowPresetForegroundTimeoutSeconds(preset);
-  startComfyuiProgress(workflowTimeoutSeconds);
+  const runCount = typeof comfyuiRunCount === "function" ? comfyuiRunCount() : 1;
+  const seedAfterGenerate = typeof comfyuiSeedAfterGenerateMode === "function" ? comfyuiSeedAfterGenerateMode() : "random";
+  startComfyuiProgress(workflowTimeoutSeconds > 0 ? workflowTimeoutSeconds * runCount : workflowTimeoutSeconds);
   const controller = new AbortController();
   comfyuiGenerateAbortController = controller;
-  const runRequest = (confirmed) => apiFetch(API + `/comfyui/workflows/${encodeURIComponent(presetId)}/run`, {
+  const runRequest = (confirmed, requestUserInputs) => apiFetch(API + `/comfyui/workflows/${encodeURIComponent(presetId)}/run`, {
     method: "POST",
     credentials: "same-origin",
     signal: controller.signal,
@@ -3216,12 +3266,14 @@ async function runComfyuiWorkflowPreset(presetId) {
     },
     body: JSON.stringify({
       confirm_paid_api_nodes: !!confirmed,
-      user_inputs: userInputs,
+      user_inputs: requestUserInputs,
       image_field_assignments: imageAssignmentState.assignments,
       multi_compare: multiCompareSpec || undefined,
       upscale_breakpoint: upscaleBreakpointSpec || undefined,
       sdxl_refiner: sdxlRefinerSpec || undefined,
       gguf_workflow: ggufWorkflowSpec || undefined,
+      run_count: runCount,
+      seed_after_generate: seedAfterGenerate,
     }),
   });
   const partialRenderState = { signature: "" };
@@ -3257,43 +3309,55 @@ async function runComfyuiWorkflowPreset(presetId) {
     setComfyuiMessage(`Multi-Compare 已先顯示 ${images.length}${suffix} 張完成圖片，剩餘分支仍在生成。`, true);
   };
   try {
-    let res = await runRequest(confirmPaidApiNodes);
-    let json = await res.json().catch(() => ({}));
-    if ((!res.ok || !json.ok) && json.stage === "paid_api_confirmation_required") {
-      const nodes = Array.isArray(json.paid_api_nodes?.nodes) ? json.paid_api_nodes.nodes : [];
-      const labels = nodes.map((node) => `${node.node_id || "-"}:${node.class_type || node.title || "API node"}`).slice(0, 8);
-      if (!window.confirm(`這個 workflow 可能會消耗 ComfyUI 官方 credits，不會扣本站積分。\n\n節點：${labels.join(", ") || "API node"}\n\n餘額與購買請到 ComfyUI UI 的 Settings / Credits 查看。\n\n要繼續執行嗎？`)) {
-        throw new Error("已取消付費/API node workflow 執行");
+    let paidApiConfirmed = confirmPaidApiNodes;
+    const generatedImages = [];
+    const generatedMedia = [];
+    for (let runIndex = 0; runIndex < runCount; runIndex += 1) {
+      if (controller.signal.aborted) throw new DOMException("Aborted", "AbortError");
+      partialRenderState.signature = "";
+      setComfyuiMessage(`正在執行 workflow 第 ${runIndex + 1} / ${runCount} 次...`, true);
+      let res = await runRequest(paidApiConfirmed, collectRunUserInputs());
+      let json = await res.json().catch(() => ({}));
+      if ((!res.ok || !json.ok) && json.stage === "paid_api_confirmation_required") {
+        const nodes = Array.isArray(json.paid_api_nodes?.nodes) ? json.paid_api_nodes.nodes : [];
+        const labels = nodes.map((node) => `${node.node_id || "-"}:${node.class_type || node.title || "API node"}`).slice(0, 8);
+        if (!window.confirm(`這個 workflow 可能會消耗 ComfyUI 官方 credits，不會扣本站積分。\n\n節點：${labels.join(", ") || "API node"}\n\n餘額與購買請到 ComfyUI UI 的 Settings / Credits 查看。\n\n要繼續執行嗎？`)) {
+          throw new Error("已取消付費/API node workflow 執行");
+        }
+        paidApiConfirmed = true;
+        res = await runRequest(true, collectRunUserInputs());
+        json = await res.json().catch(() => ({}));
       }
-      res = await runRequest(true);
-      json = await res.json().catch(() => ({}));
+      if (!res.ok || !json.ok) throw new Error(json.msg || `workflow 執行失敗（HTTP ${res.status}）`);
+      const jobId = json.job?.job_id;
+      if (!jobId) throw new Error("Workflow 執行未回傳工作編號");
+      const result = await pollComfyuiJobUntilDone(jobId, controller, workflowTimeoutSeconds, {
+        onPartialResult: renderPartialWorkflowResult,
+        onPartialError: (err) => {
+          console.warn("Multi-Compare partial preview failed", err);
+        },
+      });
+      const rawImages = Array.isArray(result.images) && result.images.length ? result.images : [result.image].filter(Boolean);
+      const images = await hydrateComfyuiGeneratedImages(rawImages);
+      const media = await hydrateComfyuiGeneratedMedia(Array.isArray(result.media) ? result.media : [], jobId);
+      images.forEach((image, index) => generatedImages.push({ ...image, run_index: runIndex, batch_index: index, run_count: runCount }));
+      media.forEach((item, index) => generatedMedia.push({ ...item, run_index: runIndex, batch_index: index, run_count: runCount }));
+      comfyuiGeneratedImages = generatedImages.slice();
+      comfyuiGeneratedMedia = generatedMedia.slice();
+      if (comfyuiGeneratedImages.length) {
+        renderComfyuiGeneratedImages(comfyuiGeneratedImages);
+        setComfyuiSelectedImage(Math.max(0, comfyuiGeneratedImages.length - images.length));
+      } else if (comfyuiGeneratedMedia.length) {
+        renderComfyuiGeneratedMedia(comfyuiGeneratedMedia);
+      }
     }
-    if (!res.ok || !json.ok) throw new Error(json.msg || `workflow 執行失敗（HTTP ${res.status}）`);
-    const jobId = json.job?.job_id;
-    const result = await pollComfyuiJobUntilDone(jobId, controller, workflowTimeoutSeconds, {
-      onPartialResult: renderPartialWorkflowResult,
-      onPartialError: (err) => {
-        console.warn("Multi-Compare partial preview failed", err);
-      },
-    });
-    const rawImages = Array.isArray(result.images) && result.images.length ? result.images : [result.image].filter(Boolean);
-    const images = await hydrateComfyuiGeneratedImages(rawImages);
-    const media = await hydrateComfyuiGeneratedMedia(Array.isArray(result.media) ? result.media : [], jobId);
-    comfyuiGeneratedImages = images;
-    comfyuiGeneratedMedia = media;
-    if (images.length) {
-      renderComfyuiGeneratedImages(comfyuiGeneratedImages);
-      setComfyuiSelectedImage(0);
-    } else if (media.length) {
-      renderComfyuiGeneratedMedia(comfyuiGeneratedMedia);
-    } else {
-      renderComfyuiGeneratedImages([]);
-    }
+    if (!comfyuiGeneratedImages.length && !comfyuiGeneratedMedia.length) renderComfyuiGeneratedImages([]);
     stopComfyuiProgress({ complete: true });
-    updateComfyuiResultButtons(!!images.length);
+    updateComfyuiResultButtons(!!comfyuiGeneratedImages.length);
     await loadComfyuiWorkflowPresets();
-    if (typeof applyComfyuiSeedAfterGenerate === "function") applyComfyuiSeedAfterGenerate(images[images.length - 1]?.seed);
-    setComfyuiMessage(`已執行 workflow preset #${presetId}，輸出 ${images.length} 張圖片、${media.length} 個媒體檔。`, true);
+    if (typeof loadComfyuiHistory === "function") loadComfyuiHistory().catch((err) => setComfyuiHistoryActionMessage(err?.message || "ComfyUI 歷史重新整理失敗", false));
+    if (typeof applyComfyuiSeedAfterGenerate === "function") applyComfyuiSeedAfterGenerate(comfyuiGeneratedImages[comfyuiGeneratedImages.length - 1]?.seed);
+    setComfyuiMessage(`已執行 workflow preset #${presetId} ${runCount} 次，輸出 ${comfyuiGeneratedImages.length} 張圖片、${comfyuiGeneratedMedia.length} 個媒體檔。`, true);
   } catch (err) {
     const timedOut = typeof isComfyuiForegroundTimeoutError === "function" && isComfyuiForegroundTimeoutError(err);
     const message = timedOut && typeof comfyuiForegroundTimeoutMessage === "function"

@@ -1,6 +1,34 @@
 # Update Summary
 
-Release ID: `04_2026.06.06-005`
+Release ID: `04_2026.06.06-007`
+
+## 04_2026.06.06-007
+
+- Fixed workflow-template execution fidelity so background workers use the
+  current `comfyui_workflow_runs` snapshot instead of falling back to preset
+  defaults. User-selected checkpoint/model values now drive the sent workflow,
+  result metadata, and history payload consistently across templates.
+- Hardened SDXL skip-refiner runs: selecting a custom base checkpoint while
+  skipping the refiner removes refiner nodes from the runtime workflow and
+  records the selected base checkpoint as `model`/`checkpoint`, preventing
+  `sd_xl_refiner_1.0.safetensors` from reappearing in output cards or history.
+- Workflow templates now default seed-after-generate to random and pass
+  `run_count` separately from `batch_size`; the frontend executes workflow
+  run count as repeated workflow runs rather than increasing batches.
+- History one-click reruns randomize sampler seeds again when the stored run
+  uses random seed mode, while explicit fixed/increment/decrement histories
+  keep their recorded behavior.
+
+## 04_2026.06.06-006
+
+- Fixed ComfyUI history restore for workflow runs. The history payload now
+  carries workflow preset identity and params, and the frontend restores the
+  selected workflow, SDXL skip-refiner state, custom runtime model values,
+  trigger-word prompt text, width/height, steps, CFG, sampler/scheduler, batch,
+  run count, seed, and seed-after-generate mode from the workflow snapshot.
+- Added KSamplerAdvanced/noise_seed mapping so workflow histories using
+  Advanced samplers restore the visible seed field instead of falling back to
+  defaults.
 
 ## 04_2026.06.06-005
 

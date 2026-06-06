@@ -12,6 +12,21 @@ from tests.comfyui._integration_suite import (
 
 
 ROOT = Path(__file__).resolve().parents[3]
+JANKU_TEST_CHECKPOINT = "JANKU_animagineXL_v31.safetensors"
+
+
+class SdxlWorkflowModelClient(FakeComfyUIClient):
+    def get_models(self):
+        return [
+            "sd_xl_base_1.0.safetensors",
+            "sd_xl_refiner_1.0.safetensors",
+            JANKU_TEST_CHECKPOINT,
+        ]
+
+    def get_capabilities(self):
+        payload = super().get_capabilities()
+        payload["available_nodes"] = sorted(set(payload.get("available_nodes") or []) | {"KSamplerAdvanced"})
+        return payload
 
 
 def _actor(user_id, username):
@@ -205,3 +220,79 @@ def test_sdxl_gguf_workflow_run_preserves_positive_prompt_verbatim(tmp_path):
     workflow_snapshot = json.loads(row["workflow_json"])
     assert params["prompt"] == prompt
     assert workflow_snapshot["6"]["inputs"]["text"] == prompt
+
+
+def test_sdxl_skip_refiner_custom_checkpoint_drives_workflow_result_and_history(tmp_path):
+    db_path = tmp_path / "comfyui.db"
+    storage_root = tmp_path / "storage"
+    storage_root.mkdir()
+    _init_db(db_path)
+    client = _build_app(db_path, storage_root, comfyui_client=SdxlWorkflowModelClient()).test_client()
+    workflow_dir = ROOT / "workflows" / "comfyui" / "origin_sdxl_txt2img"
+    workflow = json.loads((workflow_dir / "workflow.json").read_text(encoding="utf-8"))
+    manifest = json.loads((workflow_dir / "manifest.json").read_text(encoding="utf-8"))
+    preset = _import_workflow_preset(
+        client,
+        workflow,
+        title="SDXL Skip Refiner Fidelity",
+        default_params=manifest["default_params"],
+    )
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "UPDATE comfyui_workflow_presets SET system_bundle_id='origin_sdxl_txt2img', is_official=1 WHERE id=?",
+            (int(preset["id"]),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    started = client.post(
+        f"/api/comfyui/workflows/{preset['id']}/run",
+        json={
+            "sdxl_refiner": {"skip_refiner": True},
+            "seed_after_generate": "fixed",
+            "user_inputs": {
+                "4": {"ckpt_name": JANKU_TEST_CHECKPOINT},
+                "6": {"text": "janku custom checkpoint prompt"},
+                "7": {"text": "low quality"},
+                "10": {"noise_seed": 987654321, "steps": 28, "cfg": 7.25},
+            },
+        },
+    )
+    assert started.status_code == 200, started.get_json()
+    run_id = int(started.get_json()["workflow_run_id"])
+    result = _await_comfyui_result(client, started)
+
+    assert FakeComfyUIClient.last_workflow["4"]["inputs"]["ckpt_name"] == JANKU_TEST_CHECKPOINT
+    assert "12" not in FakeComfyUIClient.last_workflow
+    assert FakeComfyUIClient.last_workflow["17"]["inputs"]["samples"] == ["10", 0]
+    assert result["images"][0]["model"] == JANKU_TEST_CHECKPOINT
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            "SELECT params_json, workflow_json FROM comfyui_workflow_runs WHERE id=?",
+            (run_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None
+    params = json.loads(row["params_json"])
+    workflow_snapshot = json.loads(row["workflow_json"])
+    assert params["skip_refiner"] is True
+    assert params["model"] == JANKU_TEST_CHECKPOINT
+    assert params["checkpoint"] == JANKU_TEST_CHECKPOINT
+    assert params["seed"] == 987654321
+    assert workflow_snapshot["4"]["inputs"]["ckpt_name"] == JANKU_TEST_CHECKPOINT
+    assert "sd_xl_refiner_1.0.safetensors" not in json.dumps(workflow_snapshot)
+
+    history = client.get("/api/comfyui/history")
+    assert history.status_code == 200, history.get_json()
+    history_item = next(
+        item for item in history.get_json()["history"]
+        if item.get("workflow_run_id") == run_id
+    )
+    assert history_item["payload"]["model"] == JANKU_TEST_CHECKPOINT
+    assert history_item["params"]["model"] == JANKU_TEST_CHECKPOINT

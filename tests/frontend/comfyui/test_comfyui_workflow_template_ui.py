@@ -152,7 +152,7 @@ def test_seed_after_generation_mode_is_available_for_generate_and_templates():
     assert "randomComfyuiSeedForUi" in comfyui_js
     assert "currentSelectedComfyuiTemplateSeedValue" in comfyui_js
     assert "applyComfyuiSeedAfterGenerate(generated[generated.length - 1]?.seed);" in comfyui_js
-    assert 'if (typeof applyComfyuiSeedAfterGenerate === "function") applyComfyuiSeedAfterGenerate(images[images.length - 1]?.seed);' in workflow_js
+    assert 'if (typeof applyComfyuiSeedAfterGenerate === "function") applyComfyuiSeedAfterGenerate(comfyuiGeneratedImages[comfyuiGeneratedImages.length - 1]?.seed);' in workflow_js
     assert "function comfyuiTemplateFieldIsSeed" in workflow_js
     assert "function currentSelectedComfyuiTemplateSeedValue" in workflow_js
     assert "function renderComfyuiTemplateSeedAfterGenerateControl" in workflow_js
@@ -274,7 +274,7 @@ def test_non_image_comfyui_outputs_render_as_playable_media():
     assert "generatedMedia.push({ ...item, run_index: runIndex, batch_index: batchIndex, run_count: runCount });" in comfyui_js
     assert "comfyuiGeneratedMedia = generatedMedia;" in comfyui_js
     assert "if (comfyuiGeneratedImages.length) comfyuiGeneratedMedia = [];" not in comfyui_js
-    assert "} else if (media.length) {\n      renderComfyuiGeneratedMedia(comfyuiGeneratedMedia);\n    }" in workflow_js
+    assert "} else if (comfyuiGeneratedMedia.length) {\n        renderComfyuiGeneratedMedia(comfyuiGeneratedMedia);\n      }" in workflow_js
 
 
 def test_template_local_images_are_imported_before_safe_remap_gate():

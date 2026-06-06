@@ -1,4 +1,5 @@
 import json
+import secrets
 from datetime import datetime
 from pathlib import Path
 
@@ -320,20 +321,61 @@ def register_comfyui_workflow_routes(app, ctx):
                 inputs[key] = value
         return patched
 
+    def _workflow_request_int(value, fallback, minimum, maximum):
+        try:
+            parsed = int(float(value))
+        except (TypeError, ValueError):
+            parsed = fallback
+        return max(minimum, min(maximum, parsed))
+
+    def _normalize_workflow_seed_after_generate(value):
+        mode = str(value or "random").strip().lower()
+        return mode if mode in {"random", "fixed", "increment", "decrement"} else "random"
+
+    def _randomize_workflow_seed_inputs(workflow_json, user_inputs):
+        if not isinstance(workflow_json, dict):
+            return workflow_json, user_inputs, None
+        patched_inputs = {
+            str(node_id): dict(patch)
+            for node_id, patch in (user_inputs or {}).items()
+            if isinstance(patch, dict)
+        }
+        seed = secrets.randbits(32)
+        changed = False
+        for node_id, node in workflow_json.items():
+            if not isinstance(node, dict):
+                continue
+            class_type = str(node.get("class_type") or "")
+            if class_type not in {"KSampler", "KSamplerAdvanced"}:
+                continue
+            inputs = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
+            seed_keys = []
+            if "noise_seed" in inputs or class_type == "KSamplerAdvanced":
+                seed_keys.append("noise_seed")
+            if "seed" in inputs or class_type == "KSampler":
+                seed_keys.append("seed")
+            for key in seed_keys:
+                input_patch = patched_inputs.get(str(node_id), {})
+                if key not in inputs and key not in input_patch:
+                    continue
+                patched_inputs.setdefault(str(node_id), {})[key] = seed
+                changed = True
+        return workflow_json, patched_inputs, seed if changed else None
+
     def _workflow_snapshot_params(default_params, workflow_json):
         params = dict(default_params or {})
         if not isinstance(workflow_json, dict):
             return params
         prompts = []
         negatives = []
+        checkpoint_names = []
         for node in workflow_json.values():
             if not isinstance(node, dict):
                 continue
             inputs = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
             class_type = str(node.get("class_type") or "")
-            if class_type == "CheckpointLoaderSimple" and inputs.get("ckpt_name") and not params.get("model"):
-                params["model"] = inputs.get("ckpt_name")
-                params["checkpoint"] = inputs.get("ckpt_name")
+            if class_type == "CheckpointLoaderSimple" and inputs.get("ckpt_name"):
+                checkpoint_names.append(str(inputs.get("ckpt_name") or ""))
             if class_type in {"KSampler", "KSamplerAdvanced"}:
                 if inputs.get("noise_seed") is not None:
                     params["seed"] = inputs.get("noise_seed")
@@ -358,6 +400,15 @@ def register_comfyui_workflow_routes(app, ctx):
                     negatives.append(text)
                 else:
                     prompts.append(text)
+        checkpoint_names = [name for name in checkpoint_names if name]
+        if checkpoint_names:
+            current_model = str(params.get("model") or params.get("checkpoint") or "").strip()
+            if not current_model or current_model not in checkpoint_names:
+                params["model"] = checkpoint_names[0]
+                params["checkpoint"] = checkpoint_names[0]
+            else:
+                params["model"] = current_model
+                params["checkpoint"] = current_model
         if prompts:
             params["prompt"] = prompts[0]
         if negatives:
@@ -908,6 +959,19 @@ def register_comfyui_workflow_routes(app, ctx):
                     default_params["clip_loader_class"] = selection.profile.get("clip_loader_class") or ""
                     runtime_workflow_changed = True
 
+            run_count = _workflow_request_int(body.get("run_count") or body.get("history_run_count"), 1, 1, 10)
+            seed_after_generate = _normalize_workflow_seed_after_generate(
+                body.get("seed_after_generate") or body.get("seed_after_generate_mode")
+            )
+            default_params = dict(default_params)
+            default_params["run_count"] = run_count
+            default_params["seed_after_generate"] = seed_after_generate
+            if seed_after_generate == "random":
+                workflow_json, user_inputs, random_seed = _randomize_workflow_seed_inputs(workflow_json, user_inputs)
+                if random_seed is not None:
+                    default_params["seed"] = random_seed
+                    runtime_workflow_changed = True
+
             if runtime_workflow_changed:
                 runtime_dependency_row = dict(row)
                 runtime_dependency_row["workflow_json"] = json.dumps(workflow_json or {}, ensure_ascii=False, sort_keys=True)
@@ -1027,6 +1091,9 @@ def register_comfyui_workflow_routes(app, ctx):
                     return paid_api_error
 
             workflow_run_params = _workflow_snapshot_params(default_params, workflow_json)
+            workflow_run_params["workflow_preset_id"] = int(preset_id)
+            workflow_run_params["workflow_preset_title"] = row["title"] or "Workflow"
+            workflow_run_params["workflow_system_bundle_id"] = row["system_bundle_id"] or ""
             run_id = create_workflow_run(
                 conn,
                 preset_id=preset_id,
