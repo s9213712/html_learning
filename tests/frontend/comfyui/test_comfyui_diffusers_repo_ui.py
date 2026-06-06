@@ -172,6 +172,7 @@ def test_civitai_frontend_entry_is_explicit_and_not_hf_settings_family():
     assert "function openComfyuiCivitaiPanel()" in comfyui_js
     assert 'const civitaiShortcut = $("comfyui-open-civitai-panel-btn");' in comfyui_js
     assert 'civitaiShortcut.style.display = showLocalModels && comfyuiActiveBackendFamily !== "hf" ? "" : "none";' in comfyui_js
+    assert "updateComfyuiRootPanelVisibility();" in comfyui_js
 
 
 def test_diffusers_text_only_repo_hides_image_cards_and_omits_image_payloads():

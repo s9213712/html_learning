@@ -6307,6 +6307,7 @@ def test_comfyui_frontend_is_wired():
     assert 'HF 頁籤會檢查 Hugging Face repo 與 Python / Diffusers 套件' in admin_js
     assert "function openComfyuiCivitaiPanel()" in comfyui_js
     assert 'civitaiShortcut.style.display = showLocalModels && comfyuiActiveBackendFamily !== "hf" ? "" : "none";' in comfyui_js
+    assert "updateComfyuiRootPanelVisibility();" in comfyui_js
     assert 'apiFetch(API + "/comfyui/generate"' in comfyui_js
     assert 'apiFetch(API + "/comfyui/billing-quote"' in comfyui_js
     assert 'apiFetch(API + "/root/comfyui/civitai/search"' in comfyui_js

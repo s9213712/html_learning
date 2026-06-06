@@ -1,6 +1,13 @@
 # Update Summary
 
-Release ID: `04_2026.06.06-002`
+Release ID: `04_2026.06.06-003`
+
+## 04_2026.06.06-003
+
+- Fixed a live UI state leak found by Playwright: switching from the ComfyUI
+  surface to `HF / Diffusers` now refreshes root-panel visibility immediately,
+  so the `Civitai / 模型匯入` shortcut does not remain visible on the active HF
+  surface.
 
 ## 04_2026.06.06-002
 

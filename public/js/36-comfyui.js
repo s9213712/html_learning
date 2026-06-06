@@ -1457,6 +1457,7 @@ function setComfyuiView(view, { persist = true } = {}) {
   updateComfyuiModeNote();
   updateComfyuiStartButton();
   updateComfyuiDiffusersUi();
+  updateComfyuiRootPanelVisibility();
   updateComfyuiStatusForActiveBackend();
 }
 

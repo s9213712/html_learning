@@ -20,7 +20,7 @@ Related technical references:
 
 ## Release and Schema
 
-- Release ID: `04_2026.06.06-002`
+- Release ID: `04_2026.06.06-003`
 - Schema version: `30`
 - Release ID source: `services/platform/release_info.py`
 - Runtime version endpoint: `GET /api/version`

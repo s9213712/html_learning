@@ -24,7 +24,8 @@
 
 - 使用者實測指出 AI 後端設定切到 HF 時仍混入 ComfyUI 相關欄位，且前台不容易看到 Civitai。已將 gear 的 `HF` family 限定為 Hugging Face / Diffusers 欄位；`Civitai API Key`、ComfyUI Account API Key、batch/default-size 等 ComfyUI 專屬欄位只留在 `ComfyUI` family。
 - root 前台新增 `Civitai / 模型匯入` 快捷按鈕，並將模型子頁籤改名為 `Civitai / 模型管理`。Civitai 仍是 ComfyUI 模型匯入工具，會在 ComfyUI 本地/遠端模式常駐可見；HF active surface 與 HF 設定 family 不再混入 ComfyUI/Civitai 專屬欄位。
-- Release ID 往前推進為 `04_2026.06.06-002`。
+- Live Playwright smoke 抓到切到 HF active surface 後 `Civitai / 模型匯入` 快捷按鈕仍沿用上一個 ComfyUI surface 的 visible 狀態；已補 `setComfyuiView()` 內的 root-panel visibility refresh。
+- Release ID 往前推進為 `04_2026.06.06-003`。
 
 ## 已補驗證
 
