@@ -9,6 +9,52 @@ from datetime import datetime
 from services.core.sqlite_hardening import connect_sqlite, connect_sqlite_readonly
 
 
+def _request_connection_bucket():
+    try:
+        from flask import g, has_request_context
+
+        if not has_request_context():
+            return None
+        bucket = getattr(g, "_hackme_sqlite_connections", None)
+        if bucket is None:
+            bucket = []
+            setattr(g, "_hackme_sqlite_connections", bucket)
+        return bucket
+    except Exception:
+        return None
+
+
+def track_request_connection(conn):
+    bucket = _request_connection_bucket()
+    if bucket is not None:
+        bucket.append(conn)
+    return conn
+
+
+def close_request_db_connections(_exc=None):
+    try:
+        from flask import g, has_request_context
+
+        if not has_request_context():
+            return None
+        bucket = getattr(g, "_hackme_sqlite_connections", None) or []
+        setattr(g, "_hackme_sqlite_connections", [])
+    except Exception:
+        return None
+    while bucket:
+        conn = bucket.pop()
+        try:
+            if getattr(conn, "in_transaction", False):
+                conn.rollback()
+        except Exception:
+            pass
+        try:
+            conn.close()
+        except Exception:
+            pass
+    return None
+
+
 def _open_sqlite(db_path, *, register_app_mode=None):
     conn = connect_sqlite(db_path, timeout=15, row_factory=True, foreign_keys=True, wal=True)
     try:
@@ -60,23 +106,23 @@ def ensure_audit_db_schema(conn):
 
 def get_db(db_path, *, register_app_mode=None):
     conn = _open_sqlite(db_path, register_app_mode=register_app_mode)
-    return conn
+    return track_request_connection(conn)
 
 
 def get_readonly_db(db_path, *, register_app_mode=None):
-    return _open_sqlite_readonly(db_path, register_app_mode=register_app_mode)
+    return track_request_connection(_open_sqlite_readonly(db_path, register_app_mode=register_app_mode))
 
 
 def get_readonly_auth_db(db_path):
-    return _open_sqlite_readonly(db_path)
+    return track_request_connection(_open_sqlite_readonly(db_path))
 
 
 def get_readonly_audit_db(db_path):
-    return _open_sqlite_readonly(db_path)
+    return track_request_connection(_open_sqlite_readonly(db_path))
 
 
 def get_readonly_control_db(db_path):
-    return _open_sqlite_readonly(db_path)
+    return track_request_connection(_open_sqlite_readonly(db_path))
 
 
 def get_audit_db(db_path):
@@ -88,7 +134,7 @@ def get_audit_db(db_path):
                 ensure_audit_db_schema(conn)
                 conn.commit()
                 _ENSURED_AUDIT_DB_PATHS.add(path)
-    return conn
+    return track_request_connection(conn)
 
 
 def count_role(role, *, get_db):
@@ -246,7 +292,7 @@ def get_auth_db(db_path):
                 ensure_auth_db_schema(conn)
                 conn.commit()
                 _ENSURED_AUTH_DB_PATHS.add(path)
-    return conn
+    return track_request_connection(conn)
 
 
 def get_control_db(db_path):
@@ -260,7 +306,7 @@ def get_control_db(db_path):
                 ensure_control_db_schema(conn)
                 conn.commit()
                 _ENSURED_CONTROL_DB_PATHS.add(path)
-    return conn
+    return track_request_connection(conn)
 
 
 def ensure_security_support_schema(

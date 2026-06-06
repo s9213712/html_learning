@@ -1,6 +1,13 @@
 # Update Summary
 
-Release ID: `04_2026.06.06-004`
+Release ID: `04_2026.06.06-005`
+
+## 04_2026.06.06-005
+
+- Added request-scope SQLite connection cleanup. Every Flask request now tracks
+  opened DB connections and teardown rolls back uncommitted transactions before
+  closing them, preventing leaked route connections from holding SQLite write
+  locks and surfacing repeated `目前資料庫忙碌，請稍候再試` responses.
 
 ## 04_2026.06.06-004
 

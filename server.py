@@ -178,6 +178,7 @@ from services.server.validation import (
 )
 from services.server.database import (
     activate_emergency_lockdown as activate_emergency_lockdown_helper,
+    close_request_db_connections,
     ensure_auth_db_schema as ensure_auth_db_schema_helper,
     count_role as count_role_helper,
     db_get_user_role as db_get_user_role_helper,
@@ -1197,6 +1198,7 @@ def ensure_runtime_finance_schema(_conn=None):
 # ── Flask app ──────────────────────────────────────────────────────────────────
 app = Flask(__name__, static_folder=PUBLIC_DIR, static_url_path="")
 app.config["SECRET_KEY"] = SECRET_KEY
+app.teardown_request(close_request_db_connections)
 
 def _configured_max_content_mb():
     if str(os.environ.get("HTML_LEARNING_MAX_CONTENT_MB") or "").strip():
