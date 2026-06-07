@@ -60,6 +60,7 @@
 - ControlNet 目前支援 `Canny`、`Depth`、`OpenPose`、`Lineart / Scribble`、`SoftEdge`、`Tile`
 - 歷史清單可一鍵把先前的提示詞、LoRA、ControlNet、來源圖 / 遮罩圖設定套回再重跑
 - `ComfyUI Workflow 工作台` 可把目前表單匯出成 workflow JSON，再匯入為個人 preset、日後一鍵套回/重跑；若你是 root，還可把自己的 preset 發布成官方 preset
+- 透過 Civitai 圖片頁帶回的參數會自動正規化 `VAE`（`auto` / `builtin` 視為不帶 VAE），並會依模型家族（ZIT、ANIMA、Flux、SDXL、SD3.5、NetaYume）找最接近的系統 workflow，減少套回後缺參數的機率。
 - 產圖完成後可儲存到 Cloud Drive、分享到論壇或丟棄
 - 頁面會明確顯示目前是本地模式還是遠端模式
 - 產圖會建立背景任務；大模型載入慢、VRAM 不足或磁碟 I/O 慢時，狀態可能顯示後端暫時沒有回報進度，但主網站 request 不應同步等到當機

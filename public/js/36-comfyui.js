@@ -15,6 +15,8 @@ let comfyuiProgressTimer = null;
 let comfyuiProgressStartedAt = 0;
 let comfyuiProgressPythonLogTail = [];
 let comfyuiProgressBackendKind = "";
+let comfyuiResourceDashboardTimer = null;
+let comfyuiResourceDashboardInFlight = false;
 let comfyuiGenerateAbortController = null;
 let comfyuiActiveJobId = null;
 let comfyuiMaxBatchSize = 1;
@@ -49,11 +51,13 @@ let comfyuiGgufProfilesLoadPromise = null;
 const comfyuiDiffusersInspectCache = new Map();
 const comfyuiDiffusersInspectInflight = new Map();
 let comfyuiHistoryItems = [];
+let comfyuiImageFavorites = [];
 let comfyuiWorkflowPresets = [];
 let comfyuiWorkflowCurrentPresetId = null;
 let comfyuiWorkflowEditorDefaults = null;
 let comfyuiSelectedTemplatePresetId = null;
 let comfyuiSelectedTemplateDetail = null;
+let comfyuiLastFocusedPromptType = "prompt";
 let comfyuiInputAssets = {
   source: { file: null, imageRef: null, previewUrl: "", filename: "", cloudFileId: "" },
   mask: { file: null, imageRef: null, previewUrl: "", filename: "", cloudFileId: "" },
@@ -1414,7 +1418,7 @@ function renderComfyuiModelFamilyHints(values = []) {
 
 function normalizeComfyuiView(view) {
   const value = String(view || "").trim().toLowerCase();
-  return ["generate", "hf", "history", "workflow", "models", "settings"].includes(value) ? value : "generate";
+  return ["generate", "hf", "history", "workflow", "models", "favorites", "settings"].includes(value) ? value : "generate";
 }
 
 function canManageComfyuiLocalModels(modeOverride = null) {
@@ -1446,6 +1450,9 @@ function setComfyuiView(view, { persist = true } = {}) {
   if (activeView === "history") {
     loadComfyuiHistory().catch((err) => setComfyuiHistoryActionMessage(err?.message || "ComfyUI 歷史讀取失敗", false));
   }
+  if (activeView === "favorites") {
+    loadComfyuiImageFavorites().catch((err) => setComfyuiMessage(err?.message || "圖片收藏讀取失敗", false));
+  }
   if (activeView === "workflow") {
     loadComfyuiWorkflowPresets().catch((err) => {
       if (typeof setComfyuiWorkflowStatus === "function") {
@@ -1457,6 +1464,11 @@ function setComfyuiView(view, { persist = true } = {}) {
   }
   if (activeView === "settings" && typeof loadSettings === "function") {
     loadSettings();
+  }
+  if (currentUser && (activeView === "generate" || activeView === "hf")) {
+    startComfyuiResourceDashboardPolling();
+  } else {
+    stopComfyuiResourceDashboardPolling();
   }
   updateComfyuiModeNote();
   updateComfyuiStartButton();
@@ -2439,9 +2451,11 @@ function fillComfyuiVaeSelect(values = []) {
 
 function updateComfyuiResultButtons(hasImage) {
   const save = $("comfyui-save-btn");
+  const favorite = $("comfyui-favorite-btn");
   const discard = $("comfyui-discard-btn");
   const share = $("comfyui-share-btn");
   if (save) save.disabled = !hasImage;
+  if (favorite) favorite.disabled = !hasImage;
   if (discard) discard.disabled = !hasImage;
   if (share) share.disabled = !hasImage;
 }
@@ -2451,6 +2465,121 @@ function formatComfyuiDuration(seconds) {
   const mins = Math.floor(safe / 60);
   const secs = safe % 60;
   return `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+}
+
+function comfyuiResourcePercent(value) {
+  const percent = Number(value);
+  if (!Number.isFinite(percent) || percent < 0) return null;
+  return Math.max(0, Math.min(100, percent));
+}
+
+function comfyuiResourceDetailBytes(used, total) {
+  const usedBytes = Number(used || 0);
+  const totalBytes = Number(total || 0);
+  if (totalBytes > 0 && typeof formatDriveBytes === "function") {
+    return `${formatDriveBytes(usedBytes)} / ${formatDriveBytes(totalBytes)}`;
+  }
+  return "";
+}
+
+function comfyuiResourceMetricMarkup({ label, percent, detail = "", available = true }) {
+  const safePercent = comfyuiResourcePercent(percent);
+  const unavailable = available === false || safePercent === null;
+  const display = unavailable ? "--" : `${Math.round(safePercent)}%`;
+  const level = unavailable ? "muted" : (safePercent >= 90 ? "danger" : (safePercent >= 75 ? "warn" : "ok"));
+  return `
+    <div class="comfyui-resource-metric ${level}">
+      <span>${sanitize(label || "-")}</span>
+      <strong>${sanitize(display)}</strong>
+      <small>${sanitize(detail || (unavailable ? "未偵測" : "使用中"))}</small>
+    </div>
+  `;
+}
+
+function renderComfyuiResourceDashboard(resource = {}, { error = "" } = {}) {
+  const host = $("comfyui-resource-dashboard");
+  if (!host) return;
+  if (error) {
+    host.innerHTML = [
+      comfyuiResourceMetricMarkup({ label: "RAM", percent: null, available: false, detail: error }),
+      comfyuiResourceMetricMarkup({ label: "GPU Load", percent: null, available: false, detail: "等待資源資料" }),
+      comfyuiResourceMetricMarkup({ label: "VRAM", percent: null, available: false, detail: "等待資源資料" }),
+      comfyuiResourceMetricMarkup({ label: "GPU Temp", percent: null, available: false, detail: "等待資源資料" }),
+    ].join("");
+    return;
+  }
+  const ram = resource.ram || {};
+  const gpu = resource.gpu || {};
+  const vram = resource.vram || {};
+  const gpus = Array.isArray(gpu.gpus) ? gpu.gpus : [];
+  const tempValues = gpus
+    .map((item) => Number(item.temperature_c))
+    .filter((value) => Number.isFinite(value) && value >= 0);
+  const maxTemp = tempValues.length ? Math.max(...tempValues) : null;
+  const gpuNames = gpus.length ? gpus.map((item) => item.name || `GPU ${item.index ?? ""}`).join(" / ") : "";
+  host.innerHTML = [
+    comfyuiResourceMetricMarkup({
+      label: "RAM",
+      percent: ram.percent,
+      detail: comfyuiResourceDetailBytes(ram.used_bytes, ram.total_bytes) || "系統記憶體",
+    }),
+    comfyuiResourceMetricMarkup({
+      label: "GPU Load",
+      percent: gpu.percent,
+      available: gpu.available,
+      detail: gpu.available ? (gpuNames || "GPU 使用率") : (gpu.error || "未偵測到 GPU"),
+    }),
+    comfyuiResourceMetricMarkup({
+      label: "VRAM",
+      percent: vram.percent,
+      available: vram.available,
+      detail: comfyuiResourceDetailBytes(vram.used_bytes, vram.total_bytes) || "顯示記憶體",
+    }),
+    comfyuiResourceMetricMarkup({
+      label: "GPU Temp",
+      percent: maxTemp === null ? null : Math.min(100, maxTemp),
+      available: maxTemp !== null,
+      detail: maxTemp === null ? "未偵測溫度" : `${Math.round(maxTemp)} C`,
+    }),
+  ].join("");
+}
+
+async function refreshComfyuiResourceDashboard() {
+  if (comfyuiResourceDashboardInFlight || !$("comfyui-resource-dashboard")) return;
+  if (!currentUser) {
+    renderComfyuiResourceDashboard({}, { error: "尚未登入" });
+    return;
+  }
+  comfyuiResourceDashboardInFlight = true;
+  try {
+    const csrf = await fetchCsrfToken();
+    const res = await apiFetch(API + "/comfyui/resources", {
+      credentials: "same-origin",
+      headers: { "X-CSRF-Token": csrf || "" },
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok || !json.ok) throw new Error(json.msg || "資源 dashboard 讀取失敗");
+    renderComfyuiResourceDashboard(json.resource_usage || {});
+  } catch (err) {
+    renderComfyuiResourceDashboard({}, { error: err?.message || "資源 dashboard 讀取失敗" });
+  } finally {
+    comfyuiResourceDashboardInFlight = false;
+  }
+}
+
+function startComfyuiResourceDashboardPolling() {
+  if (!$("comfyui-resource-dashboard") || !currentUser) return;
+  if (!comfyuiResourceDashboardTimer) {
+    comfyuiResourceDashboardTimer = setInterval(refreshComfyuiResourceDashboard, 5000);
+  }
+  refreshComfyuiResourceDashboard();
+}
+
+function stopComfyuiResourceDashboardPolling() {
+  if (comfyuiResourceDashboardTimer) {
+    clearInterval(comfyuiResourceDashboardTimer);
+    comfyuiResourceDashboardTimer = null;
+  }
 }
 
 function setComfyuiProgress({ visible = true, running = false, percent = 0, label = "", detail = "", pythonLogTail = null, backendKind = "", showPythonLog = false, pythonLogPlaceholder = "" } = {}) {
@@ -2761,6 +2890,146 @@ function setComfyuiFieldValue(id, value, { preserveMissingOption = false } = {})
   el.value = String(value);
 }
 
+function comfyuiSelectOptionValues(id, { includeHistoryOptions = false } = {}) {
+  const select = $(id);
+  if (!select) return [];
+  return Array.from(select.options || [])
+    .filter((option) => includeHistoryOptions || option.dataset.historyValue !== "1")
+    .map((option) => String(option.value || "").trim())
+    .filter(Boolean);
+}
+
+function comfyuiComparableOptionKey(value = "") {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/＋/g, "+")
+    .replace(/\+\+/g, "pp")
+    .replace(/\+/g, "p")
+    .replace(/[_-]+/g, " ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function comfyuiUniqueValues(values = []) {
+  const seen = new Set();
+  const out = [];
+  values.forEach((value) => {
+    const text = String(value || "").trim();
+    if (!text) return;
+    const key = comfyuiComparableOptionKey(text);
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(text);
+  });
+  return out;
+}
+
+function comfyuiPickAvailableSelectValue(id, candidates = [], fallbacks = []) {
+  const values = comfyuiSelectOptionValues(id);
+  if (!values.length) return "";
+  const exact = new Map(values.map((value) => [String(value), value]));
+  const keyed = new Map();
+  values.forEach((value) => {
+    const key = comfyuiComparableOptionKey(value);
+    if (key && !keyed.has(key)) keyed.set(key, value);
+  });
+  for (const candidate of comfyuiUniqueValues([...(candidates || []), ...(fallbacks || [])])) {
+    if (exact.has(candidate)) return exact.get(candidate);
+    const key = comfyuiComparableOptionKey(candidate);
+    if (keyed.has(key)) return keyed.get(key);
+  }
+  return "";
+}
+
+function comfyuiSamplerCandidateValues(value = "") {
+  const raw = String(value || "").trim();
+  const key = comfyuiComparableOptionKey(raw);
+  const aliases = {
+    "euler a": ["euler_ancestral", "euler a"],
+    "euler ancestral": ["euler_ancestral"],
+    "euler": ["euler"],
+    "lms": ["lms"],
+    "heun": ["heun"],
+    "dpm 2": ["dpm_2"],
+    "dpm2": ["dpm_2"],
+    "dpm 2 a": ["dpm_2_ancestral"],
+    "dpm2 a": ["dpm_2_ancestral"],
+    "dpm fast": ["dpm_fast"],
+    "dpm adaptive": ["dpm_adaptive"],
+    "dpmpp 2s a": ["dpmpp_2s_ancestral"],
+    "dpmpp 2m": ["dpmpp_2m"],
+    "dpmpp 2m sde": ["dpmpp_2m_sde"],
+    "dpmpp sde": ["dpmpp_sde"],
+    "dpmpp 3m sde": ["dpmpp_3m_sde"],
+    "ddim": ["ddim"],
+    "uni pc": ["uni_pc"],
+    "unipc": ["uni_pc"],
+    "lcm": ["lcm"],
+    "ipndm": ["ipndm"],
+    "deis": ["deis"],
+    "ddpm": ["ddpm"],
+  };
+  const schedulerWords = /\b(?:karras|exponential|normal|simple|beta|sgm uniform|ddim uniform|linear quadratic|kl optimal)\b/g;
+  const strippedKey = key.replace(schedulerWords, " ").replace(/\s+/g, " ").trim();
+  return comfyuiUniqueValues([
+    raw,
+    ...(aliases[key] || []),
+    ...(strippedKey && strippedKey !== key ? aliases[strippedKey] || [strippedKey] : []),
+  ]);
+}
+
+function comfyuiSchedulerCandidateValues(scheduler = "", sampler = "") {
+  const rawScheduler = String(scheduler || "").trim();
+  const rawSampler = String(sampler || "").trim();
+  const keys = [
+    comfyuiComparableOptionKey(rawScheduler),
+    comfyuiComparableOptionKey(rawSampler),
+    comfyuiComparableOptionKey(`${rawSampler} ${rawScheduler}`),
+  ].filter(Boolean);
+  const candidates = [rawScheduler];
+  const hasToken = (pattern) => keys.some((key) => pattern.test(key));
+  if (hasToken(/\bsgm uniform\b/)) candidates.push("sgm_uniform");
+  if (hasToken(/\bddim uniform\b/)) candidates.push("ddim_uniform");
+  if (hasToken(/\blinear quadratic\b/)) candidates.push("linear_quadratic");
+  if (hasToken(/\bkl optimal\b/)) candidates.push("kl_optimal");
+  if (hasToken(/\bkarras\b/)) candidates.push("karras");
+  if (hasToken(/\bexponential\b/)) candidates.push("exponential");
+  if (hasToken(/\bbeta\b/)) candidates.push("beta");
+  if (hasToken(/\bsimple\b/)) candidates.push("simple");
+  if (hasToken(/\bnormal\b/)) candidates.push("normal");
+  return comfyuiUniqueValues(candidates);
+}
+
+function comfyuiResolvedSamplerValue(value = "") {
+  return comfyuiPickAvailableSelectValue("comfyui-sampler", comfyuiSamplerCandidateValues(value), ["euler"]);
+}
+
+function comfyuiResolvedSchedulerValue(value = "", sampler = "") {
+  return comfyuiPickAvailableSelectValue("comfyui-scheduler", comfyuiSchedulerCandidateValues(value, sampler), ["normal", "simple", "karras"]);
+}
+
+function setComfyuiSamplingFieldsFromValues(samplerName = "", scheduler = "") {
+  const rawSampler = String(samplerName || "").trim();
+  const resolvedSampler = comfyuiResolvedSamplerValue(rawSampler || "euler")
+    || comfyuiPickAvailableSelectValue("comfyui-sampler", [], ["euler"]);
+  if (resolvedSampler) setComfyuiFieldValue("comfyui-sampler", resolvedSampler);
+  const resolvedScheduler = comfyuiResolvedSchedulerValue(scheduler || "normal", rawSampler || resolvedSampler)
+    || comfyuiPickAvailableSelectValue("comfyui-scheduler", [], ["normal", "simple", "karras"]);
+  if (resolvedScheduler) setComfyuiFieldValue("comfyui-scheduler", resolvedScheduler);
+  const samplerFallback = comfyuiSamplerCandidateValues(rawSampler || "euler").find((value) => value !== rawSampler) || rawSampler || "euler";
+  const schedulerFallback = comfyuiSchedulerCandidateValues(scheduler || "normal", rawSampler || samplerFallback).find(Boolean) || "normal";
+  return {
+    sampler_name: resolvedSampler || samplerFallback,
+    scheduler: resolvedScheduler || schedulerFallback,
+  };
+}
+
+function comfyuiCurrentSamplingFieldsForPayload() {
+  return setComfyuiSamplingFieldsFromValues($("comfyui-sampler")?.value || "euler", $("comfyui-scheduler")?.value || "normal");
+}
+
 function normalizeComfyuiLoraName(name) {
   return String(name || "").trim().replace(/（提醒：[^）]*）$/u, "").trim();
 }
@@ -2973,6 +3242,37 @@ function comfyuiPromptField(promptType = "prompt") {
   return $(promptType === "negative" ? "comfyui-negative-prompt" : "comfyui-prompt");
 }
 
+function comfyuiPromptTypeForElement(el) {
+  const id = String(el?.id || "");
+  if (id === "comfyui-negative-prompt") return "negative";
+  if (id === "comfyui-prompt") return "prompt";
+  return "";
+}
+
+function rememberComfyuiPromptFocus(el) {
+  const promptType = comfyuiPromptTypeForElement(el);
+  if (promptType) comfyuiLastFocusedPromptType = promptType;
+}
+
+function bindComfyuiPromptCursorTracking() {
+  ["comfyui-prompt", "comfyui-negative-prompt"].forEach((id) => {
+    const el = $(id);
+    if (!el || el.dataset.comfyuiPromptCursorBound === "1") return;
+    el.dataset.comfyuiPromptCursorBound = "1";
+    ["focus", "click", "keyup", "select", "mouseup", "touchend"].forEach((eventName) => {
+      el.addEventListener(eventName, () => rememberComfyuiPromptFocus(el));
+    });
+  });
+}
+
+function currentComfyuiPromptTypeForInsertion() {
+  return comfyuiPromptTypeForElement(document.activeElement) || comfyuiLastFocusedPromptType || "prompt";
+}
+
+function comfyuiPromptTypeLabel(promptType = "prompt") {
+  return promptType === "negative" ? "負面" : "正向";
+}
+
 function splitComfyuiPromptTerms(text) {
   return String(text || "")
     .split(/[\n,]+/)
@@ -3061,29 +3361,16 @@ function removeComfyuiEmbeddingTokenFromPrompt(name, { promptType = "prompt" } =
   return removed;
 }
 
-function isNegativeComfyuiEmbedding(name) {
-  const normalized = String(name || "").trim().toLowerCase();
-  return normalized.includes("negative") || normalized.includes("neg");
-}
-
 function insertComfyuiEmbeddingToken(name) {
   const cleanName = String(name || "").trim();
-  const promptType = isNegativeComfyuiEmbedding(cleanName) ? "negative" : "prompt";
+  const promptType = currentComfyuiPromptTypeForInsertion();
   const prompt = comfyuiPromptField(promptType);
-  const otherPromptType = promptType === "negative" ? "prompt" : "negative";
-  const otherPrompt = comfyuiPromptField(otherPromptType);
   if (!prompt || !cleanName) return;
   const embeddingTag = `<embeddings:${cleanName}>`;
   const removed = removeComfyuiEmbeddingTokenFromPrompt(cleanName, { promptType });
   if (removed.length) {
-    setComfyuiMessage(`已從${promptType === "negative" ? "負面" : "正向"}提示詞移除 ${cleanName}。`, true);
+    setComfyuiMessage(`已從${comfyuiPromptTypeLabel(promptType)}提示詞移除 ${cleanName}。`, true);
     prompt.focus();
-    return;
-  }
-  const removedOther = otherPrompt ? removeComfyuiEmbeddingTokenFromPrompt(cleanName, { promptType: otherPromptType }) : [];
-  if (removedOther.length) {
-    setComfyuiMessage(`已從${otherPromptType === "negative" ? "負面" : "正向"}提示詞移除 ${cleanName}。`, true);
-    otherPrompt.focus();
     return;
   }
   const raw = prompt.value || "";
@@ -3096,7 +3383,7 @@ function insertComfyuiEmbeddingToken(name) {
   prompt.focus();
   if (typeof prompt.setSelectionRange === "function") prompt.setSelectionRange(cursor, cursor);
   writeComfyuiDraft();
-  setComfyuiMessage(`已把 ${cleanName} 插入${promptType === "negative" ? "負面" : "正向"}提示詞。`, true);
+  setComfyuiMessage(`已把 ${cleanName} 插入${comfyuiPromptTypeLabel(promptType)}提示詞。`, true);
 }
 
 function renderComfyuiEmbeddingShortcuts(values = []) {
@@ -3222,6 +3509,7 @@ function bindComfyuiDraftPersistence() {
 }
 
 function bindComfyuiAdvancedUi() {
+  bindComfyuiPromptCursorTracking();
   const modeSelect = $("comfyui-generation-mode");
   if (modeSelect && modeSelect.dataset.comfyuiBound !== "1") {
     modeSelect.dataset.comfyuiBound = "1";
@@ -3359,6 +3647,70 @@ function bindComfyuiAdvancedUi() {
     uploadBtn.dataset.comfyuiBound = "1";
     uploadBtn.addEventListener("click", () => {
       uploadComfyuiModelFile().catch((err) => setComfyuiMessage(err.message || "模型上傳失敗", false));
+    });
+  }
+  const favoriteBtn = $("comfyui-favorite-btn");
+  if (favoriteBtn && favoriteBtn.dataset.comfyuiBound !== "1") {
+    favoriteBtn.dataset.comfyuiBound = "1";
+    favoriteBtn.addEventListener("click", () => {
+      favoriteComfyuiGeneratedImage().catch((err) => setComfyuiMessage(err.message || "圖片收藏失敗", false));
+    });
+  }
+  const favoritesRefreshBtn = $("comfyui-favorites-refresh-btn");
+  if (favoritesRefreshBtn && favoritesRefreshBtn.dataset.comfyuiBound !== "1") {
+    favoritesRefreshBtn.dataset.comfyuiBound = "1";
+    favoritesRefreshBtn.addEventListener("click", () => {
+      loadComfyuiImageFavorites().catch((err) => setComfyuiMessage(err.message || "圖片收藏讀取失敗", false));
+    });
+  }
+  const favoriteCivitaiOpenBtn = $("comfyui-favorite-civitai-open-btn");
+  if (favoriteCivitaiOpenBtn && favoriteCivitaiOpenBtn.dataset.comfyuiBound !== "1") {
+    favoriteCivitaiOpenBtn.dataset.comfyuiBound = "1";
+    favoriteCivitaiOpenBtn.addEventListener("click", () => openComfyuiFavoriteModal("civitai"));
+  }
+  const favoriteUploadOpenBtn = $("comfyui-favorite-upload-open-btn");
+  if (favoriteUploadOpenBtn && favoriteUploadOpenBtn.dataset.comfyuiBound !== "1") {
+    favoriteUploadOpenBtn.dataset.comfyuiBound = "1";
+    favoriteUploadOpenBtn.addEventListener("click", () => openComfyuiFavoriteModal("upload"));
+  }
+  const favoriteModalCloseBtn = $("comfyui-favorite-modal-close-btn");
+  if (favoriteModalCloseBtn && favoriteModalCloseBtn.dataset.comfyuiBound !== "1") {
+    favoriteModalCloseBtn.dataset.comfyuiBound = "1";
+    favoriteModalCloseBtn.addEventListener("click", closeComfyuiFavoriteModal);
+  }
+  const favoriteModal = $("comfyui-favorite-modal");
+  if (favoriteModal && favoriteModal.dataset.comfyuiBound !== "1") {
+    favoriteModal.dataset.comfyuiBound = "1";
+    favoriteModal.addEventListener("click", (event) => {
+      if (event.target === favoriteModal) closeComfyuiFavoriteModal();
+    });
+  }
+  document.querySelectorAll("[data-comfyui-favorite-mode]").forEach((button) => {
+    if (button.dataset.comfyuiBound === "1") return;
+    button.dataset.comfyuiBound = "1";
+    button.addEventListener("click", () => setComfyuiFavoriteModalMode(button.getAttribute("data-comfyui-favorite-mode") || "civitai"));
+  });
+  if (!document.body.dataset.comfyuiFavoriteEscapeBound) {
+    document.body.dataset.comfyuiFavoriteEscapeBound = "1";
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        closeComfyuiFavoriteModal();
+        closeComfyuiFavoritePreviewModal();
+      }
+    });
+  }
+  const favoriteCivitaiImportBtn = $("comfyui-favorite-civitai-import-btn");
+  if (favoriteCivitaiImportBtn && favoriteCivitaiImportBtn.dataset.comfyuiBound !== "1") {
+    favoriteCivitaiImportBtn.dataset.comfyuiBound = "1";
+    favoriteCivitaiImportBtn.addEventListener("click", () => {
+      importComfyuiFavoriteFromCivitai().catch((err) => setComfyuiMessage(err.message || "Civitai 圖片匯入失敗", false));
+    });
+  }
+  const favoriteUploadSaveBtn = $("comfyui-favorite-upload-save-btn");
+  if (favoriteUploadSaveBtn && favoriteUploadSaveBtn.dataset.comfyuiBound !== "1") {
+    favoriteUploadSaveBtn.dataset.comfyuiBound = "1";
+    favoriteUploadSaveBtn.addEventListener("click", () => {
+      saveUploadedComfyuiFavorite().catch((err) => setComfyuiMessage(err.message || "上傳收藏失敗", false));
     });
   }
   const civitaiSearchBtn = $("comfyui-civitai-search-btn");
@@ -3672,6 +4024,20 @@ function comfyuiHistoryFirstImage(item = {}) {
   return images.find((image) => image && (image.data_url || image.preview_url || image.image_ref?.filename)) || null;
 }
 
+function comfyuiHistoryCanFavorite(item = {}) {
+  return !!comfyuiHistoryFirstImage(item)?.image_ref?.filename;
+}
+
+function comfyuiHistoryImageCount(item = {}, payload = null) {
+  const result = item?.result && typeof item.result === "object" ? item.result : {};
+  const images = Array.isArray(result.images) ? result.images.filter(Boolean) : [];
+  if (images.length) return images.length;
+  const source = payload || comfyuiHistoryPayload(item);
+  const runCount = Math.max(1, Number(source.run_count || 1));
+  const batchSize = Math.max(1, Number(source.ui_batch_size || source.batch_size || 1));
+  return Math.max(1, Math.floor(runCount * batchSize));
+}
+
 function comfyuiHistoryPreviewMarkup(item = {}) {
   const image = comfyuiHistoryFirstImage(item);
   if (!image) {
@@ -3740,10 +4106,12 @@ function renderComfyuiHistory() {
     const prompt = sanitize(String(payload?.prompt || "").slice(0, 140) || "（無提示詞）");
     const createdAt = sanitize(String(item?.created_at || "").replace("T", " ").slice(0, 16));
     const disabled = historyId ? "" : " disabled";
+    const favoriteDisabled = historyId && comfyuiHistoryCanFavorite(item) ? "" : " disabled";
     const idLabel = item?.history_source === "workflow"
       ? `Workflow run #${item.workflow_run_id || "-"}`
       : (historyId ? `ID #${historyId}` : "ID 未取得");
     const sourceLabel = item?.history_source === "workflow" ? ` · ${item.preset_title || "Workflow"}` : "";
+    const imageCount = comfyuiHistoryImageCount(item, payload);
     return `
       <div class="comfyui-history-item">
         ${comfyuiHistoryPreviewMarkup(item)}
@@ -3755,11 +4123,12 @@ function renderComfyuiHistory() {
           <div class="drive-card-sub">${sanitize(`${idLabel}${sourceLabel}${model}${controlLabel}`)}</div>
           <div class="comfyui-history-prompt">${prompt}</div>
           <div class="drive-card-sub">
-            ${sanitize(`步數 ${payload.steps || "-"} · CFG ${payload.cfg || "-"} · Seed ${payload.seed ?? "random"} · 張數 ${payload.batch_size || 1}`)}
+            ${sanitize(`步數 ${payload.steps || "-"} · CFG ${payload.cfg || "-"} · Seed ${payload.seed ?? "random"} · 張數 ${imageCount}`)}
           </div>
           <div class="drive-file-actions" style="justify-content:flex-start;">
             <button class="btn btn-sm" type="button" data-comfyui-history-apply="${sanitize(historyId)}"${disabled}>套回表單</button>
             <button class="btn btn-sm" type="button" data-comfyui-history-rerun="${sanitize(historyId)}"${disabled}>一鍵重跑</button>
+            <button class="btn btn-sm" type="button" data-comfyui-history-favorite="${sanitize(historyId)}"${favoriteDisabled}>收藏</button>
             <button class="btn btn-sm btn-danger" type="button" data-comfyui-history-delete="${sanitize(historyId)}"${disabled}>刪除</button>
           </div>
         </div>
@@ -3780,6 +4149,14 @@ function renderComfyuiHistory() {
       const historyId = button.getAttribute("data-comfyui-history-rerun") || "";
       rerunComfyuiHistory(historyId).catch((err) => {
         setComfyuiHistoryActionMessage(err.message || "ComfyUI 歷史重跑失敗", false);
+      });
+    });
+  });
+  list.querySelectorAll("[data-comfyui-history-favorite]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const historyId = button.getAttribute("data-comfyui-history-favorite") || "";
+      favoriteComfyuiHistoryImage(historyId).catch((err) => {
+        setComfyuiHistoryActionMessage(err.message || "ComfyUI 歷史收藏失敗", false);
       });
     });
   });
@@ -3846,6 +4223,34 @@ function comfyuiHistoryPayload(item = {}) {
   return payload;
 }
 
+function comfyuiHistoryFavoriteParams(item = {}) {
+  const params = comfyuiHistoryPayload(item);
+  if (item?.history_source === "workflow") {
+    params.workflow_preset_id = Number(item.preset_id || params.workflow_preset_id || 0);
+    params.workflow_run_id = Number(item.workflow_run_id || params.workflow_run_id || 0);
+    params.workflow_preset_title = params.workflow_preset_title || item.preset_title || "";
+    params.workflow_system_bundle_id = params.workflow_system_bundle_id || item.workflow_system_bundle_id || "";
+    const originalParams = item?.params && typeof item.params === "object" ? item.params : {};
+    if (!originalParams.model && params.model && params.model === item.preset_title) {
+      delete params.model;
+    }
+  }
+  return params;
+}
+
+function comfyuiHistoryHasConcreteSeed(payload = {}) {
+  const value = payload?.seed;
+  if (value === undefined || value === null || value === "") return false;
+  const seed = Number(value);
+  return Number.isFinite(seed) && seed >= 0;
+}
+
+function comfyuiHistorySeedModeForApply(payload = {}, workflowPresetId = 0) {
+  if (comfyuiHistoryHasConcreteSeed(payload)) return "fixed";
+  const rawMode = String(payload?.seed_after_generate || payload?.seed_after_generate_mode || "").trim();
+  return rawMode ? normalizeComfyuiSeedAfterGenerateMode(rawMode) : (workflowPresetId > 0 ? "random" : "fixed");
+}
+
 function ensureComfyuiHistoryWorkflowSelectOption(presetId, label = "") {
   const select = $("comfyui-template-select");
   if (!select || !presetId) return;
@@ -3881,6 +4286,7 @@ async function applyComfyuiHistoryToForm(historyId) {
   const controlnet = payload.controlnet || {};
   const loras = Array.isArray(payload.loras) ? payload.loras : [];
   const workflowPresetId = item.history_source === "workflow" ? Number(item.preset_id || payload.workflow_preset_id || 0) : 0;
+  const historySeedMode = comfyuiHistorySeedModeForApply(payload, workflowPresetId);
   if (workflowPresetId > 0) {
     try {
       const needsGgufProfiles = payload.gguf_profile || payload.gguf_variant || payload.diffusion_model || payload.diffusers_gguf_file
@@ -3926,9 +4332,7 @@ async function applyComfyuiHistoryToForm(historyId) {
     ["comfyui-batch-size", payload.ui_batch_size || payload.batch_size || 1],
     ["comfyui-run-count", payload.run_count || 1],
     ["comfyui-seed", payload.seed ?? ""],
-    ["comfyui-seed-after-generate", payload.seed_after_generate || (workflowPresetId > 0 ? "random" : "fixed")],
-    ["comfyui-sampler", payload.sampler_name || "euler", true],
-    ["comfyui-scheduler", payload.scheduler || "normal", true],
+    ["comfyui-seed-after-generate", historySeedMode],
     ["comfyui-denoise-strength", payload.denoise_strength ?? 0.65],
     ["comfyui-upscale-model", payload.upscale_model || "", true],
     ["comfyui-controlnet-type", controlnet.type || "canny", true],
@@ -3944,11 +4348,12 @@ async function applyComfyuiHistoryToForm(historyId) {
   historyFieldRestores
     .filter(([id]) => !(workflowPresetId > 0 && id === "comfyui-model-select"))
     .forEach(([id, value, preserveMissingOption]) => setComfyuiFieldValue(id, value, { preserveMissingOption: !!preserveMissingOption }));
+  setComfyuiSamplingFieldsFromValues(payload.sampler_name || "euler", payload.scheduler || "normal");
   const targetView = payload.diffusers_model_repo ? "hf" : "generate";
   setComfyuiView(targetView);
   const controlEnabled = !!(controlnet?.enabled || controlnet?.type);
   if ($("comfyui-controlnet-enabled")) $("comfyui-controlnet-enabled").checked = targetView !== "hf" && controlEnabled;
-  setComfyuiSeedAfterGenerateMode(payload.seed_after_generate || (workflowPresetId > 0 ? "random" : "fixed"));
+  setComfyuiSeedAfterGenerateMode(historySeedMode);
   fillComfyuiControlnetModelOptions();
   fillComfyuiControlnetPreprocessorOptions();
   setComfyuiFieldValue("comfyui-controlnet-model", controlnet.model_name || "", { preserveMissingOption: true });
@@ -3994,6 +4399,64 @@ async function deleteComfyuiHistory(historyId) {
   renderComfyuiHistory();
   loadComfyuiHistory().catch((err) => setComfyuiHistoryActionMessage(err?.message || "ComfyUI 歷史重新整理失敗", false));
   setComfyuiHistoryActionMessage(`已刪除${label}。`, true);
+}
+
+async function favoriteComfyuiHistoryImage(historyId) {
+  const targetId = String(historyId || "").trim();
+  if (!targetId) {
+    setComfyuiHistoryActionMessage("這筆 ComfyUI 歷史缺少可收藏 ID，請重新整理歷史。", false);
+    return;
+  }
+  const item = comfyuiHistoryItemById(targetId);
+  if (!item) {
+    setComfyuiHistoryActionMessage("找不到這筆 ComfyUI 歷史紀錄，請重新整理歷史。", false);
+    return;
+  }
+  const image = comfyuiHistoryFirstImage(item);
+  if (!image?.image_ref?.filename) {
+    setComfyuiHistoryActionMessage("這筆 ComfyUI 歷史沒有可收藏的圖片預覽。", false);
+    return;
+  }
+  const button = document.querySelector(`[data-comfyui-history-favorite="${CSS.escape(targetId)}"]`);
+  if (button) {
+    button.disabled = true;
+    button.textContent = "收藏中...";
+  }
+  try {
+    await fetchCsrfToken({ force: true });
+    const params = comfyuiHistoryFavoriteParams(item);
+    const mode = comfyuiReadableModeLabel(params.generation_mode || item.generation_mode || "txt2img");
+    const createdAt = String(item.created_at || "").replace("T", " ").slice(0, 16);
+    const title = `歷史收藏 - ${mode}${createdAt ? ` ${createdAt}` : ""}`.slice(0, 120);
+    const res = await apiFetch(API + "/comfyui/image-favorites", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: {
+        "Content-Type": "application/json",
+        "X-CSRF-Token": getCsrfToken() || "",
+      },
+      body: JSON.stringify({
+        source_type: item.history_source === "workflow" ? "workflow_history" : "history",
+        title,
+        image_ref: image.image_ref,
+        prompt_id: image.prompt_id || item?.result?.prompt_id || "",
+        selected_image_index: Number.isFinite(Number(image.batch_index)) ? Number(image.batch_index) : 0,
+        output_label: image.output_label || "",
+        params,
+      }),
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok || !json.ok) throw new Error(json.msg || `ComfyUI 歷史收藏失敗（HTTP ${res.status}）`);
+    setComfyuiHistoryActionMessage(json.msg || "已收藏這張歷史產圖", true);
+    if ($("comfyui-view-favorites")?.classList.contains("active")) {
+      await loadComfyuiImageFavorites();
+    }
+  } finally {
+    if (button) {
+      button.disabled = !comfyuiHistoryCanFavorite(item);
+      button.textContent = "收藏";
+    }
+  }
 }
 
 async function rerunComfyuiHistory(historyId) {
@@ -4598,13 +5061,14 @@ function applyComfyuiSeedAfterGenerate(completedSeed = null) {
 }
 
 function comfyuiPayload() {
-  const vae = $("comfyui-vae-select")?.value || COMFYUI_VAE_BUILTIN;
   const mode = comfyuiGenerationMode();
+  const sampling = comfyuiCurrentSamplingFieldsForPayload();
+  const diffusersMode = isComfyuiDiffusersMode();
+  const vae = diffusersMode ? "" : $("comfyui-vae-select")?.value || COMFYUI_VAE_BUILTIN;
   const diffusersRepo = isComfyuiDiffusersMode()
     ? sanitizeComfyuiDiffusersRepoField({ strict: true, quiet: true })
     : normalizeComfyuiHuggingFaceRepoInput($("comfyui-diffusers-model-repo")?.value || "");
   const diffusersVariant = $("comfyui-diffusers-model-variant")?.value || "";
-  const diffusersMode = isComfyuiDiffusersMode();
   const batchSize = Math.max(1, Math.min(comfyuiMaxBatchSize, comfyuiNumberValue("comfyui-batch-size", 1)));
   const payload = {
     generation_mode: mode,
@@ -4626,9 +5090,9 @@ function comfyuiPayload() {
     batch_size: batchSize,
     ui_batch_size: batchSize,
     seed: $("comfyui-seed")?.value ? comfyuiNumberValue("comfyui-seed", 0) : undefined,
-    sampler_name: $("comfyui-sampler")?.value || "euler",
-    scheduler: $("comfyui-scheduler")?.value || "normal",
-    vae: vae === COMFYUI_VAE_BUILTIN ? "" : vae,
+    sampler_name: sampling.sampler_name,
+    scheduler: sampling.scheduler,
+    vae: diffusersMode ? "" : (vae === COMFYUI_VAE_BUILTIN ? "" : vae),
     loras: diffusersMode ? [] : comfyuiSelectedLoras.slice(0, COMFYUI_MAX_LORAS),
     denoise_strength: comfyuiNumberValue("comfyui-denoise-strength", 0.65),
     filename_prefix: "hackme_web",
@@ -4774,6 +5238,15 @@ function comfyuiRunCount() {
 
 function comfyuiShareGenerationPayload() {
   const payload = comfyuiPayload();
+  const selectedTemplateId = Number(comfyuiSelectedTemplatePresetId || $("comfyui-template-select")?.value || 0);
+  if (!isComfyuiDiffusersMode() && selectedTemplateId > 0) {
+    payload.workflow_preset_id = selectedTemplateId;
+    payload.workflow_preset_title = comfyuiSelectedTemplateDetail?.title || "";
+    payload.workflow_system_bundle_id = comfyuiSelectedTemplateDetail?.system_bundle_id || "";
+    if (typeof comfyuiTemplateSdxlSkipRefiner !== "undefined") {
+      payload.skip_refiner = !!comfyuiTemplateSdxlSkipRefiner;
+    }
+  }
   if (comfyuiCurrentImage && comfyuiCurrentImage.seed !== undefined && comfyuiCurrentImage.seed !== null) {
     payload.seed = comfyuiCurrentImage.seed;
   }
@@ -5259,6 +5732,726 @@ function promptComfyuiShareMetadata() {
     title: cleanTitle,
     note: String(note || "").trim().slice(0, 900),
   };
+}
+
+function setComfyuiFavoritesStatus(text) {
+  const status = $("comfyui-favorites-status");
+  if (status) status.textContent = text || "";
+}
+
+function setComfyuiFavoriteModalMode(mode = "civitai") {
+  const normalized = mode === "upload" ? "upload" : "civitai";
+  document.querySelectorAll("[data-comfyui-favorite-mode]").forEach((button) => {
+    const active = (button.getAttribute("data-comfyui-favorite-mode") || "") === normalized;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", active ? "true" : "false");
+  });
+  document.querySelectorAll("[data-comfyui-favorite-panel]").forEach((panel) => {
+    panel.hidden = (panel.getAttribute("data-comfyui-favorite-panel") || "") !== normalized;
+  });
+}
+
+function openComfyuiFavoriteModal(mode = "civitai") {
+  setComfyuiFavoriteModalMode(mode);
+  const modal = $("comfyui-favorite-modal");
+  if (!modal) return;
+  modal.hidden = false;
+  updateComfyuiFavoriteModalBodyState();
+  const focusTarget = mode === "upload" ? $("comfyui-favorite-upload-file") : $("comfyui-favorite-civitai-url");
+  window.setTimeout(() => focusTarget?.focus?.(), 0);
+}
+
+function updateComfyuiFavoriteModalBodyState() {
+  const favoriteModal = $("comfyui-favorite-modal");
+  const previewModal = $("comfyui-favorite-preview-modal");
+  const favoriteModalOpen = !!favoriteModal && !favoriteModal.hidden;
+  const previewModalOpen = !!previewModal && !previewModal.hidden;
+  document.body.classList.toggle("modal-open", !!(favoriteModalOpen || previewModalOpen));
+}
+
+function closeComfyuiFavoriteModal() {
+  const modal = $("comfyui-favorite-modal");
+  if (modal) modal.hidden = true;
+  updateComfyuiFavoriteModalBodyState();
+}
+
+function comfyuiFavoriteParamSummary(params = {}) {
+  const values = [];
+  const model = params.model || params.diffusers_model_repo || "";
+  if (model) values.push(`模型：${model}`);
+  else if (params.source_model_name) values.push(`來源模型：${params.source_model_name}`);
+  if (params.workflow_preset_title || params.workflow_system_bundle_id) {
+    values.push(`Workflow：${params.workflow_preset_title || params.workflow_system_bundle_id}`);
+  }
+  if (params.vae) values.push(`VAE：${params.vae}`);
+  if (params.width || params.height) values.push(`尺寸：${params.width || "?"}x${params.height || "?"}`);
+  if (params.steps) values.push(`Steps：${params.steps}`);
+  if (params.cfg) values.push(`CFG：${params.cfg}`);
+  if (params.seed !== undefined && params.seed !== null && String(params.seed)) values.push(`Seed：${params.seed}`);
+  if (params.sampler_name) values.push(`Sampler：${params.sampler_name}`);
+  if (params.scheduler) values.push(`Scheduler：${params.scheduler}`);
+  if (params.skip_refiner === true || params.skip_refiner === "true" || params.skip_refiner === 1 || params.skip_refiner === "1") {
+    values.push("跳過 Refiner");
+  }
+  return values.slice(0, 8);
+}
+
+function comfyuiFavoritePromptText(params = {}, key = "prompt", limit = 900) {
+  const text = String(params?.[key] || "").trim();
+  if (!text) return "";
+  return text.length > limit ? `${text.slice(0, limit)}...` : text;
+}
+
+function comfyuiFavoriteRequirementKind(value = "") {
+  const raw = String(value || "").trim().toLowerCase();
+  if (raw.includes("vae")) return "VAE";
+  if (raw.includes("lora")) return "LoRA";
+  if (raw.includes("textual") || raw.includes("embedding") || raw.includes("embed")) return "Embedding";
+  if (raw.includes("checkpoint") || raw.includes("model") || raw.includes("base")) return "Checkpoint";
+  return "Model";
+}
+
+function comfyuiFavoriteRequirementTokens(value = "") {
+  const raw = String(value || "").trim();
+  if (!raw) return [];
+  const noQuery = raw.split(/[?#]/, 1)[0];
+  const base = noQuery.split(/[\\/]/).pop() || noQuery;
+  const noExt = base.replace(/\.(?:safetensors|ckpt|pt|pth|bin|gguf)$/i, "");
+  return [raw, noQuery, base, noExt]
+    .map((item) => String(item || "").trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function comfyuiFavoriteRequirementExists(item = {}) {
+  const type = String(item.type || "").toLowerCase();
+  const pools = [];
+  if (type === "checkpoint" || type === "model") pools.push(comfyuiAvailableCheckpoints);
+  if (type === "lora") pools.push(comfyuiAvailableLoras);
+  if (type === "embedding") pools.push(comfyuiAvailableEmbeddings);
+  if (type === "vae") pools.push(comfyuiAvailableVaes);
+  const requiredTokens = new Set([
+    ...comfyuiFavoriteRequirementTokens(item.label),
+    ...comfyuiFavoriteRequirementTokens(item.version),
+  ]);
+  if (!requiredTokens.size || !pools.length) return false;
+  const availableTokens = new Set();
+  pools.flat().forEach((value) => comfyuiFavoriteRequirementTokens(value).forEach((token) => availableTokens.add(token)));
+  return [...requiredTokens].some((token) => availableTokens.has(token));
+}
+
+function comfyuiFavoriteRequirementItems(params = {}) {
+  const civitai = params?.civitai && typeof params.civitai === "object" ? params.civitai : {};
+  const items = [];
+  const seen = new Map();
+  const pushItem = ({ kind = "", name = "", version = "", file = "", url = "" }) => {
+    const label = String(file || name || version || "").trim();
+    if (!label) return;
+    const type = comfyuiFavoriteRequirementKind(kind || file || name);
+    const href = String(url || "").trim();
+    const key = `${type}|${label}`;
+    const normalized = { type, label, version: String(version || "").trim(), url: href };
+    if (seen.has(key)) {
+      const existing = seen.get(key);
+      if (!existing.url && href) existing.url = href;
+      return;
+    }
+    seen.set(key, normalized);
+    items.push(normalized);
+  };
+  if (params.model || params.diffusers_model_repo) {
+    pushItem({
+      kind: "checkpoint",
+      name: params.model || params.diffusers_model_repo,
+      url: params.diffusers_model_repo ? `https://huggingface.co/${params.diffusers_model_repo}` : "",
+    });
+  }
+  if (Array.isArray(params.loras)) {
+    params.loras.forEach((item) => pushItem({
+      kind: "lora",
+      name: item?.name || item?.lora_name || "",
+    }));
+  }
+  if (Array.isArray(params.embeddings)) {
+    params.embeddings.forEach((item) => {
+      if (item && typeof item === "object") {
+        pushItem({
+          kind: "embedding",
+          name: item.name || item.embedding_name || item.file || "",
+          url: item.url || item.download_url || "",
+        });
+      } else {
+        pushItem({ kind: "embedding", name: item });
+      }
+    });
+  }
+  if (params.vae && params.vae !== COMFYUI_VAE_BUILTIN) {
+    pushItem({
+      kind: "vae",
+      name: params.vae,
+    });
+  }
+  (Array.isArray(civitai.model_version_resources) ? civitai.model_version_resources : []).forEach((resource) => {
+    const primary = resource?.primary_file && typeof resource.primary_file === "object" ? resource.primary_file : {};
+    const versionId = resource?.model_version_id || resource?.id || "";
+    pushItem({
+      kind: resource?.model_type || primary?.type || "",
+      name: resource?.model_name || "",
+      version: resource?.version_name || "",
+      file: primary?.name || "",
+      url: primary?.download_url || resource?.download_url || (versionId ? `https://civitai.com/api/download/models/${encodeURIComponent(versionId)}` : ""),
+    });
+  });
+  (Array.isArray(civitai.resources) ? civitai.resources : []).forEach((resource) => {
+    const versionId = resource?.modelVersionId || resource?.model_version_id || resource?.id || "";
+    const kind = resource?.type || resource?.modelType || resource?.model_type || "";
+    const kindKey = String(kind || "").trim().toLowerCase();
+    const file = resource?.fileName || resource?.filename || "";
+    const directUrl = resource?.downloadUrl || resource?.download_url || resource?.url || "";
+    if (["model", "checkpoint", "base_model"].includes(kindKey) && !versionId && !file && !directUrl) {
+      return;
+    }
+    pushItem({
+      kind,
+      name: resource?.name || resource?.modelName || "",
+      version: resource?.versionName || resource?.modelVersionName || "",
+      file,
+      url: directUrl || (versionId ? `https://civitai.com/api/download/models/${encodeURIComponent(versionId)}` : ""),
+    });
+  });
+  return items.slice(0, 24);
+}
+
+function comfyuiFavoriteRequirementsMarkup(params = {}) {
+  const requirements = comfyuiFavoriteRequirementItems(params);
+  if (!requirements.length) return "";
+  return `
+    <section class="comfyui-favorite-preview-section comfyui-favorite-requirements">
+      <h4>模型需求</h4>
+      <div class="comfyui-favorite-requirement-list">
+        ${requirements.map((item) => {
+          const exists = comfyuiFavoriteRequirementExists(item);
+          const statusLabel = exists ? "已存在" : "未找到";
+          return `
+          <div class="comfyui-favorite-requirement-item ${exists ? "exists" : "missing"}" data-model-exists="${exists ? "1" : "0"}">
+            <div class="comfyui-favorite-requirement-main">
+              <span class="comfyui-favorite-requirement-status" aria-label="${statusLabel}" title="${statusLabel}">${exists ? "✓" : "×"}</span>
+              <span class="comfyui-favorite-requirement-type">${sanitize(item.type)}</span>
+              ${item.url
+                ? `<a href="${sanitize(item.url)}" target="_blank" rel="noopener noreferrer">${sanitize(item.label)}</a>`
+                : `<strong>${sanitize(item.label)}</strong>`}
+            </div>
+            ${item.version ? `<small>${sanitize(item.version)}</small>` : ""}
+          </div>
+        `;
+        }).join("")}
+      </div>
+    </section>
+  `;
+}
+
+async function copyComfyuiFavoritePromptText(text, button, label = "提示詞") {
+  const value = String(text || "").trim();
+  if (!value) {
+    setComfyuiMessage(`沒有可複製的${label}。`, false);
+    return;
+  }
+  try {
+    if (navigator.clipboard?.writeText && window.isSecureContext) {
+      await navigator.clipboard.writeText(value);
+    } else if (typeof showCopyFallbackDialog === "function") {
+      await showCopyFallbackDialog(value, `複製${label}`);
+    } else {
+      window.prompt(`請手動複製${label}`, value);
+    }
+    if (typeof showCopyLinkFeedback === "function") {
+      showCopyLinkFeedback(button || document.activeElement, "已完成複製", true);
+    }
+    setComfyuiMessage(`${label}已複製。`, true);
+  } catch (err) {
+    if (typeof showCopyLinkFeedback === "function") {
+      showCopyLinkFeedback(button || document.activeElement, "請手動複製", false);
+    }
+    setComfyuiMessage(`${label}複製失敗，請手動選取內容。`, false);
+  }
+}
+
+function comfyuiFavoritePromptSectionMarkup(title, text, copyKey) {
+  if (!text) return "";
+  return `
+    <section class="comfyui-favorite-preview-section comfyui-favorite-prompt-section">
+      <div class="comfyui-favorite-preview-section-head">
+        <h4>${sanitize(title)}</h4>
+        <button class="btn btn-sm comfyui-favorite-copy-btn" type="button" data-comfyui-favorite-copy="${sanitize(copyKey)}" title="複製${sanitize(title)}" aria-label="複製${sanitize(title)}">⧉</button>
+      </div>
+      <p>${sanitize(text)}</p>
+    </section>
+  `;
+}
+
+function ensureComfyuiFavoritePreviewModal() {
+  let modal = $("comfyui-favorite-preview-modal");
+  if (modal) return modal;
+  modal = document.createElement("div");
+  modal.id = "comfyui-favorite-preview-modal";
+  modal.className = "comfyui-favorite-preview-modal";
+  modal.dataset.globalModalClose = "none";
+  modal.hidden = true;
+  modal.innerHTML = `
+    <div class="comfyui-favorite-preview-card" role="dialog" aria-modal="true" aria-labelledby="comfyui-favorite-preview-title" data-global-modal-close="none">
+      <button class="btn btn-sm comfyui-favorite-preview-close" type="button" data-comfyui-favorite-preview-close="1" aria-label="關閉" title="關閉">×</button>
+      <div class="comfyui-favorite-preview-image" id="comfyui-favorite-preview-image"></div>
+      <div class="comfyui-favorite-preview-detail" id="comfyui-favorite-preview-detail"></div>
+    </div>
+  `;
+  modal.addEventListener("click", (event) => {
+    if (event.target === modal || event.target.closest("[data-comfyui-favorite-preview-close]")) {
+      closeComfyuiFavoritePreviewModal();
+    }
+  });
+  document.body.appendChild(modal);
+  return modal;
+}
+
+function closeComfyuiFavoritePreviewModal() {
+  const modal = $("comfyui-favorite-preview-modal");
+  if (modal) modal.hidden = true;
+  updateComfyuiFavoriteModalBodyState();
+}
+
+function openComfyuiFavoritePreview(favoriteId) {
+  const item = comfyuiImageFavorites.find((favorite) => String(favorite?.id || "") === String(favoriteId || ""));
+  if (!item) {
+    setComfyuiMessage("找不到這筆圖片收藏。", false);
+    return;
+  }
+  const params = item?.params && typeof item.params === "object" ? item.params : {};
+  const summary = comfyuiFavoriteParamSummary(params);
+  const sourceUrl = item?.source_url || "";
+  const prompt = comfyuiFavoritePromptText(params, "prompt", 2200);
+  const negative = comfyuiFavoritePromptText(params, "negative_prompt", 1600);
+  const requirements = comfyuiFavoriteRequirementsMarkup(params);
+  const modal = ensureComfyuiFavoritePreviewModal();
+  const image = $("comfyui-favorite-preview-image");
+  const detail = $("comfyui-favorite-preview-detail");
+  if (image) {
+    image.innerHTML = `<img src="${sanitize(item.preview_url || "")}" alt="${sanitize(item.title || "圖片收藏")}" />`;
+  }
+  if (detail) {
+    detail.innerHTML = `
+      <div class="comfyui-favorite-preview-head">
+        <strong id="comfyui-favorite-preview-title">${sanitize(item.title || "圖片收藏")}</strong>
+        <span>${sanitize(item.source_type || "manual")}${item.created_at ? ` · ${sanitize(new Date(item.created_at).toLocaleString())}` : ""}</span>
+      </div>
+      <div class="comfyui-favorite-chips">
+        ${summary.length ? summary.map((value) => `<span>${sanitize(value)}</span>`).join("") : "<span>尚無參數</span>"}
+      </div>
+      ${requirements}
+      ${comfyuiFavoritePromptSectionMarkup("提示詞", prompt, "prompt")}
+      ${comfyuiFavoritePromptSectionMarkup("負面提示詞", negative, "negative")}
+      ${item.note ? `<section class="comfyui-favorite-preview-section"><h4>備註</h4><p>${sanitize(item.note)}</p></section>` : ""}
+      <div class="drive-file-actions comfyui-favorite-actions">
+        <button class="btn btn-primary" type="button" data-comfyui-favorite-preview-apply="${sanitize(String(item.id || ""))}">套回表單</button>
+        ${sourceUrl ? `<a class="btn" href="${sanitize(sourceUrl)}" target="_blank" rel="noopener noreferrer">來源</a>` : ""}
+        <button class="btn btn-danger" type="button" data-comfyui-favorite-preview-delete="${sanitize(String(item.id || ""))}">刪除</button>
+      </div>
+    `;
+    detail.querySelector("[data-comfyui-favorite-preview-apply]")?.addEventListener("click", () => {
+      applyComfyuiFavoriteToForm(item.id).catch((err) => setComfyuiMessage(err.message || "圖片收藏套回表單失敗", false));
+      closeComfyuiFavoritePreviewModal();
+    });
+    detail.querySelectorAll("[data-comfyui-favorite-copy]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const key = button.getAttribute("data-comfyui-favorite-copy");
+        copyComfyuiFavoritePromptText(key === "negative" ? negative : prompt, button, key === "negative" ? "負面提示詞" : "提示詞");
+      });
+    });
+    detail.querySelector("[data-comfyui-favorite-preview-delete]")?.addEventListener("click", () => {
+      deleteComfyuiImageFavorite(item.id).catch((err) => setComfyuiMessage(err.message || "圖片收藏刪除失敗", false));
+    });
+  }
+  modal.hidden = false;
+  updateComfyuiFavoriteModalBodyState();
+}
+
+function renderComfyuiImageFavorites(favorites = []) {
+  const list = $("comfyui-favorites-list");
+  if (!list) return;
+  comfyuiImageFavorites = Array.isArray(favorites) ? favorites.slice() : [];
+  if (!comfyuiImageFavorites.length) {
+    list.innerHTML = '<div class="drive-empty">尚無圖片收藏</div>';
+    setComfyuiFavoritesStatus("尚無圖片收藏。");
+    return;
+  }
+  list.innerHTML = comfyuiImageFavorites.map((item) => {
+    const params = item?.params && typeof item.params === "object" ? item.params : {};
+    const summary = comfyuiFavoriteParamSummary(params);
+    const model = params.model || params.diffusers_model_repo || "";
+    return `
+      <article class="comfyui-favorite-card" data-comfyui-favorite-card="${sanitize(String(item.id || ""))}">
+        <button class="comfyui-favorite-thumb" type="button" data-comfyui-favorite-open="${sanitize(String(item.id || ""))}" aria-label="${sanitize(item.title || "圖片收藏")}">
+          <img src="${sanitize(item.preview_url || "")}" alt="${sanitize(item.title || "圖片收藏")}" loading="lazy" />
+          <span class="comfyui-favorite-image-caption">
+            <strong>${sanitize(item.title || "圖片收藏")}</strong>
+            ${model ? `<small>${sanitize(model)}</small>` : ""}
+          </span>
+          <span class="comfyui-favorite-image-meta">${summary.length ? sanitize(summary.slice(0, 2).join(" · ")) : ""}</span>
+        </button>
+      </article>
+    `;
+  }).join("");
+  list.querySelectorAll("[data-comfyui-favorite-open]").forEach((button) => {
+    let lastTouch = 0;
+    button.addEventListener("click", () => {
+      if (window.matchMedia?.("(pointer: coarse)")?.matches) {
+        openComfyuiFavoritePreview(button.getAttribute("data-comfyui-favorite-open"));
+        return;
+      }
+      const now = Date.now();
+      if (now - lastTouch < 420) {
+        openComfyuiFavoritePreview(button.getAttribute("data-comfyui-favorite-open"));
+      }
+      lastTouch = now;
+    });
+    button.addEventListener("dblclick", () => openComfyuiFavoritePreview(button.getAttribute("data-comfyui-favorite-open")));
+    button.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        openComfyuiFavoritePreview(button.getAttribute("data-comfyui-favorite-open"));
+      }
+    });
+  });
+  setComfyuiFavoritesStatus(`已讀取 ${comfyuiImageFavorites.length} 筆圖片收藏。`);
+}
+
+async function loadComfyuiImageFavorites() {
+  const refreshBtn = $("comfyui-favorites-refresh-btn");
+  if (refreshBtn) {
+    refreshBtn.disabled = true;
+    refreshBtn.textContent = "讀取中...";
+  }
+  setComfyuiFavoritesStatus("正在讀取圖片收藏...");
+  try {
+    await fetchCsrfToken();
+    const res = await apiFetch(API + "/comfyui/image-favorites", {
+      credentials: "same-origin",
+      headers: { "X-CSRF-Token": getCsrfToken() || "" },
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok || !json.ok) throw new Error(json.msg || `圖片收藏讀取失敗（HTTP ${res.status}）`);
+    renderComfyuiImageFavorites(json.favorites || []);
+  } finally {
+    if (refreshBtn) {
+      refreshBtn.disabled = false;
+      refreshBtn.textContent = "重新整理收藏";
+    }
+  }
+}
+
+function comfyuiFavoriteWorkflowBundleHint(params = {}) {
+  const explicit = String(params.workflow_system_bundle_id || params.workflow_bundle_id || "").trim();
+  if (explicit) return explicit;
+  const baseModel = String(params?.civitai?.base_model || "").toLowerCase();
+  const model = String(params.model || params.diffusers_model_repo || "").toLowerCase();
+  const sourceModelName = String(params?.civitai?.source_model_name || "").toLowerCase();
+  const resourceNames = Array.isArray(params?.civitai?.model_version_resources)
+    ? params.civitai.model_version_resources.map((resource) => String(resource?.model_name || resource?.version_name || "").toLowerCase()).join(" ")
+    : "";
+  const family = `${model} ${sourceModelName} ${baseModel} ${resourceNames}`;
+  if (family.includes("zit") || model.includes("z_image_turbo")) {
+    return "origin_zit_txt2img";
+  }
+  if (family.includes("anima")) {
+    return "origin_anima_txt2img";
+  }
+  if (family.includes("flux") || model.includes("flux1-") || model.includes("flux-1")) {
+    return "origin_flux_dev_txt2img";
+  }
+  if (family.includes("netayume")) {
+    return "origin_netayume_txt2img";
+  }
+  if (family.includes("sd3.5") || family.includes("sd 3.5") || family.includes("sd3_5")) {
+    return "origin_sd35_txt2img";
+  }
+  if (["sdxl", "sd xl", "illustrious", "pony", "noob", "xl"].some((token) => family.includes(token))) {
+    return "origin_sdxl_txt2img";
+  }
+  return "";
+}
+
+async function resolveComfyuiFavoriteWorkflow(params = {}) {
+  const directId = Number(params.workflow_preset_id || params.preset_id || 0);
+  if (Number.isFinite(directId) && directId > 0) {
+    return {
+      id: directId,
+      title: params.workflow_preset_title || params.preset_title || `Workflow #${directId}`,
+      bundleId: params.workflow_system_bundle_id || params.workflow_bundle_id || "",
+    };
+  }
+  const bundleId = comfyuiFavoriteWorkflowBundleHint(params);
+  if (!bundleId) return { id: 0, title: "", bundleId: "" };
+  if (typeof loadComfyuiWorkflowPresets === "function") {
+    try {
+      await loadComfyuiWorkflowPresets({ silentTemplateReload: true });
+    } catch (err) {
+      console.warn("Failed to load workflow presets for favorite restore", err);
+    }
+  }
+  const presets = Array.isArray(comfyuiWorkflowPresets) ? comfyuiWorkflowPresets : [];
+  const preset = presets.find((item) => String(item?.system_bundle_id || "") === bundleId)
+    || presets.find((item) => String(item?.title || "").toLowerCase().includes(bundleId.replace(/^origin_/, "").replace(/_/g, " ").toLowerCase()));
+  return preset
+    ? { id: Number(preset.id || 0), title: preset.title || params.workflow_preset_title || "", bundleId }
+    : { id: 0, title: params.workflow_preset_title || bundleId, bundleId };
+}
+
+async function applyComfyuiFavoriteToForm(favoriteId) {
+  const item = comfyuiImageFavorites.find((favorite) => String(favorite?.id || "") === String(favoriteId || ""));
+  if (!item) {
+    setComfyuiMessage("找不到這筆圖片收藏。", false);
+    return;
+  }
+  const params = item.params && typeof item.params === "object" ? item.params : {};
+  const diffusersRepo = params.diffusers_model_repo || "";
+  const workflow = diffusersRepo ? { id: 0, title: "", bundleId: "" } : await resolveComfyuiFavoriteWorkflow(params);
+  const workflowPresetId = Number(workflow.id || 0);
+  setComfyuiView(diffusersRepo ? "hf" : "generate");
+  if (workflowPresetId > 0) {
+    if (typeof ensureComfyuiHistoryWorkflowSelectOption === "function") {
+      ensureComfyuiHistoryWorkflowSelectOption(workflowPresetId, workflow.title || params.workflow_preset_title || "");
+    }
+    if (typeof loadComfyuiSelectedTemplateDetail === "function") {
+      await loadComfyuiSelectedTemplateDetail(workflowPresetId, { silent: true, applyDefaults: false });
+    }
+    if (typeof ensureComfyuiHistoryWorkflowSelectOption === "function") {
+      ensureComfyuiHistoryWorkflowSelectOption(workflowPresetId, workflow.title || params.workflow_preset_title || "");
+    }
+  }
+  const generationMode = params.generation_mode || "txt2img";
+  const isDiffusersMode = isComfyuiDiffusersMode();
+  [
+    ["comfyui-generation-mode", generationMode],
+    ["comfyui-model-select", params.model || "", true],
+    ["comfyui-prompt", params.prompt || ""],
+    ["comfyui-negative-prompt", params.negative_prompt || ""],
+    ["comfyui-width", params.width || ""],
+    ["comfyui-height", params.height || ""],
+    ["comfyui-steps", params.steps || ""],
+    ["comfyui-cfg", params.cfg || ""],
+    ["comfyui-run-count", params.run_count || 1],
+    ["comfyui-seed", params.seed || ""],
+  ]
+    .filter(([id]) => !(workflowPresetId > 0 && id === "comfyui-model-select"))
+    .forEach(([id, value, preserveMissingOption]) => setComfyuiFieldValue(id, value, { preserveMissingOption: !!preserveMissingOption }));
+  setComfyuiSamplingFieldsFromValues(params.sampler_name || "euler", params.scheduler || "normal");
+  if (diffusersRepo) {
+    setComfyuiFieldValue("comfyui-diffusers-model-repo", diffusersRepo);
+    setComfyuiFieldValue("comfyui-diffusers-model-variant", params.diffusers_model_variant || "", { preserveMissingOption: true });
+  } else if (!workflowPresetId) {
+    setComfyuiFieldValue("comfyui-model-select", params.model || "", { preserveMissingOption: true });
+  }
+  if (params.vae && !isDiffusersMode) {
+    setComfyuiFieldValue("comfyui-vae-select", params.vae, { preserveMissingOption: true });
+  }
+  if (params.seed !== undefined && params.seed !== null && String(params.seed).trim()) {
+    setComfyuiSeedAfterGenerateMode("fixed");
+  } else if (params.seed_after_generate) {
+    setComfyuiSeedAfterGenerateMode(params.seed_after_generate);
+  }
+  if (Array.isArray(params.loras)) {
+    comfyuiSelectedLoras = params.loras.slice(0, COMFYUI_MAX_LORAS).map((item) => ({
+      name: String(item?.name || item?.lora_name || "").trim(),
+      strength_model: Number.isFinite(Number(item?.strength_model)) ? Number(item.strength_model) : 1,
+      strength_clip: Number.isFinite(Number(item?.strength_clip)) ? Number(item.strength_clip) : 1,
+    })).filter((item) => item.name);
+    renderComfyuiSelectedLoras();
+  }
+  if (workflowPresetId > 0 && typeof applyComfyuiTemplateHistorySnapshotToForm === "function") {
+    applyComfyuiTemplateHistorySnapshotToForm({}, params);
+  }
+  updateComfyuiModeVisibility();
+  updateComfyuiDiffusersUi();
+  writeComfyuiDraft();
+  setComfyuiMessage(`已套回圖片收藏「${item.title || item.id}」${workflowPresetId ? `與 workflow「${workflow.title || workflowPresetId}」` : ""}。`, true);
+}
+
+async function deleteComfyuiImageFavorite(favoriteId) {
+  if (!favoriteId) return;
+  const confirmed = window.confirm("刪除這筆圖片收藏？");
+  if (!confirmed) return;
+  try {
+    await fetchCsrfToken({ force: true });
+    const res = await apiFetch(API + `/comfyui/image-favorites/${encodeURIComponent(favoriteId)}`, {
+      method: "DELETE",
+      credentials: "same-origin",
+      headers: { "X-CSRF-Token": getCsrfToken() || "" },
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok || !json.ok) throw new Error(json.msg || `圖片收藏刪除失敗（HTTP ${res.status}）`);
+    await loadComfyuiImageFavorites();
+    setComfyuiMessage(json.msg || "已刪除圖片收藏", true);
+  } catch (err) {
+    setComfyuiMessage(err.message || "圖片收藏刪除失敗", false);
+  }
+}
+
+function comfyuiFavoriteCurrentPayload() {
+  const params = comfyuiShareGenerationPayload();
+  const outputLabel = comfyuiGeneratedImageLabel(comfyuiCurrentImage, comfyuiSelectedImageIndex);
+  return {
+    source_type: "generated",
+    title: outputLabel ? `產圖收藏 - ${outputLabel}` : "產圖收藏",
+    image_ref: comfyuiCurrentImage?.image_ref,
+    prompt_id: comfyuiCurrentImage?.prompt_id || "",
+    selected_image_index: comfyuiSelectedImageIndex,
+    output_label: outputLabel,
+    params,
+  };
+}
+
+async function favoriteComfyuiGeneratedImage() {
+  if (!comfyuiCurrentImage?.image_ref) {
+    setComfyuiMessage("目前沒有可收藏的產圖結果", false);
+    return;
+  }
+  const favoriteBtn = $("comfyui-favorite-btn");
+  if (favoriteBtn) {
+    favoriteBtn.disabled = true;
+    favoriteBtn.textContent = "收藏中...";
+  }
+  try {
+    await fetchCsrfToken({ force: true });
+    const res = await apiFetch(API + "/comfyui/image-favorites", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: {
+        "Content-Type": "application/json",
+        "X-CSRF-Token": getCsrfToken() || "",
+      },
+      body: JSON.stringify(comfyuiFavoriteCurrentPayload()),
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok || !json.ok) throw new Error(json.msg || `圖片收藏失敗（HTTP ${res.status}）`);
+    setComfyuiMessage(json.msg || "已收藏這張產圖", true);
+    if ($("comfyui-view-favorites")?.classList.contains("active")) {
+      await loadComfyuiImageFavorites();
+    }
+  } catch (err) {
+    setComfyuiMessage(err.message || "圖片收藏失敗", false);
+  } finally {
+    if (favoriteBtn) {
+      favoriteBtn.disabled = !comfyuiCurrentImage?.image_ref;
+      favoriteBtn.textContent = "收藏";
+    }
+  }
+}
+
+async function importComfyuiFavoriteFromCivitai() {
+  const input = $("comfyui-favorite-civitai-url");
+  const button = $("comfyui-favorite-civitai-import-btn");
+  const status = $("comfyui-favorite-civitai-status");
+  const url = (input?.value || "").trim();
+  if (!url) {
+    setComfyuiMessage("請輸入 Civitai 圖片頁 URL。", false);
+    return;
+  }
+  if (button) {
+    button.disabled = true;
+    button.textContent = "匯入中...";
+  }
+  if (status) status.textContent = "正在從 Civitai API 匯入...";
+  try {
+    await fetchCsrfToken({ force: true });
+    const res = await apiFetch(API + "/comfyui/image-favorites/import-civitai", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: {
+        "Content-Type": "application/json",
+        "X-CSRF-Token": getCsrfToken() || "",
+      },
+      body: JSON.stringify({ url }),
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok || !json.ok) throw new Error(json.msg || `Civitai 圖片匯入失敗（HTTP ${res.status}）`);
+    if (status) status.textContent = json.msg || "已匯入 Civitai 圖片收藏。";
+    input.value = "";
+    await loadComfyuiImageFavorites();
+    closeComfyuiFavoriteModal();
+    setComfyuiMessage(json.msg || "已匯入 Civitai 圖片收藏", true);
+  } catch (err) {
+    if (status) status.textContent = err.message || "Civitai 圖片匯入失敗";
+    setComfyuiMessage(err.message || "Civitai 圖片匯入失敗", false);
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = "從 Civitai 匯入";
+    }
+  }
+}
+
+function comfyuiFavoriteUploadParams() {
+  return {
+    generation_mode: "txt2img",
+    prompt: $("comfyui-favorite-prompt")?.value || "",
+    negative_prompt: $("comfyui-favorite-negative-prompt")?.value || "",
+    model: $("comfyui-favorite-model")?.value || "",
+    vae: $("comfyui-favorite-vae")?.value || "",
+    seed: $("comfyui-favorite-seed")?.value || "",
+    width: $("comfyui-favorite-width")?.value || "",
+    height: $("comfyui-favorite-height")?.value || "",
+    steps: $("comfyui-favorite-steps")?.value || "",
+    cfg: $("comfyui-favorite-cfg")?.value || "",
+    sampler_name: $("comfyui-favorite-sampler")?.value || "",
+    scheduler: $("comfyui-favorite-scheduler")?.value || "",
+  };
+}
+
+async function saveUploadedComfyuiFavorite() {
+  const fileInput = $("comfyui-favorite-upload-file");
+  const button = $("comfyui-favorite-upload-save-btn");
+  const status = $("comfyui-favorite-upload-status");
+  const file = fileInput?.files && fileInput.files[0] ? fileInput.files[0] : null;
+  if (!file) {
+    setComfyuiMessage("請先選擇要收藏的圖片。", false);
+    return;
+  }
+  if (!/^image\/(png|jpeg|webp)$/i.test(file.type || "")) {
+    setComfyuiMessage("收藏圖片只支援 PNG、JPG、WEBP。", false);
+    return;
+  }
+  const form = new FormData();
+  form.append("image", file, file.name || "favorite.png");
+  form.append("title", $("comfyui-favorite-title")?.value || "");
+  form.append("note", $("comfyui-favorite-note")?.value || "");
+  form.append("params_json", JSON.stringify(comfyuiFavoriteUploadParams()));
+  if (button) {
+    button.disabled = true;
+    button.textContent = "儲存中...";
+  }
+  if (status) status.textContent = "正在儲存圖片收藏...";
+  try {
+    await fetchCsrfToken({ force: true });
+    const res = await apiFetch(API + "/comfyui/image-favorites", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "X-CSRF-Token": getCsrfToken() || "" },
+      body: form,
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok || !json.ok) throw new Error(json.msg || `上傳收藏失敗（HTTP ${res.status}）`);
+    if (status) status.textContent = json.msg || "已儲存上傳收藏。";
+    if (fileInput) fileInput.value = "";
+    await loadComfyuiImageFavorites();
+    closeComfyuiFavoriteModal();
+    setComfyuiMessage(json.msg || "已儲存上傳收藏", true);
+  } catch (err) {
+    if (status) status.textContent = err.message || "上傳收藏失敗";
+    setComfyuiMessage(err.message || "上傳收藏失敗", false);
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = "儲存上傳收藏";
+    }
+  }
 }
 
 function formatComfyuiCivitaiFileSize(file) {
@@ -5845,6 +7038,7 @@ const ComfyUITemplateImporter = (() => {
   let modalEl = null;
   let currentToken = null;
   let currentCapability = null;
+  let lastFocusedImporterTextInput = null;
 
   function ensureModal() {
     if (modalEl && document.body.contains(modalEl)) return modalEl;
@@ -5957,22 +7151,17 @@ const ComfyUITemplateImporter = (() => {
     const textInputs = Array.from(modalEl.querySelectorAll("[data-comfyui-template-importer-input='1']"))
       .filter((el) => el.dataset.category === "TEXT" && el.dataset.inputName !== "filename_prefix");
     if (!textInputs.length) return;
-    const promptType = typeof isNegativeComfyuiEmbedding === "function" && isNegativeComfyuiEmbedding(cleanName) ? "negative" : "prompt";
-    const looksNegative = (el) => {
-      const text = `${el?.dataset?.label || ""} ${el?.value || ""}`.toLowerCase();
-      return text.includes("負") || text.includes("negative") || text.includes("low quality") || text.includes("worst quality");
-    };
-    const target = promptType === "negative"
-      ? (textInputs.find((el) => looksNegative(el)) || textInputs[1] || textInputs[0])
-      : (textInputs.find((el) => !looksNegative(el)) || textInputs[0]);
+    const active = document.activeElement;
+    const target = textInputs.includes(active)
+      ? active
+      : (textInputs.includes(lastFocusedImporterTextInput) ? lastFocusedImporterTextInput : textInputs[0]);
     const embeddingTag = `<embeddings:${cleanName}>`;
-    const existingTarget = textInputs.find((el) => (
-      typeof removeComfyuiEmbeddingTokenFromInput === "function"
-        ? removeComfyuiEmbeddingTokenFromInput(el, cleanName).length
-        : false
-    ));
-    if (existingTarget) {
-      existingTarget.focus();
+    const removed = typeof removeComfyuiEmbeddingTokenFromInput === "function"
+      ? removeComfyuiEmbeddingTokenFromInput(target, cleanName)
+      : [];
+    if (removed.length) {
+      lastFocusedImporterTextInput = target;
+      target.focus();
       return;
     }
     const raw = target.value || "";
@@ -5982,6 +7171,7 @@ const ComfyUITemplateImporter = (() => {
     const suffix = end < raw.length && !/^[\s,]/.test(raw.slice(end)) ? " " : "";
     target.value = `${raw.slice(0, start)}${prefix}${embeddingTag}${suffix}${raw.slice(end)}`;
     const cursor = start + prefix.length + embeddingTag.length + suffix.length;
+    lastFocusedImporterTextInput = target;
     target.focus();
     if (typeof target.setSelectionRange === "function") target.setSelectionRange(cursor, cursor);
   }
@@ -6062,6 +7252,11 @@ const ComfyUITemplateImporter = (() => {
         inputEl.value = field.current_value != null ? String(field.current_value) : "";
         inputEl.style.flex = "1";
         inputEl.style.padding = "4px 8px";
+        ["focus", "click", "keyup", "select", "mouseup", "touchend"].forEach((eventName) => {
+          inputEl.addEventListener(eventName, () => {
+            lastFocusedImporterTextInput = inputEl;
+          });
+        });
         row.appendChild(labelEl);
         row.appendChild(inputEl);
         section.appendChild(row);

@@ -315,6 +315,12 @@ Root can configure ComfyUI in two modes from server settings:
 - The page also exposes a VAE selector. Keeping `use checkpoint builtin VAE`
   uses the model's bundled VAE; selecting another VAE inserts a `VAELoader`
   node into the generated workflow.
+- If `VAE` is not explicitly set in source metadata (or is `auto` / `builtin`),
+  the front-end normalizes it to empty and sends only checkpoint builtin mode,
+  so SDXL-style workflows no longer fail with "missing VAE".
+- Civitai image import now also carries model family hints (`ZIT`, `ANIMA`,
+  `Flux`, `SDXL`, `SD3.5`, `NetaYume`) and maps them to matching system
+  workflow bundles automatically.
 - Available Embeddings are loaded from the ComfyUI API and rendered as clickable
   shortcut buttons. Clicking one inserts `<embeddings:name>` into the positive
   prompt; the backend translates that shortcut into ComfyUI's actual embedding
