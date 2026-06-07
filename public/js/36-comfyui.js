@@ -94,7 +94,9 @@ const COMFYUI_IMAGE_ASSET_KEYS = ["source", "mask", "control"];
 const COMFYUI_HF_MODEL_FILE_EXT_RE = /\.(?:safetensors|ckpt|pt|pth|bin|gguf)$/i;
 const COMFYUI_DIFFUSERS_BUILTIN_COMMON_REPOS = [
   { repo: "dhead/wai-nsfw-illustrious-sdxl-v140-sdxl", label: "dhead WAI Illustrious SDXL v140" },
+  { repo: "dhead/waiIllustriousSDXL_v150", label: "dhead WAI Illustrious SDXL v150" },
   { repo: "Heartsync/NSFW-Uncensored", label: "Heartsync NSFW Uncensored" },
+  { repo: "John6666/janku-v5-nsfw-trained-noobai-rou-wei-illustrious-xl-v50-sdxl", label: "John6666 JanKu V50（SDXL / I2I）" },
   { repo: "stabilityai/sd-turbo", label: "SD Turbo（txt2img / I2I）" },
   { repo: "stabilityai/sdxl-turbo", label: "SDXL Turbo（txt2img / I2I）" },
   { repo: "stable-diffusion-v1-5/stable-diffusion-v1-5", label: "Stable Diffusion 1.5（txt2img / I2I）" },

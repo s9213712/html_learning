@@ -395,8 +395,8 @@ def detect_diffusers_supported_modes(*, repo_id="", pipeline_tag="", library_nam
         supported.add("img2img")
     if inpaint_hint:
         supported.add("inpaint")
-    if is_diffusers and tag in {"", "text-to-image"}:
-        supported.update({"txt2img", "img2img"})
+    if is_diffusers and tag == "":
+        supported.add("txt2img")
     if is_diffusers and any(name in class_name for name in ("text2image", "texttoimage", "text-to-image", "pipeline")):
         supported.add("txt2img")
     if is_diffusers and any(name in class_name for name in ("image2image", "imagetoimage", "img2img")):

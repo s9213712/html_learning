@@ -158,7 +158,17 @@ def test_huggingface_diffusers_metadata_requires_diffusers_marker_for_regular_re
         library_name="diffusers",
         tags=["text-to-image", "diffusers"],
         siblings=[{"rfilename": "model_index.json"}],
-    ) == ["txt2img", "img2img"]
+    ) == ["txt2img"]
+
+
+def test_huggingface_diffusers_metadata_does_not_imply_img2img_only_from_txt2img_tag():
+    assert detect_diffusers_supported_modes(
+        repo_id="owner/diffusers-only-txt2img",
+        pipeline_tag="text-to-image",
+        library_name="diffusers",
+        tags=["text-to-image", "diffusers"],
+        siblings=[{"rfilename": "model_index.json"}],
+    ) == ["txt2img"]
 
 
 def test_huggingface_diffusers_metadata_accepts_modular_model_index():
@@ -168,7 +178,7 @@ def test_huggingface_diffusers_metadata_accepts_modular_model_index():
         library_name="diffusers",
         tags=["text-to-image", "diffusers"],
         siblings=[{"rfilename": "modular_model_index.json"}],
-    ) == ["txt2img", "img2img"]
+    ) == ["txt2img"]
 
 
 def test_huggingface_model_card_hints_parse_official_diffusers_snippet():
