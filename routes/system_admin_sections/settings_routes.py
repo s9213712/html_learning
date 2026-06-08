@@ -304,6 +304,23 @@ def register_system_admin_settings_routes(app, ctx):
             if timezone_name is None:
                 return json_resp({"ok":False,"msg":"server_timezone 必須是有效的 IANA 時區名稱，例如 UTC、Asia/Taipei 或 America/New_York"}), 400
             data["server_timezone"] = timezone_name
+
+        site_identity_limits = {
+            "site_name": 80,
+            "site_document_title": 120,
+            "site_login_heading": 120,
+            "site_login_subtitle": 200,
+            "site_success_heading": 80,
+            "site_success_message": 200,
+        }
+        for key, maximum in site_identity_limits.items():
+            if key not in data:
+                continue
+            value = str(data.get(key) or "").strip()
+            if len(value) > maximum:
+                return json_resp({"ok": False, "msg": f"{key} 長度不可超過 {maximum} 字"}), 400
+            data[key] = value
+
         if "system_resource_board_refresh_seconds" in data:
             refresh_seconds = parse_int_in_range(data.get("system_resource_board_refresh_seconds"), 1, 300)
             if refresh_seconds is None:

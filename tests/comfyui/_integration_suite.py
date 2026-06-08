@@ -16,6 +16,7 @@ from routes.comfyui import register_comfyui_routes
 from routes.comfyui_sections import workflow_routes as comfyui_workflow_routes
 from services.comfyui import client as comfyui_client_module
 from services.comfyui import execution as comfy_execution
+from services.core.sqlite_hardening import connect_sqlite
 from services.storage.cloud_drive import ensure_cloud_drive_attachment_schema
 from services.comfyui.client import ComfyUIClient, ComfyUIError, ComfyUIImage
 from services.users.member_levels import ensure_member_level_rules_schema
@@ -735,8 +736,7 @@ def _write_lora_sidecar(base_dir, filename, *, base_model="", trained_words=None
 
 
 def _init_db(db_path):
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
+    conn = connect_sqlite(db_path, timeout=15, row_factory=True, foreign_keys=True, wal=True)
     conn.executescript(
         """
         CREATE TABLE users (
@@ -761,8 +761,7 @@ def _build_app(db_path, storage_root, settings=None, comfyui_client=None, actor=
     app.testing = True
 
     def get_db():
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
+        conn = connect_sqlite(db_path, timeout=15, row_factory=True, foreign_keys=True, wal=True)
         return conn
 
     deps = {
