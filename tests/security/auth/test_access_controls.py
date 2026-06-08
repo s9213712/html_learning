@@ -755,6 +755,14 @@ def test_ai_agent_settings_validate_url_and_key_shape():
     assert bad_key.status_code == 400
     assert "ai_agent_api_key" not in state
 
+    bad_persona = client.put("/api/admin/settings", json={"ai_agent_persona": "bad_persona"})
+    assert bad_persona.status_code == 400
+    assert "ai_agent_persona" not in state
+
+    bad_task_flag = client.put("/api/admin/settings", json={"ai_agent_task_prompt": "not_bool"})
+    assert bad_task_flag.status_code == 400
+    assert "ai_agent_task_prompt" not in state
+
 
 def test_root_can_configure_diffusers_backend_and_hf_token_write_only():
     app, state = _admin_app()

@@ -1,13 +1,17 @@
 import pytest
+import json
+from urllib import error as urllib_error
 
 from services.ai_agent.hermes import (
     AiAgentError,
     _normalize_chat_messages,
     normalize_ai_agent_api_base_url,
     normalize_ai_agent_model,
+    normalize_ai_agent_persona,
     public_ai_agent_settings,
     validate_ai_agent_api_key,
 )
+from services.ai_agent import hermes as hermes_client
 
 
 def test_ai_agent_public_settings_redacts_secret_and_keeps_connection_fields():
@@ -27,6 +31,12 @@ def test_ai_agent_public_settings_redacts_secret_and_keeps_connection_fields():
     assert payload["api_key_configured"] is True
     assert "api_key" not in payload
     assert payload["model"] == "hermes-agent"
+    assert payload["persona"] == "concise_helper"
+    assert payload["tasks"] == {
+        "site_guide": True,
+        "troubleshoot": True,
+        "prompt": True,
+    }
 
 
 def test_ai_agent_base_url_rejects_credentials_query_and_fragment():
@@ -44,6 +54,46 @@ def test_ai_agent_key_and_model_validation():
     assert validate_ai_agent_api_key("bad\nkey") is None
     assert normalize_ai_agent_model("hermes-agent") == "hermes-agent"
     assert normalize_ai_agent_model("bad\nmodel") is None
+
+
+def test_ai_agent_persona_validation():
+    assert normalize_ai_agent_persona("concise_helper") == "concise_helper"
+    assert normalize_ai_agent_persona("strict_helper") == "strict_helper"
+    assert normalize_ai_agent_persona("creative_coordinator") == "creative_coordinator"
+    assert normalize_ai_agent_persona("bad-persona") is None
+
+
+def test_ai_agent_chat_injects_persona_and_task_scope(monkeypatch):
+    payloads = []
+
+    def fake_json_request(_settings, method, path, payload=None, session_key="", timeout=None):
+        payloads.append({"method": method, "path": path, "payload": payload, "session_key": session_key, "timeout": timeout})
+        return {"choices": [{"message": {"content": "回覆內容"}}], "model": "hermes-agent"}
+
+    monkeypatch.setattr(hermes_client, "_json_request", fake_json_request)
+    result = hermes_client.ai_agent_chat(
+        {
+            "ai_agent_persona": "strict_helper",
+            "ai_agent_task_prompt": False,
+            "ai_agent_task_site_guide": True,
+            "ai_agent_task_troubleshoot": False,
+            "ai_agent_allow_tool_runs": False,
+        },
+        messages=[{"role": "user", "content": "我想知道為什麼下載沒反應"}],
+    )
+
+    assert result["content"] == "回覆內容"
+    assert payloads, "預期會發送一次 backend 請求"
+    request_payload = payloads[0]["payload"]
+    messages = request_payload.get("messages") or []
+    assert messages and messages[0]["role"] == "system"
+    content = str(messages[0]["content"])
+    assert "嚴謹流程助手" in content
+    assert "網站導覽" in content
+    assert "未啟用任務提示" in content
+    assert "生圖 / 下載排錯" in content
+    assert "生圖提示詞與參數" in content
+    assert "工具僅提供可執行建議" in content
 
 
 def test_ai_agent_multimodal_messages_are_openai_compatible():
@@ -70,3 +120,37 @@ def test_ai_agent_rejects_image_when_disabled():
             allow_image_input=False,
         )
 
+
+def test_ai_agent_health_checks_base_path_when_present(monkeypatch):
+    class FakeResponse:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def read(self, _size):
+            return json.dumps(self._payload).encode("utf-8")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    requests = []
+
+    def fake_urlopen(req, timeout=5):
+        url = getattr(req, "full_url", "")
+        requests.append(url)
+        if url == "http://127.0.0.1:8642/v1/health":
+            raise urllib_error.URLError("not found")
+        if url == "http://127.0.0.1:8642/health":
+            return FakeResponse({"ok": True})
+        raise urllib_error.URLError("not found")
+
+    monkeypatch.setattr(hermes_client.urllib_request, "urlopen", fake_urlopen)
+
+    result = hermes_client.ai_agent_health({"ai_agent_api_base_url": "http://127.0.0.1:8642/v1"})
+
+    assert requests == ["http://127.0.0.1:8642/v1/health", "http://127.0.0.1:8642/health"]
+    assert result["ok"] is True
+    assert result["url"] == "http://127.0.0.1:8642/health"
+    assert result["payload"] == {"ok": True}

@@ -12,6 +12,7 @@ from services.ai_agent.hermes import (
     normalize_ai_agent_api_base_url,
     normalize_ai_agent_model,
     normalize_ai_agent_provider,
+    normalize_ai_agent_persona,
     validate_ai_agent_api_key,
 )
 from services.platform.settings_metadata import (
@@ -358,6 +359,26 @@ def register_system_admin_settings_routes(app, ctx):
             if model is None:
                 return json_resp({"ok":False,"msg":"ai_agent_model 不可包含換行或控制字元，長度不可超過 200"}), 400
             data["ai_agent_model"] = model
+        if "ai_agent_persona" in data:
+            persona = normalize_ai_agent_persona(data.get("ai_agent_persona"))
+            if persona is None:
+                return json_resp({"ok":False,"msg":"ai_agent_persona 不合法，請選擇 concise_helper、strict_helper 或 creative_coordinator"}), 400
+            data["ai_agent_persona"] = persona
+        if "ai_agent_task_site_guide" in data:
+            parsed = parse_strict_bool(data.get("ai_agent_task_site_guide"))
+            if parsed is None:
+                return json_resp({"ok":False,"msg":"ai_agent_task_site_guide 必須是布林值 true/false"}), 400
+            data["ai_agent_task_site_guide"] = parsed
+        if "ai_agent_task_troubleshoot" in data:
+            parsed = parse_strict_bool(data.get("ai_agent_task_troubleshoot"))
+            if parsed is None:
+                return json_resp({"ok":False,"msg":"ai_agent_task_troubleshoot 必須是布林值 true/false"}), 400
+            data["ai_agent_task_troubleshoot"] = parsed
+        if "ai_agent_task_prompt" in data:
+            parsed = parse_strict_bool(data.get("ai_agent_task_prompt"))
+            if parsed is None:
+                return json_resp({"ok":False,"msg":"ai_agent_task_prompt 必須是布林值 true/false"}), 400
+            data["ai_agent_task_prompt"] = parsed
         if "ai_agent_request_timeout_seconds" in data:
             timeout_seconds = parse_int_in_range(data.get("ai_agent_request_timeout_seconds"), 5, 600)
             if timeout_seconds is None:

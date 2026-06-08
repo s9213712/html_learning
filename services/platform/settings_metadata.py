@@ -358,6 +358,22 @@ SETTING_DETAILS = {
         "label": "允許工具型任務",
         "description": "預留給後續 Hermes runs / approvals 流程；MVP chat route 不會自動開工具任務。",
     },
+    "ai_agent_persona": {
+        "label": "AI Agent 個性",
+        "description": "選擇回覆人格模板：簡潔客服導向 / 嚴謹流程助手 / 創意流程統籌。",
+    },
+    "ai_agent_task_site_guide": {
+        "label": "啟用網站導覽任務",
+        "description": "開啟後 Agent 可回答站內頁面導覽與功能操作指引。",
+    },
+    "ai_agent_task_troubleshoot": {
+        "label": "啟用排錯任務",
+        "description": "開啟後 Agent 可提供生圖 / 下載排錯的診斷步驟建議。",
+    },
+    "ai_agent_task_prompt": {
+        "label": "啟用提示詞任務",
+        "description": "開啟後 Agent 可提供生圖提示詞與參數建議。",
+    },
     "notification_poll_seconds": {
         "label": "通知更新頻率",
         "description": "登入後背景檢查通知未讀數；預設每 60 秒，頁面隱藏時暫停。",
