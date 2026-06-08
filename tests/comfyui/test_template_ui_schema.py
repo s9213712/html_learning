@@ -50,6 +50,30 @@ def test_ui_schema_panels_in_canonical_order():
     assert "sampler" in ids
 
 
+def test_ui_schema_injects_synthetic_vae_field_for_vae_consumer_without_loader():
+    schema = build_ui_schema(analysis=analyze_workflow_json(TXT2IMG), raw_workflow=TXT2IMG)
+    model_panel = next(p for p in schema.panels if p["id"] == "model")
+    field_ids = {field["id"] for field in model_panel["fields"]}
+    assert "node:template:vae_name" in field_ids
+    synthetic = next(field for field in model_panel["fields"] if field["id"] == "node:template:vae_name")
+    assert synthetic["class_type"] == "VAELoader"
+    assert synthetic["input_name"] == "vae_name"
+    assert synthetic["synthetic"] is True
+
+
+def test_ui_schema_skips_synthetic_vae_field_when_vae_loader_present():
+    workflow = {
+        **TXT2IMG,
+        "20": {"class_type": "VAELoader", "inputs": {"vae_name": "existing.vae.safetensors"}},
+    }
+    workflow["8"]["inputs"]["vae"] = ["20", 0]
+    schema = build_ui_schema(analysis=analyze_workflow_json(workflow), raw_workflow=workflow)
+    model_panel = next(p for p in schema.panels if p["id"] == "model")
+    field_ids = {field["id"] for field in model_panel["fields"]}
+    assert "node:20:vae_name" in field_ids
+    assert "node:template:vae_name" not in field_ids
+
+
 def test_ui_schema_groups_text_inputs_onto_text_panel():
     schema = build_ui_schema(analysis=analyze_workflow_json(TXT2IMG))
     text_panel = next(p for p in schema.panels if p["id"] == "text")

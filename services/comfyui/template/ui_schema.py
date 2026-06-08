@@ -643,6 +643,48 @@ def _build_label_context(
     return context
 
 
+def _workflow_has_vae_loader_node(analysis: WorkflowAnalysis) -> bool:
+    return any(
+        field.class_type == "VAELoader" and field.input_name == "vae_name"
+        for field in analysis.user_inputs
+    )
+
+
+def _workflow_has_vae_consumer(raw_workflow: dict[str, Any] | None) -> bool:
+    if not isinstance(raw_workflow, dict):
+        return False
+    for node in raw_workflow.values():
+        if not isinstance(node, dict):
+            continue
+        inputs = node.get("inputs")
+        if not isinstance(inputs, dict):
+            continue
+        for input_name, value in inputs.items():
+            if str(input_name) != "vae":
+                continue
+            if isinstance(value, list) and len(value) == 2:
+                return True
+    return False
+
+
+def _build_synthetic_vae_field(
+    analysis: WorkflowAnalysis,
+    raw_workflow: dict[str, Any] | None,
+) -> InputField | None:
+    """Create a synthetic editable VAE field for templates that consume `vae` input."""
+    if _workflow_has_vae_loader_node(analysis) or not _workflow_has_vae_consumer(raw_workflow):
+        return None
+    return InputField(
+        node_id="template",
+        class_type="VAELoader",
+        input_name="vae_name",
+        raw_value="",
+        category=FieldCategory.MODEL,
+        is_link=False,
+        node_title="Template VAE",
+    )
+
+
 # ----------------------------------------------------------------------------
 # Public API: build_ui_schema
 # ----------------------------------------------------------------------------
@@ -690,6 +732,15 @@ def build_ui_schema(
     by_panel: dict[str, list[dict[str, Any]]] = {key: [] for key, _, _ in _PANEL_ORDER}
     label_context = _build_label_context(analysis, raw_workflow=raw_workflow)
 
+    synthetic_vae_field = _build_synthetic_vae_field(analysis, raw_workflow)
+    synthetic_vae_payload = (
+        _serialize_field(synthetic_vae_field, label_context)
+        if synthetic_vae_field is not None
+        else None
+    )
+    if synthetic_vae_payload is not None:
+        synthetic_vae_payload["synthetic"] = True
+
     for field_obj in analysis.user_inputs:
         # Output filename prefixes are overwritten by §7.2; not user-editable.
         if not _is_user_visible_field(field_obj):
@@ -698,6 +749,8 @@ def build_ui_schema(
         if panel_key is None:
             continue
         by_panel[panel_key].append(_serialize_field(field_obj, label_context))
+    if synthetic_vae_payload:
+        by_panel["model"].append(synthetic_vae_payload)
 
     text_fields = by_panel.get("text", [])
     embedding_targets = [field for field in text_fields if _supports_embedding_shortcuts(field)]
