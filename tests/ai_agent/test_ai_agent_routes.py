@@ -1,5 +1,7 @@
 import json
 import sqlite3
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 
 from flask import Flask, jsonify, make_response
 
@@ -103,10 +105,22 @@ def _build_app(db_path, actor, *, settings=None):
             "require_csrf": lambda x: x,
             "require_csrf_safe": lambda x: x,
             "get_db": get_db,
-            "role_rank": lambda role: {"user": 0, "manager": 1, "super_admin": 2}.get(role or "user", 0),
+            "role_rank": lambda role: {"user": 0, "manager": 1, "admin": 1, "super_admin": 2}.get(role or "user", 0),
         }
     )
     return app
+
+
+def _insert_user(db_path, *, user_id, username, role):
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "INSERT OR IGNORE INTO users (id, username, role, status, created_at) VALUES (?, ?, ?, 'active', '2026-01-01T00:03:00')",
+            (user_id, username, role),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def test_ai_agent_status_includes_role_scope_and_settings(monkeypatch, tmp_path):
@@ -169,3 +183,118 @@ def test_ai_agent_readonly_manager_and_super_admin_incremental_permissions(tmp_p
     assert super_payload["permissions"]["manage_servers"] is True
     assert "member_management" in super_payload
     assert "attack_diagnosis" in super_payload
+
+
+def test_ai_agent_readonly_admin_role_keeps_member_scope_only(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    _insert_user(db_path, user_id=4, username="adminA", role="admin")
+    admin_app = _build_app(db_path, {"id": 4, "username": "adminA", "role": "admin"})
+
+    admin_payload = admin_app.test_client().get("/api/ai-agent/readonly?scope=all&limit=5").get_json()
+
+    assert admin_payload["ok"] is True
+    assert admin_payload["actor"]["role"] == "admin"
+    assert admin_payload["permissions"]["manage_members"] is True
+    assert admin_payload["permissions"]["manage_servers"] is False
+    assert "member_management" in admin_payload
+    assert "attack_diagnosis" not in admin_payload
+
+
+class _FakeHermesResponse:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def read(self, _size=-1):
+        return json.dumps(self._payload).encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+def _make_hermes_urlopen_spy(recorded, *, model="hermes-agent"):
+    def fake_urlopen(req, timeout=5):
+        url = getattr(req, "full_url", "")
+        method = getattr(req, "method", None) or getattr(req, "get_method", lambda: "")()
+        body = None
+        if getattr(req, "data", None):
+            try:
+                body = json.loads(req.data.decode("utf-8"))
+            except Exception:
+                body = req.data.decode("utf-8", "replace")
+        recorded.append((method.upper(), url, body))
+
+        if url.endswith("/v1/health"):
+            raise urllib_error.URLError("fallback")
+        if url.endswith("/health"):
+            return _FakeHermesResponse({"ok": True, "service": "hermes", "model": model})
+        if url.endswith("/capabilities"):
+            return _FakeHermesResponse({"tools": ["check_download_state", "suggest_navigation_step", "suggest_prompt"]})
+        if url.endswith("/models"):
+            return _FakeHermesResponse({"data": [model, "stable-diffusion-xl-base-1.0"]})
+        if url.endswith("/chat/completions"):
+            return _FakeHermesResponse({
+                "model": model,
+                "choices": [
+                    {"message": {"role": "assistant", "content": "已查到占用與任務進度，建議先確認下載器與模型服務是否重啟。"}},
+                ],
+            })
+        raise urllib_error.URLError(f"unhandled endpoint: {url}")
+
+    return fake_urlopen
+
+
+def test_ai_agent_routes_smoke_with_fake_hermes_endpoints(tmp_path, monkeypatch):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(db_path, {"id": 2, "username": "userA", "role": "user"}, settings={
+        "module_ai_agent_min_role": "user",
+        "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
+        "ai_agent_api_key": "smoke-key",
+    })
+
+    recorded = []
+    monkeypatch.setattr(urllib_request, "urlopen", _make_hermes_urlopen_spy(recorded))
+
+    status = app.test_client().get("/api/ai-agent/status")
+    models = app.test_client().get("/api/ai-agent/models")
+    chat = app.test_client().post("/api/ai-agent/chat", json={
+        "session_id": "smoke-1",
+        "messages": [{"role": "user", "content": "幫我看一下下載有沒有在下載"}],
+    })
+    readonly = app.test_client().get("/api/ai-agent/readonly?scope=all&limit=5")
+
+    assert status.status_code == 200
+    status_json = status.get_json()
+    assert status_json["ok"] is True
+    assert status_json["health"]["ok"] is True
+    assert status_json["health"]["url"].endswith("/health")
+    assert status_json["capabilities"]["tools"]
+
+    assert models.status_code == 200
+    models_json = models.get_json()
+    assert models_json["ok"] is True
+    assert "hermes-agent" in (models_json["models"].get("data", []))
+
+    assert chat.status_code == 200
+    chat_json = chat.get_json()
+    assert chat_json["ok"] is True
+    assert "已查到占用與任務進度" in chat_json["message"]["content"]
+
+    assert readonly.status_code == 200
+    readonly_json = readonly.get_json()
+    assert readonly_json["ok"] is True
+    assert readonly_json["resources"]["cpu"]["cores"] >= 1
+    assert readonly_json["comfyui_jobs"]
+    assert readonly_json["remote_download_jobs"]
+
+    assert any(path.endswith("/v1/health") for _, path, _ in recorded)
+    assert any(path.endswith("/health") for _, path, _ in recorded)
+    assert any(path.endswith("/capabilities") for _, path, _ in recorded)
+    assert any(path.endswith("/models") for _, path, _ in recorded)
+    assert any(path.endswith("/chat/completions") for _, path, _ in recorded)
+    chat_calls = [item for item in recorded if item[1].endswith("/chat/completions")]
+    assert chat_calls and chat_calls[0][2]["messages"][0]["role"] == "system"

@@ -145,7 +145,11 @@ def register_ai_agent_routes(app, deps):
         actor_name = str(_actor_value(actor, "username") or "").strip()
         if actor_name == "root":
             return "super_admin"
-        return actor_role if actor_role in {"user", "manager", "super_admin"} else "user"
+        if actor_role in {"manager", "admin", "super_admin", "user"}:
+            return actor_role
+        if actor_role in {"root", "super"}:
+            return "super_admin"
+        return "user"
 
     def _actor_scope_payload(actor):
         actor_role = _coerce_role(actor)
