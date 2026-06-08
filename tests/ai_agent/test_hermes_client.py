@@ -4,6 +4,7 @@ from urllib import error as urllib_error
 
 from services.ai_agent.hermes import (
     AiAgentError,
+    normalize_ai_agent_role,
     _normalize_chat_messages,
     normalize_ai_agent_api_base_url,
     normalize_ai_agent_model,
@@ -61,6 +62,13 @@ def test_ai_agent_persona_validation():
     assert normalize_ai_agent_persona("strict_helper") == "strict_helper"
     assert normalize_ai_agent_persona("creative_coordinator") == "creative_coordinator"
     assert normalize_ai_agent_persona("bad-persona") is None
+
+
+def test_ai_agent_admin_role_maps_to_manager_scope_only():
+    assert normalize_ai_agent_role("admin") == "manager"
+    assert normalize_ai_agent_role("manager") == "manager"
+    assert normalize_ai_agent_role("root") == "super_admin"
+    assert normalize_ai_agent_role("super_admin") == "super_admin"
 
 
 def test_ai_agent_chat_injects_persona_and_task_scope(monkeypatch):

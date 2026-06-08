@@ -208,9 +208,11 @@ def _normalize_ai_agent_behavior(settings):
 
 def normalize_ai_agent_role(value):
     raw = str(value or "").strip().lower()
+    if raw in {"admin"}:
+        return "manager"
     if raw in AI_AGENT_ROLE_SCOPES:
         return raw
-    if raw in {"root", "admin", "super", "super_admin"}:
+    if raw in {"root", "super", "super_admin"}:
         return "super_admin"
     return "user"
 

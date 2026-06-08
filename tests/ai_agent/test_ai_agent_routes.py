@@ -201,6 +201,31 @@ def test_ai_agent_readonly_admin_role_keeps_member_scope_only(tmp_path):
     assert "attack_diagnosis" not in admin_payload
 
 
+def test_ai_agent_status_admin_keeps_member_scope_only(tmp_path, monkeypatch):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    _insert_user(db_path, user_id=4, username="adminA", role="admin")
+    app = _build_app(db_path, {"id": 4, "username": "adminA", "role": "admin"}, settings={
+        "module_ai_agent_min_role": "user",
+        "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
+        "ai_agent_api_key": "secret",
+    })
+
+    monkeypatch.setattr("routes.ai_agent.ai_agent_health", lambda settings: {"ok": True, "url": "http://127.0.0.1:8642/health", "payload": {}})
+    monkeypatch.setattr("routes.ai_agent.ai_agent_capabilities", lambda settings: {"ok": True, "chat": True})
+
+    res = app.test_client().get("/api/ai-agent/status")
+    payload = res.get_json()
+
+    assert res.status_code == 200
+    assert payload["ok"] is True
+    assert payload["actor"]["role"] == "admin"
+    assert payload["actor"]["scope"]["can_manage_members"] is True
+    assert payload["actor"]["scope"]["can_manage_servers"] is False
+    assert payload["settings"]["role"] == "manager"
+    assert payload["settings"]["scope"]["label"] == "管理者助手"
+
+
 class _FakeHermesResponse:
     def __init__(self, payload):
         self._payload = payload
@@ -298,3 +323,40 @@ def test_ai_agent_routes_smoke_with_fake_hermes_endpoints(tmp_path, monkeypatch)
     assert any(path.endswith("/chat/completions") for _, path, _ in recorded)
     chat_calls = [item for item in recorded if item[1].endswith("/chat/completions")]
     assert chat_calls and chat_calls[0][2]["messages"][0]["role"] == "system"
+
+
+def test_ai_agent_chat_session_key_is_user_isolated(tmp_path, monkeypatch):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    user_app = _build_app(db_path, {"id": 2, "username": "userA", "role": "user"}, settings={
+        "module_ai_agent_min_role": "user",
+        "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
+    })
+    other_app = _build_app(db_path, {"id": 3, "username": "managerA", "role": "manager"}, settings={
+        "module_ai_agent_min_role": "user",
+        "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
+    })
+
+    calls = []
+
+    def fake_chat(settings, *, messages=None, prompt="", image_data_url="", model="", session_key="", actor=None):
+        calls.append({
+            "session_key": session_key,
+            "actor": actor.get("username") if isinstance(actor, dict) else None,
+        })
+        return {"content": "ok", "model": "hermes-agent", "usage": {}}
+
+    monkeypatch.setattr("routes.ai_agent.ai_agent_chat", fake_chat)
+
+    user_client = user_app.test_client()
+    other_client = other_app.test_client()
+    payload = {"session_id": "shared-session", "messages": [{"role": "user", "content": "查一下任務"}]}
+    response_a = user_client.post("/api/ai-agent/chat", json=payload)
+    response_b = other_client.post("/api/ai-agent/chat", json=payload)
+
+    assert response_a.status_code == 200
+    assert response_b.status_code == 200
+    assert len(calls) == 2
+    assert calls[0]["actor"] != calls[1]["actor"]
+    assert calls[0]["session_key"] == "hackme:2:shared-session"
+    assert calls[1]["session_key"] == "hackme:3:shared-session"
