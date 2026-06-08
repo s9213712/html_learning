@@ -4,6 +4,7 @@ const AI_AGENT_STATE = {
   loaded: false,
   loading: false,
   sending: false,
+  readonlyLoading: false,
   messages: [],
   imageDataUrl: "",
   settings: {},
@@ -47,6 +48,7 @@ function renderAiAgentThread() {
 function renderAiAgentStatus(json) {
   const settings = json?.settings || {};
   AI_AGENT_STATE.settings = settings;
+  const actor = json?.actor || {};
   const health = json?.health || {};
   const status = $("ai-agent-status");
   if (status) {
@@ -57,8 +59,72 @@ function renderAiAgentStatus(json) {
   if ($("ai-agent-base-url")) $("ai-agent-base-url").textContent = settings.api_base_url || "-";
   if ($("ai-agent-key-state")) $("ai-agent-key-state").textContent = settings.api_key_configured ? "已設定" : "未設定";
   if ($("ai-agent-image-allowed")) $("ai-agent-image-allowed").textContent = settings.allow_image_input === false ? "關閉" : "開啟";
+  const personaLabelMap = {
+    concise_helper: "簡潔客服導向",
+    strict_helper: "嚴謹流程助手",
+    creative_coordinator: "創意流程統籌",
+  };
+  if ($("ai-agent-persona-state")) $("ai-agent-persona-state").textContent = personaLabelMap[settings.persona] || settings.persona || "未設定";
+  const tasks = settings.tasks || {};
+  const taskLines = [];
+  if (tasks.site_guide) taskLines.push("網站導覽");
+  if (tasks.troubleshoot) taskLines.push("生圖/下載排錯");
+  if (tasks.prompt) taskLines.push("提示詞與參數");
+  if ($("ai-agent-tasks-state")) $("ai-agent-tasks-state").textContent = taskLines.length ? taskLines.join("、") : "未啟用";
   if ($("ai-agent-model-state")) $("ai-agent-model-state").textContent = `模型：${settings.model || "-"}`;
   if ($("ai-agent-model") && !$("ai-agent-model").value) $("ai-agent-model").value = settings.model || "hermes-agent";
+}
+
+function renderAiAgentReadOnly(payload = {}) {
+  const actor = payload?.actor || {};
+  const permissions = payload.permissions || {};
+  const scope = (actor.role || "user").toString();
+  const canManageMembers = !!permissions.manage_members;
+  const canManageServers = !!permissions.manage_servers;
+
+  if ($("ai-agent-readonly-role")) $("ai-agent-readonly-role").textContent = scope;
+  if ($("ai-agent-readonly-resource")) $("ai-agent-readonly-resource").textContent = "可";
+  if ($("ai-agent-readonly-member-mgmt")) $("ai-agent-readonly-member-mgmt").textContent = canManageMembers ? "可" : "否";
+  if ($("ai-agent-readonly-attack-diagnostic")) $("ai-agent-readonly-attack-diagnostic").textContent = canManageServers ? "可" : "否";
+
+  const capabilities = ["僅讀取模式"];
+  if (canManageMembers) capabilities.push("會員管理報表（唯讀）");
+  if (canManageServers) capabilities.push("伺服器資源與攻擊診斷（唯讀）");
+  if ($("ai-agent-readonly-capabilities")) {
+    $("ai-agent-readonly-capabilities").innerHTML = capabilities.map((line) => `<div>${sanitize(line)}</div>`).join("");
+  }
+
+  const resources = payload.resources || {};
+  const cpu = resources?.cpu || {};
+  const ram = resources?.ram || {};
+  const disk = resources?.disk || {};
+  const jobs = [];
+  if (Array.isArray(payload.comfyui_jobs) && payload.comfyui_jobs.length) {
+    jobs.push(`ComfyUI 任務：${payload.comfyui_jobs.length} 筆`);
+  }
+  if (Array.isArray(payload.remote_download_jobs) && payload.remote_download_jobs.length) {
+    jobs.push(`下載任務：${payload.remote_download_jobs.length} 筆`);
+  }
+
+  const summary = [
+    `取樣時間：${resources?.sampled_at || "-"}`,
+    `CPU：${cpu?.percent !== null && cpu?.percent !== undefined ? `${cpu.percent.toFixed(1)}%` : "-"}`,
+    `RAM：${ram?.percent !== null && ram?.percent !== undefined ? `${ram.percent.toFixed(1)}%` : "-"}`,
+    `硬碟：${disk?.percent !== null && disk?.percent !== undefined ? `${disk.percent.toFixed(1)}%` : "-"}`,
+    `任務摘要：${jobs.length ? jobs.join("；") : "無進行中唯讀快照"}`,
+  ];
+
+  if (payload.member_management) {
+    const member = payload.member_management;
+    summary.push(`近期使用者：${member.recent_users?.length || 0} / 全站 ${member.total_users || 0}`);
+  }
+  if (payload.attack_diagnosis) {
+    summary.push(`安全事件：${payload.attack_diagnosis.security_events?.length || 0} / 失敗任務：${payload.attack_diagnosis.recent_failed_jobs?.length || 0}`);
+  }
+
+  if ($("ai-agent-readonly-overview")) {
+    $("ai-agent-readonly-overview").innerHTML = summary.map((line) => `<div>${sanitize(line)}</div>`).join("");
+  }
 }
 
 function renderAiAgentModels(modelsPayload) {
@@ -85,18 +151,19 @@ async function loadAiAgentStatus(options = {}) {
   if (AI_AGENT_STATE.loading) return;
   if (AI_AGENT_STATE.loaded && !options.force) return;
   AI_AGENT_STATE.loading = true;
-  try {
-    const res = await apiFetch(API + "/ai-agent/status", { credentials: "same-origin" });
-    const json = await res.json().catch(() => ({}));
-    if (!json.ok) {
-      setAiAgentMessage(json.msg || "AI Agent 狀態讀取失敗", "err");
-      return;
-    }
-    renderAiAgentStatus(json);
-    AI_AGENT_STATE.loaded = true;
-    setAiAgentMessage("", "info");
     try {
-      const modelsRes = await apiFetch(API + "/ai-agent/models", { credentials: "same-origin" });
+      const res = await apiFetch(API + "/ai-agent/status", { credentials: "same-origin" });
+      const json = await res.json().catch(() => ({}));
+      if (!json.ok) {
+        setAiAgentMessage(json.msg || "AI Agent 狀態讀取失敗", "err");
+        return;
+      }
+      renderAiAgentStatus(json);
+      await loadAiAgentReadOnly({ scope: "all", limit: 20, silent: true }).catch(() => undefined);
+      AI_AGENT_STATE.loaded = true;
+      setAiAgentMessage("", "info");
+      try {
+        const modelsRes = await apiFetch(API + "/ai-agent/models", { credentials: "same-origin" });
       const modelsJson = await modelsRes.json().catch(() => ({}));
       renderAiAgentModels(modelsJson.models || {});
     } catch (err) {
@@ -106,6 +173,30 @@ async function loadAiAgentStatus(options = {}) {
     setAiAgentMessage(`AI Agent 狀態讀取失敗：${err}`, "err");
   } finally {
     AI_AGENT_STATE.loading = false;
+  }
+}
+
+async function loadAiAgentReadOnly(options = {}) {
+  if (AI_AGENT_STATE.readonlyLoading && !options.force) return;
+  AI_AGENT_STATE.readonlyLoading = true;
+  const scope = options.scope || "all";
+  const limit = Math.max(1, Math.min(100, parseInt(options.limit || 20, 10) || 20));
+  try {
+    const res = await apiFetch(`${API}/ai-agent/readonly?scope=${encodeURIComponent(scope)}&limit=${limit}`, {
+      credentials: "same-origin",
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!json.ok) {
+      if (!options.silent) setAiAgentMessage(json.msg || "AI Agent 只讀摘要讀取失敗", "err");
+      return;
+    }
+    renderAiAgentReadOnly(json);
+    if (options.silent) {
+      return;
+    }
+    setAiAgentMessage("", "info");
+  } finally {
+    AI_AGENT_STATE.readonlyLoading = false;
   }
 }
 
@@ -219,4 +310,3 @@ document.addEventListener("hackme:module-changed", (event) => {
 });
 
 renderAiAgentThread();
-

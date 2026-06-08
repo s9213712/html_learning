@@ -238,6 +238,7 @@
         <button class="tab" id="tab-module-videos" style="display:none;">影音</button>
         <button class="tab" id="tab-module-games" style="display:none;">遊戲區</button>
         <button class="tab" id="tab-module-comfyui" style="display:none;">AI 產圖</button>
+        <button class="tab" id="tab-module-ai-agent" style="display:none;">AI 助理</button>
         <button class="tab" id="tab-module-economy" style="display:none;">積分系統</button>
         <button class="tab" id="tab-module-trading" style="display:none;">積分交易所</button>
         <button class="tab" id="tab-module-jobs" style="display:none;">任務中心</button>
@@ -2210,6 +2211,82 @@
         </div>
       </section>
 
+    </div>
+  </div>
+
+  <div class="module-section" id="module-ai-agent">
+    <div class="admin-tools ai-agent-module" style="margin-top:.95rem;text-align:left;">
+      <div class="drive-card-heading">
+        <div>
+          <div class="mini-title">AI 助理</div>
+          <div class="drive-card-sub" id="ai-agent-status">尚未連線</div>
+        </div>
+        <button class="btn" id="ai-agent-refresh-btn" type="button">重新整理</button>
+      </div>
+      <div class="ai-agent-layout">
+        <section class="drive-card ai-agent-chat-panel">
+          <div class="drive-card-heading">
+            <div>
+              <div class="drive-card-title">對話</div>
+              <div class="drive-card-sub" id="ai-agent-model-state">模型：尚未讀取</div>
+            </div>
+            <button class="btn btn-sm" id="ai-agent-clear-btn" type="button">清空</button>
+          </div>
+          <div class="ai-agent-thread" id="ai-agent-thread" aria-live="polite"></div>
+          <div class="ai-agent-composer">
+            <div class="grid2">
+              <div class="field">
+                <label>模式</label>
+                <select id="ai-agent-mode">
+                  <option value="text">文字對話</option>
+                  <option value="image">圖片理解</option>
+                </select>
+              </div>
+              <div class="field">
+                <label>模型</label>
+                <input type="text" id="ai-agent-model" placeholder="hermes-agent" autocomplete="off" />
+              </div>
+            </div>
+            <div class="field">
+              <label>訊息</label>
+              <textarea id="ai-agent-input" rows="5" maxlength="20000" placeholder="輸入要交給 AI Agent 的內容"></textarea>
+            </div>
+            <div class="ai-agent-attachment-row">
+              <label class="btn btn-sm" for="ai-agent-image-file">選擇圖片</label>
+              <input type="file" id="ai-agent-image-file" accept="image/*" style="display:none;" />
+              <span class="drive-card-sub" id="ai-agent-image-state">未附加圖片</span>
+            </div>
+            <div id="ai-agent-msg" class="msg"></div>
+            <div class="edit-user-actions">
+              <button class="btn btn-primary" id="ai-agent-send-btn" type="button">送出</button>
+            </div>
+          </div>
+        </section>
+        <aside class="drive-card ai-agent-side-panel">
+          <div class="drive-card-title">Backend</div>
+          <div class="ai-agent-kv">
+            <span>Provider</span><strong id="ai-agent-provider">-</strong>
+            <span>Base URL</span><strong id="ai-agent-base-url">-</strong>
+            <span>API Key</span><strong id="ai-agent-key-state">-</strong>
+            <span>圖片輸入</span><strong id="ai-agent-image-allowed">-</strong>
+            <span>人格</span><strong id="ai-agent-persona-state">預設</strong>
+            <span>任務</span><strong id="ai-agent-tasks-state">未啟用</strong>
+          </div>
+          <div class="drive-card-title" style="margin-top:1rem;">Models</div>
+          <div class="drive-file-list ai-agent-model-list" id="ai-agent-model-list"></div>
+
+          <div class="drive-card-title" style="margin-top:1rem;">只讀權限與摘要</div>
+          <div class="ai-agent-kv ai-agent-readonly-kv">
+            <span>角色</span><strong id="ai-agent-readonly-role">未讀取</strong>
+            <span>資源查看</span><strong id="ai-agent-readonly-resource">未讀取</strong>
+            <span>管理會員</span><strong id="ai-agent-readonly-member-mgmt">未授權</strong>
+            <span>系統診斷</span><strong id="ai-agent-readonly-attack-diagnostic">未授權</strong>
+          </div>
+          <div class="ai-agent-readonly-panel" id="ai-agent-readonly-capabilities" aria-live="polite">尚未載入只讀能力。</div>
+          <div class="drive-card-title" style="margin-top:1rem;">資源與任務快照</div>
+          <div class="ai-agent-readonly-section" id="ai-agent-readonly-overview">尚未載入快照。</div>
+        </aside>
+      </div>
     </div>
   </div>
 
@@ -5861,6 +5938,67 @@
             <div style="font-size:.78rem;color:var(--muted);margin:.25rem 0 .75rem;">儲存後立即生效，不需重啟。若使用本地模式，第一次產圖時會在後台嘗試執行啟動腳本。</div>
               </div>
             </details>
+            <details class="drive-collapsible-panel settings-collapse" id="sec-settings-ai-agent">
+              <summary>
+                <div>
+                  <div class="drive-card-title">AI Agent / LLM</div>
+                  <div class="drive-card-sub">Hermes / OpenAI-compatible API 設定。</div>
+                </div>
+              </summary>
+              <div class="drive-collapsible-body">
+            <div class="grid2">
+              <div class="field">
+                <label>Provider</label>
+                <select id="s-ai-agent-provider">
+                  <option value="hermes">Hermes Agent</option>
+                  <option value="openai_compatible">OpenAI-compatible</option>
+                </select>
+              </div>
+              <div class="field">
+                <label>API Base URL</label>
+                <input type="url" id="s-ai-agent-api-base-url" placeholder="http://127.0.0.1:8642/v1" />
+              </div>
+              <div class="field">
+                <label>API Key</label>
+                <input type="password" id="s-ai-agent-api-key" placeholder="留空代表不變更" autocomplete="off" />
+                <div class="drive-card-sub" id="ai-agent-api-key-state">尚未讀取 key 狀態。</div>
+                <label style="margin-top:.35rem;"><input type="checkbox" id="s-ai-agent-api-key-clear" /> 清除已儲存的 AI Agent API Key</label>
+              </div>
+              <div class="field">
+                <label>Model</label>
+                <input type="text" id="s-ai-agent-model" placeholder="hermes-agent" autocomplete="off" />
+              </div>
+              <div class="field">
+                <label>請求逾時秒數</label>
+                <input type="number" id="s-ai-agent-request-timeout-seconds" min="5" max="600" step="1" value="120" />
+              </div>
+              <div class="field">
+                <label>單次文字字元上限</label>
+                <input type="number" id="s-ai-agent-max-prompt-chars" min="1000" max="200000" step="1000" value="20000" />
+              </div>
+              <div class="field">
+                <label><input type="checkbox" id="s-ai-agent-allow-image-input" /> 允許圖片理解</label>
+              </div>
+              <div class="field">
+                <label><input type="checkbox" id="s-ai-agent-allow-tool-runs" /> 允許工具型任務</label>
+              </div>
+              <div class="field">
+                <label>AI Agent 個性</label>
+                <select id="s-ai-agent-persona">
+                  <option value="concise_helper">簡潔客服導向</option>
+                  <option value="strict_helper">嚴謹流程助手</option>
+                  <option value="creative_coordinator">創意流程統籌</option>
+                </select>
+              </div>
+              <div class="field">
+                <label>啟用任務</label>
+                <label style="display:block;margin:.3rem 0 0;"><input type="checkbox" id="s-ai-agent-task-site-guide" /> 網站導覽</label>
+                <label style="display:block;margin:.3rem 0 0;"><input type="checkbox" id="s-ai-agent-task-troubleshoot" /> 生圖 / 下載排錯</label>
+                <label style="display:block;margin:.3rem 0 0;"><input type="checkbox" id="s-ai-agent-task-prompt" /> 生圖提示詞與參數</label>
+              </div>
+            </div>
+              </div>
+            </details>
             <details class="drive-collapsible-panel settings-collapse" id="sec-settings-danger-ops">
               <summary>
                 <div>
@@ -5952,6 +6090,14 @@
             <div class="field">
               <label>AI 產圖最低可用角色</label>
               <select id="s-module-comfyui-min-role">
+                <option value="user">一般用戶</option>
+                <option value="manager">管理者</option>
+                <option value="super_admin">最高管理者</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>AI 助理最低可用角色</label>
+              <select id="s-module-ai-agent-min-role">
                 <option value="user">一般用戶</option>
                 <option value="manager">管理者</option>
                 <option value="super_admin">最高管理者</option>
@@ -7495,6 +7641,7 @@
 <!-- cache marker retained for template-import regression: /js/36-comfyui.js?v=20260509-comfyui-template-embeddings -->
 <script src="/js/36-comfyui.js?v=20260607-image-favorites-history-favorite-dashboard" defer></script>
 <script src="/js/36-comfyui-workflows.js?v=20260607-template-filter-reset" defer></script>
+<script src="/js/37-ai-agent.js?v=20260606-ai-agent-mvp" defer></script>
 <script src="/js/37-bug-report.js?v=20260502-device-feature" defer></script>
 <script src="/js/41-game-modules.js?v=20260601-rubiks-visible" defer></script>
 <script src="/js/games/game-view-registry.js?v=20260513-legacy-modules" defer></script>

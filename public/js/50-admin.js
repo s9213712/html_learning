@@ -2646,6 +2646,10 @@ async function loadSettings() {
   if ($("s-ai-agent-max-prompt-chars")) $("s-ai-agent-max-prompt-chars").value = s.ai_agent_max_prompt_chars || 20000;
   if ($("s-ai-agent-allow-image-input")) $("s-ai-agent-allow-image-input").checked = s.ai_agent_allow_image_input !== false;
   if ($("s-ai-agent-allow-tool-runs")) $("s-ai-agent-allow-tool-runs").checked = !!s.ai_agent_allow_tool_runs;
+  if ($("s-ai-agent-persona")) $("s-ai-agent-persona").value = s.ai_agent_persona || "concise_helper";
+  if ($("s-ai-agent-task-site-guide")) $("s-ai-agent-task-site-guide").checked = s.ai_agent_task_site_guide !== false;
+  if ($("s-ai-agent-task-troubleshoot")) $("s-ai-agent-task-troubleshoot").checked = s.ai_agent_task_troubleshoot !== false;
+  if ($("s-ai-agent-task-prompt")) $("s-ai-agent-task-prompt").checked = s.ai_agent_task_prompt !== false;
   updateComfyuiConnectionModeFields();
   if ($("s-comfyui-max-batch-size")) $("s-comfyui-max-batch-size").value = s.comfyui_max_batch_size || 1;
   if ($("s-comfyui-default-width")) $("s-comfyui-default-width").value = s.comfyui_default_width || 1024;
@@ -2711,7 +2715,7 @@ async function loadSettings() {
   if ($("s-module-appeals-min-role")) $("s-module-appeals-min-role").value = s.module_appeals_min_role || "user";
   if ($("s-module-accounts-min-role")) $("s-module-accounts-min-role").value = s.module_accounts_min_role || "manager";
   if ($("s-module-comfyui-min-role")) $("s-module-comfyui-min-role").value = s.module_comfyui_min_role || "user";
-  if ($("s-module-ai-agent-min-role")) $("s-module-ai-agent-min-role").value = s.module_ai_agent_min_role || "manager";
+  if ($("s-module-ai-agent-min-role")) $("s-module-ai-agent-min-role").value = s.module_ai_agent_min_role || "user";
   if ($("s-module-games-min-role")) $("s-module-games-min-role").value = s.module_games_min_role || "user";
   if ($("s-module-videos-min-role")) $("s-module-videos-min-role").value = s.module_videos_min_role || "user";
   if ($("s-video-tip-fee-percent")) $("s-video-tip-fee-percent").value = s.video_tip_fee_percent ?? 5;
@@ -4958,6 +4962,10 @@ async function saveSettings() {
     ai_agent_max_prompt_chars: parseInt($("s-ai-agent-max-prompt-chars")?.value || "20000", 10) || 20000,
     ai_agent_allow_image_input: $("s-ai-agent-allow-image-input") ? !!$("s-ai-agent-allow-image-input").checked : true,
     ai_agent_allow_tool_runs: !!$("s-ai-agent-allow-tool-runs")?.checked,
+    ai_agent_persona: $("s-ai-agent-persona")?.value || "concise_helper",
+    ai_agent_task_site_guide: !!$("s-ai-agent-task-site-guide")?.checked,
+    ai_agent_task_troubleshoot: !!$("s-ai-agent-task-troubleshoot")?.checked,
+    ai_agent_task_prompt: !!$("s-ai-agent-task-prompt")?.checked,
     comfyui_max_batch_size: parseInt($("s-comfyui-max-batch-size")?.value || "1"),
     comfyui_default_width: parseInt($("s-comfyui-default-width")?.value || "1024"),
     comfyui_default_height: parseInt($("s-comfyui-default-height")?.value || "1024"),
@@ -4982,7 +4990,7 @@ async function saveSettings() {
     module_appeals_min_role: $("s-module-appeals-min-role")?.value || "user",
     module_accounts_min_role: $("s-module-accounts-min-role")?.value || "manager",
     module_comfyui_min_role: $("s-module-comfyui-min-role")?.value || "user",
-    module_ai_agent_min_role: $("s-module-ai-agent-min-role")?.value || "manager",
+    module_ai_agent_min_role: $("s-module-ai-agent-min-role")?.value || "user",
     module_games_min_role: $("s-module-games-min-role")?.value || "user",
     module_videos_min_role: $("s-module-videos-min-role")?.value || "user",
     video_tip_fee_percent: Number($("s-video-tip-fee-percent")?.value || 5),

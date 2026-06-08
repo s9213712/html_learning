@@ -2077,6 +2077,123 @@
       margin-bottom: .7rem;
     }
 
+    .ai-agent-layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(260px, 340px);
+      gap: 1rem;
+      align-items: start;
+    }
+
+    .ai-agent-chat-panel {
+      min-width: 0;
+    }
+
+    .ai-agent-thread {
+      min-height: 320px;
+      max-height: 52vh;
+      overflow: auto;
+      display: flex;
+      flex-direction: column;
+      gap: .65rem;
+      padding: .25rem;
+      margin: .7rem 0;
+    }
+
+    .ai-agent-message {
+      max-width: min(760px, 92%);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: .65rem .75rem;
+      background: rgba(255,255,255,.045);
+      overflow-wrap: anywhere;
+      white-space: pre-wrap;
+    }
+
+    .ai-agent-message.user {
+      align-self: flex-end;
+      border-color: rgba(122,123,220,.42);
+      background: rgba(122,123,220,.14);
+    }
+
+    .ai-agent-message.assistant {
+      align-self: flex-start;
+      border-color: rgba(67,182,160,.36);
+      background: rgba(67,182,160,.11);
+    }
+
+    .ai-agent-message-role {
+      font-size: .74rem;
+      color: var(--muted);
+      margin-bottom: .25rem;
+    }
+
+    .ai-agent-message-body {
+      line-height: 1.5;
+    }
+
+    .ai-agent-composer textarea {
+      resize: vertical;
+      min-height: 130px;
+    }
+
+    .ai-agent-attachment-row {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: .55rem;
+      margin: .45rem 0 .6rem;
+    }
+
+    .ai-agent-kv {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      gap: .45rem .7rem;
+      align-items: baseline;
+      margin-top: .65rem;
+      font-size: .84rem;
+    }
+
+    .ai-agent-kv span {
+      color: var(--muted);
+    }
+
+    .ai-agent-kv strong {
+      min-width: 0;
+      overflow-wrap: anywhere;
+      font-weight: 650;
+    }
+
+    .ai-agent-model-list {
+      margin-top: .65rem;
+    }
+
+    .ai-agent-readonly-kv {
+      grid-template-columns: auto minmax(0, 1fr);
+      margin-top: .5rem;
+    }
+
+    .ai-agent-readonly-panel,
+    .ai-agent-readonly-section {
+      margin-top: .65rem;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: .65rem .7rem;
+      min-height: 50px;
+      background: rgba(255,255,255,.03);
+      font-size: .84rem;
+      line-height: 1.55;
+      max-height: 260px;
+      overflow: auto;
+      white-space: pre-wrap;
+    }
+
+    .ai-agent-model-option {
+      width: 100%;
+      text-align: left;
+      color: var(--text);
+      cursor: pointer;
+    }
+
     .economy-subtabs {
       margin: .7rem 0 .75rem;
     }
@@ -15947,5 +16064,18 @@
   button.btn-sm {
     min-height: 44px !important;
     padding-block: .5rem !important;
+  }
+
+  .ai-agent-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .ai-agent-thread {
+    min-height: 260px;
+    max-height: 48vh;
+  }
+
+  .ai-agent-message {
+    max-width: 100%;
   }
 }
