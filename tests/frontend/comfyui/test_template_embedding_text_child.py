@@ -23,6 +23,9 @@ def test_selected_template_renders_embedding_shortcuts_under_text_panel():
     assert "data-comfyui-template-embedding-targets" in workflow_js
     assert "insertComfyuiTemplateEmbeddingToken" in workflow_js
     assert "removeComfyuiEmbeddingTokenFromInput" in workflow_js
+    assert "comfyuiTemplateLastFocusedTextFieldId" in workflow_js
+    assert "function comfyuiTemplateEmbeddingInsertionTarget" in workflow_js
+    assert "comfyuiTemplateLooksNegativeTextTarget" not in workflow_js
     assert "點一下插入，再點一次會從提示詞移除。" in workflow_js
     assert "renderSelectedComfyuiTemplate({ preserveOpenPanels: true });" in workflow_js
     assert "data-comfyui-template-panel-id" in workflow_js

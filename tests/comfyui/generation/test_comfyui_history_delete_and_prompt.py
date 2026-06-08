@@ -296,3 +296,98 @@ def test_sdxl_skip_refiner_custom_checkpoint_drives_workflow_result_and_history(
     )
     assert history_item["payload"]["model"] == JANKU_TEST_CHECKPOINT
     assert history_item["params"]["model"] == JANKU_TEST_CHECKPOINT
+
+    rerun = client.post(f"/api/comfyui/workflow-runs/{run_id}/rerun", json={})
+    assert rerun.status_code == 200, rerun.get_json()
+    rerun_id = int(rerun.get_json()["workflow_run_id"])
+    rerun_result = _await_comfyui_result(client, rerun)
+    assert FakeComfyUIClient.last_workflow["4"]["inputs"]["ckpt_name"] == JANKU_TEST_CHECKPOINT
+    assert "12" not in FakeComfyUIClient.last_workflow
+    assert FakeComfyUIClient.last_workflow["17"]["inputs"]["samples"] == ["10", 0]
+    assert rerun_result["images"][0]["model"] == JANKU_TEST_CHECKPOINT
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        rerun_row = conn.execute(
+            "SELECT params_json, workflow_json FROM comfyui_workflow_runs WHERE id=?",
+            (rerun_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert rerun_row is not None
+    rerun_params = json.loads(rerun_row["params_json"])
+    rerun_snapshot = json.loads(rerun_row["workflow_json"])
+    assert rerun_params["seed_after_generate"] == "fixed"
+    assert rerun_params["seed"] == 987654321
+    assert rerun_params["model"] == JANKU_TEST_CHECKPOINT
+    assert rerun_params["prompt"] == "janku custom checkpoint prompt"
+    assert rerun_snapshot["4"]["inputs"]["ckpt_name"] == JANKU_TEST_CHECKPOINT
+    assert "sd_xl_refiner_1.0.safetensors" not in json.dumps(rerun_snapshot)
+
+
+def test_workflow_run_applies_selected_vae_to_snapshot_and_comfyui(tmp_path):
+    db_path = tmp_path / "comfyui.db"
+    storage_root = tmp_path / "storage"
+    storage_root.mkdir()
+    _init_db(db_path)
+    client = _build_app(db_path, storage_root, comfyui_client=FakeComfyUIClient()).test_client()
+    workflow = FakeComfyUIClient().build_generation_workflow({
+        "generation_mode": "txt2img",
+        "model": "dream.safetensors",
+        "prompt": "vae override prompt",
+        "negative_prompt": "",
+        "width": 512,
+        "height": 512,
+        "steps": 12,
+        "cfg": 6.5,
+        "seed": 123,
+        "batch_size": 1,
+        "sampler_name": "euler",
+        "scheduler": "normal",
+        "filename_prefix": "vae_override",
+    })
+    preset = _import_workflow_preset(
+        client,
+        workflow,
+        title="VAE Override Workflow",
+        visibility="public",
+    )
+    FakeComfyUIClient.last_workflow = {}
+
+    started = client.post(
+        f"/api/comfyui/workflows/{preset['id']}/run",
+        json={"vae": "anime_vae.pt", "seed_after_generate": "fixed"},
+    )
+    assert started.status_code == 200, started.get_json()
+    run_id = int(started.get_json()["workflow_run_id"])
+    _await_comfyui_result(client, started)
+
+    vae_loader_ids = [
+        node_id
+        for node_id, node in FakeComfyUIClient.last_workflow.items()
+        if node.get("class_type") == "VAELoader"
+    ]
+    assert vae_loader_ids
+    vae_loader_id = vae_loader_ids[0]
+    assert FakeComfyUIClient.last_workflow[vae_loader_id]["inputs"]["vae_name"] == "anime_vae.pt"
+    assert any(
+        node.get("inputs", {}).get("vae") == [vae_loader_id, 0]
+        for node in FakeComfyUIClient.last_workflow.values()
+        if node.get("class_type") == "VAEDecode"
+    )
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            "SELECT params_json, workflow_json FROM comfyui_workflow_runs WHERE id=?",
+            (run_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None
+    params = json.loads(row["params_json"])
+    workflow_snapshot = json.loads(row["workflow_json"])
+    assert params["vae"] == "anime_vae.pt"
+    assert workflow_snapshot[vae_loader_id]["inputs"]["vae_name"] == "anime_vae.pt"

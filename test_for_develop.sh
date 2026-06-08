@@ -14,6 +14,7 @@ CUSTOM_RUNTIME_ROOT="${HACKME_DEV_RUNTIME_ROOT:-}"
 CUSTOM_RUNTIME_ROOT_PROMPTED=0
 HOST="${HOST:-0.0.0.0}"
 PORT="${PORT:-5000}"
+RESTART_PORT=""
 TRUSTED_HOSTS="${HTML_LEARNING_TRUSTED_HOSTS:-}"
 PUBLIC_HOST="${HACKME_DEV_PUBLIC_HOST:-}"
 DISABLE_TRUSTED_HOSTS="${HACKME_DEV_DISABLE_TRUSTED_HOSTS:-${HTML_LEARNING_DISABLE_TRUSTED_HOSTS:-1}}"
@@ -185,7 +186,7 @@ write_restart_shortcut_script() {
   local restart_args=(
     --cli
     --host "$HOST"
-    --port "$PORT"
+    --port "${RESTART_PORT:-$PORT}"
     --feature-mode "$FEATURE_MODE"
     --server-mode "$SERVER_MODE"
     --port-conflict "$PORT_CONFLICT_ACTION"
@@ -1425,7 +1426,7 @@ print_resolved_config() {
   if [[ "$SECURITY_SETTINGS_ENABLED" == "1" ]]; then
     say "  password_policy:     enforced"
   else
-    say "  password_policy:     dev-disabled (default-password change gate off)"
+    say "  password_policy:     dev-disabled (sitewide + default-password policy)"
   fi
   say "  idle_logout_minutes: ${SESSION_IDLE_TIMEOUT_MINUTES:-<profile default>}"
   say "  server_mode:         $SERVER_MODE"
@@ -4232,7 +4233,7 @@ kill_port_processes() {
     use_next_available_port "$requested"
     return 0
   fi
-  for _ in $(seq 1 20); do
+  for _ in $(seq 1 80); do
     if port_is_available "$requested"; then
       PORT="$requested"
       say "[dev-tmp] port:      $requested is now available"
@@ -4240,7 +4241,18 @@ kill_port_processes() {
     fi
     sleep 0.25
   done
-  say "[dev-tmp] port:      port $requested is still occupied after terminating pid(s): $pids; falling back to another port"
+
+  say "[dev-tmp] port:      port $requested is still occupied after graceful stop; forcing pid(s): $pids"
+  kill -KILL $pids 2>/dev/null || true
+  for _ in $(seq 1 40); do
+    if port_is_available "$requested"; then
+      PORT="$requested"
+      say "[dev-tmp] port:      $requested is now available"
+      return 0
+    fi
+    sleep 0.25
+  done
+  say "[dev-tmp] port:      port $requested is still occupied after forcing pid(s): $pids; falling back to another port"
   use_next_available_port "$requested"
 }
 
@@ -4485,6 +4497,9 @@ resolve_occupied_port_interactively() {
 resolve_server_port() {
   normalize_port "$PORT"
   local requested="$NORMALIZED_PORT"
+  if [[ -z "$RESTART_PORT" ]]; then
+    RESTART_PORT="$requested"
+  fi
   PORT="$requested"
 
   if port_is_available "$requested"; then
@@ -5265,6 +5280,7 @@ else:
         for key in feature_keys
     }
 feature_updates["feature_account_security_enabled"] = bool(security_enabled)
+feature_updates["password_strength_policy_enabled"] = bool(security_enabled)
 relaxed_security_settings = {
     "allow_register": True,
     "audit_chain_enabled": False,

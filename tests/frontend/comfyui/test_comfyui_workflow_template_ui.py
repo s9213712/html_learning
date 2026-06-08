@@ -56,6 +56,30 @@ def test_workflow_template_cards_show_default_model_notice():
     assert ".comfyui-workflow-default-model-notice" in css
 
 
+def test_workflow_recent_runs_can_restore_the_actual_run_payload():
+    js = _read("public/js/36-comfyui-workflows.js")
+
+    assert "function renderComfyuiWorkflowRunList(runs = [])" in js
+    assert 'data-comfyui-workflow-run-apply="${sanitize(String(runId))}"' in js
+    assert "套回本次" in js
+    assert "async function applyComfyuiWorkflowRunToForm(runId)" in js
+    assert "await loadComfyuiHistory();" in js
+    assert "await applyComfyuiHistoryToForm(`workflow-${numericRunId}`);" in js
+    assert "workflow 執行紀錄套回失敗" in js
+    assert "套用模板預設" in js
+    assert "套回表單</button>" not in js
+
+
+def test_gguf_template_render_does_not_clobber_history_overrides():
+    js = _read("public/js/36-comfyui-workflows.js")
+
+    assert "function applyComfyuiGgufWorkflowProfileDefaults" in js
+    assert 'applyComfyuiGgufWorkflowProfileDefaults(detail, { overwrite: false });' in js
+    assert 'if (overwrite || !Object.prototype.hasOwnProperty.call(comfyuiTemplateFieldOverrides, key))' in js
+    assert "state.profileId = profile?.id || \"\";" in js
+    assert 'applyComfyuiGgufWorkflowProfileDefaults(detail, { overwrite: true });' in js
+
+
 def test_workflow_layout_builder_secondary_actions_are_collapsed():
     html = _read("public/index.html")
     css = _read("public/styles.css")
@@ -384,6 +408,20 @@ def test_template_renderer_relabels_ambiguous_existing_manifest_fields():
     assert 'return comfyuiTemplateLabelWithNoise(field, "LoRA 模型（Model-only）");' in workflow_js
     assert 'return "放大 / Upscale 模型";' in workflow_js
     assert "const fieldLabel = comfyuiTemplateFieldLabel(field, binding);" in workflow_js
+
+
+def test_template_model_candidate_filter_can_be_cleared():
+    workflow_js = _read("public/js/36-comfyui-workflows.js")
+
+    assert "let comfyuiTemplateModelShowAllFields = {};" in workflow_js
+    assert "function comfyuiTemplateModelSelectFilterState" in workflow_js
+    assert "function comfyuiTemplateModelSelectFilterActions" in workflow_js
+    assert "重設篩選：顯示全部候選" in workflow_js
+    assert "不要依模板前綴篩選，顯示全部候選模型" in workflow_js
+    assert "按下方「重設篩選：顯示全部候選」可不要依前綴篩選" in workflow_js
+    assert "恢復前綴篩選" in workflow_js
+    assert 'data-comfyui-template-model-filter="' in workflow_js
+    assert 'data-comfyui-template-model-filter-mode="' in workflow_js
 
 
 def test_comfyui_tools_are_split_into_subviews():

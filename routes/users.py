@@ -1223,6 +1223,7 @@ def register_user_routes(app, deps):
             try:
                 ensure_member_level_user_columns(conn)
                 ensure_avatar_user_columns(conn)
+                conn.commit()
                 where_parts = []
                 params = []
                 if not include_deleted:

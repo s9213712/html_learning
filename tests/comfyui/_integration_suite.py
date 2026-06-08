@@ -6318,8 +6318,8 @@ def test_comfyui_frontend_is_wired():
     assert "if (modelsTab) modelsTab.hidden = false;" in comfyui_js
     assert 'if (accessNote) accessNote.style.display = showLocalModels ? "none" : "";' in comfyui_js
     assert '目前是雲端 / 遠端模式；Civitai 匯入區仍可使用' in comfyui_js
-    assert "/js/36-comfyui.js?v=20260606-civitai-history-restore" in index_html
-    assert "/styles.css?v=20260606-site-avatar-controls" in index_html
+    assert "/js/36-comfyui.js?v=20260607-image-favorites-history-favorite-dashboard" in index_html
+    assert "/styles.css?v=20260607-image-favorites-history-favorite" in index_html
     assert "width: min(420px, 100%);" in css
     assert "max-height: 320px;" in css
     assert ".comfyui-root-details" in css
@@ -6483,7 +6483,8 @@ def test_comfyui_frontend_is_wired():
     assert "function renderComfyuiHistory()" in comfyui_js
     assert 'apiFetch(API + "/comfyui/history"' in comfyui_js
     assert 'apiFetch(API + "/comfyui/image-preview"' in comfyui_js
-    assert "function isNegativeComfyuiEmbedding(name)" in comfyui_js
+    assert "function currentComfyuiPromptTypeForInsertion()" in comfyui_js
+    assert "function bindComfyuiPromptCursorTracking()" in comfyui_js
     assert "function applyComfyuiPromptTerms(terms = [])" in comfyui_js
     assert "function renderComfyuiCivitaiTrainedWords(versionId)" in comfyui_js
     assert "function renderComfyuiCivitaiSearchResults(results)" in comfyui_js
@@ -6511,9 +6512,10 @@ def test_comfyui_frontend_is_wired():
     assert 'clearSelectedComfyuiLoras();' in comfyui_js
     assert 'removeComfyuiSelectedLoraByIndex(index);' in comfyui_js
     assert 'removeComfyuiPromptTerms(removableTerms, { promptType: "prompt" });' in comfyui_js
-    assert 'normalized.includes("negative") || normalized.includes("neg")' in comfyui_js
-    assert '已把 ${cleanName} 插入${promptType === "negative" ? "負面" : "正向"}提示詞。' in comfyui_js
-    assert '已從${promptType === "negative" ? "負面" : "正向"}提示詞移除 ${cleanName}。' in comfyui_js
+    assert 'normalized.includes("negative") || normalized.includes("neg")' not in comfyui_js
+    assert "comfyuiPromptTypeLabel(promptType)" in comfyui_js
+    assert '已把 ${cleanName} 插入${comfyuiPromptTypeLabel(promptType)}提示詞。' in comfyui_js
+    assert '已從${comfyuiPromptTypeLabel(promptType)}提示詞移除 ${cleanName}。' in comfyui_js
     assert '<embeddings:' in comfyui_js
     assert "trigger words" in comfyui_js
     assert 'comfyuiEffectiveConnectionMode() !== "local"' in comfyui_js

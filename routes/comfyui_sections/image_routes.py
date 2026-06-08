@@ -325,7 +325,9 @@ def register_comfyui_image_routes(app, ctx):
                 resource_names.append(str(resource.get("version_name") or "").lower())
         resource_names = " ".join(name for name in resource_names if name)
         family_text = f"{model} {model_name} {base_model} {resource_names}"
-        if "zit" in family_text or "z_image_turbo" in model:
+        family_compact = re.sub(r"[^a-z0-9]+", "", family_text.lower())
+        if ("zit" in family_text or "z_image_turbo" in model or
+                "zimagebase" in family_compact or "zimage" in family_compact):
             return {
                 "workflow_system_bundle_id": "origin_zit_txt2img",
                 "workflow_preset_title": "ZIT Text-to-Image",
@@ -480,7 +482,7 @@ def register_comfyui_image_routes(app, ctx):
         return f"https://{site}/api/v1"
 
     def _parse_size_text(value):
-        match = re.search(r"(\d{2,5})\s*[xX*]\s*(\d{2,5})", str(value or ""))
+        match = re.search(r"(\d{2,5})\s*[xX×*]\s*(\d{2,5})", str(value or ""))
         if not match:
             return None, None
         return int(match.group(1)), int(match.group(2))
@@ -683,9 +685,10 @@ def register_comfyui_image_routes(app, ctx):
                 "model_version_resources": version_resources,
             },
         }
-        if embedding_files:
+        workflow_hint = _civitai_workflow_hint(params)
+        if embedding_files and workflow_hint.get("workflow_system_bundle_id") not in {"origin_anima_txt2img", "origin_zit_txt2img"}:
             params["embeddings"] = embedding_files
-        params.update(_civitai_workflow_hint(params))
+        params.update(workflow_hint)
         fields = _favorite_fields_from_mapping(
             {"title": f"Civitai #{params['civitai']['image_id']}", "params": params},
             source_type="civitai",

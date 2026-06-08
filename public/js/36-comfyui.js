@@ -92,25 +92,26 @@ const COMFYUI_VAE_BUILTIN = "__checkpoint_builtin__";
 const COMFYUI_VIEW_STORAGE_KEY = "hackme_web.comfyui.active_view";
 const COMFYUI_IMAGE_ASSET_KEYS = ["source", "mask", "control"];
 const COMFYUI_HF_MODEL_FILE_EXT_RE = /\.(?:safetensors|ckpt|pt|pth|bin|gguf)$/i;
-const COMFYUI_DIFFUSERS_BUILTIN_COMMON_REPOS = [
-  { repo: "dhead/wai-nsfw-illustrious-sdxl-v140-sdxl", label: "dhead WAI Illustrious SDXL v140" },
-  { repo: "dhead/waiIllustriousSDXL_v150", label: "dhead WAI Illustrious SDXL v150" },
-  { repo: "Heartsync/NSFW-Uncensored", label: "Heartsync NSFW Uncensored" },
-  { repo: "John6666/janku-v5-nsfw-trained-noobai-rou-wei-illustrious-xl-v50-sdxl", label: "John6666 JanKu V50（SDXL / I2I）" },
-  { repo: "stabilityai/sd-turbo", label: "SD Turbo（txt2img / I2I）" },
-  { repo: "stabilityai/sdxl-turbo", label: "SDXL Turbo（txt2img / I2I）" },
-  { repo: "stable-diffusion-v1-5/stable-diffusion-v1-5", label: "Stable Diffusion 1.5（txt2img / I2I）" },
-  { repo: "RunDiffusion/Juggernaut-XL-v9", label: "Juggernaut XL v9（SDXL / I2I）" },
-  { repo: "SG161222/RealVisXL_V4.0", label: "RealVisXL V4.0（SDXL / I2I）" },
-  { repo: "cagliostrolab/animagine-xl-4.0", label: "Animagine XL 4.0（Anime SDXL / I2I）" },
-  { repo: "cagliostrolab/animagine-xl-3.1", label: "Animagine XL 3.1（Anime SDXL / I2I）" },
-  { repo: "stablediffusionapi/animapencil-xl-v3", label: "AnimaPencil XL v3（Anime SDXL / I2I）" },
-  { repo: "Lykon/AAM_XL_AnimeMix", label: "AAM XL AnimeMix（Anime SDXL / I2I）" },
-  { repo: "black-forest-labs/FLUX.1-schnell", label: "FLUX.1 schnell（txt2img / I2I，需 HF 授權）" },
-  { repo: "Qwen/Qwen-Image", label: "Qwen Image（txt2img / I2I）" },
-  { repo: "Qwen/Qwen-Image-Edit", label: "Qwen Image Edit（I2I）" },
-  { repo: "Tongyi-MAI/Z-Image-Turbo", label: "Z-Image Turbo（txt2img / I2I）" },
-];
+  const COMFYUI_DIFFUSERS_BUILTIN_COMMON_REPOS = [
+    { repo: "dhead/wai-nsfw-illustrious-sdxl-v140-sdxl", label: "dhead WAI Illustrious SDXL v140" },
+    { repo: "dhead/waiIllustriousSDXL_v150", label: "dhead WAI Illustrious SDXL v150" },
+    { repo: "Heartsync/NSFW-Uncensored", label: "Heartsync NSFW Uncensored" },
+    { repo: "John6666/janku-v5-nsfw-trained-noobai-rou-wei-illustrious-xl-v50-sdxl", label: "John6666 JanKu V50（SDXL）" },
+    { repo: "stabilityai/sd-turbo", label: "SD Turbo（txt2img）" },
+  { repo: "stabilityai/sdxl-turbo", label: "SDXL Turbo（txt2img）" },
+  { repo: "stable-diffusion-v1-5/stable-diffusion-v1-5", label: "Stable Diffusion 1.5（txt2img）" },
+  { repo: "RunDiffusion/Juggernaut-XL-v9", label: "Juggernaut XL v9（SDXL）" },
+  { repo: "SG161222/RealVisXL_V4.0", label: "RealVisXL V4.0（SDXL）" },
+  { repo: "cagliostrolab/animagine-xl-4.0", label: "Animagine XL 4.0（Anime SDXL）" },
+  { repo: "cagliostrolab/animagine-xl-3.1", label: "Animagine XL 3.1（Anime SDXL）" },
+  { repo: "stablediffusionapi/animapencil-xl-v3", label: "AnimaPencil XL v3（Anime SDXL）" },
+  { repo: "Lykon/AAM_XL_AnimeMix", label: "AAM XL AnimeMix（Anime SDXL）" },
+  { repo: "black-forest-labs/FLUX.1-schnell", label: "FLUX.1 schnell（txt2img，需 HF 授權）" },
+    { repo: "Qwen/Qwen-Image", label: "Qwen Image（txt2img）" },
+    { repo: "Qwen/Qwen-Image-Edit", label: "Qwen Image Edit（I2I）" },
+    { repo: "Tongyi-MAI/Z-Image-Turbo", label: "Z-Image Turbo（txt2img）" },
+    { repo: "stabilityai/stable-diffusion-xl-refiner-1.0", label: "SDXL Refiner（I2I）" },
+  ];
 const COMFYUI_DIFFUSERS_MAX_CUSTOM_COMMON_REPOS = 20;
 const COMFYUI_CONTROLNET_TIPS = {
   canny: "適合保留邊緣與輪廓，常用於重畫原圖構圖。",
@@ -3393,11 +3394,16 @@ function renderComfyuiEmbeddingShortcuts(values = []) {
   const box = $("comfyui-embedding-shortcuts");
   if (!box) return;
   const field = $("comfyui-embedding-shortcuts-field") || box.closest(".field");
+  const supportsEmbeddingShortcut = typeof comfyuiTemplateSupportsEmbeddingShortcuts === "function"
+    ? comfyuiTemplateSupportsEmbeddingShortcuts()
+    : true;
   if (field) field.style.display = comfyuiAvailableEmbeddings.length ? "" : "none";
-  if (!comfyuiAvailableEmbeddings.length) {
+  if (!supportsEmbeddingShortcut || !comfyuiAvailableEmbeddings.length) {
     box.innerHTML = "";
+    if (field) field.style.display = "none";
     return;
   }
+  if (field) field.style.display = "";
   box.innerHTML = comfyuiAvailableEmbeddings.map((value) => (
     `<button class="comfyui-embedding-chip" type="button" data-comfyui-embedding="${sanitize(value)}" title="插入 / 移除 ${sanitize(value)}">${sanitize(value)}</button>`
   )).join("");
@@ -4285,9 +4291,18 @@ async function applyComfyuiHistoryToForm(historyId) {
   }
   const displayId = comfyuiHistoryItemId(item) || historyId;
   const payload = comfyuiHistoryPayload(item);
+  const workflowPresetId = item.history_source === "workflow" ? Number(item.preset_id || payload.workflow_preset_id || 0) : 0;
+  const historyWorkflowJson = item?.params?.workflow_json && typeof item.params.workflow_json === "object" && !Array.isArray(item.params.workflow_json)
+    ? item.params.workflow_json
+    : item?.workflow_json && typeof item.workflow_json === "object" && !Array.isArray(item.workflow_json)
+      ? item.workflow_json
+      : (comfyuiSelectedTemplateDetail?.workflow_json && typeof comfyuiSelectedTemplateDetail.workflow_json === "object" && !Array.isArray(comfyuiSelectedTemplateDetail.workflow_json)
+        ? comfyuiSelectedTemplateDetail.workflow_json
+        : {});
+  const hasHistoryWorkflowJson = !!(historyWorkflowJson && Object.keys(historyWorkflowJson).length);
+  const shouldApplyHistoryWorkflowSnapshot = workflowPresetId > 0 && hasHistoryWorkflowJson;
   const controlnet = payload.controlnet || {};
   const loras = Array.isArray(payload.loras) ? payload.loras : [];
-  const workflowPresetId = item.history_source === "workflow" ? Number(item.preset_id || payload.workflow_preset_id || 0) : 0;
   const historySeedMode = comfyuiHistorySeedModeForApply(payload, workflowPresetId);
   if (workflowPresetId > 0) {
     try {
@@ -4351,6 +4366,15 @@ async function applyComfyuiHistoryToForm(historyId) {
     .filter(([id]) => !(workflowPresetId > 0 && id === "comfyui-model-select"))
     .forEach(([id, value, preserveMissingOption]) => setComfyuiFieldValue(id, value, { preserveMissingOption: !!preserveMissingOption }));
   setComfyuiSamplingFieldsFromValues(payload.sampler_name || "euler", payload.scheduler || "normal");
+  if (shouldApplyHistoryWorkflowSnapshot && typeof applyComfyuiTemplateHistorySnapshotToForm === "function") {
+    applyComfyuiTemplateHistorySnapshotToForm(item.workflow_json || {}, payload);
+    if (!item.workflow_json && hasHistoryWorkflowJson) {
+      applyComfyuiTemplateHistorySnapshotToForm(historyWorkflowJson, payload);
+    }
+    if (!payload.diffusers_model_repo && workflowPresetId) {
+      setComfyuiFieldValue("comfyui-model-select", payload.model || "", { preserveMissingOption: true });
+    }
+  }
   const targetView = payload.diffusers_model_repo ? "hf" : "generate";
   setComfyuiView(targetView);
   const controlEnabled = !!(controlnet?.enabled || controlnet?.type);
@@ -4360,8 +4384,11 @@ async function applyComfyuiHistoryToForm(historyId) {
   fillComfyuiControlnetPreprocessorOptions();
   setComfyuiFieldValue("comfyui-controlnet-model", controlnet.model_name || "", { preserveMissingOption: true });
   setComfyuiFieldValue("comfyui-controlnet-preprocessor", controlnet.preprocessor || "", { preserveMissingOption: true });
-  if (workflowPresetId > 0 && typeof applyComfyuiTemplateHistorySnapshotToForm === "function") {
+  if (shouldApplyHistoryWorkflowSnapshot && typeof applyComfyuiTemplateHistorySnapshotToForm === "function") {
     applyComfyuiTemplateHistorySnapshotToForm(item.workflow_json || {}, payload);
+    if (!item.workflow_json && hasHistoryWorkflowJson) {
+      applyComfyuiTemplateHistorySnapshotToForm(historyWorkflowJson, payload);
+    }
   }
   await applyComfyuiHistoryAssets(comfyuiHistoryInputAssets(item, payload));
   updateComfyuiModeVisibility();
@@ -5094,7 +5121,7 @@ function comfyuiPayload() {
     seed: $("comfyui-seed")?.value ? comfyuiNumberValue("comfyui-seed", 0) : undefined,
     sampler_name: sampling.sampler_name,
     scheduler: sampling.scheduler,
-    vae: diffusersMode ? "" : (vae === COMFYUI_VAE_BUILTIN ? "" : vae),
+    vae: vae === COMFYUI_VAE_BUILTIN ? "" : vae,
     loras: diffusersMode ? [] : comfyuiSelectedLoras.slice(0, COMFYUI_MAX_LORAS),
     denoise_strength: comfyuiNumberValue("comfyui-denoise-strength", 0.65),
     filename_prefix: "hackme_web",
@@ -5245,6 +5272,9 @@ function comfyuiShareGenerationPayload() {
     payload.workflow_preset_id = selectedTemplateId;
     payload.workflow_preset_title = comfyuiSelectedTemplateDetail?.title || "";
     payload.workflow_system_bundle_id = comfyuiSelectedTemplateDetail?.system_bundle_id || "";
+    if (comfyuiSelectedTemplateDetail?.workflow_json && typeof comfyuiSelectedTemplateDetail.workflow_json === "object") {
+      payload.workflow_json = comfyuiSelectedTemplateDetail.workflow_json;
+    }
     if (typeof comfyuiTemplateSdxlSkipRefiner !== "undefined") {
       payload.skip_refiner = !!comfyuiTemplateSdxlSkipRefiner;
     }
@@ -5778,6 +5808,7 @@ function closeComfyuiFavoriteModal() {
 }
 
 function comfyuiFavoriteParamSummary(params = {}) {
+  const normalized = comfyuiNormalizeFavoriteParamsForRestore(params);
   const values = [];
   const model = params.model || params.diffusers_model_repo || "";
   if (model) values.push(`模型：${model}`);
@@ -5786,9 +5817,9 @@ function comfyuiFavoriteParamSummary(params = {}) {
     values.push(`Workflow：${params.workflow_preset_title || params.workflow_system_bundle_id}`);
   }
   if (params.vae) values.push(`VAE：${params.vae}`);
-  if (params.width || params.height) values.push(`尺寸：${params.width || "?"}x${params.height || "?"}`);
+  if (normalized.width || normalized.height) values.push(`尺寸：${normalized.width || "?"}x${normalized.height || "?"}`);
   if (params.steps) values.push(`Steps：${params.steps}`);
-  if (params.cfg) values.push(`CFG：${params.cfg}`);
+  if (normalized.cfg !== null) values.push(`CFG：${normalized.cfg}`);
   if (params.seed !== undefined && params.seed !== null && String(params.seed)) values.push(`Seed：${params.seed}`);
   if (params.sampler_name) values.push(`Sampler：${params.sampler_name}`);
   if (params.scheduler) values.push(`Scheduler：${params.scheduler}`);
@@ -5796,6 +5827,41 @@ function comfyuiFavoriteParamSummary(params = {}) {
     values.push("跳過 Refiner");
   }
   return values.slice(0, 8);
+}
+
+function comfyuiNormalizeFavoriteValueForRestore(value) {
+  if (value === undefined || value === null || value === "") return null;
+  const num = Number(String(value).trim().replace(/,/g, ""));
+  return Number.isFinite(num) ? num : null;
+}
+
+function comfyuiParseFavoriteSizeText(value = "") {
+  const match = String(value || "").match(/(\d{2,5})\s*[xX×*]\s*(\d{2,5})/);
+  if (!match) return [null, null];
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  return [Number.isFinite(width) ? width : null, Number.isFinite(height) ? height : null];
+}
+
+function comfyuiNormalizeFavoriteParamsForRestore(params = {}) {
+  const candidates = (keys = []) => {
+    for (const key of keys) {
+      if (Object.prototype.hasOwnProperty.call(params, key) && params[key] !== undefined && params[key] !== null && `${params[key]}`.trim() !== "") return params[key];
+    }
+    return "";
+  };
+  const fromWidth = candidates(["width", "image_width", "size_width", "img_width", "resolution_width", "output_width"]);
+  const fromHeight = candidates(["height", "image_height", "size_height", "img_height", "resolution_height", "output_height"]);
+  const sizeText = candidates(["size", "image_size", "Size", "image_size_text", "resolution"]);
+  const parsedFromSize = comfyuiParseFavoriteSizeText(sizeText);
+  const width = comfyuiNormalizeFavoriteValueForRestore(fromWidth)
+    ?? (parsedFromSize[0] != null ? parsedFromSize[0] : null);
+  const height = comfyuiNormalizeFavoriteValueForRestore(fromHeight)
+    ?? (parsedFromSize[1] != null ? parsedFromSize[1] : null);
+  const cfg = comfyuiNormalizeFavoriteValueForRestore(
+    candidates(["cfg", "cfg_scale", "cfgScale", "cfgscale", "cfg-scale", "CFG", "CFGScale", "CFG scale"])
+  );
+  return { width, height, cfg };
 }
 
 function comfyuiFavoritePromptText(params = {}, key = "prompt", limit = 900) {
@@ -6159,7 +6225,8 @@ function comfyuiFavoriteWorkflowBundleHint(params = {}) {
     ? params.civitai.model_version_resources.map((resource) => String(resource?.model_name || resource?.version_name || "").toLowerCase()).join(" ")
     : "";
   const family = `${model} ${sourceModelName} ${baseModel} ${resourceNames}`;
-  if (family.includes("zit") || model.includes("z_image_turbo")) {
+  const familyCompact = family.replace(/[^a-z0-9]/g, "");
+  if (family.includes("zit") || familyCompact.includes("zimagebase") || familyCompact.includes("zimage") || model.includes("z_image_turbo")) {
     return "origin_zit_txt2img";
   }
   if (family.includes("anima")) {
@@ -6213,9 +6280,19 @@ async function applyComfyuiFavoriteToForm(favoriteId) {
     return;
   }
   const params = item.params && typeof item.params === "object" ? item.params : {};
+  const normalized = comfyuiNormalizeFavoriteParamsForRestore(params);
   const diffusersRepo = params.diffusers_model_repo || "";
   const workflow = diffusersRepo ? { id: 0, title: "", bundleId: "" } : await resolveComfyuiFavoriteWorkflow(params);
   const workflowPresetId = Number(workflow.id || 0);
+  const favoriteWorkflowJson = item?.params?.workflow_json && typeof item.params.workflow_json === "object" && !Array.isArray(item.params.workflow_json)
+    ? item.params.workflow_json
+    : item?.workflow_json && typeof item.workflow_json === "object" && !Array.isArray(item.workflow_json)
+      ? item.workflow_json
+      : (comfyuiSelectedTemplateDetail?.workflow_json && typeof comfyuiSelectedTemplateDetail.workflow_json === "object" && !Array.isArray(comfyuiSelectedTemplateDetail.workflow_json)
+        ? comfyuiSelectedTemplateDetail.workflow_json
+        : {});
+  const hasFavoriteWorkflowJson = !!(favoriteWorkflowJson && Object.keys(favoriteWorkflowJson).length);
+  const shouldApplyWorkflowSnapshot = workflowPresetId > 0 && hasFavoriteWorkflowJson;
   setComfyuiView(diffusersRepo ? "hf" : "generate");
   if (workflowPresetId > 0) {
     if (typeof ensureComfyuiHistoryWorkflowSelectOption === "function") {
@@ -6235,19 +6312,27 @@ async function applyComfyuiFavoriteToForm(favoriteId) {
     ["comfyui-model-select", params.model || "", true],
     ["comfyui-prompt", params.prompt || ""],
     ["comfyui-negative-prompt", params.negative_prompt || ""],
-    ["comfyui-width", params.width || ""],
-    ["comfyui-height", params.height || ""],
+    ["comfyui-width", normalized.width ?? ""],
+    ["comfyui-height", normalized.height ?? ""],
     ["comfyui-steps", params.steps || ""],
-    ["comfyui-cfg", params.cfg || ""],
+    ["comfyui-cfg", normalized.cfg ?? ""],
     ["comfyui-run-count", params.run_count || 1],
     ["comfyui-seed", params.seed || ""],
   ]
     .filter(([id]) => !(workflowPresetId > 0 && id === "comfyui-model-select"))
     .forEach(([id, value, preserveMissingOption]) => setComfyuiFieldValue(id, value, { preserveMissingOption: !!preserveMissingOption }));
   setComfyuiSamplingFieldsFromValues(params.sampler_name || "euler", params.scheduler || "normal");
+  if (shouldApplyWorkflowSnapshot && typeof applyComfyuiTemplateHistorySnapshotToForm === "function") {
+    applyComfyuiTemplateHistorySnapshotToForm(favoriteWorkflowJson, params);
+    if (!diffusersRepo && workflowPresetId) {
+      setComfyuiFieldValue("comfyui-model-select", params.model || "", { preserveMissingOption: true });
+    }
+  }
   if (diffusersRepo) {
     setComfyuiFieldValue("comfyui-diffusers-model-repo", diffusersRepo);
     setComfyuiFieldValue("comfyui-diffusers-model-variant", params.diffusers_model_variant || "", { preserveMissingOption: true });
+  } else if (workflowPresetId) {
+    setComfyuiFieldValue("comfyui-model-select", params.model || "", { preserveMissingOption: true });
   } else if (!workflowPresetId) {
     setComfyuiFieldValue("comfyui-model-select", params.model || "", { preserveMissingOption: true });
   }
@@ -6266,9 +6351,6 @@ async function applyComfyuiFavoriteToForm(favoriteId) {
       strength_clip: Number.isFinite(Number(item?.strength_clip)) ? Number(item.strength_clip) : 1,
     })).filter((item) => item.name);
     renderComfyuiSelectedLoras();
-  }
-  if (workflowPresetId > 0 && typeof applyComfyuiTemplateHistorySnapshotToForm === "function") {
-    applyComfyuiTemplateHistorySnapshotToForm({}, params);
   }
   updateComfyuiModeVisibility();
   updateComfyuiDiffusersUi();

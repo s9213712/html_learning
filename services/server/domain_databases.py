@@ -220,6 +220,7 @@ DOMAIN_TABLES = {
     },
     "comfyui": {
         "comfyui_generation_history",
+        "comfyui_image_favorites",
         "comfyui_image_refs",
         "comfyui_template_preview_tokens",
         "comfyui_workflow_layout_versions",

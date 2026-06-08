@@ -158,6 +158,210 @@ def register_comfyui_runtime_routes(app, ctx):
         next_params["seed"] = seed
         return patched_workflow, next_params
 
+    def _runtime_workflow_snapshot_params(params, workflow_json):
+        merged = dict(params or {})
+        if not isinstance(workflow_json, dict):
+            return merged
+        prompts = []
+        negatives = []
+        checkpoint_names = []
+        unet_names = []
+        vae_names = []
+        unet_loader_types = {"UNETLoader", "UNetLoader", "UnetLoader", "UnetLoaderGGUF", "UnetLoaderGGUFAdvanced"}
+        for node in workflow_json.values():
+            if not isinstance(node, dict):
+                continue
+            inputs = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
+            class_type = str(node.get("class_type") or "")
+            if class_type == "CheckpointLoaderSimple" and inputs.get("ckpt_name"):
+                checkpoint_names.append(str(inputs.get("ckpt_name") or ""))
+            if class_type in unet_loader_types and inputs.get("unet_name"):
+                unet_names.append(str(inputs.get("unet_name") or ""))
+            if class_type == "VAELoader" and inputs.get("vae_name"):
+                vae_names.append(str(inputs.get("vae_name") or ""))
+            if class_type in {"KSampler", "KSamplerAdvanced"}:
+                if inputs.get("noise_seed") is not None:
+                    merged["seed"] = inputs.get("noise_seed")
+                elif inputs.get("seed") is not None:
+                    merged["seed"] = inputs.get("seed")
+                for src, dst in (
+                    ("steps", "steps"),
+                    ("cfg", "cfg"),
+                    ("sampler_name", "sampler_name"),
+                    ("scheduler", "scheduler"),
+                    ("denoise", "denoise_strength"),
+                ):
+                    if inputs.get(src) is not None:
+                        merged[dst] = inputs.get(src)
+            if class_type == "EmptyLatentImage":
+                for key in ("width", "height", "batch_size"):
+                    if inputs.get(key) is not None:
+                        merged[key] = inputs.get(key)
+                if inputs.get("batch_size") is not None and not merged.get("ui_batch_size"):
+                    merged["ui_batch_size"] = inputs.get("batch_size")
+            if class_type in {"CLIPTextEncode", "CLIPTextEncodeFlux"}:
+                text = str(inputs.get("text") or "").strip()
+                if not text:
+                    continue
+                meta_title = ""
+                if isinstance(node.get("_meta"), dict):
+                    meta_title = str(node.get("_meta", {}).get("title") or "")
+                haystack = f"{meta_title} {text}".lower()
+                if any(marker in haystack for marker in ("negative", "負", "low quality", "worst quality", "watermark")):
+                    negatives.append(text)
+                else:
+                    prompts.append(text)
+        checkpoint_names = [name for name in checkpoint_names if name]
+        unet_names = [name for name in unet_names if name]
+        candidates = list(checkpoint_names) + list(unet_names)
+        current_model = str(merged.get("model") or merged.get("checkpoint") or merged.get("diffusion_model") or "").strip()
+        if candidates:
+            current_normalized = current_model.replace("\\", "/").strip().lower()
+            current_base = current_normalized.rsplit("/", 1)[-1]
+            selected_model = ""
+            for candidate in candidates:
+                candidate_normalized = str(candidate).replace("\\", "/").strip().lower()
+                candidate_base = candidate_normalized.rsplit("/", 1)[-1]
+                if candidate_normalized == current_normalized or candidate_base == current_base:
+                    selected_model = candidate
+                    break
+            if not selected_model:
+                selected_model = candidates[0]
+            merged["model"] = selected_model
+            if selected_model in checkpoint_names:
+                merged["checkpoint"] = selected_model
+        vae_names = [name for name in vae_names if name]
+        if vae_names:
+            merged["vae"] = vae_names[0]
+        if prompts:
+            merged["prompt"] = prompts[0]
+        if negatives:
+            merged["negative_prompt"] = negatives[0]
+        return merged
+
+    def _runtime_workflow_rerun_seed_mode(params, request_body):
+        body = request_body if isinstance(request_body, dict) else {}
+        requested = str(body.get("seed_after_generate") or body.get("seed_after_generate_mode") or "").strip().lower()
+        if requested in {"random", "fixed", "increment", "decrement"}:
+            return requested
+        saved = str((params or {}).get("seed_after_generate") or "").strip().lower()
+        if saved in {"fixed", "increment", "decrement"}:
+            return saved
+        if (params or {}).get("seed") not in (None, ""):
+            return "fixed"
+        return "random"
+
+    def _resource_percent(value):
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        return max(0.0, min(100.0, parsed))
+
+    def _proc_meminfo_snapshot():
+        meminfo = {}
+        try:
+            with open("/proc/meminfo", "r", encoding="utf-8") as handle:
+                for line in handle:
+                    if ":" not in line:
+                        continue
+                    key, rest = line.split(":", 1)
+                    parts = rest.strip().split()
+                    if not parts:
+                        continue
+                    meminfo[key] = int(float(parts[0])) * 1024
+        except Exception:
+            return {"available": False}
+        total = int(meminfo.get("MemTotal") or 0)
+        available = int(meminfo.get("MemAvailable") or 0)
+        used = max(0, total - available) if total else 0
+        percent = round((used / total) * 100, 1) if total else None
+        return {
+            "available": bool(total),
+            "used_bytes": used,
+            "total_bytes": total,
+            "percent": percent,
+        }
+
+    def _nvidia_smi_resource_snapshot():
+        import shutil
+        import subprocess
+
+        if not shutil.which("nvidia-smi"):
+            return {"available": False, "gpus": [], "error": "nvidia-smi not found"}
+        try:
+            proc = subprocess.run(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu",
+                    "--format=csv,noheader,nounits",
+                ],
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=2.5,
+            )
+        except Exception as exc:
+            return {"available": False, "gpus": [], "error": str(exc)}
+        if proc.returncode != 0:
+            return {"available": False, "gpus": [], "error": (proc.stderr or proc.stdout or "").strip()[:240]}
+        gpus = []
+        for line in (proc.stdout or "").splitlines():
+            parts = [part.strip() for part in line.split(",")]
+            if len(parts) < 6:
+                continue
+            try:
+                used_mb = float(parts[3])
+                total_mb = float(parts[4])
+            except (TypeError, ValueError):
+                used_mb = 0.0
+                total_mb = 0.0
+            gpus.append({
+                "index": parts[0],
+                "name": parts[1],
+                "percent": _resource_percent(parts[2]),
+                "vram_used_bytes": int(max(0.0, used_mb) * 1024 * 1024),
+                "vram_total_bytes": int(max(0.0, total_mb) * 1024 * 1024),
+                "temperature_c": _resource_percent(parts[5]),
+            })
+        vram_total = sum(int(gpu.get("vram_total_bytes") or 0) for gpu in gpus)
+        vram_used = sum(int(gpu.get("vram_used_bytes") or 0) for gpu in gpus)
+        gpu_values = [float(gpu["percent"]) for gpu in gpus if gpu.get("percent") is not None]
+        temp_values = [float(gpu["temperature_c"]) for gpu in gpus if gpu.get("temperature_c") is not None]
+        return {
+            "available": bool(gpus),
+            "percent": round(sum(gpu_values) / len(gpu_values), 1) if gpu_values else None,
+            "temperature_c": round(max(temp_values), 1) if temp_values else None,
+            "vram": {
+                "available": bool(gpus),
+                "used_bytes": vram_used,
+                "total_bytes": vram_total,
+                "percent": round((vram_used / vram_total) * 100, 1) if vram_total else None,
+            },
+            "gpus": gpus,
+            "error": "" if gpus else "no gpu rows",
+        }
+
+    def _comfyui_resource_usage_snapshot():
+        from datetime import datetime
+
+        gpu = _nvidia_smi_resource_snapshot()
+        return {
+            "sampled_at": datetime.now().replace(microsecond=0).isoformat(),
+            "ram": _proc_meminfo_snapshot(),
+            "gpu": gpu,
+            "vram": gpu.get("vram") if isinstance(gpu, dict) else {"percent": None},
+        }
+
+    @app.route("/api/comfyui/resources", methods=["GET"])
+    @require_csrf_safe
+    def comfyui_resource_dashboard():
+        actor, err = _actor_or_401()
+        if err:
+            return err
+        return json_resp({"ok": True, "resource_usage": _comfyui_resource_usage_snapshot()})
+
     @app.route("/api/comfyui/status", methods=["GET"])
     @require_csrf_safe
     def comfyui_status():
@@ -678,10 +882,14 @@ def register_comfyui_runtime_routes(app, ctx):
                     (int(actor.get("id") or 0), int(actor.get("id") or 0), int(COMFYUI_HISTORY_LIMIT)),
                 ).fetchall()
             for row in workflow_rows:
-                params = _runtime_parse_json_field(row["params_json"], {})
                 workflow_json = _runtime_parse_json_field(row["workflow_json"], {})
+                params = _runtime_workflow_snapshot_params(
+                    _runtime_parse_json_field(row["params_json"], {}),
+                    workflow_json,
+                )
                 output_refs = _runtime_parse_json_field(row["output_refs_json"], {})
-                prompt = row["prompt"] or params.get("prompt") or row["preset_title"] or ""
+                prompt = params.get("prompt") or row["prompt"] or row["preset_title"] or ""
+                negative_prompt = params.get("negative_prompt") or row["negative_prompt"] or ""
                 items.append({
                     "id": f"workflow-{int(row['id'])}",
                     "history_source": "workflow",
@@ -696,7 +904,7 @@ def register_comfyui_runtime_routes(app, ctx):
                         "workflow_preset_id": int(row["preset_id"]),
                         "workflow_preset_title": row["preset_title"] or "Workflow",
                         "prompt": prompt,
-                        "negative_prompt": row["negative_prompt"] or params.get("negative_prompt") or "",
+                        "negative_prompt": negative_prompt,
                         "model": params.get("model") or row["preset_title"] or "Workflow",
                     },
                     "params": params,
@@ -879,8 +1087,9 @@ def register_comfyui_runtime_routes(app, ctx):
             can_rerun = int(row["actor_user_id"] or 0) == actor_id
             if not can_rerun:
                 return json_resp({"ok": False, "msg": "你沒有權限重跑這筆 workflow run"}), 403
-            params = _parse_json_field(row["params_json"], {}) or {}
-            workflow_json = _parse_json_field(row["workflow_json"], {}) or {}
+            params = _runtime_parse_json_field(row["params_json"], {}) or {}
+            workflow_json = _runtime_parse_json_field(row["workflow_json"], {}) or {}
+            params = _runtime_workflow_snapshot_params(params, workflow_json)
             try:
                 from services.comfyui.template.gguf_workflow import (
                     apply_gguf_workflow_profile,
@@ -916,13 +1125,16 @@ def register_comfyui_runtime_routes(app, ctx):
                         params["diffusion_model"] = params["model"]
             except Exception:
                 pass
+            request_body = request.get_json(force=True, silent=True) or {}
+            params = dict(params)
+            params["seed_after_generate"] = _runtime_workflow_rerun_seed_mode(params, request_body)
             workflow_json, params = _runtime_randomize_workflow_seed_inputs(workflow_json, params)
             new_run_id = _create_workflow_run(
                 conn,
                 preset_id=int(row["preset_id"]),
                 actor=actor,
-                prompt=row["prompt"] or params.get("prompt") or row["preset_title"] or "",
-                negative_prompt=row["negative_prompt"] or params.get("negative_prompt") or "",
+                prompt=params.get("prompt") or row["prompt"] or row["preset_title"] or "",
+                negative_prompt=params.get("negative_prompt") or row["negative_prompt"] or "",
                 params_json=params,
                 workflow_json=workflow_json,
             )

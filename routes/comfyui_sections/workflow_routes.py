@@ -362,6 +362,72 @@ def register_comfyui_workflow_routes(app, ctx):
                 changed = True
         return workflow_json, patched_inputs, seed if changed else None
 
+    def _normalize_workflow_vae_name(value):
+        text = str(value or "").strip().replace("\\", "/")
+        if not text or text == "__checkpoint_builtin__":
+            return ""
+        parts = [part for part in text.split("/") if part]
+        if text.startswith("/") or "\x00" in text or not parts or any(part == ".." for part in parts):
+            return None
+        if any(ch in text for ch in "\r\n<>|?*"):
+            return None
+        return text[:240]
+
+    def _apply_workflow_vae_override(workflow_json, vae_name):
+        if not vae_name or not isinstance(workflow_json, dict):
+            return workflow_json, False
+        patched = json.loads(json.dumps(workflow_json))
+        loader_id = ""
+        changed = False
+        for node_id, node in patched.items():
+            if not isinstance(node, dict):
+                continue
+            if str(node.get("class_type") or "") != "VAELoader":
+                continue
+            inputs = node.setdefault("inputs", {})
+            if not isinstance(inputs, dict):
+                inputs = {}
+                node["inputs"] = inputs
+            if inputs.get("vae_name") != vae_name:
+                changed = True
+            inputs["vae_name"] = vae_name
+            loader_id = str(node_id)
+            break
+        has_vae_consumer = False
+        for node in patched.values():
+            if not isinstance(node, dict):
+                continue
+            inputs = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
+            for input_name, value in inputs.items():
+                if str(input_name) == "vae" and isinstance(value, list):
+                    has_vae_consumer = True
+                    break
+            if has_vae_consumer:
+                break
+        if not has_vae_consumer:
+            return workflow_json, False
+        if not loader_id:
+            next_id = 90000
+            while str(next_id) in patched:
+                next_id += 1
+            loader_id = str(next_id)
+            patched[loader_id] = {
+                "class_type": "VAELoader",
+                "inputs": {"vae_name": vae_name},
+                "_meta": {"title": "使用者選擇 VAE"},
+            }
+            changed = True
+        for node in patched.values():
+            if not isinstance(node, dict):
+                continue
+            inputs = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
+            for input_name, value in list(inputs.items()):
+                if str(input_name) == "vae" and isinstance(value, list):
+                    if value != [loader_id, 0]:
+                        inputs[input_name] = [loader_id, 0]
+                        changed = True
+        return patched, changed
+
     def _workflow_snapshot_params(default_params, workflow_json):
         params = dict(default_params or {})
         if not isinstance(workflow_json, dict):
@@ -369,6 +435,9 @@ def register_comfyui_workflow_routes(app, ctx):
         prompts = []
         negatives = []
         checkpoint_names = []
+        unet_names = []
+        vae_names = []
+        unet_loader_types = {"UNETLoader", "UNetLoader", "UnetLoader", "UnetLoaderGGUF", "UnetLoaderGGUFAdvanced"}
         for node in workflow_json.values():
             if not isinstance(node, dict):
                 continue
@@ -376,6 +445,10 @@ def register_comfyui_workflow_routes(app, ctx):
             class_type = str(node.get("class_type") or "")
             if class_type == "CheckpointLoaderSimple" and inputs.get("ckpt_name"):
                 checkpoint_names.append(str(inputs.get("ckpt_name") or ""))
+            if class_type in unet_loader_types and inputs.get("unet_name"):
+                unet_names.append(str(inputs.get("unet_name") or ""))
+            if class_type == "VAELoader" and inputs.get("vae_name"):
+                vae_names.append(str(inputs.get("vae_name") or ""))
             if class_type in {"KSampler", "KSamplerAdvanced"}:
                 if inputs.get("noise_seed") is not None:
                     params["seed"] = inputs.get("noise_seed")
@@ -401,14 +474,27 @@ def register_comfyui_workflow_routes(app, ctx):
                 else:
                     prompts.append(text)
         checkpoint_names = [name for name in checkpoint_names if name]
-        if checkpoint_names:
-            current_model = str(params.get("model") or params.get("checkpoint") or "").strip()
-            if not current_model or current_model not in checkpoint_names:
-                params["model"] = checkpoint_names[0]
-                params["checkpoint"] = checkpoint_names[0]
-            else:
-                params["model"] = current_model
-                params["checkpoint"] = current_model
+        unet_names = [name for name in unet_names if name]
+        candidates = list(checkpoint_names) + list(unet_names)
+        current_model = str(params.get("model") or params.get("checkpoint") or params.get("diffusion_model") or "").strip()
+        if candidates:
+            current_normalized = current_model.replace("\\", "/").strip().lower()
+            current_base = current_normalized.rsplit("/", 1)[-1]
+            selected_model = ""
+            for candidate in candidates:
+                candidate_normalized = str(candidate).replace("\\", "/").strip().lower()
+                candidate_base = candidate_normalized.rsplit("/", 1)[-1]
+                if candidate_normalized == current_normalized or candidate_base == current_base:
+                    selected_model = candidate
+                    break
+            if not selected_model:
+                selected_model = candidates[0]
+            params["model"] = selected_model
+            if selected_model in checkpoint_names:
+                params["checkpoint"] = selected_model
+        vae_names = [name for name in vae_names if name]
+        if vae_names:
+            params["vae"] = vae_names[0]
         if prompts:
             params["prompt"] = prompts[0]
         if negatives:
@@ -877,6 +963,9 @@ def register_comfyui_workflow_routes(app, ctx):
         )
         sdxl_refiner = body.get("sdxl_refiner") if isinstance(body.get("sdxl_refiner"), dict) else {}
         gguf_workflow = body.get("gguf_workflow") if isinstance(body.get("gguf_workflow"), dict) else {}
+        selected_vae = _normalize_workflow_vae_name(body.get("vae") or body.get("vae_name"))
+        if selected_vae is None:
+            return json_resp({"ok": False, "msg": "VAE 名稱格式不合法", "stage": "vae_validation"}), 400
         conn = get_db()
         try:
             row, err_resp = load_workflow_preset(conn, preset_id=preset_id, actor=actor)
@@ -885,6 +974,7 @@ def register_comfyui_workflow_routes(app, ctx):
             comfyui_url = (comfyui_binding(actor) or {}).get("url")
             active_client = client_for_url(comfyui_url) if comfyui_url else None
             default_params = parse_json_field(row["default_params_json"], {}) or {}
+            preserved_seed = default_params.get("seed")
             workflow_json = apply_workflow_compatibility_fixes(parse_json_field(row["workflow_json"], {}) or {})
             runtime_dependency_row = row
             runtime_workflow_changed = False
@@ -959,13 +1049,36 @@ def register_comfyui_workflow_routes(app, ctx):
                     default_params["clip_loader_class"] = selection.profile.get("clip_loader_class") or ""
                     runtime_workflow_changed = True
 
+            if selected_vae:
+                workflow_json, vae_changed = _apply_workflow_vae_override(workflow_json, selected_vae)
+                default_params = dict(default_params)
+                default_params["vae"] = selected_vae
+                if vae_changed:
+                    runtime_workflow_changed = True
+
             run_count = _workflow_request_int(body.get("run_count") or body.get("history_run_count"), 1, 1, 10)
             seed_after_generate = _normalize_workflow_seed_after_generate(
                 body.get("seed_after_generate") or body.get("seed_after_generate_mode")
             )
+            if (
+                "seed_after_generate" not in (body or {})
+                and "seed_after_generate_mode" not in (body or {})
+            ):
+                configured_mode = _normalize_workflow_seed_after_generate(default_params.get("seed_after_generate"))
+                if configured_mode in {"fixed", "increment", "decrement", "random"}:
+                    seed_after_generate = configured_mode
+                elif default_params.get("seed") is not None:
+                    seed_after_generate = "fixed"
             default_params = dict(default_params)
             default_params["run_count"] = run_count
             default_params["seed_after_generate"] = seed_after_generate
+            has_seed_patch = bool(
+                any(
+                    "noise_seed" in patch or "seed" in patch
+                    for patch in user_inputs.values()
+                    if isinstance(patch, dict)
+                )
+            )
             if seed_after_generate == "random":
                 workflow_json, user_inputs, random_seed = _randomize_workflow_seed_inputs(workflow_json, user_inputs)
                 if random_seed is not None:
@@ -1091,6 +1204,9 @@ def register_comfyui_workflow_routes(app, ctx):
                     return paid_api_error
 
             workflow_run_params = _workflow_snapshot_params(default_params, workflow_json)
+            if seed_after_generate != "random" and preserved_seed is not None and not has_seed_patch:
+                workflow_run_params["seed"] = preserved_seed
+            workflow_run_params["seed_after_generate"] = seed_after_generate
             workflow_run_params["workflow_preset_id"] = int(preset_id)
             workflow_run_params["workflow_preset_title"] = row["title"] or "Workflow"
             workflow_run_params["workflow_system_bundle_id"] = row["system_bundle_id"] or ""

@@ -2662,7 +2662,7 @@ function renderComfyuiTemplateEmbeddingShortcuts(field, detail = comfyuiSelected
 
 function renderComfyuiTemplateField(field, detail, ctx) {
   if (field?.input_type === "embedding_shortcuts") {
-    return renderComfyuiTemplateEmbeddingShortcuts(field, detail);
+    return renderComfyuiTemplateEmbeddingShortcuts(field);
   }
   const binding = comfyuiTemplateFieldBinding(field, detail, ctx);
   if (comfyuiTemplateIsHiddenField(detail, field)) return "";

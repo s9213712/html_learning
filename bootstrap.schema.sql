@@ -1058,6 +1058,39 @@ CREATE TABLE IF NOT EXISTS comfyui_generation_history (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS comfyui_image_favorites (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    source_type TEXT NOT NULL DEFAULT 'manual',
+    title TEXT NOT NULL DEFAULT '',
+    note TEXT NOT NULL DEFAULT '',
+    source_url TEXT NOT NULL DEFAULT '',
+    civitai_image_id INTEGER,
+    image_url TEXT NOT NULL DEFAULT '',
+    backend_url TEXT NOT NULL DEFAULT '',
+    image_ref_json TEXT NOT NULL DEFAULT '{}',
+    cloud_file_id TEXT NOT NULL DEFAULT '',
+    storage_file_id TEXT NOT NULL DEFAULT '',
+    filename TEXT NOT NULL DEFAULT '',
+    mime_type TEXT NOT NULL DEFAULT '',
+    size_bytes INTEGER NOT NULL DEFAULT 0,
+    prompt TEXT NOT NULL DEFAULT '',
+    negative_prompt TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL DEFAULT '',
+    vae TEXT NOT NULL DEFAULT '',
+    sampler_name TEXT NOT NULL DEFAULT '',
+    scheduler TEXT NOT NULL DEFAULT '',
+    seed TEXT NOT NULL DEFAULT '',
+    steps INTEGER,
+    cfg REAL,
+    width INTEGER,
+    height INTEGER,
+    params_json TEXT NOT NULL DEFAULT '{}',
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS comfyui_workflow_presets (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     owner_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -1105,6 +1138,8 @@ CREATE INDEX IF NOT EXISTS idx_reports_claimed ON reports(claimed_by_user_id, st
 CREATE INDEX IF NOT EXISTS idx_notifications_user_read ON notifications(user_id, is_read, created_at);
 CREATE INDEX IF NOT EXISTS idx_comfyui_image_refs_owner ON comfyui_image_refs(owner_user_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_comfyui_generation_history_owner ON comfyui_generation_history(owner_user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_comfyui_image_favorites_owner ON comfyui_image_favorites(owner_user_id, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_comfyui_image_favorites_civitai_owner ON comfyui_image_favorites(owner_user_id, civitai_image_id) WHERE civitai_image_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_comfyui_workflow_presets_owner ON comfyui_workflow_presets(owner_user_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_comfyui_workflow_presets_official ON comfyui_workflow_presets(is_official, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_comfyui_workflow_runs_preset ON comfyui_workflow_runs(preset_id, created_at DESC);

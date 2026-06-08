@@ -439,26 +439,35 @@ def get_or_create_profile(conn, user_id):
         return profile
     now = _now()
     code = _generate_friend_code(conn)
-    conn.execute(
-        """
-        INSERT INTO user_profiles (
-            user_id, display_name, bio, signature, location, website,
-            friend_code, friend_code_rotated_at, profile_visibility,
-            display_timezone, profile_template, profile_accent, profile_density,
-            profile_style_json, public_account_fields_json, profile_public_info_json,
-            appearance_json, created_at, updated_at
+    try:
+        conn.execute(
+            """
+            INSERT INTO user_profiles (
+                user_id, display_name, bio, signature, location, website,
+                friend_code, friend_code_rotated_at, profile_visibility,
+                display_timezone, profile_template, profile_accent, profile_density,
+                profile_style_json, public_account_fields_json, profile_public_info_json,
+                appearance_json, created_at, updated_at
+            )
+            VALUES (?, '', '', '', '', '', ?, ?, 'public', 'auto', 'classic', 'default', 'comfortable', ?, '[]', '[]', '{}', ?, ?)
+            """,
+            (
+                int(user_id),
+                code,
+                now,
+                json.dumps(PROFILE_STYLE_DEFAULTS, ensure_ascii=False, sort_keys=True),
+                now,
+                now,
+            ),
         )
-        VALUES (?, '', '', '', '', '', ?, ?, 'public', 'auto', 'classic', 'default', 'comfortable', ?, '[]', '[]', '{}', ?, ?)
-        """,
-        (
-            int(user_id),
-            code,
-            now,
-            json.dumps(PROFILE_STYLE_DEFAULTS, ensure_ascii=False, sort_keys=True),
-            now,
-            now,
-        ),
-    )
+    except sqlite3.IntegrityError:
+        row = conn.execute("SELECT * FROM user_profiles WHERE user_id=?", (int(user_id),)).fetchone()
+        if row:
+            profile = dict(row)
+            if not profile.get("friend_code"):
+                profile["friend_code"] = ensure_profile_friend_code(conn, user_id)
+            return profile
+        raise
     return dict(conn.execute("SELECT * FROM user_profiles WHERE user_id=?", (int(user_id),)).fetchone())
 
 

@@ -150,12 +150,8 @@ function clientRoleRank(role) {
   return 1;
 }
 
-function normalizeModuleSettingKey(moduleKey) {
-  return String(moduleKey || "").replaceAll("-", "_");
-}
-
 function getModuleMinRole(moduleKey, fallbackRole) {
-  const key = `module_${normalizeModuleSettingKey(moduleKey)}_min_role`;
+  const key = `module_${moduleKey}_min_role`;
   const value = siteConfig && typeof siteConfig[key] === "string" ? siteConfig[key] : fallbackRole;
   return ["user", "manager", "super_admin"].includes(value) ? value : fallbackRole;
 }
@@ -209,8 +205,6 @@ const MODULE_FEATURE_KEYS = Object.freeze({
   games: "feature_games_enabled",
   experiments: "feature_experiments_enabled",
   comfyui: "feature_comfyui_enabled",
-  "ai-agent": "feature_ai_agent_enabled",
-  ai_agent: "feature_ai_agent_enabled",
   economy: "feature_economy_enabled",
   trading: "feature_trading_enabled",
 });
@@ -387,7 +381,6 @@ const SIDEBAR_MENU_CONFIG = [
   { tabId: "tab-module-videos", module: "videos", tab: "videos", icon: "video", label: "影音", group: "功能" },
   { tabId: "tab-module-games", module: "games", tab: "games", icon: "game", label: "遊戲區", group: "功能" },
   { tabId: "tab-module-comfyui", module: "comfyui", tab: "comfyui", icon: "spark", label: "AI 產圖", group: "功能" },
-  { tabId: "tab-module-ai-agent", module: "ai-agent", tab: "ai-agent", icon: "chat", label: "AI 助理", group: "功能" },
   {
     tabId: "tab-module-economy",
     module: "economy",
@@ -2458,7 +2451,6 @@ function setAuthState(json, showLoginHero = false) {
   const tabModuleJobs = $("tab-module-jobs");
   const tabModuleShares = $("tab-module-shares");
   const tabModuleComfyui = $("tab-module-comfyui");
-  const tabModuleAiAgent = $("tab-module-ai-agent");
   const tabModuleEconomy = $("tab-module-economy");
   const tabModuleTrading = $("tab-module-trading");
   const tabModuleAppeals = $("tab-module-appeals");
@@ -2481,7 +2473,12 @@ function setAuthState(json, showLoginHero = false) {
   if (tabModuleJobs) tabModuleJobs.style.display = canAccessModule("jobs") ? "" : "none";
   if (tabModuleShares) tabModuleShares.style.display = canAccessModule("shares") ? "" : "none";
   if (tabModuleComfyui) tabModuleComfyui.style.display = canAccessModule("comfyui") ? "" : "none";
-  if (tabModuleAiAgent) tabModuleAiAgent.style.display = canAccessModule("ai-agent") ? "" : "none";
+  if (canAccessModule("comfyui") && typeof startComfyuiResourceDashboardPolling === "function") {
+    startComfyuiResourceDashboardPolling();
+    if (typeof refreshComfyuiResourceDashboard === "function") {
+      setTimeout(() => refreshComfyuiResourceDashboard(), 250);
+    }
+  }
   if (tabModuleEconomy) tabModuleEconomy.style.display = canAccessModule("economy") ? "" : "none";
   if (tabModuleTrading) tabModuleTrading.style.display = (canAccessModule("economy") && canAccessModule("trading")) ? "" : "none";
   if (tabModuleAppeals) {
@@ -2546,15 +2543,13 @@ function setAuthState(json, showLoginHero = false) {
                 ? "videos"
                 : canAccessModule("comfyui")
                   ? "comfyui"
-                  : canAccessModule("ai-agent")
-                    ? "ai-agent"
-                    : canAccessModule("games")
-                      ? "games"
-                      : canAccessModule("experiments")
-                        ? "experiments"
-                        : canAccessModule("economy")
-                          ? "economy"
-                          : (currentRole !== "super_admin" && canAccessModule("appeals")) ? "appeals" : "chat");
+                  : canAccessModule("games")
+                    ? "games"
+                    : canAccessModule("experiments")
+                      ? "experiments"
+                      : canAccessModule("economy")
+                        ? "economy"
+                        : (currentRole !== "super_admin" && canAccessModule("appeals")) ? "appeals" : "chat");
   switchModuleTab(initialModule);
   if (typeof updateSidebarActiveState === "function") updateSidebarActiveState();
   resetInactivityTimer();
@@ -2610,7 +2605,6 @@ function resetAuthState() {
   const moduleJobs = $("module-jobs");
   const moduleShares = $("module-shares");
   const moduleComfyui = $("module-comfyui");
-  const moduleAiAgent = $("module-ai-agent");
   const moduleEconomy = $("module-economy");
   const moduleTrading = $("module-trading");
   const moduleAccounts = $("module-accounts");
@@ -2629,7 +2623,6 @@ function resetAuthState() {
   if (moduleJobs) moduleJobs.classList.remove("active");
   if (moduleShares) moduleShares.classList.remove("active");
   if (moduleComfyui) moduleComfyui.classList.remove("active");
-  if (moduleAiAgent) moduleAiAgent.classList.remove("active");
   if (moduleEconomy) moduleEconomy.classList.remove("active");
   if (moduleTrading) moduleTrading.classList.remove("active");
   if (moduleAccounts) moduleAccounts.classList.remove("active");
@@ -2788,6 +2781,7 @@ function resetAuthState() {
   function enhanceModal(candidate) {
     const modal = modalCloseContent(candidate);
     if (!modal || modal.dataset.globalModalCloseReady === "1") return;
+    if (modal.dataset.globalModalClose === "none") return;
     if (modal.matches?.(".user-edit-overlay, .app-dialog-overlay")) return;
     modal.dataset.globalModalCloseReady = "1";
     if (!modalTopHasClose(modal)) {

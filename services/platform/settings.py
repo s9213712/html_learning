@@ -224,6 +224,8 @@ DEFAULT_SETTINGS = {
     "security_log_tail_lines": 200,
 }
 
+DISABLED_SESSION_IDLE_TIMEOUT_TTL_HOURS = 24
+
 LEGACY_THEME_DEFAULT_REPLACEMENTS = {
     "site_bg": ("#0f0f1a", DEFAULT_SETTINGS["site_bg"]),
     "site_surface": ("#1a1a2e", DEFAULT_SETTINGS["site_surface"]),
@@ -660,6 +662,8 @@ def save_settings(data):
         and "audit_chain_reseal_required" not in updates
     ):
         updates["audit_chain_reseal_required"] = True
+    if updates.get("session_idle_timeout_minutes") == 0:
+        updates["session_ttl_hours"] = DISABLED_SESSION_IDLE_TIMEOUT_TTL_HOURS
     if not updates:
         return {}
 

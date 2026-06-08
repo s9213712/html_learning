@@ -45,6 +45,7 @@ _HF_PIPELINE_MODE_TAGS = {
 }
 _HF_MODE_ORDER = ["txt2img", "img2img", "inpaint", "t2t", "i2t", "t2v", "i2v", "v2v", "t2s", "t2sv"]
 _DIFFUSERS_IMAGE_GENERATION_MODES = {"txt2img", "img2img", "inpaint"}
+_HF_MAX_DIFFUSERS_VARIANT_BYTES = 16 * 1024**3
 _PRECISION_LABELS = {
     "default": "預設精度",
     "fp16": "FP16 / half",
@@ -246,6 +247,17 @@ def _precision_from_filename(filename):
     if re.search(r"(^|[._/-])(fp32|float32)([._/-]|$)", lowered):
         return "fp32"
     return "default"
+
+
+def _format_size_bytes(size):
+    value = float(int(size))
+    units = ["B", "KB", "MB", "GB", "TB"]
+    index = 0
+    while value >= 1024 and index < len(units) - 1:
+        value /= 1024
+        index += 1
+    suffix = units[index]
+    return f"{value:.2f} {suffix}" if index > 0 else f"{int(value)} {suffix}"
 
 
 def _gguf_quant_from_filename(filename):
@@ -454,6 +466,12 @@ def inspect_huggingface_diffusers_repo(repo_value, *, token="", mode="txt2img"):
         supported_modes = []
     runnable_modes = [mode for mode in supported_modes if mode in _DIFFUSERS_IMAGE_GENERATION_MODES]
     variant_options = build_diffusers_variant_options(siblings)
+    oversized_variants = []
+    if _HF_MAX_DIFFUSERS_VARIANT_BYTES > 0:
+        oversized_variants = [option for option in variant_options if int(option.get("size_bytes") or 0) > _HF_MAX_DIFFUSERS_VARIANT_BYTES]
+        if oversized_variants:
+            variant_options = [option for option in variant_options if int(option.get("size_bytes") or 0) <= _HF_MAX_DIFFUSERS_VARIANT_BYTES]
+    runnable_modes = [mode for mode in supported_modes if mode in _DIFFUSERS_IMAGE_GENERATION_MODES]
     model_card_hints = _load_model_card_hints(repo_id, token)
     has_gguf_options = any(item.get("kind") == "gguf" for item in variant_options)
     suggested_base_repo = infer_gguf_base_repo(repo_id, tags=tags, card_data=card_data) if has_gguf_options else ""
@@ -487,6 +505,16 @@ def inspect_huggingface_diffusers_repo(repo_value, *, token="", mode="txt2img"):
         warnings.append("此 repo 不屬於本站目前可直接執行的 Diffusers 生圖模式。")
     elif requested_mode not in runnable_modes:
         warnings.append(f"此 repo 目前偵測本站可執行 {', '.join(runnable_modes)}，不支援 {requested_mode}。")
+    if oversized_variants:
+        warnings.append(
+            "此 repo 檢測到超過本專案上限（"
+            + f"{_format_size_bytes(_HF_MAX_DIFFUSERS_VARIANT_BYTES)}）的精度版本已自動過濾："
+            + "、".join([str(option.get("label", "未知")) for option in oversized_variants])
+            + "。"
+        )
+    if oversized_variants and not variant_options:
+        warnings.append("本專案暫不支援此 repo 的 HF/Diffusers 直接下載（可用版本皆超過單精度上限），請改用可同時支援 local/remote 的流程。")
+        runnable_modes = []
     if len(variant_options) > 1:
         warnings.append("偵測到多個精度版本，請先選擇要下載/載入的版本，避免同一模型重複下載。")
     if model_card_hints:
@@ -509,7 +537,7 @@ def inspect_huggingface_diffusers_repo(repo_value, *, token="", mode="txt2img"):
         )
         if suggested_base_repo:
             warnings.append(f"已推定 base repo：{suggested_base_repo}。")
-    if not variant_options:
+    if not variant_options and not oversized_variants:
         warnings.append("沒有取得模型檔大小；若這不是 Diffusers repo，生成前會被阻擋。")
     payload = {
         "ok": True,

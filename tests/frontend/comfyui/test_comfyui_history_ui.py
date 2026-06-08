@@ -39,7 +39,8 @@ def test_history_apply_restores_full_generation_payload():
     assert '["comfyui-diffusers-model-variant", payload.diffusers_model_variant || "", true],' in js
     assert '["comfyui-batch-size", payload.ui_batch_size || payload.batch_size || 1],' in js
     assert '["comfyui-run-count", payload.run_count || 1],' in js
-    assert '["comfyui-seed-after-generate", payload.seed_after_generate || (workflowPresetId > 0 ? "random" : "fixed")],' in js
+    assert "function comfyuiHistorySeedModeForApply(payload = {}, workflowPresetId = 0)" in js
+    assert '["comfyui-seed-after-generate", historySeedMode],' in js
     assert '.filter(([id]) => !(workflowPresetId > 0 && id === "comfyui-model-select"))' in js
     assert 'await applyComfyuiHistoryAssets(comfyuiHistoryInputAssets(item, payload));' in js
     assert 'const targetView = payload.diffusers_model_repo ? "hf" : "generate";' in js
@@ -51,16 +52,25 @@ def test_history_apply_restores_full_generation_payload():
     assert "function comfyuiTemplateEffectiveFieldValue(field = {})" in workflow_js
     assert "seed_after_generate: seedAfterGenerate" in workflow_js
     assert "run_count: runCount" in workflow_js
+    assert 'data-comfyui-template-run-count="1"' in workflow_js
+    assert 'vae: selectedVae && selectedVae !== COMFYUI_VAE_BUILTIN ? selectedVae : "",' in workflow_js
     assert '["comfyui-run-count", payload.run_count || 1],' in workflow_js
     assert '["comfyui-seed-after-generate", payload.seed_after_generate || "random"],' in workflow_js
     assert 'comfyuiTemplateSdxlSkipRefiner = skipRefiner;' in workflow_js
+    assert 'Object.prototype.hasOwnProperty.call(payload || {}, "prompt")' in workflow_js
+    assert 'label: `${currentRaw}（目前未列出，仍會送出）`' in workflow_js
+    assert "return resolved || current;" in workflow_js
     assert 'if (targetId === "comfyui-cfg") return payload.cfg;' in workflow_js
     assert 'if (targetId === "comfyui-seed") return payload.seed;' in workflow_js
     assert 'if (targetId === "comfyui-width") return payload.width;' in workflow_js
     assert 'if (targetId === "comfyui-height") return payload.height;' in workflow_js
     assert 'params": params' in runtime_routes
+    assert 'params = _runtime_workflow_snapshot_params(' in runtime_routes
+    assert 'params["seed_after_generate"] = _runtime_workflow_rerun_seed_mode(params, request_body)' in runtime_routes
     assert '"workflow_preset_id": int(row["preset_id"]),' in runtime_routes
+    assert '@app.route("/api/comfyui/resources", methods=["GET"])' in runtime_routes
     assert 'workflow_run_params["workflow_preset_id"] = int(preset_id)' in workflow_routes
+    assert 'workflow_json, vae_changed = _apply_workflow_vae_override(workflow_json, selected_vae)' in workflow_routes
 
 
 def test_history_rerun_opens_generate_view_for_visible_progress():
@@ -70,6 +80,23 @@ def test_history_rerun_opens_generate_view_for_visible_progress():
     assert "這筆 ComfyUI 歷史缺少可重跑 ID，請重新整理歷史。" in js
     assert 'API + `/comfyui/history/${encodeURIComponent(targetId)}/rerun`' in js
     assert "setComfyuiMessage(\"正在建立 ComfyUI 重跑工作...\", true);" in js
+
+
+def test_history_items_can_be_favorited_without_using_current_preview_state():
+    js = _read("public/js/36-comfyui.js")
+
+    assert "function comfyuiHistoryCanFavorite(item = {})" in js
+    assert "function comfyuiHistoryImageCount(item = {}, payload = null)" in js
+    assert "function comfyuiHistoryFavoriteParams(item = {})" in js
+    assert "async function favoriteComfyuiHistoryImage(historyId)" in js
+    assert 'data-comfyui-history-favorite="${sanitize(historyId)}"' in js
+    assert 'button.getAttribute("data-comfyui-history-favorite")' in js
+    assert 'API + "/comfyui/image-favorites"' in js
+    assert 'source_type: item.history_source === "workflow" ? "workflow_history" : "history"' in js
+    assert "image_ref: image.image_ref" in js
+    assert "params," in js
+    assert "comfyuiCurrentImage =" not in js[js.index("async function favoriteComfyuiHistoryImage(historyId)") : js.index("async function rerunComfyuiHistory")]
+    assert "張數 ${imageCount}" in js
 
 
 def test_history_delete_removes_legacy_and_workflow_runs():
@@ -84,3 +111,25 @@ def test_history_delete_removes_legacy_and_workflow_runs():
     assert 'method: "DELETE"' in js
     assert '@app.route("/api/comfyui/history/<int:history_id>", methods=["DELETE"])' in runtime_routes
     assert '@app.route("/api/comfyui/workflow-runs/<int:run_id>", methods=["DELETE"])' in runtime_routes
+
+
+def test_comfyui_preview_resource_dashboard_is_wired():
+    html = _read("public/index.html")
+    js = _read("public/js/36-comfyui.js")
+    core_js = _read("public/js/00-core.js")
+    styles = _read("public/styles.css")
+    runtime_routes = _read("routes/comfyui_sections/runtime_routes.py")
+
+    assert 'id="comfyui-resource-dashboard"' in html
+    assert 'apiFetch(API + "/comfyui/resources"' in js
+    assert "function startComfyuiResourceDashboardPolling()" in js
+    assert "function stopComfyuiResourceDashboardPolling()" in js
+    assert 'if (!currentUser) {' in js
+    assert 'if (!$("comfyui-resource-dashboard") || !currentUser) return;' in js
+    assert 'if (currentUser && (activeView === "generate" || activeView === "hf"))' in js
+    assert 'comfyuiResourceMetricMarkup({ label: "RAM", percent: null, available: false, detail: error })' in js
+    assert 'comfyuiResourceMetricMarkup({ label: "GPU Load", percent: null, available: false, detail: "等待資源資料" })' in js
+    assert 'typeof startComfyuiResourceDashboardPolling === "function"' in core_js
+    assert 'setTimeout(() => refreshComfyuiResourceDashboard(), 250);' in core_js
+    assert ".comfyui-resource-dashboard" in styles
+    assert '@app.route("/api/comfyui/resources", methods=["GET"])' in runtime_routes

@@ -1615,7 +1615,7 @@ def register_comfyui_routes(app, deps):
                     params["diffusers_gguf_profile"] = str(profile.get("id") or "")
                     params["diffusers_gguf_variant"] = str(profile_variant.get("id") or "")
                     params["diffusers_gguf_base_repo"] = str(profile.get("base_repo") or params.get("diffusers_gguf_base_repo") or "").strip()
-                if len(variant_options) > 1 and not params.get("diffusers_model_variant_selected") and not selected_gguf_file:
+                if len(variant_options) > 1 and not selected_variant and not selected_gguf_file:
                     return (
                         {**(capabilities or {}), "diffusers_inspection": inspection},
                         "這個 Hugging Face repo 有多個精度版本，請先在生圖頁面選擇要下載/載入的版本，避免重複下載。",
@@ -4298,6 +4298,7 @@ def register_comfyui_routes(app, deps):
 
     register_comfyui_image_routes(app, {
         "base64": base64,
+        "send_file": send_file,
         "request": request,
         "json_resp": json_resp,
         "require_csrf": require_csrf,
@@ -4333,6 +4334,13 @@ def register_comfyui_routes(app, deps):
         "resolve_file_storage_path": resolve_file_storage_path,
         "safe_text": _safe_text,
         "save_fetched_image": _save_fetched_image,
+        "configured_civitai_api_key": _configured_civitai_api_key,
+        "civitai_headers": _civitai_headers,
+        "fetch_json": _fetch_json,
+        "safe_civitai_media_url": _safe_civitai_media_url,
+        "fetch_civitai_media": _fetch_civitai_media,
+        "CIVITAI_API_BASE": CIVITAI_API_BASE,
+        "CIVITAI_API_BASES": CIVITAI_API_BASES,
         "validate_image_upload": _validate_image_upload,
         "validate_video_upload": _validate_video_upload,
         "storage_root": storage_root,

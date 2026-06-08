@@ -504,6 +504,28 @@ class DiffusersClient:
             return inferred
         raise ComfyUIError("GGUF 需要設定 base Diffusers repo，例如 stabilityai/stable-diffusion-xl-base-1.0")
 
+    def _resolve_diffusers_variant(self, model_repo, *, explicit_variant="", mode="txt2img"):
+        explicit_variant = str(explicit_variant or "").strip()
+        normalized = normalize_diffusers_variant(explicit_variant, allow_blank=True)
+        if normalized:
+            return normalized
+        if not model_repo:
+            return ""
+        inspection = inspect_huggingface_diffusers_repo(model_repo, token=self.token, mode=mode)
+        if not inspection.get("ok"):
+            raise ComfyUIError(inspection.get("msg") or "Hugging Face repo 檢查失敗，尚未開始下載。")
+        variant_options = inspection.get("variant_options") or []
+        diffusers_options = [
+            item
+            for item in variant_options
+            if str(item.get("kind") or "diffusers") != "gguf"
+        ]
+        if len(diffusers_options) > 1:
+            raise ComfyUIError("這個 Hugging Face repo 有多個精度版本，請先在生圖頁面選擇要下載/載入的版本，避免重複下載。")
+        if len(diffusers_options) == 1:
+            return normalize_diffusers_variant(diffusers_options[0].get("variant") or "", allow_blank=True) or ""
+        return ""
+
     def _missing_dependency_names(self):
         required = {
             "diffusers": "diffusers",
@@ -2191,8 +2213,11 @@ class DiffusersClient:
         if params.get("controlnet"):
             raise ComfyUIError("Diffusers 後端目前不支援本站 ControlNet 快捷模式，請改用 ComfyUI 本地/遠端模式")
         model_repo = self._effective_model_repo(params)
-        variant = self._effective_model_variant(params)
         gguf_file = self._effective_gguf_file(params)
+        if gguf_file:
+            variant = ""
+        else:
+            variant = self._resolve_diffusers_variant(model_repo, explicit_variant=self._effective_model_variant(params), mode=mode)
         gguf_base_repo = ""
         if gguf_file:
             gguf_base_repo = self._effective_gguf_base_repo(params, model_repo=model_repo)

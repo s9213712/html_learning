@@ -115,12 +115,14 @@ def test_diffusers_js_preflights_huggingface_repo_before_generation():
     assert "Qwen/Qwen-Image" in js
     assert "Qwen/Qwen-Image-Edit" in js
     assert "Tongyi-MAI/Z-Image-Turbo" in js
-    assert "SD Turbo（txt2img / I2I）" in js
-    assert "SDXL Turbo（txt2img / I2I）" in js
-    assert "Animagine XL 4.0（Anime SDXL / I2I）" in js
-    assert "FLUX.1 schnell（txt2img / I2I，需 HF 授權）" in js
-    assert "Qwen Image（txt2img / I2I）" in js
-    assert "Z-Image Turbo（txt2img / I2I）" in js
+    assert "stabilityai/stable-diffusion-xl-refiner-1.0" in js
+    assert "SD Turbo（txt2img）" in js
+    assert "SDXL Turbo（txt2img）" in js
+    assert "Animagine XL 4.0（Anime SDXL）" in js
+    assert "FLUX.1 schnell（txt2img，需 HF 授權）" in js
+    assert "Qwen Image（txt2img）" in js
+    assert "Z-Image Turbo（txt2img）" in js
+    assert "SDXL Refiner（I2I）" in js
     assert "function addCurrentComfyuiDiffusersCommonRepo()" in js
     assert "function removeSelectedComfyuiDiffusersCommonRepo()" in js
     assert "function setComfyuiDiffusersRepo(repo, { inspect = true } = {})" in js
@@ -199,8 +201,8 @@ def test_diffusers_text_only_repo_hides_image_cards_and_omits_image_payloads():
 
 def test_diffusers_cache_busts_preflight_ui_assets():
     html = _read("public/index.html")
-    assert "/js/36-comfyui.js?v=20260606-civitai-history-restore" in html
-    assert "/js/36-comfyui-workflows.js?v=20260605-history-gguf-rehydrate" in html
+    assert "/js/36-comfyui.js?v=20260607-image-favorites-history-favorite-dashboard" in html
+    assert "/js/36-comfyui-workflows.js?v=20260607-template-filter-reset" in html
 
 
 
