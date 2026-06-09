@@ -4,6 +4,7 @@ let comfyuiCurrentImage = null;
 let comfyuiGeneratedImages = [];
 let comfyuiGeneratedMedia = [];
 let comfyuiSelectedImageIndex = 0;
+let comfyuiImageLightboxSwipeState = null;
 let comfyuiSavedResult = null;
 let comfyuiModelsLoaded = false;
 let comfyuiModelsLoadPromise = null;
@@ -4657,7 +4658,7 @@ function openComfyuiGeneratedImage(index = comfyuiSelectedImageIndex) {
           <strong id="comfyui-image-lightbox-title">ComfyUI 圖片</strong>
           <div class="drive-card-sub" id="comfyui-image-lightbox-meta"></div>
         </div>
-        <button class="btn btn-sm" type="button" data-comfyui-lightbox-close="1">關閉</button>
+        <button class="comfyui-lightbox-close-btn" type="button" data-comfyui-lightbox-close="1" aria-label="關閉">✕</button>
       </div>
       <button class="comfyui-lightbox-nav prev" type="button" data-comfyui-lightbox-prev="1" aria-label="上一張">‹</button>
       <div class="comfyui-image-lightbox-body" data-comfyui-lightbox-close="1">
@@ -4666,6 +4667,7 @@ function openComfyuiGeneratedImage(index = comfyuiSelectedImageIndex) {
       <button class="comfyui-lightbox-nav next" type="button" data-comfyui-lightbox-next="1" aria-label="下一張">›</button>
     `;
     document.body.appendChild(overlay);
+    overlay.dataset.comfyuiLightboxBound = "1";
     overlay.querySelectorAll("[data-comfyui-lightbox-close]").forEach((el) => {
       el.addEventListener("click", (event) => {
         if (event.target === el) closeComfyuiGeneratedImageLightbox();
@@ -4677,6 +4679,45 @@ function openComfyuiGeneratedImage(index = comfyuiSelectedImageIndex) {
     overlay.querySelector("[data-comfyui-lightbox-next]")?.addEventListener("click", () => {
       openComfyuiGeneratedImage((Number(overlay.dataset.index) || 0) + 1);
     });
+    const lightboxBody = overlay.querySelector(".comfyui-image-lightbox-body");
+    lightboxBody?.addEventListener("touchstart", (event) => {
+      const touch = event.changedTouches?.[0];
+      if (!touch) return;
+      comfyuiImageLightboxSwipeState = {
+        x: touch.clientX,
+        y: touch.clientY,
+        t: Date.now()
+      };
+    }, { passive: true });
+    lightboxBody?.addEventListener("touchmove", (event) => {
+      if (!comfyuiImageLightboxSwipeState) return;
+      const touch = event.changedTouches?.[0];
+      if (!touch) return;
+      const dx = touch.clientX - comfyuiImageLightboxSwipeState.x;
+      const dy = touch.clientY - comfyuiImageLightboxSwipeState.y;
+      if (Math.abs(dx) > 18 && Math.abs(dx) > Math.abs(dy)) {
+        event.preventDefault();
+      }
+    }, { passive: false });
+    lightboxBody?.addEventListener("touchend", (event) => {
+      const state = comfyuiImageLightboxSwipeState;
+      comfyuiImageLightboxSwipeState = null;
+      const touch = event.changedTouches?.[0];
+      if (!state || !touch) return;
+      const dx = touch.clientX - state.x;
+      const dy = touch.clientY - state.y;
+      const dt = Date.now() - state.t;
+      const isHorizontal = Math.abs(dx) > Math.max(64, Math.abs(dy) * 1.4);
+      if (!isHorizontal || dt > 900) return;
+      event.preventDefault();
+      const nextIndex = dx < 0 ? (Number(overlay.dataset.index) || 0) + 1 : (Number(overlay.dataset.index) || 0) - 1;
+      openComfyuiGeneratedImage(nextIndex);
+    }, { passive: false });
+    overlay.addEventListener("wheel", (event) => {
+      if (Math.abs(event.deltaX) <= Math.abs(event.deltaY)) return;
+      event.preventDefault();
+      openComfyuiGeneratedImage((Number(overlay.dataset.index) || 0) + (event.deltaX > 0 ? 1 : -1));
+    }, { passive: false });
   }
   overlay.dataset.index = String(safeIndex);
   const img = overlay.querySelector("#comfyui-image-lightbox-img");
@@ -4702,6 +4743,7 @@ function closeComfyuiGeneratedImageLightbox() {
   overlay.setAttribute("aria-hidden", "true");
   const img = overlay.querySelector("#comfyui-image-lightbox-img");
   if (img) img.removeAttribute("src");
+  comfyuiImageLightboxSwipeState = null;
   document.body.classList.remove("modal-open");
 }
 
@@ -4784,6 +4826,12 @@ function renderComfyuiGeneratedImages(images) {
       setComfyuiSelectedImage(nextIndex);
       renderComfyuiGeneratedImages(comfyuiGeneratedImages);
     });
+  });
+  const activeThumb = preview.querySelector(`.comfyui-batch-item[data-comfyui-image-index="${selectedIndex}"]`);
+  activeThumb?.scrollIntoView({
+    behavior: "smooth",
+    block: "nearest",
+    inline: "center"
   });
 }
 
