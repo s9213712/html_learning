@@ -43,6 +43,7 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert 'API + "/ai-agent/status"' in ai_agent_js
     assert 'API + "/ai-agent/chat"' in ai_agent_js
     assert 'image_url' in ai_agent_js
+    assert 'hackme:account-context-changed' in ai_agent_js
 
     assert ".ai-agent-layout" in css
     assert ".ai-agent-thread" in css

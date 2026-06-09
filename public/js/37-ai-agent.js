@@ -9,7 +9,23 @@ const AI_AGENT_STATE = {
   imageDataUrl: "",
   settings: {},
   sessionId: "",
+  accountScope: "",
 };
+
+function aiAgentCurrentAccountScope() {
+  return typeof getCurrentAccountStorageScope === "function"
+    ? getCurrentAccountStorageScope()
+    : "anonymous";
+}
+
+function aiAgentResetScopeState() {
+  const nextScope = aiAgentCurrentAccountScope();
+  const previousScope = AI_AGENT_STATE.accountScope;
+  AI_AGENT_STATE.accountScope = nextScope;
+  if (previousScope && previousScope !== nextScope) {
+    clearAiAgentConversation();
+  }
+}
 
 function aiAgentEnsureSessionId() {
   if (AI_AGENT_STATE.sessionId) return AI_AGENT_STATE.sessionId;
@@ -222,6 +238,10 @@ function clearAiAgentConversation() {
   setAiAgentMessage("", "info");
 }
 
+function handleAiAgentAccountContextChanged() {
+  aiAgentResetScopeState();
+}
+
 function handleAiAgentImagePick(event) {
   const file = event?.target?.files?.[0];
   AI_AGENT_STATE.imageDataUrl = "";
@@ -336,5 +356,9 @@ async function sendAiAgentMessage() {
 document.addEventListener("hackme:module-changed", (event) => {
   if (event?.detail?.current === "ai-agent") loadAiAgentStatus();
 });
+
+document.addEventListener("hackme:account-context-changed", handleAiAgentAccountContextChanged);
+
+aiAgentResetScopeState();
 
 renderAiAgentThread();

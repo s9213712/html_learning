@@ -1,4 +1,5 @@
 import json
+import hashlib
 import sqlite3
 from urllib import error as urllib_error
 from urllib import request as urllib_request
@@ -391,6 +392,60 @@ def test_ai_agent_chat_session_key_is_user_isolated(tmp_path, monkeypatch):
     assert calls[0]["actor"] != calls[1]["actor"]
     assert calls[0]["session_key"] == "hackme:2:shared-session"
     assert calls[1]["session_key"] == "hackme:3:shared-session"
+
+
+def test_ai_agent_chat_session_key_is_bound_to_login_session_token(tmp_path, monkeypatch):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(db_path, {"id": 2, "username": "userA", "role": "user"}, settings={
+        "module_ai_agent_min_role": "user",
+        "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
+    })
+
+    calls = []
+
+    def fake_chat(settings, *, messages=None, prompt="", image_data_url="", model="", session_key="", actor=None):
+        calls.append({
+            "session_key": session_key,
+            "actor": actor.get("username") if isinstance(actor, dict) else None,
+        })
+        return {"content": "ok", "model": "hermes-agent", "usage": {}}
+
+    monkeypatch.setattr("routes.ai_agent.ai_agent_chat", fake_chat)
+
+    client = app.test_client()
+    client.set_cookie("session_token", "cookie-session")
+    payload = {"session_id": "shared-session", "messages": [{"role": "user", "content": "查一下任務"}]}
+    response = client.post("/api/ai-agent/chat", json=payload)
+
+    assert response.status_code == 200
+    assert len(calls) == 1
+    assert calls[0]["actor"] == "userA"
+    assert calls[0]["session_key"] == "hackme:2:%s:shared-session" % hashlib.sha256("cookie-session".encode()).hexdigest()[:16]
+
+
+def test_ai_agent_chat_rejects_actor_without_id(tmp_path, monkeypatch):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(db_path, {"username": "userA", "role": "user"}, settings={
+        "module_ai_agent_min_role": "user",
+        "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
+    })
+
+    def fake_chat(*_args, **_kwargs):
+        raise RuntimeError("should not be called")
+
+    monkeypatch.setattr("routes.ai_agent.ai_agent_chat", fake_chat)
+
+    response = app.test_client().post("/api/ai-agent/chat", json={
+        "session_id": "missing-id",
+        "messages": [{"role": "user", "content": "查一下任務"}],
+    })
+    payload = response.get_json()
+
+    assert response.status_code == 401
+    assert payload["ok"] is False
+    assert "無法辨識使用者身份" in payload["msg"]
 
 
 def test_ai_agent_chat_rejects_mock_reply(tmp_path, monkeypatch):

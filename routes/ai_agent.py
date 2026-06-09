@@ -1,5 +1,6 @@
 import json
 from datetime import datetime
+import hashlib
 import os
 import shutil
 
@@ -403,10 +404,20 @@ def register_ai_agent_routes(app, deps):
         finally:
             conn.close()
 
+    def _actor_session_binding():
+        raw = request.cookies.get("session_token") or ""
+        raw = str(raw or "").strip()
+        if not raw:
+            return ""
+        return hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()[:16]
+
     def _actor_or_401():
         actor = get_current_user_ctx()
         if not actor:
             return None, json_resp({"ok": False, "msg": "請先登入"}, 401)
+        user_id = int(_actor_value(actor, "id") or 0)
+        if user_id <= 0:
+            return None, json_resp({"ok": False, "msg": "無法辨識使用者身份"}, 401)
         settings = get_system_settings() or {}
         min_role = str(settings.get("module_ai_agent_min_role") or "user")
         actor_role = _coerce_role(actor)
@@ -500,7 +511,9 @@ def register_ai_agent_routes(app, deps):
         settings = get_system_settings() or {}
         user_id = _actor_value(actor, "id", 0)
         session_id = str(data.get("session_id") or "").strip()[:120]
-        session_key = f"hackme:{user_id}:{session_id or 'default'}"
+        binding = _actor_session_binding()
+        base_key = f"hackme:{user_id}:{session_id or 'default'}"
+        session_key = f"hackme:{user_id}:{binding}:{session_id or 'default'}" if binding else base_key
         try:
             result = ai_agent_chat(
                 settings,
