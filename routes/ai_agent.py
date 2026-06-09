@@ -11,6 +11,8 @@ from services.ai_agent.hermes import (
     ai_agent_capabilities,
     ai_agent_chat,
     ai_agent_health,
+    public_ai_agent_audit_status,
+    run_ai_agent_audit_scan,
     ai_agent_models,
     _is_mock_chat_reply,
     public_ai_agent_settings,
@@ -425,6 +427,25 @@ def register_ai_agent_routes(app, deps):
             return None, json_resp({"ok": False, "msg": "沒有 AI Agent 使用權限"}, 403)
         return actor, None
 
+    def _actor_is_manager_or_above(actor):
+        actor_role = _coerce_role(actor)
+        return role_rank(actor_role) >= role_rank("manager")
+
+    def _actor_is_super_admin(actor):
+        actor_role = _coerce_role(actor)
+        return role_rank(actor_role) >= role_rank("super_admin")
+
+    def _parse_bool(raw):
+        if isinstance(raw, bool):
+            return raw
+        if isinstance(raw, str):
+            value = raw.strip().lower()
+            if value in {"1", "true", "yes", "on", "y"}:
+                return True
+            if value in {"0", "false", "off", "no", "n"}:
+                return False
+        return None
+
     @app.route("/api/ai-agent/readonly", methods=["GET"])
     @require_csrf_safe
     def ai_agent_readonly():
@@ -469,11 +490,13 @@ def register_ai_agent_routes(app, deps):
         actor_scope = _actor_scope_payload(actor)
         settings = get_system_settings() or {}
         public = public_ai_agent_settings(settings, actor=actor)
+        audit_status = public_ai_agent_audit_status(settings)
         health = ai_agent_health(settings)
         capabilities = ai_agent_capabilities(settings) if health.get("ok") else {}
         return json_resp({
             "ok": True,
             "settings": public,
+            "audit": audit_status,
             "health": health,
             "capabilities": capabilities,
             "actor": {
@@ -495,6 +518,43 @@ def register_ai_agent_routes(app, deps):
         except AiAgentError as exc:
             return json_resp({"ok": False, "msg": str(exc), "status": exc.status, "payload": exc.payload}), 502
         return json_resp({"ok": True, "models": models})
+
+    @app.route("/api/ai-agent/audit-scan", methods=["GET", "POST"])
+    @require_csrf
+    def ai_agent_audit_scan_route():
+        actor, denied = _actor_or_401()
+        if denied:
+            return denied
+        if not _actor_is_super_admin(actor):
+            return json_resp({"ok": False, "msg": "只有最高管理者可執行 AI Agent 審計掃描"}), 403
+        settings = get_system_settings() or {}
+        force = _parse_bool(request.args.get("force")) if request.method == "GET" else _parse_bool(request.json.get("force")) if request.is_json else False
+        if force is None:
+            force = False
+        try:
+            scan = run_ai_agent_audit_scan(
+                settings,
+                get_db=get_db,
+                actor=actor,
+                force=force,
+                get_client_ip=get_client_ip,
+                get_ua=get_ua,
+                audit=audit,
+            )
+        except Exception as exc:
+            return json_resp({"ok": False, "msg": str(exc)}), 502
+        return json_resp({"ok": True, "scan": scan})
+
+    @app.route("/api/ai-agent/audit-status", methods=["GET"])
+    @require_csrf
+    def ai_agent_audit_status_route():
+        actor, denied = _actor_or_401()
+        if denied:
+            return denied
+        if not _actor_is_super_admin(actor):
+            return json_resp({"ok": False, "msg": "只有最高管理者可檢視 AI Agent 審計狀態"}), 403
+        settings = get_system_settings() or {}
+        return json_resp({"ok": True, "audit_status": public_ai_agent_audit_status(settings)})
 
     @app.route("/api/ai-agent/chat", methods=["POST"])
     @require_csrf

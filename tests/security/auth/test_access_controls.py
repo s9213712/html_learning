@@ -764,6 +764,55 @@ def test_ai_agent_settings_validate_url_and_key_shape():
     assert "ai_agent_task_prompt" not in state
 
 
+def test_ai_agent_audit_settings_are_configurable_and_validated():
+    app, state = _admin_app()
+    client = app.test_client()
+
+    saved = client.put(
+        "/api/admin/settings",
+        json={
+            "ai_agent_operation_mode": "readonly",
+            "ai_agent_allowed_models": "hermes-agent,stable-diffusion-xl-base-1.0",
+            "ai_agent_audit_interval_minutes": 8,
+            "ai_agent_audit_cpu_percent_threshold": 89,
+            "ai_agent_audit_ram_percent_threshold": 88,
+            "ai_agent_audit_disk_percent_threshold": 90,
+            "ai_agent_audit_ip_event_rate_threshold": 300,
+            "ai_agent_audit_ip_event_rate_window_minutes": 7,
+            "ai_agent_audit_security_event_rate_threshold": 140,
+            "ai_agent_audit_security_event_rate_window_minutes": 6,
+            "ai_agent_audit_auto_block_suspect_ip": True,
+            "ai_agent_audit_block_minutes": 45,
+            "ai_agent_audit_notify_root": False,
+        },
+    )
+    assert saved.status_code == 200, saved.get_json()
+    assert state["ai_agent_operation_mode"] == "readonly"
+    assert state["ai_agent_allowed_models"] == "hermes-agent,stable-diffusion-xl-base-1.0"
+    assert state["ai_agent_audit_interval_minutes"] == 8
+    assert state["ai_agent_audit_cpu_percent_threshold"] == 89
+    assert state["ai_agent_audit_ram_percent_threshold"] == 88
+    assert state["ai_agent_audit_disk_percent_threshold"] == 90
+    assert state["ai_agent_audit_ip_event_rate_threshold"] == 300
+    assert state["ai_agent_audit_ip_event_rate_window_minutes"] == 7
+    assert state["ai_agent_audit_security_event_rate_threshold"] == 140
+    assert state["ai_agent_audit_security_event_rate_window_minutes"] == 6
+    assert state["ai_agent_audit_auto_block_suspect_ip"] is True
+    assert state["ai_agent_audit_block_minutes"] == 45
+    assert state["ai_agent_audit_notify_root"] is False
+
+    payload = saved.get_json()["settings"]
+    assert payload["ai_agent_operation_mode"] == "readonly"
+    assert payload["ai_agent_allowed_models"] == "hermes-agent,stable-diffusion-xl-base-1.0"
+
+    assert client.put("/api/admin/settings", json={"ai_agent_operation_mode": "invalid"}).status_code == 400
+    assert client.put("/api/admin/settings", json={"ai_agent_allowed_models": ["hermes\nagent"]}).status_code == 400
+    assert client.put("/api/admin/settings", json={"ai_agent_audit_interval_minutes": 0}).status_code == 400
+    assert client.put("/api/admin/settings", json={"ai_agent_audit_cpu_percent_threshold": 101}).status_code == 400
+    assert client.put("/api/admin/settings", json={"ai_agent_audit_ip_event_rate_threshold": 10001}).status_code == 400
+    assert client.put("/api/admin/settings", json={"ai_agent_audit_auto_block_suspect_ip": "maybe"}).status_code == 400
+
+
 def test_root_can_configure_diffusers_backend_and_hf_token_write_only():
     app, state = _admin_app()
     client = app.test_client()

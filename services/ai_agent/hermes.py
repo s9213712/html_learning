@@ -1,6 +1,12 @@
 import json
 import os
 import re
+import sqlite3
+import threading
+from collections import Counter
+from datetime import datetime, timedelta
+import shutil
+from time import time
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 from urllib.parse import urljoin, urlparse
@@ -10,13 +16,39 @@ DEFAULT_AI_AGENT_API_BASE_URL = os.environ.get("HACKME_AI_AGENT_API_BASE_URL", "
 DEFAULT_AI_AGENT_MODEL = os.environ.get("HACKME_AI_AGENT_MODEL", "hermes-agent")
 DEFAULT_AI_AGENT_PROVIDER = "hermes"
 DEFAULT_AI_AGENT_PERSONA = "concise_helper"
+DEFAULT_AI_AGENT_OPERATION_MODE = "assist"
 MAX_AI_AGENT_IMAGE_DATA_URL_CHARS = 3 * 1024 * 1024
+AI_AGENT_AUDIT_INTERVAL_MINUTES_DEFAULT = 5
+AI_AGENT_AUDIT_INTERVAL_MINUTES_MAX = 60
+AI_AGENT_OPERATION_MODES = {"readonly", "assist", "write", "audit"}
+AI_AGENT_AUDIT_IP_EVENT_RATE_THRESHOLD_DEFAULT = 240
+AI_AGENT_AUDIT_IP_EVENT_RATE_WINDOW_MINUTES_DEFAULT = 5
+AI_AGENT_AUDIT_SECURITY_EVENT_RATE_THRESHOLD_DEFAULT = 120
+AI_AGENT_AUDIT_SECURITY_EVENT_RATE_WINDOW_MINUTES_DEFAULT = 5
+AI_AGENT_AUDIT_CPU_PERCENT_THRESHOLD_DEFAULT = 92
+AI_AGENT_AUDIT_RAM_PERCENT_THRESHOLD_DEFAULT = 92
+AI_AGENT_AUDIT_DISK_PERCENT_THRESHOLD_DEFAULT = 95
+AI_AGENT_AUDIT_AUTO_BLOCK_DEFAULT = False
+AI_AGENT_AUDIT_BLOCK_MINUTES_DEFAULT = 30
+AI_AGENT_AUDIT_NOTIFY_ROOT_DEFAULT = False
+AI_AGENT_AUDIT_IP_EVENT_RATE_MAX_PER_MIN = 10000
+AI_AGENT_AUDIT_SECURITY_EVENT_RATE_MAX_PER_MIN = 10000
 KNOWN_MOCK_CHAT_REPLIES = {
     "mockhermesresponse已收到你的請求",
     "mockhermesresponse已收到你的请求",
 }
 
-
+_AUDIT_SCAN_STATE = {
+    "audit": {
+        "at": 0.0,
+        "data": {},
+    },
+    "network_last": {
+        "at": 0.0,
+        "data": {},
+    }
+}
+_AUDIT_SCAN_LOCK = threading.Lock()
 def _compact_mock_text(value):
     text = str(value or "").strip().lower()
     if not text:
@@ -52,6 +84,85 @@ def _contains_mock_phrase(value):
                 return True
         return False
     return False
+
+
+def parse_int_setting(settings, key, default, minimum, maximum):
+    try:
+        value = int((settings or {}).get(key, default))
+    except Exception:
+        value = default
+    return max(minimum, min(maximum, value))
+
+
+def normalize_ai_agent_allowed_models(value):
+    if value is None:
+        return ""
+    if isinstance(value, (list, tuple, set)):
+        parts = [str(item or "").strip() for item in value]
+    else:
+        raw = str(value)
+        if "\n" in raw or "\r" in raw or "\t" in raw:
+            return None
+        parts = [part.strip() for part in str(value).replace("\n", ",").split(",")]
+    models = []
+    seen = set()
+    for part in parts:
+        if not part:
+            continue
+        if any(ch in part for ch in "\r\n\t"):
+            return None
+        model = part.strip()
+        if len(model) > 200:
+            return None
+        if model not in seen:
+            seen.add(model)
+            models.append(model)
+    return ",".join(models)
+
+
+def clear_ai_agent_audit_scan_state():
+    with _AUDIT_SCAN_LOCK:
+        _AUDIT_SCAN_STATE["audit"] = {"at": 0.0, "data": {}}
+        _AUDIT_SCAN_STATE["network_last"] = {"at": 0.0, "data": {}}
+
+
+def normalize_ai_agent_operation_mode(value):
+    raw = str(value or "").strip().lower()
+    if raw in AI_AGENT_OPERATION_MODES:
+        return raw
+    if raw in {"read_only", "read"}:
+        return "readonly"
+    if raw in {"write_candidate", "execution", "action"}:
+        return "write"
+    return None
+
+
+def normalize_ai_agent_audit_interval_minutes(value, *, default=None):
+    default = int(default if default is not None else AI_AGENT_AUDIT_INTERVAL_MINUTES_DEFAULT)
+    return parse_int_setting(
+        {"ai_agent_audit_interval_minutes": value},
+        "ai_agent_audit_interval_minutes",
+        default,
+        1,
+        AI_AGENT_AUDIT_INTERVAL_MINUTES_MAX,
+    )
+
+
+def normalize_ai_agent_audit_int(value, key, *, default, minimum, maximum):
+    return parse_int_setting({key: value}, key, default, minimum, maximum)
+
+
+def normalize_ai_agent_audit_bool(value, default):
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    raw = str(value).strip().lower()
+    if raw in {"1", "true", "on", "yes", "y"}:
+        return True
+    if raw in {"0", "false", "off", "no", "n", ""}:
+        return False
+    return bool(default)
 
 
 AI_AGENT_PERSONA_PRESETS = {
@@ -158,14 +269,6 @@ class AiAgentError(Exception):
         self.status = status
         self.payload = payload
         super().__init__(message)
-
-
-def parse_int_setting(settings, key, default, minimum, maximum):
-    try:
-        value = int((settings or {}).get(key, default))
-    except Exception:
-        value = default
-    return max(minimum, min(maximum, value))
 
 
 def normalize_ai_agent_api_base_url(value, *, allow_blank=True):
@@ -306,11 +409,187 @@ def _ai_agent_system_prompt(behavior, *, role="user", allow_tool_runs=False):
     )
 
 
+def _coerce_audit_settings(settings):
+    settings = settings or {}
+    return {
+        "operation_mode": normalize_ai_agent_operation_mode(settings.get("ai_agent_operation_mode")) or DEFAULT_AI_AGENT_OPERATION_MODE,
+        "allowed_models": normalize_ai_agent_allowed_models(settings.get("ai_agent_allowed_models")) or "",
+        "audit_interval_minutes": normalize_ai_agent_audit_interval_minutes(
+            settings.get("ai_agent_audit_interval_minutes"),
+            default=AI_AGENT_AUDIT_INTERVAL_MINUTES_DEFAULT,
+        ),
+        "audit_cpu_percent_threshold": normalize_ai_agent_audit_int(
+            settings.get("ai_agent_audit_cpu_percent_threshold"),
+            "ai_agent_audit_cpu_percent_threshold",
+            default=AI_AGENT_AUDIT_CPU_PERCENT_THRESHOLD_DEFAULT,
+            minimum=10,
+            maximum=100,
+        ),
+        "audit_ram_percent_threshold": normalize_ai_agent_audit_int(
+            settings.get("ai_agent_audit_ram_percent_threshold"),
+            "ai_agent_audit_ram_percent_threshold",
+            default=AI_AGENT_AUDIT_RAM_PERCENT_THRESHOLD_DEFAULT,
+            minimum=10,
+            maximum=100,
+        ),
+        "audit_disk_percent_threshold": normalize_ai_agent_audit_int(
+            settings.get("ai_agent_audit_disk_percent_threshold"),
+            "ai_agent_audit_disk_percent_threshold",
+            default=AI_AGENT_AUDIT_DISK_PERCENT_THRESHOLD_DEFAULT,
+            minimum=10,
+            maximum=100,
+        ),
+        "audit_ip_event_rate_threshold": normalize_ai_agent_audit_int(
+            settings.get("ai_agent_audit_ip_event_rate_threshold"),
+            "ai_agent_audit_ip_event_rate_threshold",
+            default=AI_AGENT_AUDIT_IP_EVENT_RATE_THRESHOLD_DEFAULT,
+            minimum=1,
+            maximum=10000,
+        ),
+        "audit_ip_event_rate_window_minutes": normalize_ai_agent_audit_int(
+            settings.get("ai_agent_audit_ip_event_rate_window_minutes"),
+            "ai_agent_audit_ip_event_rate_window_minutes",
+            default=AI_AGENT_AUDIT_IP_EVENT_RATE_WINDOW_MINUTES_DEFAULT,
+            minimum=1,
+            maximum=1440,
+        ),
+        "audit_security_event_rate_threshold": normalize_ai_agent_audit_int(
+            settings.get("ai_agent_audit_security_event_rate_threshold"),
+            "ai_agent_audit_security_event_rate_threshold",
+            default=AI_AGENT_AUDIT_SECURITY_EVENT_RATE_THRESHOLD_DEFAULT,
+            minimum=1,
+            maximum=10000,
+        ),
+        "audit_security_event_rate_window_minutes": normalize_ai_agent_audit_int(
+            settings.get("ai_agent_audit_security_event_rate_window_minutes"),
+            "ai_agent_audit_security_event_rate_window_minutes",
+            default=AI_AGENT_AUDIT_SECURITY_EVENT_RATE_WINDOW_MINUTES_DEFAULT,
+            minimum=1,
+            maximum=1440,
+        ),
+        "audit_auto_block_suspect_ip": normalize_ai_agent_audit_bool(
+            settings.get("ai_agent_audit_auto_block_suspect_ip"),
+            default=AI_AGENT_AUDIT_AUTO_BLOCK_DEFAULT,
+        ),
+        "audit_block_minutes": normalize_ai_agent_audit_int(
+            settings.get("ai_agent_audit_block_minutes"),
+            "ai_agent_audit_block_minutes",
+            default=AI_AGENT_AUDIT_BLOCK_MINUTES_DEFAULT,
+            minimum=1,
+            maximum=60 * 24 * 7,
+        ),
+        "audit_notify_root": normalize_ai_agent_audit_bool(
+            settings.get("ai_agent_audit_notify_root"),
+            default=AI_AGENT_AUDIT_NOTIFY_ROOT_DEFAULT,
+        ),
+    }
+
+
+def _safe_audit_timestamp(value, *, default_minutes=5):
+    try:
+        parsed = datetime.fromisoformat(str(value))
+        return parsed.isoformat()
+    except Exception:
+        return (datetime.now() - timedelta(minutes=default_minutes)).isoformat()
+
+
+def _safe_parse_iso(value):
+    try:
+        return datetime.fromisoformat(str(value))
+    except Exception:
+        return None
+
+
+def _extract_text_from_messages(messages):
+    pieces = []
+    for message in messages or []:
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            pieces.append(content)
+            continue
+        if isinstance(content, list):
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                if part.get("type") == "text":
+                    pieces.append(str(part.get("text") or ""))
+    return "\n".join(pieces)
+
+
+def _contains_audit_mode_prohibited_action(text):
+    sample = str(text or "").lower()
+    if not sample:
+        return False
+    blocked = (
+        "刪除",
+        "清除",
+        "移除",
+        "修改",
+        "改變",
+        "更新",
+        "上傳",
+        "下載",
+        "刪掉",
+        "封鎖",
+        "封鎖",
+        "擋",
+        "封掉",
+        "block",
+        "delete",
+        "remove",
+        "restart",
+        "kill",
+        "shutdown",
+        "關閉",
+        "開啟",
+        "start",
+        "stop",
+    )
+    for token in blocked:
+        if token in sample:
+            return True
+    return False
+
+
+def _table_exists(conn, table_name):
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+            (table_name,),
+        ).fetchone()
+        return bool(row)
+    except Exception:
+        return False
+
+
+def _safe_rows(conn, sql, params=()):
+    try:
+        return conn.execute(sql, params).fetchall()
+    except (sqlite3.OperationalError, sqlite3.DatabaseError):
+        return []
+
+
+def _row_get(row, key, default=None):
+    if row is None:
+        return default
+    try:
+        return row[key]
+    except Exception:
+        pass
+    try:
+        return dict(row).get(key, default)
+    except Exception:
+        return default
+
+
 def public_ai_agent_settings(settings, *, actor=None):
     settings = settings or {}
     key = str(settings.get("ai_agent_api_key") or "").strip()
     behavior = _normalize_ai_agent_behavior(settings)
     actor_role = normalize_ai_agent_role((actor or {}).get("role") if isinstance(actor, dict) else "user")
+    audit_settings = _coerce_audit_settings(settings)
     return {
         "provider": normalize_ai_agent_provider(settings.get("ai_agent_provider")) or DEFAULT_AI_AGENT_PROVIDER,
         "api_base_url": normalize_ai_agent_api_base_url(
@@ -323,6 +602,21 @@ def public_ai_agent_settings(settings, *, actor=None):
         "max_prompt_chars": parse_int_setting(settings, "ai_agent_max_prompt_chars", 20000, 1000, 200000),
         "allow_image_input": bool(settings.get("ai_agent_allow_image_input", True)),
         "allow_tool_runs": bool(settings.get("ai_agent_allow_tool_runs", False)),
+        "operation_mode": audit_settings["operation_mode"],
+        "allowed_models": audit_settings["allowed_models"],
+        "audit_interval_minutes": audit_settings["audit_interval_minutes"],
+        "audit_thresholds": {
+            "cpu_percent": audit_settings["audit_cpu_percent_threshold"],
+            "ram_percent": audit_settings["audit_ram_percent_threshold"],
+            "disk_percent": audit_settings["audit_disk_percent_threshold"],
+            "ip_event_rate_per_min": audit_settings["audit_ip_event_rate_threshold"],
+            "ip_event_rate_window_minutes": audit_settings["audit_ip_event_rate_window_minutes"],
+            "security_event_rate_per_min": audit_settings["audit_security_event_rate_threshold"],
+            "security_event_rate_window_minutes": audit_settings["audit_security_event_rate_window_minutes"],
+            "auto_block_suspect_ip": audit_settings["audit_auto_block_suspect_ip"],
+            "auto_block_minutes": audit_settings["audit_block_minutes"],
+            "notify_root": audit_settings["audit_notify_root"],
+        },
         "role": actor_role,
         "scope": _agent_role_scope(actor_role),
         "persona": behavior["persona"],
@@ -392,6 +686,450 @@ def _json_request(settings, method, path, payload=None, *, session_key="", timeo
         raise AiAgentError(f"AI Agent backend 回傳不是有效 JSON：{exc}") from exc
 
 
+def _safe_percent(value):
+    try:
+        number = float(value)
+        if number != number:
+            return None
+        return max(0.0, min(100.0, number))
+    except Exception:
+        return None
+
+
+def _read_meminfo_int(key):
+    try:
+        with open("/proc/meminfo", "r", encoding="utf-8") as stream:
+            for line in stream:
+                if not line.startswith(f"{key}:"):
+                    continue
+                parts = line.split()
+                if len(parts) >= 2:
+                    return int(parts[1]) * 1024
+    except Exception:
+        return None
+    return None
+
+
+def _snapshot_resources():
+    cores = os.cpu_count() or 1
+    try:
+        load_avg = list(os.getloadavg())
+    except Exception:
+        load_avg = None
+    total_ram = _read_meminfo_int("MemTotal")
+    available_ram = _read_meminfo_int("MemAvailable")
+    if total_ram is None or available_ram is None:
+        ram_percent = None
+    else:
+        used_ram = max(0, total_ram - available_ram)
+        ram_percent = _safe_percent((used_ram / float(total_ram)) * 100.0)
+    try:
+        disk = shutil.disk_usage(".")
+        disk_percent = _safe_percent((disk.used / max(1, disk.total)) * 100.0)
+    except Exception:
+        disk = None
+        disk_percent = None
+    cpu_percent = None
+    if load_avg:
+        cpu_percent = _safe_percent((float(load_avg[0]) / max(1, cores)) * 100.0)
+    return {
+        "sampled_at": datetime.now().replace(microsecond=0).isoformat(),
+        "cpu": {
+            "cores": cores,
+            "percent": cpu_percent,
+            "load_avg": load_avg,
+        },
+        "ram": {
+            "total": total_ram or 0,
+            "available": available_ram or 0,
+            "percent": ram_percent,
+        },
+        "disk": {
+            "total": disk.total if disk else 0,
+            "used": disk.used if disk else 0,
+            "free": disk.free if disk else 0,
+            "percent": disk_percent,
+        },
+    }
+
+
+def _read_proc_net_dev():
+    total = {
+        "sampled_at": datetime.now().replace(microsecond=0).isoformat(),
+        "raw_delta_seconds": 0.0,
+        "interfaces": {},
+        "total_rx_bytes": 0,
+        "total_tx_bytes": 0,
+    }
+    try:
+        with open("/proc/net/dev", "r", encoding="utf-8") as stream:
+            lines = stream.readlines()
+    except Exception:
+        return total
+
+    for line in lines:
+        if ":" not in line:
+            continue
+        left, right = line.split(":", 1)
+        iface = left.strip()
+        if not iface or iface.lower() == "lo":
+            continue
+        parts = right.split()
+        if len(parts) < 16:
+            continue
+        try:
+            rx_bytes = int(parts[0])
+            tx_bytes = int(parts[8])
+            rx_packets = int(parts[1])
+            tx_packets = int(parts[9])
+        except Exception:
+            continue
+        total["interfaces"][iface] = {
+            "rx_bytes": rx_bytes,
+            "tx_bytes": tx_bytes,
+            "rx_packets": rx_packets,
+            "tx_packets": tx_packets,
+        }
+        total["total_rx_bytes"] += max(0, rx_bytes)
+        total["total_tx_bytes"] += max(0, tx_bytes)
+    return total
+
+
+def _snapshot_network_delta():
+    now = _read_proc_net_dev()
+    state = _AUDIT_SCAN_STATE.get("network_last", {})
+    prev = state.get("data", {})
+    prev_at = state.get("at", 0.0)
+    now_ts = time()
+    delta = {
+        "sampled_at": now["sampled_at"],
+        "window_seconds": 0.0,
+        "interfaces": {},
+        "total_rx_bytes_delta": 0,
+        "total_tx_bytes_delta": 0,
+        "total_kbps": 0.0,
+    }
+    if not prev:
+        _AUDIT_SCAN_STATE["network_last"] = {"at": now_ts, "data": now}
+        return delta
+
+    prev_ts = time()
+    try:
+        prev_ts = datetime.fromisoformat(prev.get("sampled_at", now["sampled_at"])).timestamp()
+    except Exception:
+        prev_ts = prev_at
+    window = max(1.0, now_ts - prev_ts)
+    delta["window_seconds"] = window
+
+    prev_by_iface = prev.get("interfaces", {})
+    for iface, iface_data in now.get("interfaces", {}).items():
+        prior = prev_by_iface.get(iface, {})
+        rx = max(0, int(iface_data.get("rx_bytes", 0)) - int(prior.get("rx_bytes", 0)))
+        tx = max(0, int(iface_data.get("tx_bytes", 0)) - int(prior.get("tx_bytes", 0)))
+        if rx < 0 or tx < 0:
+            rx = max(0, rx)
+            tx = max(0, tx)
+        kbps = (rx + tx) / max(1.0, window) / 1024
+        if kbps >= 1:
+            delta["interfaces"][iface] = {
+                "rx_delta": rx,
+                "tx_delta": tx,
+                "kbps": round(kbps, 3),
+            }
+            delta["total_rx_bytes_delta"] += rx
+            delta["total_tx_bytes_delta"] += tx
+
+    total_bytes = delta["total_rx_bytes_delta"] + delta["total_tx_bytes_delta"]
+    delta["total_kbps"] = round((total_bytes / max(1.0, window)) / 1024, 3)
+    _AUDIT_SCAN_STATE["network_last"] = {"at": now_ts, "data": now}
+    return delta
+
+
+def _collect_security_samples(conn, *, since_iso):
+    result = {
+        "security_events_total": 0,
+        "security_events": [],
+        "secure_audit_total": 0,
+        "secure_audit": [],
+    }
+    if _table_exists(conn, "security_events"):
+        result["security_events"] = _safe_rows(
+            conn,
+            "SELECT event_type, ip_address, target_user, detail, created_at "
+            "FROM security_events WHERE created_at>=? ORDER BY id DESC LIMIT 2000",
+            (since_iso,),
+        )
+        result["security_events_total"] = len(result["security_events"])
+    if _table_exists(conn, "secure_audit"):
+        result["secure_audit"] = _safe_rows(
+            conn,
+            "SELECT ts, action, ip, user, success, detail FROM secure_audit WHERE ts>=? ORDER BY id DESC LIMIT 2000",
+            (since_iso,),
+        )
+        result["secure_audit_total"] = len(result["secure_audit"])
+    return result
+
+
+def run_ai_agent_audit_scan(settings, *, get_db, actor=None, force=False, get_client_ip=None, get_ua=None, audit=None):
+    settings = settings or {}
+    actor = actor or {}
+    audit_settings = _coerce_audit_settings(settings)
+    interval_seconds = max(60, int(audit_settings["audit_interval_minutes"]) * 60)
+    now_ts = time()
+
+    with _AUDIT_SCAN_LOCK:
+        cached = _AUDIT_SCAN_STATE.get("audit", {})
+        last_at = float(cached.get("at") or 0.0)
+        if (not force) and last_at and (now_ts - last_at) < interval_seconds and cached.get("data"):
+            cached_payload = dict(cached["data"])
+            cached_payload["cached"] = True
+            cached_payload["cache_expires_at"] = datetime.fromtimestamp(last_at + interval_seconds).replace(microsecond=0).isoformat()
+            return cached_payload
+
+    actor_name = str((actor or {}).get("username") or "").strip()
+    actor_role = normalize_ai_agent_role((actor or {}).get("role") if isinstance(actor, dict) else "user")
+
+    ip_window_minutes = int(audit_settings["audit_ip_event_rate_window_minutes"])
+    security_window_minutes = int(audit_settings["audit_security_event_rate_window_minutes"])
+    window_minutes = max(ip_window_minutes, security_window_minutes)
+
+    scan_started = datetime.now().replace(microsecond=0).isoformat()
+    since_iso = _safe_audit_timestamp(datetime.now() - timedelta(minutes=window_minutes), default_minutes=window_minutes)
+    ip_window_start = _safe_parse_iso(scan_started) - timedelta(minutes=ip_window_minutes)
+    security_window_start = _safe_parse_iso(scan_started) - timedelta(minutes=security_window_minutes)
+
+    conn = get_db()
+    try:
+        samples = _collect_security_samples(conn, since_iso=since_iso)
+    finally:
+        conn.close()
+
+    security_rows = []
+    for row in samples.get("security_events", []):
+        sample_ts = _safe_parse_iso(_row_get(row, "created_at"))
+        if sample_ts is None:
+            continue
+        if security_window_start is None or sample_ts >= security_window_start:
+            security_rows.append(row)
+
+    request_rows = []
+    for row in samples.get("secure_audit", []):
+        sample_ts = _safe_parse_iso(_row_get(row, "ts"))
+        if sample_ts is None:
+            continue
+        if ip_window_start is None or sample_ts >= ip_window_start:
+            request_rows.append(row)
+
+    resource_snapshot = _snapshot_resources()
+    network_delta = _snapshot_network_delta()
+
+    security_type_counts = Counter()
+    security_ip_counts = Counter()
+    request_ip_counts = Counter()
+    request_action_counts = Counter()
+
+    for row in security_rows:
+        event_type = str(_row_get(row, "event_type") or "unknown").strip()
+        ip = str(_row_get(row, "ip_address") or "").strip()
+        security_type_counts[event_type] += 1
+        if ip and ip != "-":
+            security_ip_counts[ip] += 1
+
+    for row in request_rows:
+        ip = str(_row_get(row, "ip") or "").strip()
+        action = str(_row_get(row, "action") or "request").strip()
+        request_ip_counts[ip] += 1 if ip and ip != "-" else 0
+        request_action_counts[action] += 1
+
+    top_request_ips = [{"ip": ip, "count": count} for ip, count in request_ip_counts.most_common(5)]
+    top_security_ips = [{"ip": ip, "count": count} for ip, count in security_ip_counts.most_common(5)]
+    top_security_event_types = [{"type": key, "count": count} for key, count in security_type_counts.most_common(20)]
+
+    anomalies = []
+    recommendations = []
+    interventions = []
+    notifications = []
+
+    def add_anomaly(code, severity, message, details):
+        anomalies.append({
+            "code": code,
+            "severity": severity,
+            "message": message,
+            "details": details or {},
+        })
+
+    cpu_percent = resource_snapshot["cpu"].get("percent")
+    ram_percent = resource_snapshot["ram"].get("percent")
+    disk_percent = resource_snapshot["disk"].get("percent")
+
+    if cpu_percent is not None and cpu_percent >= audit_settings["audit_cpu_percent_threshold"]:
+        sev = "alert" if cpu_percent >= 100 else "warn"
+        add_anomaly(
+            "resource.cpu.threshold_exceeded",
+            sev,
+            f"CPU 使用率偏高：{cpu_percent:.1f}%（阈值 {audit_settings['audit_cpu_percent_threshold']}%）",
+            {"cpu_percent": cpu_percent, "threshold": audit_settings["audit_cpu_percent_threshold"]},
+        )
+        recommendations.append("請檢查 ComfyUI 任務佔用、下載高併發或長時間 blocking 佇列。")
+    if ram_percent is not None and ram_percent >= audit_settings["audit_ram_percent_threshold"]:
+        sev = "alert" if ram_percent >= 100 else "warn"
+        add_anomaly(
+            "resource.ram.threshold_exceeded",
+            sev,
+            f"記憶體使用率偏高：{ram_percent:.1f}%（阈值 {audit_settings['audit_ram_percent_threshold']}%）",
+            {"ram_percent": ram_percent, "threshold": audit_settings["audit_ram_percent_threshold"]},
+        )
+        recommendations.append("請檢查長留任 job、模型加載與下載暫存清理是否正常。")
+    if disk_percent is not None and disk_percent >= audit_settings["audit_disk_percent_threshold"]:
+        sev = "alert" if disk_percent >= 100 else "warn"
+        add_anomaly(
+            "resource.disk.threshold_exceeded",
+            sev,
+            f"磁碟使用率偏高：{disk_percent:.1f}%（阈值 {audit_settings['audit_disk_percent_threshold']}%）",
+            {"disk_percent": disk_percent, "threshold": audit_settings["audit_disk_percent_threshold"]},
+        )
+        recommendations.append("請檢查臨時輸出、日誌與下載殘留檔是否需要清理。")
+
+    ip_threshold = int(audit_settings["audit_ip_event_rate_threshold"])
+    ip_rate_window = int(audit_settings["audit_ip_event_rate_window_minutes"])
+    ip_threshold_count = max(1, int(ip_threshold * ip_rate_window))
+    for item in top_request_ips:
+        if item["count"] >= ip_threshold_count:
+            rate = item["count"] / max(1, ip_rate_window)
+            sev = "alert" if item["count"] >= ip_threshold_count * 2 else "warn"
+            add_anomaly(
+                "security.request_rate_per_ip",
+                sev,
+                f"IP {item['ip']} 在 {ip_rate_window} 分鐘請求筆數偏高（{item['count']}）",
+                {"ip": item["ip"], "count": item["count"], "window_minutes": ip_rate_window},
+            )
+            if audit_settings["audit_auto_block_suspect_ip"]:
+                try:
+                    from services.security.events import block_ip
+
+                    block_ip(item["ip"], minutes=int(audit_settings["audit_block_minutes"]), reason="AI Agent 審計異常請求")
+                    interventions.append({
+                        "type": "block_ip",
+                        "ip": item["ip"],
+                        "minutes": int(audit_settings["audit_block_minutes"]),
+                        "status": "success",
+                        "reason": "請求速率異常",
+                    })
+                    if audit:
+                        audit("AI_AGENT_AUDIT_BLOCK_IP", get_client_ip() if callable(get_client_ip) else "-", actor_name, ua=get_ua() if callable(get_ua) else "", detail=f"ip={item['ip']} count={item['count']}")
+                except Exception as exc:
+                    interventions.append({
+                        "type": "block_ip",
+                        "ip": item["ip"],
+                        "minutes": int(audit_settings["audit_block_minutes"]),
+                        "status": "failed",
+                        "reason": str(exc),
+                    })
+            recommendations.append(f"考慮限流或封鎖來源 IP {item['ip']}。")
+
+    security_threshold = int(audit_settings["audit_security_event_rate_threshold"])
+    security_rate_window = int(audit_settings["audit_security_event_rate_window_minutes"])
+    security_event_count = len(security_rows)
+    security_threshold_count = max(1, int(security_threshold * security_rate_window))
+    if security_event_count >= security_threshold_count:
+        sev = "alert" if security_event_count >= security_threshold_count * 2 else "warn"
+        add_anomaly(
+            "security.security_event_rate",
+            sev,
+            f"近期安全事件偏多（{security_event_count}）",
+            {"count": security_event_count, "threshold": security_threshold, "window_minutes": security_rate_window},
+        )
+        recommendations.append("請檢視 security_events、login/fail 及 rate_limit 類型事件的來源IP是否異常。")
+
+    if network_delta.get("total_kbps", 0.0) >= 512000:
+        add_anomaly(
+            "network.traffic_spike",
+            "warn",
+            f"網路傳輸速率較高：{network_delta.get('total_kbps', 0)} KB/s",
+            {
+                "total_kbps": network_delta.get("total_kbps", 0),
+                "window_seconds": network_delta.get("window_seconds", 0),
+            },
+        )
+        recommendations.append("請檢查是否有大量下載/大檔輸出或流量放大來源。")
+
+    status = "ok"
+    for item in anomalies:
+        if item["severity"] == "alert":
+            status = "alert"
+            break
+    if status != "alert" and any(item["severity"] == "warn" for item in anomalies):
+        status = "warn"
+
+    if audit_settings["audit_notify_root"] and status != "ok":
+        notifications.append({
+            "target": "root",
+            "level": status,
+            "message": "AI Agent 審計發現異常",
+            "details": {
+                "anomaly_count": len(anomalies),
+                "status": status,
+            },
+        })
+
+    result = {
+        "status": status,
+        "scanned_at": scan_started,
+        "cached": False,
+        "actor": {
+            "id": int((actor or {}).get("id") or 0),
+            "username": actor_name,
+            "role": actor_role,
+        },
+        "settings": {
+            "operation_mode": audit_settings["operation_mode"],
+            "allowed_models": audit_settings["allowed_models"],
+            "audit_interval_minutes": audit_settings["audit_interval_minutes"],
+            "audit_thresholds": {
+                "ip_event_rate_threshold_per_min": audit_settings["audit_ip_event_rate_threshold"],
+                "ip_event_rate_window_minutes": audit_settings["audit_ip_event_rate_window_minutes"],
+                "security_event_rate_threshold_per_min": audit_settings["audit_security_event_rate_threshold"],
+                "security_event_rate_window_minutes": audit_settings["audit_security_event_rate_window_minutes"],
+                "resource_cpu_threshold": audit_settings["audit_cpu_percent_threshold"],
+                "resource_ram_threshold": audit_settings["audit_ram_percent_threshold"],
+                "resource_disk_threshold": audit_settings["audit_disk_percent_threshold"],
+                "auto_block_suspect_ip": audit_settings["audit_auto_block_suspect_ip"],
+                "auto_block_minutes": audit_settings["audit_block_minutes"],
+                "notify_root": audit_settings["audit_notify_root"],
+            },
+        },
+        "window": {
+            "minutes": window_minutes,
+            "start_at": since_iso,
+            "end_at": scan_started,
+        },
+        "resources": resource_snapshot,
+        "network": network_delta,
+        "aggregates": {
+            "security_events_total": samples["security_events_total"],
+            "secure_audit_total": samples["secure_audit_total"],
+            "security_event_types": top_security_event_types,
+            "request_ips": top_request_ips,
+            "security_ips": top_security_ips,
+            "request_actions": [{"action": action, "count": count} for action, count in request_action_counts.most_common(10)],
+        },
+        "anomalies": anomalies,
+        "interventions": interventions,
+        "recommendations": recommendations,
+        "notifications": notifications,
+        "raw": {
+            "sample_count": samples["security_events_total"] + samples["secure_audit_total"],
+        },
+    }
+
+    with _AUDIT_SCAN_LOCK:
+        _AUDIT_SCAN_STATE["audit"] = {
+            "at": now_ts,
+            "data": result,
+        }
+    return result
+
+
 def ai_agent_health(settings):
     base_url = _backend_base_url(settings)
     parsed = urlparse(base_url)
@@ -424,6 +1162,74 @@ def ai_agent_health(settings):
             continue
 
     return {"ok": False, "url": urls[-1] if urls else base_url, "msg": last_error}
+
+
+def get_ai_agent_audit_last_scan():
+    with _AUDIT_SCAN_LOCK:
+        last = _AUDIT_SCAN_STATE.get("audit", {})
+        payload = last.get("data")
+        if isinstance(payload, dict):
+            payload = dict(payload)
+        else:
+            payload = {}
+        return {
+            "last_scanned_at_ts": float(last.get("at") or 0.0),
+            "has_result": bool(payload),
+            "scan": payload,
+        }
+
+
+def _safe_datetime_from_timestamp(ts):
+    try:
+        return datetime.fromtimestamp(float(ts)).replace(microsecond=0).isoformat()
+    except Exception:
+        return ""
+
+
+def public_ai_agent_audit_status(settings):
+    settings = settings or {}
+    audit_settings = _coerce_audit_settings(settings)
+    interval_minutes = int(audit_settings["audit_interval_minutes"])
+    last_scan = get_ai_agent_audit_last_scan()
+    at_ts = float(last_scan.get("last_scanned_at_ts") or 0.0)
+    next_due_ts = at_ts + max(1.0, interval_minutes * 60.0) if at_ts > 0 else 0.0
+    summary = {}
+    scan = last_scan.get("scan") or {}
+    if scan:
+        summary = {
+            "status": scan.get("status") or "unknown",
+            "scanned_at": scan.get("scanned_at"),
+            "anomaly_count": len(scan.get("anomalies") or []),
+            "intervention_count": len(scan.get("interventions") or []),
+            "notification_count": len(scan.get("notifications") or []),
+            "cache_expires_at": scan.get("cache_expires_at"),
+        }
+    return {
+        "mode": audit_settings["operation_mode"],
+        "scheduler": {
+            "enabled": audit_settings["operation_mode"] == "audit",
+            "interval_minutes": interval_minutes,
+            "last_scanned_at": _safe_datetime_from_timestamp(at_ts),
+            "next_due_at": _safe_datetime_from_timestamp(next_due_ts),
+            "has_scan": last_scan.get("has_result"),
+        },
+        "summary": summary,
+        "scan": scan,
+        "settings": {
+            "audit_thresholds": {
+                "cpu_percent": audit_settings["audit_cpu_percent_threshold"],
+                "ram_percent": audit_settings["audit_ram_percent_threshold"],
+                "disk_percent": audit_settings["audit_disk_percent_threshold"],
+                "ip_event_rate_threshold_per_min": audit_settings["audit_ip_event_rate_threshold"],
+                "ip_event_rate_window_minutes": audit_settings["audit_ip_event_rate_window_minutes"],
+                "security_event_rate_threshold_per_min": audit_settings["audit_security_event_rate_threshold"],
+                "security_event_rate_window_minutes": audit_settings["audit_security_event_rate_window_minutes"],
+                "auto_block_suspect_ip": audit_settings["audit_auto_block_suspect_ip"],
+                "auto_block_minutes": audit_settings["audit_block_minutes"],
+                "notify_root": audit_settings["audit_notify_root"],
+            }
+        },
+    }
 
 
 def ai_agent_capabilities(settings):
@@ -521,6 +1327,13 @@ def ai_agent_chat(settings, *, messages=None, prompt="", image_data_url="", mode
         raise AiAgentError("請輸入訊息")
     behavior = _normalize_ai_agent_behavior(settings)
     actor_role = normalize_ai_agent_role((actor or {}).get("role") if isinstance(actor, dict) else "user")
+
+    if public["operation_mode"] == "readonly" and _contains_audit_mode_prohibited_action(_extract_text_from_messages(normalized_messages)):
+        raise AiAgentError("AI Agent 目前為唯讀模式，僅提供查詢與排查建議，不接受操作類指令。")
+
+    if public["operation_mode"] == "audit" and actor_role not in {"manager", "super_admin"}:
+        raise AiAgentError("AI Agent 目前為審計模式，僅管理者可執行。")
+
     system_prompt = _ai_agent_system_prompt(
         behavior,
         role=actor_role,
@@ -532,6 +1345,9 @@ def ai_agent_chat(settings, *, messages=None, prompt="", image_data_url="", mode
     if _message_text_length(sanitized_messages[1:]) > max_prompt_chars:
         raise AiAgentError(f"訊息內容超過上限 {max_prompt_chars} 字")
     model_name = normalize_ai_agent_model(model) or public["model"] or DEFAULT_AI_AGENT_MODEL
+    allowed_models = [item for item in str(public.get("allowed_models") or "").split(",") if item]
+    if allowed_models and model_name not in allowed_models:
+        raise AiAgentError("model 不在允許清單，請改用允許的模型")
     payload = {
         "model": model_name,
         "messages": sanitized_messages,

@@ -10,9 +10,11 @@ from flask import request
 from services.platform.settings import DangerousChangeBlocked, FEATURE_FLAG_KEYS, enforce_dangerous_confirm
 from services.ai_agent.hermes import (
     normalize_ai_agent_api_base_url,
+    normalize_ai_agent_allowed_models,
     normalize_ai_agent_model,
     normalize_ai_agent_provider,
     normalize_ai_agent_persona,
+    normalize_ai_agent_operation_mode,
     validate_ai_agent_api_key,
 )
 from services.platform.settings_metadata import (
@@ -376,6 +378,16 @@ def register_system_admin_settings_routes(app, ctx):
             if model is None:
                 return json_resp({"ok":False,"msg":"ai_agent_model 不可包含換行或控制字元，長度不可超過 200"}), 400
             data["ai_agent_model"] = model
+        if "ai_agent_operation_mode" in data:
+            operation_mode = normalize_ai_agent_operation_mode(data.get("ai_agent_operation_mode"))
+            if operation_mode is None:
+                return json_resp({"ok":False,"msg":"ai_agent_operation_mode 必須是 readonly、assist、write、audit"}), 400
+            data["ai_agent_operation_mode"] = operation_mode
+        if "ai_agent_allowed_models" in data:
+            allowed_models = normalize_ai_agent_allowed_models(data.get("ai_agent_allowed_models"))
+            if allowed_models is None:
+                return json_resp({"ok":False,"msg":"ai_agent_allowed_models 只能是逗號分隔模型名稱，不可包含換行或過長項目"}), 400
+            data["ai_agent_allowed_models"] = allowed_models
         if "ai_agent_persona" in data:
             persona = normalize_ai_agent_persona(data.get("ai_agent_persona"))
             if persona is None:
@@ -396,6 +408,61 @@ def register_system_admin_settings_routes(app, ctx):
             if parsed is None:
                 return json_resp({"ok":False,"msg":"ai_agent_task_prompt 必須是布林值 true/false"}), 400
             data["ai_agent_task_prompt"] = parsed
+        if "ai_agent_audit_interval_minutes" in data:
+            audit_interval_minutes = parse_int_in_range(data.get("ai_agent_audit_interval_minutes"), 1, 60)
+            if audit_interval_minutes is None:
+                return json_resp({"ok":False,"msg":"ai_agent_audit_interval_minutes 必須是 1-60 分鐘"}), 400
+            data["ai_agent_audit_interval_minutes"] = audit_interval_minutes
+        if "ai_agent_audit_cpu_percent_threshold" in data:
+            threshold = parse_int_in_range(data.get("ai_agent_audit_cpu_percent_threshold"), 10, 100)
+            if threshold is None:
+                return json_resp({"ok":False,"msg":"ai_agent_audit_cpu_percent_threshold 必須是 10-100"}), 400
+            data["ai_agent_audit_cpu_percent_threshold"] = threshold
+        if "ai_agent_audit_ram_percent_threshold" in data:
+            threshold = parse_int_in_range(data.get("ai_agent_audit_ram_percent_threshold"), 10, 100)
+            if threshold is None:
+                return json_resp({"ok":False,"msg":"ai_agent_audit_ram_percent_threshold 必須是 10-100"}), 400
+            data["ai_agent_audit_ram_percent_threshold"] = threshold
+        if "ai_agent_audit_disk_percent_threshold" in data:
+            threshold = parse_int_in_range(data.get("ai_agent_audit_disk_percent_threshold"), 10, 100)
+            if threshold is None:
+                return json_resp({"ok":False,"msg":"ai_agent_audit_disk_percent_threshold 必須是 10-100"}), 400
+            data["ai_agent_audit_disk_percent_threshold"] = threshold
+        if "ai_agent_audit_ip_event_rate_threshold" in data:
+            threshold = parse_int_in_range(data.get("ai_agent_audit_ip_event_rate_threshold"), 1, 10000)
+            if threshold is None:
+                return json_resp({"ok":False,"msg":"ai_agent_audit_ip_event_rate_threshold 必須是 1-10000"}), 400
+            data["ai_agent_audit_ip_event_rate_threshold"] = threshold
+        if "ai_agent_audit_ip_event_rate_window_minutes" in data:
+            window = parse_int_in_range(data.get("ai_agent_audit_ip_event_rate_window_minutes"), 1, 1440)
+            if window is None:
+                return json_resp({"ok":False,"msg":"ai_agent_audit_ip_event_rate_window_minutes 必須是 1-1440"}), 400
+            data["ai_agent_audit_ip_event_rate_window_minutes"] = window
+        if "ai_agent_audit_security_event_rate_threshold" in data:
+            threshold = parse_int_in_range(data.get("ai_agent_audit_security_event_rate_threshold"), 1, 10000)
+            if threshold is None:
+                return json_resp({"ok":False,"msg":"ai_agent_audit_security_event_rate_threshold 必須是 1-10000"}), 400
+            data["ai_agent_audit_security_event_rate_threshold"] = threshold
+        if "ai_agent_audit_security_event_rate_window_minutes" in data:
+            window = parse_int_in_range(data.get("ai_agent_audit_security_event_rate_window_minutes"), 1, 1440)
+            if window is None:
+                return json_resp({"ok":False,"msg":"ai_agent_audit_security_event_rate_window_minutes 必須是 1-1440"}), 400
+            data["ai_agent_audit_security_event_rate_window_minutes"] = window
+        if "ai_agent_audit_auto_block_suspect_ip" in data:
+            parsed = parse_strict_bool(data.get("ai_agent_audit_auto_block_suspect_ip"))
+            if parsed is None:
+                return json_resp({"ok":False,"msg":"ai_agent_audit_auto_block_suspect_ip 必須是布林值 true/false"}), 400
+            data["ai_agent_audit_auto_block_suspect_ip"] = parsed
+        if "ai_agent_audit_block_minutes" in data:
+            minutes = parse_int_in_range(data.get("ai_agent_audit_block_minutes"), 1, 60 * 24 * 7)
+            if minutes is None:
+                return json_resp({"ok":False,"msg":"ai_agent_audit_block_minutes 必須是 1-10080"}), 400
+            data["ai_agent_audit_block_minutes"] = minutes
+        if "ai_agent_audit_notify_root" in data:
+            parsed = parse_strict_bool(data.get("ai_agent_audit_notify_root"))
+            if parsed is None:
+                return json_resp({"ok":False,"msg":"ai_agent_audit_notify_root 必須是布林值 true/false"}), 400
+            data["ai_agent_audit_notify_root"] = parsed
         if "ai_agent_request_timeout_seconds" in data:
             timeout_seconds = parse_int_in_range(data.get("ai_agent_request_timeout_seconds"), 5, 600)
             if timeout_seconds is None:

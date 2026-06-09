@@ -205,6 +205,7 @@ from services.server.startup import (
     measure_backtest_capacity_if_needed as measure_backtest_capacity_if_needed_helper,
     run_server_main as run_server_main_helper,
     should_start_import_mode_workers,
+    start_ai_agent_audit_worker as start_ai_agent_audit_worker_helper,
     start_daily_snapshot_worker as start_daily_snapshot_worker_helper,
     start_points_chain_block_worker as start_points_chain_block_worker_helper,
     start_storage_maintenance_worker as start_storage_maintenance_worker_helper,
@@ -243,6 +244,7 @@ from services.snapshots.schema import ensure_control_db_schema
 from services.storage.maintenance import run_storage_maintenance_if_due
 from services.storage.paths import validate_storage_root
 from services.security.upload_security import ensure_upload_security_schema
+from services.system.notifications import create_root_notification_if_enabled
 from services.trading.trading_engine import TradingEngineService, ensure_trading_schema
 from services.trading.streams import TradingPriceStreamHub
 
@@ -1737,6 +1739,75 @@ def start_storage_maintenance_worker(shutdown_event=None):
     )
 
 
+def _notify_root_from_ai_agent_audit(scan):
+    if not isinstance(scan, dict):
+        return 0
+    status = str(scan.get("status") or "ok").lower()
+    if status == "ok":
+        return 0
+    actor_user_ids = []
+    conn = None
+    try:
+        conn = get_db()
+        actor_user_ids = []
+        rows = conn.execute("SELECT id FROM users WHERE username='root'").fetchall()
+        for row in rows:
+            try:
+                actor_user_ids.append(int(row[0]))
+            except Exception:
+                continue
+        message_lines = [
+            str(item.get("message") or "").strip()
+            for item in (scan.get("anomalies") or [])[:3]
+            if str(item.get("message") or "").strip()
+        ]
+        title = "AI Agent 僅審計異常"
+        body = (
+            f"時間：{scan.get('scanned_at', '-')}\n"
+            f"狀態：{status}\n"
+            f"異常數：{len(scan.get('anomalies') or 0)}\n"
+            f"建議處置：{len(scan.get('interventions') or 0)}\n"
+        )
+        if message_lines:
+            body += "異常樣本：\n" + "\n".join(f"- {line}" for line in message_lines)
+        created = 0
+        for actor_user_id in actor_user_ids:
+            payload = {
+                "user_id": actor_user_id,
+                "type": "AI_AGENT_AUDIT_ALERT",
+                "title": title,
+                "body": body[:1000],
+                "link": "/security",
+            }
+            if create_root_notification_if_enabled(conn, **payload):
+                created += 1
+        conn.commit()
+        return created
+    except Exception:
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        return 0
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def start_ai_agent_audit_worker(shutdown_event=None):
+    return start_ai_agent_audit_worker_helper(
+        get_system_settings=get_system_settings,
+        get_db=get_db,
+        audit=audit,
+        notify_root=_notify_root_from_ai_agent_audit,
+        shutdown_event=shutdown_event or SERVER_SHUTDOWN_EVENT,
+    )
+
+
 def start_points_chain_block_worker(shutdown_event=None):
     return start_points_chain_block_worker_helper(
         points_service=points_service,
@@ -1829,6 +1900,7 @@ def _start_import_mode_workers_with_leadership_locked():
         ("daily_snapshot", start_daily_snapshot_worker),
         ("storage_maintenance", start_storage_maintenance_worker),
         ("points_chain_block", start_points_chain_block_worker),
+        ("ai_agent_audit", start_ai_agent_audit_worker),
         ("trading_background", start_trading_background_worker),
     ):
         if _start_import_mode_worker(label, starter, workers):
@@ -1975,6 +2047,7 @@ if __name__ == "__main__":
         start_daily_snapshot_worker=start_daily_snapshot_worker,
         start_storage_maintenance_worker=start_storage_maintenance_worker,
         start_points_chain_block_worker=start_points_chain_block_worker,
+        start_ai_agent_audit_worker=start_ai_agent_audit_worker,
         start_trading_liquidation_worker=start_trading_liquidation_worker,
         start_trading_bot_worker=start_trading_bot_worker,
         start_trading_background_worker=start_trading_background_worker,

@@ -357,6 +357,89 @@ def test_ai_agent_routes_smoke_with_fake_hermes_endpoints(tmp_path, monkeypatch)
     assert chat_calls and chat_calls[0][2]["messages"][0]["role"] == "system"
 
 
+def test_ai_agent_audit_scan_requires_super_admin(tmp_path, monkeypatch):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    user_app = _build_app(db_path, {"id": 2, "username": "userA", "role": "user"}, settings={"module_ai_agent_min_role": "user"})
+    super_app = _build_app(db_path, {"id": 1, "username": "root", "role": "user"}, settings={"module_ai_agent_min_role": "user"})
+
+    called = []
+
+    def fake_scan(settings, *, get_db, actor=None, force=False, get_client_ip=None, get_ua=None, audit=None):
+        called.append({"actor": actor, "force": force})
+        return {"status": "ok", "cached": False}
+
+    monkeypatch.setattr("routes.ai_agent.run_ai_agent_audit_scan", fake_scan)
+
+    user_resp = user_app.test_client().get("/api/ai-agent/audit-scan")
+    assert user_resp.status_code == 403
+    assert user_resp.get_json()["ok"] is False
+
+    super_resp = super_app.test_client().post("/api/ai-agent/audit-scan", json={"force": True})
+    assert super_resp.status_code == 200
+    payload = super_resp.get_json()
+    assert payload["ok"] is True
+    assert payload["scan"]["status"] == "ok"
+    assert called and called[-1]["force"] is True
+    assert called[-1]["actor"]["username"] == "root"
+
+
+def test_ai_agent_audit_scan_accepts_force_query_string(tmp_path, monkeypatch):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    super_app = _build_app(db_path, {"id": 1, "username": "root", "role": "user"}, settings={"module_ai_agent_min_role": "user"})
+
+    called = []
+
+    def fake_scan(settings, *, get_db, actor=None, force=False, get_client_ip=None, get_ua=None, audit=None):
+        called.append(force)
+        return {"status": "ok", "cached": False}
+
+    monkeypatch.setattr("routes.ai_agent.run_ai_agent_audit_scan", fake_scan)
+
+    with_force = super_app.test_client().get("/api/ai-agent/audit-scan?force=true")
+    plain = super_app.test_client().get("/api/ai-agent/audit-scan")
+
+    assert with_force.status_code == 200
+    assert plain.status_code == 200
+    assert called[0] is True
+    assert called[1] is False
+
+
+def test_ai_agent_audit_status_shows_scheduler_summary_for_super_admin(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    super_app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "module_ai_agent_min_role": "user",
+            "ai_agent_operation_mode": "audit",
+            "ai_agent_audit_interval_minutes": 7,
+        },
+    )
+    response = super_app.test_client().get("/api/ai-agent/audit-status")
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert payload["audit_status"]["scheduler"]["enabled"] is True
+    assert payload["audit_status"]["scheduler"]["interval_minutes"] == 7
+    assert "summary" in payload["audit_status"]
+
+
+def test_ai_agent_audit_status_forbidden_for_non_super_admin(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    user_app = _build_app(db_path, {"id": 2, "username": "userA", "role": "user"}, settings={"module_ai_agent_min_role": "user"})
+    response = user_app.test_client().get("/api/ai-agent/audit-status")
+
+    payload = response.get_json()
+    assert response.status_code == 403
+    assert payload["ok"] is False
+    assert "最高管理者" in payload["msg"]
+
+
 def test_ai_agent_chat_session_key_is_user_isolated(tmp_path, monkeypatch):
     db_path = tmp_path / "ai_agent_routes.db"
     _build_db(db_path)
