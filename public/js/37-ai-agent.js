@@ -25,6 +25,17 @@ function setAiAgentMessage(text = "", kind = "info") {
   if (text) el.classList.add("show", kind === "err" ? "err" : kind === "ok" ? "ok" : "info");
 }
 
+function isMockAiAgentReply(text) {
+  const compact = String(text || "")
+    .toLowerCase()
+    .replace(/[^0-9a-zA-Z\u4e00-\u9fff]/g, "");
+  if (!compact) return false;
+  const hasTraditional = compact.includes("已收到你的請求");
+  const hasSimplified = compact.includes("已收到你的请求");
+  return compact.includes("mockhermesresponse") && (hasTraditional || hasSimplified);
+}
+
+
 function renderAiAgentThread() {
   const host = $("ai-agent-thread");
   if (!host) return;
@@ -279,16 +290,33 @@ async function sendAiAgentMessage() {
       messages: aiAgentBuildMessages(prompt, mode),
       image_data_url: mode === "image" ? AI_AGENT_STATE.imageDataUrl : "",
     };
-    const res = await apiFetch(API + "/ai-agent/chat", {
+    const raw = await apiFetch(API + "/ai-agent/chat", {
       method: "POST",
       credentials: "same-origin",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
+    }).then(async (res) => {
+      const text = await res.text();
+      let parsed = {};
+      try {
+        parsed = text ? JSON.parse(text) : {};
+      } catch (error) {
+        parsed = {};
+      }
+      return { res, text, parsed };
     });
-    const json = await res.json().catch(() => ({}));
-    if (!json.ok) {
-      AI_AGENT_STATE.messages.push({ role: "assistant", content: json.msg || "AI Agent 回應失敗" });
-      setAiAgentMessage(json.msg || "AI Agent 回應失敗", "err");
+
+    const { res, text, parsed: json } = raw;
+    const replied = json?.message?.content || "";
+    const statusHint = `（HTTP ${res.status} ${res.statusText || ""}）`.trim();
+    if (!json.ok || isMockAiAgentReply(replied)) {
+      const msg = json.msg || (text ? text.slice(0, 160) : `AI Agent 回應失敗 ${statusHint}`);
+      AI_AGENT_STATE.messages.push({ role: "assistant", content: msg || "AI Agent 回應失敗" });
+      if (!json.ok) {
+        setAiAgentMessage(json.msg ? `${json.msg} ${statusHint}` : `AI Agent 回應失敗 ${statusHint}`, "err");
+      } else {
+        setAiAgentMessage("AI Agent 後端仍回傳 mock 回覆，請確認 AI Agent Base URL 設定", "err");
+      }
     } else {
       AI_AGENT_STATE.messages.push(json.message || { role: "assistant", content: "" });
       setAiAgentMessage("已完成", "ok");

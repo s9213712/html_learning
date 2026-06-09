@@ -25,7 +25,7 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert 'id="s-ai-agent-api-base-url"' in html
     assert 'id="s-ai-agent-api-key"' in html
     assert 'id="s-module-ai-agent-min-role"' in html
-    assert "/js/37-ai-agent.js?v=20260606-ai-agent-mvp" in html
+    assert "/js/37-ai-agent.js?v=20260609-ai-agent-debug-msg" in html
 
     assert '"ai-agent": "feature_ai_agent_enabled"' in core_js
     assert "normalizeModuleSettingKey(moduleKey)" in core_js

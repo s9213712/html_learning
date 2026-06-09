@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 from urllib.parse import urljoin, urlparse
@@ -10,6 +11,47 @@ DEFAULT_AI_AGENT_MODEL = os.environ.get("HACKME_AI_AGENT_MODEL", "hermes-agent")
 DEFAULT_AI_AGENT_PROVIDER = "hermes"
 DEFAULT_AI_AGENT_PERSONA = "concise_helper"
 MAX_AI_AGENT_IMAGE_DATA_URL_CHARS = 3 * 1024 * 1024
+KNOWN_MOCK_CHAT_REPLIES = {
+    "mockhermesresponse已收到你的請求",
+    "mockhermesresponse已收到你的请求",
+}
+
+
+def _compact_mock_text(value):
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    text = text.replace("\u3000", "")
+    text = re.sub(r"[^0-9a-zA-Z\u4e00-\u9fff]", "", text)
+    return text
+
+
+
+def _has_mock_request_phrase(text):
+    return "已收到你的請求" in text or "已收到你的请求" in text
+
+
+def _contains_mock_phrase(value):
+    if isinstance(value, str):
+        compact = _compact_mock_text(value)
+        if not compact:
+            return False
+        if compact in KNOWN_MOCK_CHAT_REPLIES:
+            return True
+        if "mockhermesresponse" in compact and _has_mock_request_phrase(compact):
+            return True
+        return False
+    if isinstance(value, dict):
+        for item in value.values():
+            if _contains_mock_phrase(item):
+                return True
+        return False
+    if isinstance(value, list):
+        for item in value:
+            if _contains_mock_phrase(item):
+                return True
+        return False
+    return False
 
 
 AI_AGENT_PERSONA_PRESETS = {
@@ -208,9 +250,11 @@ def _normalize_ai_agent_behavior(settings):
 
 def normalize_ai_agent_role(value):
     raw = str(value or "").strip().lower()
+    if raw in {"admin"}:
+        return "manager"
     if raw in AI_AGENT_ROLE_SCOPES:
         return raw
-    if raw in {"root", "admin", "super", "super_admin"}:
+    if raw in {"root", "super", "super_admin"}:
         return "super_admin"
     return "user"
 
@@ -364,6 +408,16 @@ def ai_agent_health(settings):
             with urllib_request.urlopen(req, timeout=min(_backend_timeout(settings), 8)) as resp:
                 raw = resp.read(1024 * 1024)
                 payload = json.loads(raw.decode("utf-8")) if raw else {}
+                service = ""
+                if isinstance(payload, dict):
+                    service = str(payload.get("service") or "").strip().lower()
+                if service == "hermes-mock":
+                    return {
+                        "ok": False,
+                        "url": health_url,
+                        "msg": "偵測到 hermes-mock 後端，請改連到真實 AI Agent 服務",
+                        "payload": payload,
+                    }
                 return {"ok": True, "url": health_url, "payload": payload}
         except Exception as exc:  # pragma: no cover - fallback path probing
             last_error = str(exc)
@@ -484,6 +538,8 @@ def ai_agent_chat(settings, *, messages=None, prompt="", image_data_url="", mode
         "stream": False,
     }
     response = _json_request(settings, "POST", "/chat/completions", payload, session_key=session_key)
+    if _contains_mock_phrase(response):
+        raise AiAgentError("AI Agent 後端仍回傳 mock 回覆，請確認 ai_agent_api_base_url 是否指向真實 Hermes endpoint")
     choices = response.get("choices") if isinstance(response, dict) else None
     message = {}
     if choices and isinstance(choices, list) and isinstance(choices[0], dict):
@@ -491,9 +547,23 @@ def ai_agent_chat(settings, *, messages=None, prompt="", image_data_url="", mode
     content = message.get("content") if isinstance(message, dict) else ""
     if isinstance(content, list):
         content = "\n".join(str(part.get("text") or "") for part in content if isinstance(part, dict))
+    normalized = str(content or "").strip().lower()
+    if _is_mock_chat_reply(normalized):
+        raise AiAgentError("AI Agent 後端仍回傳 mock 回覆，請確認 ai_agent_api_base_url 是否指向真實 Hermes endpoint")
     return {
         "content": str(content or ""),
         "model": response.get("model") if isinstance(response, dict) else model_name,
         "usage": response.get("usage") if isinstance(response, dict) else None,
         "raw": response,
     }
+
+
+def _is_mock_chat_reply(content):
+    compact = _compact_mock_text(content)
+    if not compact:
+        return False
+    if compact in KNOWN_MOCK_CHAT_REPLIES:
+        return True
+    if "mockhermesresponse" in compact and _has_mock_request_phrase(compact):
+        return True
+    return False

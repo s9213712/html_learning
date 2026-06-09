@@ -11,6 +11,7 @@ from services.ai_agent.hermes import (
     ai_agent_chat,
     ai_agent_health,
     ai_agent_models,
+    _is_mock_chat_reply,
     public_ai_agent_settings,
 )
 
@@ -145,7 +146,11 @@ def register_ai_agent_routes(app, deps):
         actor_name = str(_actor_value(actor, "username") or "").strip()
         if actor_name == "root":
             return "super_admin"
-        return actor_role if actor_role in {"user", "manager", "super_admin"} else "user"
+        if actor_role in {"manager", "admin", "super_admin", "user"}:
+            return actor_role
+        if actor_role in {"root", "super"}:
+            return "super_admin"
+        return "user"
 
     def _actor_scope_payload(actor):
         actor_role = _coerce_role(actor)
@@ -315,6 +320,8 @@ def register_ai_agent_routes(app, deps):
             return []
         conn = get_db()
         try:
+            if not _table_exists(conn, "comfyui_generation_jobs"):
+                return []
             rows = conn.execute(
                 """
                 SELECT job_id, owner_user_id, owner_username, status, error, progress_json, created_at, updated_at
@@ -352,6 +359,8 @@ def register_ai_agent_routes(app, deps):
             return []
         conn = get_db()
         try:
+            if not _table_exists(conn, "job_center_jobs"):
+                return []
             cols = {
                 str(c[1] if not hasattr(c, "get") else c.get("name") or "")
                 for c in conn.execute("PRAGMA table_info(job_center_jobs)").fetchall()
@@ -512,6 +521,13 @@ def register_ai_agent_routes(app, deps):
                 detail=f"status={exc.status or '-'},error={str(exc)[:180]}",
             )
             return json_resp({"ok": False, "msg": str(exc), "status": exc.status, "payload": exc.payload}), 502
+
+        if _is_mock_chat_reply(result.get("content", "")):
+            return json_resp({
+                "ok": False,
+                "msg": "AI Agent 後端仍回傳 mock 回覆，請確認 ai_agent_api_base_url 是否指向真實 Hermes endpoint",
+            }), 502
+
         audit(
             "AI_AGENT_CHAT",
             get_client_ip(),

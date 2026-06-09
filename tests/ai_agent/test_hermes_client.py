@@ -4,6 +4,7 @@ from urllib import error as urllib_error
 
 from services.ai_agent.hermes import (
     AiAgentError,
+    normalize_ai_agent_role,
     _normalize_chat_messages,
     normalize_ai_agent_api_base_url,
     normalize_ai_agent_model,
@@ -61,6 +62,13 @@ def test_ai_agent_persona_validation():
     assert normalize_ai_agent_persona("strict_helper") == "strict_helper"
     assert normalize_ai_agent_persona("creative_coordinator") == "creative_coordinator"
     assert normalize_ai_agent_persona("bad-persona") is None
+
+
+def test_ai_agent_admin_role_maps_to_manager_scope_only():
+    assert normalize_ai_agent_role("admin") == "manager"
+    assert normalize_ai_agent_role("manager") == "manager"
+    assert normalize_ai_agent_role("root") == "super_admin"
+    assert normalize_ai_agent_role("super_admin") == "super_admin"
 
 
 def test_ai_agent_chat_injects_persona_and_task_scope(monkeypatch):
@@ -154,3 +162,171 @@ def test_ai_agent_health_checks_base_path_when_present(monkeypatch):
     assert result["ok"] is True
     assert result["url"] == "http://127.0.0.1:8642/health"
     assert result["payload"] == {"ok": True}
+
+
+def test_ai_agent_health_marks_mock_backend_as_unhealthy(monkeypatch):
+    class FakeResponse:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def read(self, _size):
+            return json.dumps(self._payload).encode("utf-8")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    calls = []
+
+    def fake_urlopen(req, timeout=5):
+        url = getattr(req, "full_url", "")
+        calls.append(url)
+        if url == "http://127.0.0.1:8642/v1/health":
+            return FakeResponse({"service": "hermes-mock", "version": "mock-1"})
+        if url == "http://127.0.0.1:8642/health":
+            return FakeResponse({"service": "hermes-mock", "version": "mock-1"})
+        raise urllib_error.URLError("not found")
+
+    monkeypatch.setattr(hermes_client.urllib_request, "urlopen", fake_urlopen)
+
+    result = hermes_client.ai_agent_health({"ai_agent_api_base_url": "http://127.0.0.1:8642/v1"})
+
+    assert calls == ["http://127.0.0.1:8642/v1/health"]
+    assert result["ok"] is False
+    assert "hermes-mock" in str(result["msg"])
+    assert result["payload"]["service"] == "hermes-mock"
+
+
+def test_ai_agent_chat_detects_mock_reply(monkeypatch):
+    def fake_json_request(_settings, method, path, payload=None, session_key="", timeout=None):
+        assert path == "/chat/completions"
+        return {
+            "model": "hermes-agent",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "Mock hermes response: 已收到你的請求。",
+                    },
+                },
+            ],
+        }
+
+    monkeypatch.setattr(hermes_client, "_json_request", fake_json_request)
+
+    with pytest.raises(AiAgentError) as exc:
+        hermes_client.ai_agent_chat(
+            {
+                "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
+                "ai_agent_api_key": "dummy-key",
+            },
+            messages=[{"role": "user", "content": "幫我看一下下載進度"}],
+        )
+    assert "mock 回覆" in str(exc.value)
+
+
+def test_ai_agent_chat_detects_mock_reply_with_whitespace(monkeypatch):
+    def fake_json_request(_settings, method, path, payload=None, session_key="", timeout=None):
+        assert path == "/chat/completions"
+        return {
+            "model": "hermes-agent",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": " Mock  \nHermes  Response:   已收到你的請求。 ",
+                    },
+                },
+            ],
+        }
+
+    monkeypatch.setattr(hermes_client, "_json_request", fake_json_request)
+
+    with pytest.raises(AiAgentError) as exc:
+        hermes_client.ai_agent_chat(
+            {
+                "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
+                "ai_agent_api_key": "dummy-key",
+            },
+            messages=[{"role": "user", "content": "幫我看一下下載進度"}],
+        )
+    assert "mock 回覆" in str(exc.value)
+
+
+def test_ai_agent_chat_detects_mock_reply_simplified_chinese(monkeypatch):
+    def fake_json_request(_settings, method, path, payload=None, session_key="", timeout=None):
+        assert path == "/chat/completions"
+        return {
+            "model": "hermes-agent",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "Mock hermes response: 已收到你的请求。",
+                    },
+                },
+            ],
+        }
+
+    monkeypatch.setattr(hermes_client, "_json_request", fake_json_request)
+
+    with pytest.raises(AiAgentError) as exc:
+        hermes_client.ai_agent_chat(
+            {
+                "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
+                "ai_agent_api_key": "dummy-key",
+            },
+            messages=[{"role": "user", "content": "幫我看一下下載進度"}],
+        )
+    assert "mock 回覆" in str(exc.value)
+
+
+def test_ai_agent_chat_detects_mock_reply_in_nested_field(monkeypatch):
+    def fake_json_request(_settings, method, path, payload=None, session_key="", timeout=None):
+        assert path == "/chat/completions"
+        return {
+            "model": "hermes-agent",
+            "response": " Mock  \nHermes  Response:   已收到你的請求。 ",
+        }
+
+    monkeypatch.setattr(hermes_client, "_json_request", fake_json_request)
+
+    with pytest.raises(AiAgentError) as exc:
+        hermes_client.ai_agent_chat(
+            {
+                "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
+                "ai_agent_api_key": "dummy-key",
+            },
+            messages=[{"role": "user", "content": "幫我看一下下載進度"}],
+        )
+    assert "mock 回覆" in str(exc.value)
+
+
+def test_ai_agent_chat_detects_mock_reply_with_interleaving_whitespace(monkeypatch):
+    def fake_json_request(_settings, method, path, payload=None, session_key="", timeout=None):
+        assert path == "/chat/completions"
+        return {
+            "model": "hermes-agent",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": " mock\tHermes\nResponse :\u3000已\u6536\u5230\u4f60\u7684\u8bf7\u6c42。 ",
+                    },
+                },
+            ],
+        }
+
+    monkeypatch.setattr(hermes_client, "_json_request", fake_json_request)
+
+    with pytest.raises(AiAgentError) as exc:
+        hermes_client.ai_agent_chat(
+            {
+                "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
+                "ai_agent_api_key": "dummy-key",
+            },
+            messages=[{"role": "user", "content": "幫我看一下下載進度"}],
+        )
+    assert "mock 回覆" in str(exc.value)

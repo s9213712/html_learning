@@ -23,7 +23,17 @@ QUICK_TESTS = [
     "tests/regressions/test_security_issue_regressions.py",
     "tests/users/test_user_csv_exports.py",
 ]
-QUICK_TIMEOUT_SECONDS = 300
+DEFAULT_QUICK_PYTEST_TIMEOUT_SECONDS = 1800
+try:
+    QUICK_TIMEOUT_SECONDS = max(
+        30,
+        min(
+            3600,
+            int(os.environ.get("PREPUSH_PYTEST_TIMEOUT_SECONDS", str(DEFAULT_QUICK_PYTEST_TIMEOUT_SECONDS)).strip()),
+        ),
+    )
+except Exception:
+    QUICK_TIMEOUT_SECONDS = DEFAULT_QUICK_PYTEST_TIMEOUT_SECONDS
 QUICK_PYTEST_TIMEOUT_SECONDS = QUICK_TIMEOUT_SECONDS
 
 

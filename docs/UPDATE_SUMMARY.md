@@ -1,6 +1,14 @@
 # Update Summary
 
-Release ID: `05_2026.06.06-007`
+Release ID: `05_2026.06.08-001`
+
+## 05_2026.06.08-001
+
+- Fixed AI Agent and settings validation regressions discovered after the
+  rebase: `site_name` / login / success text settings now enforce explicit
+  max lengths to match API validation, and AI Agent role normalization now
+  preserves `admin` as an independent non-root role while `root` remains
+  super-privileged.
 
 ## 05_2026.06.06-007
 
