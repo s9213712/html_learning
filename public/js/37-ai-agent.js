@@ -4,6 +4,7 @@ const AI_AGENT_STATE = {
   loaded: false,
   loading: false,
   sending: false,
+  sendingTool: false,
   readonlyLoading: false,
   messages: [],
   imageDataUrl: "",
@@ -59,6 +60,121 @@ function isMockAiAgentReply(text) {
   const hasTraditional = compact.includes("已收到你的請求");
   const hasSimplified = compact.includes("已收到你的请求");
   return compact.includes("mockhermesresponse") && (hasTraditional || hasSimplified);
+}
+
+function aiAgentNumberInput(id, fallback, { min = null, max = null, integer = false } = {}) {
+  const raw = ($(id)?.value || "").trim();
+  if (!raw) return fallback;
+  let value = Number(raw);
+  if (!Number.isFinite(value)) return fallback;
+  if (integer) value = Math.round(value);
+  if (min !== null) value = Math.max(min, value);
+  if (max !== null) value = Math.min(max, value);
+  return value;
+}
+
+function aiAgentHasEffectiveTool(toolName) {
+  return (AI_AGENT_STATE.settings?.tools || []).some((tool) => tool?.name === toolName);
+}
+
+function aiAgentCanRunWriteTool(toolName) {
+  return AI_AGENT_STATE.actor?.role === "super_admin"
+    && AI_AGENT_STATE.settings?.operation_mode === "write"
+    && !!AI_AGENT_STATE.settings?.operation_mode_policy?.write_enabled
+    && aiAgentHasEffectiveTool(toolName);
+}
+
+function renderAiAgentWriteTools() {
+  const panel = $("ai-agent-write-tools-panel");
+  const state = $("ai-agent-write-tools-state");
+  const form = $("ai-agent-comfyui-tool-form");
+  const button = $("ai-agent-comfyui-generate-btn");
+  if (!panel) return;
+  const isRoot = AI_AGENT_STATE.actor?.role === "super_admin";
+  const canRunComfyui = aiAgentCanRunWriteTool("write_comfyui_generate");
+  panel.hidden = !isRoot;
+  if (state) {
+    if (!isRoot) {
+      state.textContent = "僅 root 可使用 write-tool。";
+    } else if (canRunComfyui) {
+      state.textContent = "已啟用 write_comfyui_generate；送出時會自動附帶 confirm=EXECUTE。";
+    } else {
+      state.textContent = "需切換為 write 模式，且工具白名單需允許 write_comfyui_generate。";
+    }
+  }
+  if (form) form.classList.toggle("disabled", !canRunComfyui);
+  if (button) button.disabled = !canRunComfyui || AI_AGENT_STATE.sendingTool;
+}
+
+function aiAgentComfyuiToolArguments() {
+  const prompt = ($("ai-agent-comfyui-prompt")?.value || "").trim();
+  if (!prompt) throw new Error("請先輸入提示詞");
+  const args = {
+    prompt,
+    negative_prompt: ($("ai-agent-comfyui-negative")?.value || "").trim(),
+    width: aiAgentNumberInput("ai-agent-comfyui-width", 1024, { min: 256, max: 2048, integer: true }),
+    height: aiAgentNumberInput("ai-agent-comfyui-height", 1024, { min: 256, max: 2048, integer: true }),
+    steps: aiAgentNumberInput("ai-agent-comfyui-steps", 20, { min: 1, max: 80, integer: true }),
+    cfg_scale: aiAgentNumberInput("ai-agent-comfyui-cfg", 7, { min: 1, max: 20 }),
+    batch_size: aiAgentNumberInput("ai-agent-comfyui-batch-size", 1, { min: 1, max: 8, integer: true }),
+    confirm_billing: true,
+  };
+  const seedRaw = ($("ai-agent-comfyui-seed")?.value || "").trim();
+  if (seedRaw) args.seed = aiAgentNumberInput("ai-agent-comfyui-seed", -1, { integer: true });
+  const checkpoint = ($("ai-agent-comfyui-checkpoint")?.value || "").trim();
+  if (checkpoint) args.checkpoint = checkpoint;
+  const vae = ($("ai-agent-comfyui-vae")?.value || "").trim();
+  if (vae) args.vae = vae;
+  return args;
+}
+
+async function runAiAgentComfyuiGenerate() {
+  if (AI_AGENT_STATE.sendingTool) return;
+  if (!aiAgentCanRunWriteTool("write_comfyui_generate")) {
+    setAiAgentMessage("目前不可執行 ComfyUI write-tool，請確認 root / write 模式 / 工具白名單。", "err");
+    return;
+  }
+  let args = {};
+  try {
+    args = aiAgentComfyuiToolArguments();
+  } catch (err) {
+    setAiAgentMessage(err?.message || "產圖參數不完整", "err");
+    return;
+  }
+  AI_AGENT_STATE.sendingTool = true;
+  renderAiAgentWriteTools();
+  setAiAgentMessage("ComfyUI 產圖任務送出中...", "info");
+  try {
+    const res = await apiFetch(API + "/ai-agent/write-tools/execute", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        tool: "write_comfyui_generate",
+        arguments: args,
+        confirm: "EXECUTE",
+      }),
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok || !json.ok) {
+      setAiAgentMessage(json.msg || `ComfyUI 產圖送出失敗（HTTP ${res.status}）`, "err");
+      return;
+    }
+    const job = json.result?.job || json.payload?.job || json.job || {};
+    const jobId = job.job_id || json.result?.job_id || "-";
+    AI_AGENT_STATE.messages.push({
+      role: "assistant",
+      content: `ComfyUI 產圖已送出。\n工具：write_comfyui_generate\nJob ID：${jobId}\n狀態：${job.status || "queued"}`,
+    });
+    renderAiAgentThread();
+    setAiAgentMessage("ComfyUI 產圖已送出", "ok");
+    await loadAiAgentReadOnly({ scope: "all", limit: 20, silent: true, force: true }).catch(() => undefined);
+  } catch (err) {
+    setAiAgentMessage(`ComfyUI 產圖送出失敗：${err}`, "err");
+  } finally {
+    AI_AGENT_STATE.sendingTool = false;
+    renderAiAgentWriteTools();
+  }
 }
 
 
@@ -130,6 +246,7 @@ function renderAiAgentStatus(json) {
       ? tools.map((tool) => `<div>${sanitize(tool.label || tool.name || "-")}：${sanitize(tool.description || "")}<br><span class="drive-card-sub">${sanitize(tool.name || "")} / ${sanitize(tool.data_scope || "")}</span></div>`).join("")
       : "目前沒有可調用工具。";
   }
+  renderAiAgentWriteTools();
   renderAiAgentAuditStatus(AI_AGENT_STATE.audit, actor);
 }
 

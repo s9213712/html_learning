@@ -39,8 +39,13 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert 'id="ai-agent-effective-tools"' in html
     assert 'id="ai-agent-audit-overview"' in html
     assert 'id="ai-agent-audit-scan-btn"' in html
+    assert 'id="ai-agent-write-tools-panel"' in html
+    assert 'id="ai-agent-comfyui-prompt"' in html
+    assert 'id="ai-agent-comfyui-vae"' in html
+    assert 'id="ai-agent-comfyui-generate-btn"' in html
     assert 'id="s-module-ai-agent-min-role"' in html
-    assert "/js/37-ai-agent.js?v=20260611-ai-agent-provider-status" in html
+    assert "/js/37-ai-agent.js?v=20260611-ai-agent-comfyui-write-tool" in html
+    assert "/js/90-bootstrap.js?v=20260611-ai-agent-comfyui-write-tool" in html
 
     assert '"ai-agent": "feature_ai_agent_enabled"' in core_js
     assert "normalizeModuleSettingKey(moduleKey)" in core_js
@@ -51,6 +56,7 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert 'loadAiAgentStatus({ force: true })' in bootstrap_js
     assert 'loadAiAgentAuditStatus' in bootstrap_js
     assert 'runAiAgentAuditScan' in bootstrap_js
+    assert 'runAiAgentComfyuiGenerate' in bootstrap_js
 
     assert 'const canAccessAiAgent = !!currentUser && canAccessModule("ai-agent");' in admin_js
     assert 'modAiAgent.classList.toggle("active", normTab === "ai-agent")' in admin_js
@@ -65,6 +71,11 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert 'API + "/ai-agent/chat"' in ai_agent_js
     assert 'API + "/ai-agent/audit-status"' in ai_agent_js
     assert 'API + "/ai-agent/audit-scan"' in ai_agent_js
+    assert 'API + "/ai-agent/write-tools/execute"' in ai_agent_js
+    assert 'tool: "write_comfyui_generate"' in ai_agent_js
+    assert 'confirm: "EXECUTE"' in ai_agent_js
+    assert 'aiAgentCanRunWriteTool("write_comfyui_generate")' in ai_agent_js
+    assert 'ai-agent-write-tools-panel' in ai_agent_js
     assert "OpenAI-compatible" in ai_agent_js
     assert "Hermes Agent" in ai_agent_js
     assert "Hermes API 已連線" not in ai_agent_js
@@ -77,6 +88,7 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
 
     assert ".ai-agent-layout" in css
     assert ".ai-agent-thread" in css
+    assert ".ai-agent-tool-panel" in css
     assert "@media (max-width: 640px)" in css
 
 

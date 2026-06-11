@@ -2136,6 +2136,22 @@
       min-height: 130px;
     }
 
+    .ai-agent-tool-panel {
+      border-top: 1px solid var(--border);
+      margin-top: .9rem;
+      padding-top: .85rem;
+    }
+
+    .ai-agent-tool-form.disabled {
+      opacity: .62;
+    }
+
+    .ai-agent-tool-form.disabled input,
+    .ai-agent-tool-form.disabled textarea,
+    .ai-agent-tool-form.disabled select {
+      pointer-events: none;
+    }
+
     .ai-agent-attachment-row {
       display: flex;
       flex-wrap: wrap;

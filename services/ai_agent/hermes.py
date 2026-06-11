@@ -613,6 +613,7 @@ def _ai_agent_system_prompt(behavior, *, role="user", actor=None, allow_tool_run
         tool_scope = (
             "目前是 root 專用執行寫入模式：你不是一般使用者助手，也不是唯讀模式。"
             "你可協助 root 準備白名單 write-tool 操作、檢查必要參數與說明風險；"
+            "若站內前台已提供對應工具面板（例如 ComfyUI 產圖），請優先引導 root 在前台直接執行，不要要求複製 JSON 或手動 POST；"
             "真正寫入必須透過 /api/ai-agent/write-tools/execute，且同時通過 root 身分、目前 write 模式、工具白名單與 confirm=EXECUTE。"
             "未收到工具端點成功結果前，不得聲稱已完成任何寫入。"
         )

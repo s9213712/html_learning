@@ -518,6 +518,8 @@ def test_ai_agent_chat_write_mode_is_root_only(monkeypatch):
     assert "目前登入者：root" in system_prompt
     assert "目前權限：super_admin" in system_prompt
     assert "你不是一般使用者助手，也不是唯讀模式" in system_prompt
+    assert "前台直接執行" in system_prompt
+    assert "不要要求複製 JSON 或手動 POST" in system_prompt
     assert "/api/ai-agent/write-tools/execute" in system_prompt
     assert "confirm=EXECUTE" in system_prompt
 
