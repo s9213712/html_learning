@@ -1047,7 +1047,7 @@ def _snapshot_network_delta():
         "interfaces": {},
         "total_rx_bytes_delta": 0,
         "total_tx_bytes_delta": 0,
-        "total_kbps": 0.0,
+        "total_kib_per_s": 0.0,
     }
     if not prev:
         _AUDIT_SCAN_STATE["network_last"] = {"at": now_ts, "data": now}
@@ -1069,18 +1069,18 @@ def _snapshot_network_delta():
         if rx < 0 or tx < 0:
             rx = max(0, rx)
             tx = max(0, tx)
-        kbps = (rx + tx) / max(1.0, window) / 1024
-        if kbps >= 1:
+        kib_per_s = (rx + tx) / max(1.0, window) / 1024
+        if kib_per_s >= 1:
             delta["interfaces"][iface] = {
                 "rx_delta": rx,
                 "tx_delta": tx,
-                "kbps": round(kbps, 3),
+                "kib_per_s": round(kib_per_s, 3),
             }
             delta["total_rx_bytes_delta"] += rx
             delta["total_tx_bytes_delta"] += tx
 
     total_bytes = delta["total_rx_bytes_delta"] + delta["total_tx_bytes_delta"]
-    delta["total_kbps"] = round((total_bytes / max(1.0, window)) / 1024, 3)
+    delta["total_kib_per_s"] = round((total_bytes / max(1.0, window)) / 1024, 3)
     _AUDIT_SCAN_STATE["network_last"] = {"at": now_ts, "data": now}
     return delta
 
@@ -1281,13 +1281,13 @@ def run_ai_agent_audit_scan(settings, *, get_db, actor=None, force=False, get_cl
         )
         recommendations.append("請檢視 security_events、login/fail 及 rate_limit 類型事件的來源IP是否異常。")
 
-    if network_delta.get("total_kbps", 0.0) >= 512000:
+    if network_delta.get("total_kib_per_s", 0.0) >= 512000:
         add_anomaly(
             "network.traffic_spike",
             "warn",
-            f"網路傳輸速率較高：{network_delta.get('total_kbps', 0)} KB/s",
+            f"網路傳輸速率較高：{network_delta.get('total_kib_per_s', 0)} KB/s",
             {
-                "total_kbps": network_delta.get("total_kbps", 0),
+                "total_kib_per_s": network_delta.get("total_kib_per_s", 0),
                 "window_seconds": network_delta.get("window_seconds", 0),
             },
         )
