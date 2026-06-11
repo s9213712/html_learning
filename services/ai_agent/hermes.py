@@ -1482,6 +1482,16 @@ def public_ai_agent_audit_status(settings, *, include_scan=False):
 
 
 def ai_agent_capabilities(settings):
+    provider = normalize_ai_agent_provider((settings or {}).get("ai_agent_provider")) or DEFAULT_AI_AGENT_PROVIDER
+    if provider == "openai_compatible":
+        return {
+            "ok": True,
+            "provider": provider,
+            "chat": True,
+            "models": True,
+            "capabilities_endpoint": False,
+            "tools": [],
+        }
     try:
         return _json_request(settings, "GET", "/capabilities", timeout=min(_backend_timeout(settings), 8))
     except AiAgentError as exc:

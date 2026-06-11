@@ -6,6 +6,7 @@ from urllib import error as urllib_error
 
 from services.ai_agent.hermes import (
     AiAgentError,
+    ai_agent_capabilities,
     ai_agent_effective_tools,
     ai_agent_operation_mode_policy,
     get_ai_agent_audit_last_scan,
@@ -238,6 +239,21 @@ def test_ai_agent_health_openai_compatible_uses_models_endpoint(monkeypatch):
     assert result["ok"] is True
     assert result["url"] == "http://127.0.0.1:11434/v1/models"
     assert result["payload"]["data"][0]["id"] == "gpt-oss:120b-cloud"
+
+
+def test_ai_agent_capabilities_openai_compatible_is_synthetic(monkeypatch):
+    def fail_json_request(*_args, **_kwargs):
+        raise AssertionError("openai-compatible capabilities must not call /capabilities")
+
+    monkeypatch.setattr(hermes_client, "_json_request", fail_json_request)
+
+    result = ai_agent_capabilities({"ai_agent_provider": "openai_compatible"})
+
+    assert result["ok"] is True
+    assert result["provider"] == "openai_compatible"
+    assert result["chat"] is True
+    assert result["models"] is True
+    assert result["capabilities_endpoint"] is False
 
 
 def test_ai_agent_chat_detects_mock_reply(monkeypatch):
