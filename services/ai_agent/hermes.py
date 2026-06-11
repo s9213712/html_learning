@@ -1621,13 +1621,28 @@ def ai_agent_chat(settings, *, messages=None, prompt="", image_data_url="", mode
     response = _json_request(settings, "POST", "/chat/completions", payload, session_key=session_key)
     if _contains_mock_phrase(response):
         raise AiAgentError("AI Agent 後端仍回傳 mock 回覆，請確認 ai_agent_api_base_url 是否指向真實 Hermes endpoint")
+    if isinstance(response, dict):
+        hermes_meta = response.get("hermes") if isinstance(response.get("hermes"), dict) else {}
+        hermes_error = str(hermes_meta.get("error") or "").strip()
+        if hermes_meta.get("failed") is True or hermes_meta.get("completed") is False:
+            raise AiAgentError(
+                f"AI Agent 後端執行失敗：{hermes_error or 'Hermes 回報 failed'}",
+                payload=response,
+            )
     choices = response.get("choices") if isinstance(response, dict) else None
     message = {}
+    finish_reason = ""
     if choices and isinstance(choices, list) and isinstance(choices[0], dict):
         message = choices[0].get("message") or {}
+        finish_reason = str(choices[0].get("finish_reason") or "")
     content = message.get("content") if isinstance(message, dict) else ""
     if isinstance(content, list):
         content = "\n".join(str(part.get("text") or "") for part in content if isinstance(part, dict))
+    if finish_reason == "error" or str(content or "").lstrip().lower().startswith("api call failed after"):
+        raise AiAgentError(
+            f"AI Agent 後端執行失敗：{str(content or '').strip() or 'chat completion failed'}",
+            payload=response if isinstance(response, dict) else None,
+        )
     normalized = str(content or "").strip().lower()
     if _is_mock_chat_reply(normalized):
         raise AiAgentError("AI Agent 後端仍回傳 mock 回覆，請確認 ai_agent_api_base_url 是否指向真實 Hermes endpoint")

@@ -80,8 +80,16 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert "aiAgentFillComfyuiToolForm(directComfyuiArgs)" in ai_agent_js
     assert "function aiAgentAnalyzeImageForComfyui" in ai_agent_js
     assert "function aiAgentVisionModel" in ai_agent_js
+    assert "function aiAgentImageAnalysisError" in ai_agent_js
+    assert "function aiAgentReadonlyIntent" in ai_agent_js
+    assert "aiAgentReadonlyIntent(prompt)" in ai_agent_js
+    assert 'scope: "comfyui"' in ai_agent_js
+    assert 'scope: "remote_download"' in ai_agent_js
+    assert 'scope: "resources"' in ai_agent_js
+    assert 'scope: "attack_diag"' in ai_agent_js
     assert "const selectedModel = aiAgentVisionModel();" in ai_agent_js
     assert "qwen3-vl" in ai_agent_js
+    assert "圖片分析後端目前不可用" in ai_agent_js
     assert "圖片分析與提示詞生成中" in ai_agent_js
     assert "await aiAgentAnalyzeImageForComfyui(userText)" in ai_agent_js
     assert "await runAiAgentComfyuiGenerate(analyzed.args)" in ai_agent_js

@@ -264,3 +264,52 @@ write tools visible to root: 12
 1. Fix or replace the OpenAI-compatible vision backend path for `qwen3-vl:235b-instruct-cloud`; current image requests return backend HTTP 500.
 2. Add direct frontend/server execution paths for read-only tools (`check_generation_progress`, `check_resource_state`, `audit_status`) so the agent stops asking for confirmation for simple status checks.
 3. Add default ComfyUI checkpoint selection or clearer UI fallback for write-tool generation when the user does not specify `Models:`.
+
+## Remediation Follow-up
+
+Applied after the initial audit:
+
+- Pulled/refreshed `qwen3-vl:235b-instruct-cloud` with `ollama pull`.
+- Verified `ollama show qwen3-vl:235b-instruct-cloud` reports `vision` capability.
+- Verified direct Ollama `/api/chat` image request still returns HTTP 500, so the image-analysis failure is in the Ollama cloud/backend path, not the web app request wrapper.
+- Hardened Hermes/OpenAI-compatible chat handling so Hermes-style `200 OK` responses with `hermes.failed=true`, `completed=false`, `finish_reason=error`, or `API call failed after...` are treated as backend failures.
+- Added frontend image-analysis error normalization. The UI now reports that the image backend is unavailable instead of treating a backend failure as a usable assistant response.
+- Added frontend direct read-only routing for clear status prompts:
+  - ComfyUI generation progress -> `/api/ai-agent/readonly?scope=comfyui`
+  - remote downloads -> `/api/ai-agent/readonly?scope=remote_download`
+  - resources -> `/api/ai-agent/readonly?scope=resources`
+  - audit/log/IP/security status -> `/api/ai-agent/readonly?scope=attack_diag`
+
+Additional verification:
+
+```bash
+python3 -m py_compile services/ai_agent/hermes.py
+node --check public/js/37-ai-agent.js
+python3 -m pytest tests/frontend/admin/test_frontend_ai_agent.py tests/frontend/admin/test_root_quick_settings.py tests/ai_agent/test_hermes_client.py tests/ai_agent/test_ai_agent_routes.py
+```
+
+Result: `61 passed`.
+
+Live `:5000` was restarted with dev-default credentials and default-password bypass for validation:
+
+```text
+HTML_LEARNING_HOST=0.0.0.0
+HTML_LEARNING_PORT=5000
+HTML_LEARNING_TRUSTED_HOSTS=
+HTML_LEARNING_ROOT_PASSWORD=root
+HTML_LEARNING_MANAGER_PASSWORD=admin
+HTML_LEARNING_TEST_PASSWORD=test
+HTML_LEARNING_ALLOW_DEFAULT_PASSWORDS=1
+```
+
+Live validation after restart:
+
+- `root/root` login: HTTP 200, `must_change_password=false`.
+- `/api/ai-agent/status`: HTTP 200, actor `root / super_admin`, mode `write`, provider `openai_compatible`, allowed models include `qwen3-vl:235b-instruct-cloud`.
+- `/api/ai-agent/readonly?scope=resources`: HTTP 200.
+- `/api/ai-agent/readonly?scope=comfyui`: HTTP 200.
+- `/api/ai-agent/readonly?scope=remote_download`: HTTP 200.
+- `/api/ai-agent/readonly?scope=attack_diag`: HTTP 200.
+- `/api/ai-agent/audit-status`: HTTP 200.
+- `/api/ai-agent/write-tools`: HTTP 200; `write_comfyui_generate` is present and accepts `vae` / `vae_name`.
+- `/api/ai-agent/chat` with `qwen3-vl:235b-instruct-cloud` and image input: HTTP 502 with backend HTTP 500 surfaced as failure. This is expected until the Ollama cloud vision backend stops returning 500.

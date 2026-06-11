@@ -300,7 +300,7 @@ async function aiAgentAnalyzeImageForComfyui(userText) {
   const json = await res.json().catch(() => ({}));
   const content = json?.message?.content || json?.msg || "";
   if (!res.ok || !json.ok || isMockAiAgentReply(content)) {
-    throw new Error(json.msg || `圖片分析失敗（HTTP ${res.status}）`);
+    throw new Error(aiAgentImageAnalysisError(json, res.status));
   }
   const parsed = aiAgentExtractJsonObject(content);
   const args = aiAgentNormalizeAnalysisArgs(parsed || { prompt: content }, userText);
@@ -603,6 +603,64 @@ function aiAgentVisionModel() {
   return vision || selected || options[0] || AI_AGENT_STATE.settings?.model || "";
 }
 
+function aiAgentImageAnalysisError(json = {}, status = 0) {
+  const raw = String(json?.msg || json?.error || json?.message?.content || "").trim();
+  const lowered = raw.toLowerCase();
+  if (lowered.includes("does not support image input") || lowered.includes("不支援圖片")) {
+    return "目前選用模型不支援圖片分析，請改用 vision 模型（例如 qwen3-vl）後再試。";
+  }
+  if (status >= 500 || lowered.includes("internal server error")) {
+    return `圖片分析後端目前不可用（HTTP ${status || 500}）。${raw ? `後端訊息：${raw}` : "請稍後重試或檢查 Ollama/Hermes vision 模型服務。"}`;
+  }
+  return raw || `圖片分析失敗（HTTP ${status || "-"}）`;
+}
+
+function aiAgentReadonlyIntent(prompt) {
+  const text = String(prompt || "").toLowerCase();
+  if (!text) return null;
+  const asksStatus = /(查|看|顯示|確認|狀態|status|progress|進度|摘要|目前)/i.test(text);
+  if (!asksStatus) return null;
+  if (/(產圖|生圖|comfyui|generation|queue|任務)/i.test(text) && /(進度|狀態|queue|排隊|running|pending|完成|失敗)/i.test(text)) {
+    return { scope: "comfyui", label: "ComfyUI 產圖進度" };
+  }
+  if (/(下載|download|remote download)/i.test(text)) {
+    return { scope: "remote_download", label: "下載進度" };
+  }
+  if (/(資源|cpu|gpu|ram|memory|記憶體|硬碟|disk|load|負載)/i.test(text)) {
+    return { scope: "resources", label: "伺服器資源" };
+  }
+  if (/(審計|audit|logs?|log|ip|流量|攻擊|異常|安全事件|attack)/i.test(text)) {
+    return { scope: "attack_diag", label: "安全審計" };
+  }
+  return null;
+}
+
+function aiAgentReadonlySummary(payload = {}, intent = {}) {
+  const lines = [`${intent.label || "唯讀查詢"}：已直接讀取站內唯讀資料。`];
+  const resources = payload.resources || {};
+  if (resources.cpu || resources.ram || resources.disk) {
+    const cpu = resources.cpu?.percent;
+    const ram = resources.ram?.percent;
+    const disk = resources.disk?.percent;
+    lines.push(`資源：CPU ${cpu !== undefined && cpu !== null ? `${Number(cpu).toFixed(1)}%` : "-"} / RAM ${ram !== undefined && ram !== null ? `${Number(ram).toFixed(1)}%` : "-"} / Disk ${disk !== undefined && disk !== null ? `${Number(disk).toFixed(1)}%` : "-"}`);
+  }
+  if (Array.isArray(payload.comfyui_jobs)) {
+    const jobs = payload.comfyui_jobs.slice(0, 5).map((job) => `${job.status || "-"} ${job.title || job.prompt || job.id || ""}`.trim());
+    lines.push(`ComfyUI 任務：${payload.comfyui_jobs.length ? jobs.join("；") : "目前沒有可見任務"}`);
+  }
+  if (Array.isArray(payload.remote_download_jobs)) {
+    const jobs = payload.remote_download_jobs.slice(0, 5).map((job) => `${job.status || "-"} ${job.filename || job.title || job.id || ""}`.trim());
+    lines.push(`下載任務：${payload.remote_download_jobs.length ? jobs.join("；") : "目前沒有可見下載任務"}`);
+  }
+  if (payload.attack_diagnosis) {
+    const diag = payload.attack_diagnosis;
+    lines.push(`安全事件：${diag.security_events?.length || 0}；近期失敗任務：${diag.recent_failed_jobs?.length || 0}`);
+  } else if (intent.scope === "attack_diag") {
+    lines.push("安全審計完整資料限 root 檢視；目前帳號只會看到允許範圍。");
+  }
+  return lines.join("\n");
+}
+
 function syncAiAgentModelSelect() {
   const select = $("ai-agent-model");
   if (!select) return;
@@ -900,6 +958,38 @@ async function sendAiAgentMessage() {
     aiAgentFillComfyuiToolForm(directComfyuiArgs);
     if (input) input.value = "";
     await runAiAgentComfyuiGenerate(directComfyuiArgs);
+    return;
+  }
+  const readonlyIntent = mode === "text" ? aiAgentReadonlyIntent(prompt) : null;
+  if (readonlyIntent) {
+    AI_AGENT_STATE.sending = true;
+    const sendBtn = $("ai-agent-send-btn");
+    if (sendBtn) sendBtn.disabled = true;
+    const userText = prompt;
+    AI_AGENT_STATE.messages.push({ role: "user", content: userText });
+    renderAiAgentThread();
+    if (input) input.value = "";
+    setAiAgentMessage(`${readonlyIntent.label}讀取中...`, "info");
+    try {
+      const res = await apiFetch(`${API}/ai-agent/readonly?scope=${encodeURIComponent(readonlyIntent.scope)}&limit=20`, {
+        credentials: "same-origin",
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok || !json.ok) {
+        throw new Error(json.msg || `唯讀查詢失敗（HTTP ${res.status}）`);
+      }
+      renderAiAgentReadOnly(json);
+      AI_AGENT_STATE.messages.push({ role: "assistant", content: aiAgentReadonlySummary(json, readonlyIntent) });
+      renderAiAgentThread();
+      setAiAgentMessage("已完成唯讀查詢", "ok");
+    } catch (err) {
+      AI_AGENT_STATE.messages.push({ role: "assistant", content: `唯讀查詢失敗：${err?.message || err}` });
+      renderAiAgentThread();
+      setAiAgentMessage(`唯讀查詢失敗：${err?.message || err}`, "err");
+    } finally {
+      AI_AGENT_STATE.sending = false;
+      if (sendBtn) sendBtn.disabled = false;
+    }
     return;
   }
   AI_AGENT_STATE.sending = true;

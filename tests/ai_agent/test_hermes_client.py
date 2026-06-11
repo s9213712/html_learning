@@ -284,6 +284,73 @@ def test_ai_agent_chat_detects_mock_reply(monkeypatch):
     assert "mock 回覆" in str(exc.value)
 
 
+def test_ai_agent_chat_detects_hermes_failed_envelope(monkeypatch):
+    def fake_json_request(_settings, method, path, payload=None, session_key="", timeout=None):
+        assert path == "/chat/completions"
+        return {
+            "model": "qwen3-vl:235b-instruct-cloud",
+            "choices": [
+                {
+                    "finish_reason": "error",
+                    "message": {
+                        "role": "assistant",
+                        "content": "API call failed after 3 retries: HTTP 500: Internal Server Error",
+                    },
+                },
+            ],
+            "hermes": {
+                "completed": False,
+                "failed": True,
+                "error": "HTTP 500: Internal Server Error",
+            },
+        }
+
+    monkeypatch.setattr(hermes_client, "_json_request", fake_json_request)
+
+    with pytest.raises(AiAgentError) as exc:
+        hermes_client.ai_agent_chat(
+            {
+                "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
+                "ai_agent_api_key": "dummy-key",
+                "ai_agent_allowed_models": "qwen3-vl:235b-instruct-cloud",
+            },
+            messages=[{"role": "user", "content": "分析圖片"}],
+            model="qwen3-vl:235b-instruct-cloud",
+        )
+    assert "後端執行失敗" in str(exc.value)
+
+
+def test_ai_agent_chat_detects_error_finish_reason(monkeypatch):
+    def fake_json_request(_settings, method, path, payload=None, session_key="", timeout=None):
+        assert path == "/chat/completions"
+        return {
+            "model": "qwen3-vl:235b-instruct-cloud",
+            "choices": [
+                {
+                    "finish_reason": "error",
+                    "message": {
+                        "role": "assistant",
+                        "content": "API call failed after 3 retries: HTTP 500: Internal Server Error",
+                    },
+                },
+            ],
+        }
+
+    monkeypatch.setattr(hermes_client, "_json_request", fake_json_request)
+
+    with pytest.raises(AiAgentError) as exc:
+        hermes_client.ai_agent_chat(
+            {
+                "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
+                "ai_agent_api_key": "dummy-key",
+                "ai_agent_allowed_models": "qwen3-vl:235b-instruct-cloud",
+            },
+            messages=[{"role": "user", "content": "分析圖片"}],
+            model="qwen3-vl:235b-instruct-cloud",
+        )
+    assert "後端執行失敗" in str(exc.value)
+
+
 def test_ai_agent_chat_detects_mock_reply_with_whitespace(monkeypatch):
     def fake_json_request(_settings, method, path, payload=None, session_key="", timeout=None):
         assert path == "/chat/completions"
