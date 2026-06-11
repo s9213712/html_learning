@@ -4,7 +4,7 @@ import sqlite3
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 
-from flask import Flask, jsonify, make_response
+from flask import Flask, jsonify, make_response, request
 from services.ai_agent.hermes import AiAgentError, clear_ai_agent_audit_scan_state
 
 from routes.ai_agent import register_ai_agent_routes
@@ -132,7 +132,7 @@ def _build_db(path):
     conn.close()
 
 
-def _build_app(db_path, actor, *, settings=None):
+def _build_app(db_path, actor, *, settings=None, audit_events=None):
     def get_db():
         conn = sqlite3.connect(db_path)
         conn.row_factory = sqlite3.Row
@@ -140,6 +140,11 @@ def _build_app(db_path, actor, *, settings=None):
 
     app = Flask(__name__)
     app.testing = True
+
+    def record_audit(*args, **kwargs):
+        if audit_events is not None:
+            audit_events.append({"args": args, "kwargs": kwargs})
+
     register_ai_agent_routes(
         app,
         {
@@ -147,7 +152,7 @@ def _build_app(db_path, actor, *, settings=None):
             "get_system_settings": lambda: dict({"module_ai_agent_min_role": "user", "ai_agent_api_base_url": "http://127.0.0.1:8642/v1"}, **(settings or {})),
             "get_client_ip": lambda: "127.0.0.1",
             "get_ua": lambda: "pytest",
-            "audit": lambda *args, **kwargs: None,
+            "audit": record_audit,
             "json_resp": _json_resp,
             "require_csrf": lambda x: x,
             "require_csrf_safe": lambda x: x,
@@ -190,6 +195,154 @@ def test_ai_agent_status_includes_role_scope_and_settings(monkeypatch, tmp_path)
     assert payload["settings"]["operation_mode_policy"]["mode"] == "assist"
     assert payload["settings"]["safety_boundaries"]
     assert "scan" not in payload["audit"]
+
+
+def test_ai_agent_write_tools_root_only_and_lists_allowed_tools(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    settings = {
+        "ai_agent_operation_mode": "write",
+        "ai_agent_allowed_tools": "write_community_create_thread,write_launch_requirements_check",
+    }
+    user_app = _build_app(db_path, {"id": 2, "username": "userA", "role": "user"}, settings=settings)
+    root_app = _build_app(db_path, {"id": 1, "username": "root", "role": "user"}, settings=settings)
+
+    user_response = user_app.test_client().get("/api/ai-agent/write-tools")
+    root_response = root_app.test_client().get("/api/ai-agent/write-tools")
+    payload = root_response.get_json()
+
+    assert user_response.status_code == 403
+    assert root_response.status_code == 200
+    assert payload["ok"] is True
+    assert payload["root_only"] is True
+    assert payload["write_enabled"] is True
+    assert [tool["name"] for tool in payload["tools"]] == [
+        "write_community_create_thread",
+        "write_launch_requirements_check",
+    ]
+
+
+def test_ai_agent_write_tool_execute_requires_write_mode_for_mutation(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "assist",
+            "ai_agent_allowed_tools": "write_community_create_thread",
+        },
+    )
+
+    response = app.test_client().post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_community_create_thread",
+        "confirm": "EXECUTE",
+        "arguments": {"board_id": 1, "title": "hello", "content": "world"},
+    })
+    payload = response.get_json()
+
+    assert response.status_code == 409
+    assert payload["ok"] is False
+    assert "operation mode" in payload["msg"]
+
+
+def test_ai_agent_write_tool_execute_dispatches_allowlisted_read_tool(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={"ai_agent_allowed_tools": "write_launch_requirements_check"},
+    )
+
+    @app.route("/api/root/server-mode/requirements", methods=["GET"])
+    def fake_requirements():
+        return _json_resp({
+            "ok": True,
+            "checked": True,
+            "session_cookie_seen": bool(request.cookies.get("session_token")),
+        })
+
+    client = app.test_client()
+    client.set_cookie("session_token", "root-session")
+    response = client.post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_launch_requirements_check",
+        "arguments": {},
+    })
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert payload["tool"] == "write_launch_requirements_check"
+    assert payload["result"]["checked"] is True
+    assert payload["result"]["session_cookie_seen"] is True
+
+
+def test_ai_agent_write_tool_execute_blocks_unallowed_tool(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "write",
+            "ai_agent_allowed_tools": "write_launch_requirements_check",
+        },
+    )
+
+    response = app.test_client().post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_community_create_thread",
+        "confirm": "EXECUTE",
+        "arguments": {"board_id": 1, "title": "hello", "content": "world"},
+    })
+    payload = response.get_json()
+
+    assert response.status_code == 403
+    assert payload["ok"] is False
+    assert "未在目前 AI Agent allowed_tools" in payload["msg"]
+
+
+def test_ai_agent_frontend_routes_emit_audit_events(monkeypatch, tmp_path):
+    clear_ai_agent_audit_scan_state()
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    audit_events = []
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "readonly",
+            "ai_agent_allowed_tools": "write_community_create_thread,write_launch_requirements_check",
+        },
+        audit_events=audit_events,
+    )
+    monkeypatch.setattr("routes.ai_agent.ai_agent_health", lambda settings: {"ok": True, "url": "http://127.0.0.1:11434/v1/models", "payload": {}})
+    monkeypatch.setattr("routes.ai_agent.ai_agent_capabilities", lambda settings: {"ok": True, "chat": True})
+    monkeypatch.setattr("routes.ai_agent.ai_agent_models", lambda settings: {"object": "list", "data": [{"id": "gpt-oss:120b-cloud"}]})
+
+    client = app.test_client()
+    assert client.get("/api/ai-agent/status").status_code == 200
+    assert client.get("/api/ai-agent/models").status_code == 200
+    assert client.get("/api/ai-agent/readonly?scope=resources").status_code == 200
+    assert client.get("/api/ai-agent/write-tools").status_code == 200
+    blocked = client.post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_community_create_thread",
+        "confirm": "EXECUTE",
+        "arguments": {"board_id": 1, "title": "hello", "content": "world"},
+    })
+
+    actions = [event["args"][0] for event in audit_events]
+    assert blocked.status_code == 409
+    assert "AI_AGENT_STATUS" in actions
+    assert "AI_AGENT_MODELS" in actions
+    assert "AI_AGENT_READONLY" in actions
+    assert "AI_AGENT_WRITE_TOOLS_LIST" in actions
+    assert any(
+        event["args"][0] == "AI_AGENT_WRITE_TOOL"
+        and event["kwargs"].get("success") is False
+        and "operation_mode_not_write" in event["kwargs"].get("detail", "")
+        for event in audit_events
+    )
 
 
 def test_ai_agent_status_only_super_admin_gets_audit_scan(monkeypatch, tmp_path):

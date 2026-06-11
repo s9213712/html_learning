@@ -47,7 +47,7 @@ def test_root_quick_settings_expose_service_fee_pricing_for_feature_pages():
     assert "/root/economy/catalog" in js
     assert "root-module-pricing-panel" in js
     assert "root-module-pricing-panel" in css
-    assert "/js/01-root-quick-settings.js?v=20260603-drive-bulk-actions" in html
+    assert "/js/01-root-quick-settings.js?v=20260611-ai-agent-mode-quick" in html
     assert "服務費小帳本" not in js
     assert "pc0 站內帳本即時" in js
 
@@ -86,3 +86,16 @@ def test_experiments_quick_toggle_controls_feature_visibility():
     experiments_block = quick_js[experiments_start:experiments_end]
     assert 'id: "s-feature-experiments-enabled"' in experiments_block
     assert 'label: "開放實驗區"' in experiments_block
+
+
+def test_ai_agent_quick_settings_expose_operation_mode_near_top():
+    quick_js = _read("public/js/01-root-quick-settings.js")
+
+    start = quick_js.index('  "ai-agent": {')
+    end = quick_js.index("\n  },", start)
+    block = quick_js[start:end]
+
+    assert 'id: "s-feature-ai-agent-enabled"' in block
+    assert 'id: "s-ai-agent-operation-mode"' in block
+    assert 'readonly/assist/write/audit' in block
+    assert block.index('id: "s-ai-agent-operation-mode"') < block.index('id: "s-module-ai-agent-min-role"')

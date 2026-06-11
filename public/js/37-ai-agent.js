@@ -10,6 +10,7 @@ const AI_AGENT_STATE = {
   settings: {},
   actor: {},
   audit: {},
+  modelIds: [],
   sessionId: "",
   accountScope: "",
 };
@@ -90,7 +91,7 @@ function renderAiAgentStatus(json) {
   const health = json?.health || {};
   const status = $("ai-agent-status");
   if (status) {
-    status.textContent = health.ok ? "Hermes API 已連線" : `Hermes API 未連線${health.msg ? `：${health.msg}` : ""}`;
+    status.textContent = health.ok ? "AI Agent 後端已連線" : `AI Agent 後端未連線${health.msg ? `：${health.msg}` : ""}`;
     status.style.color = health.ok ? "var(--accent2)" : "var(--muted)";
   }
   if ($("ai-agent-provider")) $("ai-agent-provider").textContent = settings.provider || "-";
@@ -115,11 +116,7 @@ function renderAiAgentStatus(json) {
   if (tasks.prompt) taskLines.push("提示詞與參數");
   if ($("ai-agent-tasks-state")) $("ai-agent-tasks-state").textContent = taskLines.length ? taskLines.join("、") : "未啟用";
   if ($("ai-agent-model-state")) $("ai-agent-model-state").textContent = `模型：${settings.model || "-"}`;
-  const allowedModels = String(settings.allowed_models || "").split(",").map((item) => item.trim()).filter(Boolean);
-  const modelInput = $("ai-agent-model");
-  if (modelInput && (!modelInput.value || (allowedModels.length && !allowedModels.includes(modelInput.value)))) {
-    modelInput.value = allowedModels[0] || settings.model || "hermes-agent";
-  }
+  syncAiAgentModelSelect();
   if ($("ai-agent-safety-boundaries")) {
     const rules = Array.isArray(settings.safety_boundaries) ? settings.safety_boundaries : [];
     $("ai-agent-safety-boundaries").innerHTML = rules.length
@@ -190,19 +187,58 @@ function renderAiAgentReadOnly(payload = {}) {
   }
 }
 
-function renderAiAgentModels(modelsPayload) {
-  const host = $("ai-agent-model-list");
-  if (!host) return;
-  const rawModels = Array.isArray(modelsPayload?.data) ? modelsPayload.data : [];
-  const allowedModels = String(AI_AGENT_STATE.settings?.allowed_models || "").split(",").map((item) => item.trim()).filter(Boolean);
+function aiAgentAllowedModels() {
+  return String(AI_AGENT_STATE.settings?.allowed_models || "").split(",").map((item) => item.trim()).filter(Boolean);
+}
+
+function aiAgentSelectableModels() {
+  const allowedModels = aiAgentAllowedModels();
   const modelIds = [];
-  rawModels.forEach((model) => {
-    const id = typeof model === "string" ? model : model?.id || model?.name || "";
+  (AI_AGENT_STATE.modelIds || []).forEach((id) => {
     if (id && !modelIds.includes(id)) modelIds.push(id);
   });
   allowedModels.forEach((id) => {
     if (id && !modelIds.includes(id)) modelIds.unshift(id);
   });
+  const configured = AI_AGENT_STATE.settings?.model || "";
+  if (configured && !modelIds.includes(configured)) modelIds.unshift(configured);
+  return modelIds.filter((id) => !allowedModels.length || allowedModels.includes(id));
+}
+
+function syncAiAgentModelSelect() {
+  const select = $("ai-agent-model");
+  if (!select) return;
+  const previous = select.value;
+  const options = aiAgentSelectableModels();
+  if (!options.length) {
+    const fallback = AI_AGENT_STATE.settings?.model || "";
+    select.innerHTML = `<option value="${sanitize(fallback)}">${sanitize(fallback || "尚未取得模型")}</option>`;
+    select.disabled = !fallback;
+    return;
+  }
+  select.disabled = false;
+  select.innerHTML = options.map((id) => `<option value="${sanitize(id)}">${sanitize(id)}</option>`).join("");
+  const configured = AI_AGENT_STATE.settings?.model || "";
+  select.value = previous && options.includes(previous)
+    ? previous
+    : (configured && options.includes(configured) ? configured : options[0]);
+}
+
+function renderAiAgentModels(modelsPayload) {
+  const host = $("ai-agent-model-list");
+  if (!host) return;
+  const rawModels = Array.isArray(modelsPayload?.data) ? modelsPayload.data : [];
+  const allowedModels = aiAgentAllowedModels();
+  const modelIds = [];
+  rawModels.forEach((model) => {
+    const id = typeof model === "string" ? model : model?.id || model?.name || "";
+    if (id && !modelIds.includes(id)) modelIds.push(id);
+  });
+  AI_AGENT_STATE.modelIds = modelIds.slice();
+  allowedModels.forEach((id) => {
+    if (id && !modelIds.includes(id)) modelIds.unshift(id);
+  });
+  syncAiAgentModelSelect();
   if (!modelIds.length) {
     host.innerHTML = '<div class="drive-empty">尚未取得模型清單</div>';
     return;
@@ -214,8 +250,11 @@ function renderAiAgentModels(modelsPayload) {
   }).join("");
   host.querySelectorAll("[data-ai-agent-model]").forEach((button) => {
     button.addEventListener("click", () => {
-      const input = $("ai-agent-model");
-      if (input) input.value = button.dataset.aiAgentModel || "";
+      const select = $("ai-agent-model");
+      const model = button.dataset.aiAgentModel || "";
+      if (select && Array.from(select.options).some((option) => option.value === model)) {
+        select.value = model;
+      }
     });
   });
 }
@@ -421,13 +460,21 @@ async function sendAiAgentMessage() {
   const sendBtn = $("ai-agent-send-btn");
   if (sendBtn) sendBtn.disabled = true;
   setAiAgentMessage("送出中...", "info");
+  const selectedModel = ($("ai-agent-model")?.value || "").trim();
+  const selectableModels = aiAgentSelectableModels();
+  if (selectableModels.length && !selectableModels.includes(selectedModel)) {
+    AI_AGENT_STATE.sending = false;
+    if (sendBtn) sendBtn.disabled = false;
+    setAiAgentMessage("請從模型選單選擇可用模型。", "err");
+    return;
+  }
   const userText = prompt || "[圖片]";
   AI_AGENT_STATE.messages.push({ role: "user", content: mode === "image" && AI_AGENT_STATE.imageDataUrl ? `${userText}\n[已附加圖片]` : userText });
   renderAiAgentThread();
   try {
     const payload = {
       session_id: aiAgentEnsureSessionId(),
-      model: ($("ai-agent-model")?.value || "").trim(),
+      model: selectedModel,
       mode,
       messages: aiAgentBuildMessages(prompt, mode),
       image_data_url: mode === "image" ? AI_AGENT_STATE.imageDataUrl : "",

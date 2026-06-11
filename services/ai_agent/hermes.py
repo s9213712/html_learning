@@ -330,6 +330,72 @@ AI_AGENT_TOOL_BLUEPRINT = {
         "min_role": "super_admin",
         "data_scope": "audit_scan",
     },
+    "write_community_create_thread": {
+        "label": "發表主題",
+        "description": "root 專用白名單寫入工具：在指定討論版建立主題。",
+        "min_role": "super_admin",
+        "data_scope": "write_tool:community",
+    },
+    "write_community_reply_thread": {
+        "label": "回覆主題",
+        "description": "root 專用白名單寫入工具：在指定主題留言。",
+        "min_role": "super_admin",
+        "data_scope": "write_tool:community",
+    },
+    "write_comfyui_generate": {
+        "label": "執行生圖",
+        "description": "root 專用白名單寫入工具：送出 ComfyUI 生圖任務。",
+        "min_role": "super_admin",
+        "data_scope": "write_tool:comfyui",
+    },
+    "write_chess_create_practice": {
+        "label": "建立西洋棋練習",
+        "description": "root 專用白名單寫入工具：建立電腦對局練習。",
+        "min_role": "super_admin",
+        "data_scope": "write_tool:games",
+    },
+    "write_chess_make_move": {
+        "label": "西洋棋走子",
+        "description": "root 專用白名單寫入工具：在指定棋局送出一步棋。",
+        "min_role": "super_admin",
+        "data_scope": "write_tool:games",
+    },
+    "write_member_create_user": {
+        "label": "新增會員",
+        "description": "root 專用白名單寫入工具：透過既有會員管理 API 新增帳號。",
+        "min_role": "super_admin",
+        "data_scope": "write_tool:members",
+    },
+    "write_member_update_user": {
+        "label": "更新會員",
+        "description": "root 專用白名單寫入工具：透過既有會員管理 API 更新指定帳號。",
+        "min_role": "super_admin",
+        "data_scope": "write_tool:members",
+    },
+    "write_bug_report_review": {
+        "label": "審核 Bug 回報",
+        "description": "root 專用白名單寫入工具：審核 bug report 並可設定獎勵點數。",
+        "min_role": "super_admin",
+        "data_scope": "write_tool:bug_reports",
+    },
+    "write_launch_requirements_check": {
+        "label": "上線需求檢查",
+        "description": "root 專用白名單工具：執行上線前需求檢查。",
+        "min_role": "super_admin",
+        "data_scope": "write_tool:launch_check",
+    },
+    "write_launch_logs_verify": {
+        "label": "上線 log 鏈驗證",
+        "description": "root 專用白名單工具：驗證 server-mode log chain。",
+        "min_role": "super_admin",
+        "data_scope": "write_tool:launch_check",
+    },
+    "write_launch_doc_read": {
+        "label": "上線文件讀取",
+        "description": "root 專用白名單工具：讀取 docs/ 內的上線檢查文件。",
+        "min_role": "super_admin",
+        "data_scope": "write_tool:launch_check",
+    },
 }
 
 AI_AGENT_SAFETY_BOUNDARIES = (
@@ -1279,6 +1345,14 @@ def run_ai_agent_audit_scan(settings, *, get_db, actor=None, force=False, get_cl
 
 
 def ai_agent_health(settings):
+    provider = normalize_ai_agent_provider((settings or {}).get("ai_agent_provider")) or DEFAULT_AI_AGENT_PROVIDER
+    if provider == "openai_compatible":
+        try:
+            payload = _json_request(settings, "GET", "/models", timeout=min(_backend_timeout(settings), 8))
+            return {"ok": True, "url": urljoin(_backend_base_url(settings).rstrip("/") + "/", "models"), "payload": payload}
+        except AiAgentError as exc:
+            return {"ok": False, "url": urljoin(_backend_base_url(settings).rstrip("/") + "/", "models"), "msg": str(exc), "status": exc.status, "payload": exc.payload}
+
     base_url = _backend_base_url(settings)
     parsed = urlparse(base_url)
     path = (parsed.path or "").rstrip("/")

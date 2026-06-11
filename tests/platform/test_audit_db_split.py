@@ -1,6 +1,7 @@
 import sqlite3
 
 from services.server.database import get_audit_db
+from services.server.routes import OPERATION_ROUTE_KEYS
 from services.system import audit as audit_service
 
 
@@ -12,6 +13,10 @@ def test_get_audit_db_creates_secure_audit_schema(tmp_path):
     finally:
         conn.close()
     assert {"id", "ts", "action", "chain_hash", "prev_hash", "entry_hash"} <= cols
+
+
+def test_operation_routes_receive_split_audit_db_dependency():
+    assert "get_audit_db" in OPERATION_ROUTE_KEYS
 
 
 def test_audit_service_writes_to_split_audit_db_only(tmp_path):

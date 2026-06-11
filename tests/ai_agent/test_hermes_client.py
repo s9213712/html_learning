@@ -210,6 +210,36 @@ def test_ai_agent_health_marks_mock_backend_as_unhealthy(monkeypatch):
     assert result["payload"]["service"] == "hermes-mock"
 
 
+def test_ai_agent_health_openai_compatible_uses_models_endpoint(monkeypatch):
+    class FakeResponse:
+        def read(self, _size):
+            return json.dumps({"object": "list", "data": [{"id": "gpt-oss:120b-cloud"}]}).encode("utf-8")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    calls = []
+
+    def fake_urlopen(req, timeout=5):
+        calls.append(getattr(req, "full_url", ""))
+        return FakeResponse()
+
+    monkeypatch.setattr(hermes_client.urllib_request, "urlopen", fake_urlopen)
+
+    result = hermes_client.ai_agent_health({
+        "ai_agent_provider": "openai_compatible",
+        "ai_agent_api_base_url": "http://127.0.0.1:11434/v1",
+    })
+
+    assert calls == ["http://127.0.0.1:11434/v1/models"]
+    assert result["ok"] is True
+    assert result["url"] == "http://127.0.0.1:11434/v1/models"
+    assert result["payload"]["data"][0]["id"] == "gpt-oss:120b-cloud"
+
+
 def test_ai_agent_chat_detects_mock_reply(monkeypatch):
     def fake_json_request(_settings, method, path, payload=None, session_key="", timeout=None):
         assert path == "/chat/completions"

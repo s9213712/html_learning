@@ -175,11 +175,11 @@ const ROOT_MODULE_QUICK_SETTINGS = {
     pricingKeys: ["ai_agent_task_basic"],
     fields: [
       { id: "s-feature-ai-agent-enabled", label: "開放 AI Agent / LLM" },
+      { id: "s-ai-agent-operation-mode", label: "運作模式", hint: "readonly/assist/write/audit；write 仍只開放 root 的白名單工具。" },
       { id: "s-module-ai-agent-min-role", label: "最低可用角色" },
       { id: "s-ai-agent-provider", label: "Provider" },
       { id: "s-ai-agent-api-base-url", label: "API Base URL" },
       { id: "s-ai-agent-model", label: "模型" },
-      { id: "s-ai-agent-operation-mode", label: "運作模式" },
       { id: "s-ai-agent-allowed-models", label: "允許模型清單" },
       { id: "s-ai-agent-allowed-tools", label: "可調用工具清單" },
       { id: "s-ai-agent-allow-image-input", label: "允許圖片理解" },
