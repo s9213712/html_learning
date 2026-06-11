@@ -48,7 +48,7 @@ AI_AGENT_WRITE_TOOL_SPECS = {
         "path": "/api/comfyui/generate",
         "path_params": {},
         "body_fields": {
-            "prompt", "negative_prompt", "checkpoint", "checkpoint_name", "width", "height",
+            "prompt", "negative_prompt", "model", "checkpoint", "checkpoint_name", "width", "height",
             "steps", "cfg", "cfg_scale", "sampler", "scheduler", "seed", "batch_size",
             "workflow", "workflow_id", "official_workflow_id", "template_id", "lora",
             "loras", "vae", "vae_name", "timeout_seconds", "confirm_billing",
@@ -745,6 +745,10 @@ def register_ai_agent_routes(app, deps):
 
         body_fields = spec.get("body_fields") or set()
         body = {key: args.get(key) for key in body_fields if key in args}
+        if tool_name == "write_comfyui_generate" and not str(body.get("model") or "").strip():
+            fallback_model = str(body.get("checkpoint") or body.get("checkpoint_name") or "").strip()
+            if fallback_model:
+                body["model"] = fallback_model
         return path, body, ""
 
     def _dispatch_internal_api(method, path, body):

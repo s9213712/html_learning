@@ -278,6 +278,43 @@ def test_ai_agent_write_tool_execute_dispatches_allowlisted_read_tool(tmp_path):
     assert payload["result"]["session_cookie_seen"] is True
 
 
+def test_ai_agent_comfyui_write_tool_maps_checkpoint_to_model(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "write",
+            "ai_agent_allowed_tools": "write_comfyui_generate",
+        },
+    )
+    captured = {}
+
+    @app.route("/api/comfyui/generate", methods=["POST"])
+    def fake_comfyui_generate():
+        captured.update(request.get_json(silent=True) or {})
+        return _json_resp({"ok": True, "job": {"job_id": "job-1", "status": "queued"}})
+
+    response = app.test_client().post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_comfyui_generate",
+        "confirm": "EXECUTE",
+        "arguments": {
+            "prompt": "by ogipote, 2girls, bikini",
+            "checkpoint": "JANKU-V777.safetensors",
+            "width": 1024,
+            "height": 1024,
+            "confirm_billing": True,
+        },
+    })
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert captured["model"] == "JANKU-V777.safetensors"
+    assert captured["checkpoint"] == "JANKU-V777.safetensors"
+
+
 def test_ai_agent_write_tool_execute_blocks_unallowed_tool(tmp_path):
     db_path = tmp_path / "ai_agent_routes.db"
     _build_db(db_path)
