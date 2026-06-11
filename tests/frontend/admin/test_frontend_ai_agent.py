@@ -40,7 +40,7 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert 'id="ai-agent-audit-overview"' in html
     assert 'id="ai-agent-audit-scan-btn"' in html
     assert 'id="s-module-ai-agent-min-role"' in html
-    assert "/js/37-ai-agent.js?v=20260611-ai-agent-model-select" in html
+    assert "/js/37-ai-agent.js?v=20260611-ai-agent-provider-status" in html
 
     assert '"ai-agent": "feature_ai_agent_enabled"' in core_js
     assert "normalizeModuleSettingKey(moduleKey)" in core_js
@@ -65,8 +65,10 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert 'API + "/ai-agent/chat"' in ai_agent_js
     assert 'API + "/ai-agent/audit-status"' in ai_agent_js
     assert 'API + "/ai-agent/audit-scan"' in ai_agent_js
-    assert "AI Agent 後端已連線" in ai_agent_js
+    assert "OpenAI-compatible" in ai_agent_js
+    assert "Hermes Agent" in ai_agent_js
     assert "Hermes API 已連線" not in ai_agent_js
+    assert "AI Agent 後端已連線" not in ai_agent_js
     assert 'operation_mode_policy' in ai_agent_js
     assert 'safety_boundaries' in ai_agent_js
     assert 'ai-agent-effective-tools' in ai_agent_js

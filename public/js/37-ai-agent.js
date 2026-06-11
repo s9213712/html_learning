@@ -91,7 +91,8 @@ function renderAiAgentStatus(json) {
   const health = json?.health || {};
   const status = $("ai-agent-status");
   if (status) {
-    status.textContent = health.ok ? "AI Agent 後端已連線" : `AI Agent 後端未連線${health.msg ? `：${health.msg}` : ""}`;
+    const providerLabel = settings.provider === "openai_compatible" ? "OpenAI-compatible" : "Hermes Agent";
+    status.textContent = health.ok ? `${providerLabel} 已連線` : `${providerLabel} 未連線${health.msg ? `：${health.msg}` : ""}`;
     status.style.color = health.ok ? "var(--accent2)" : "var(--muted)";
   }
   if ($("ai-agent-provider")) $("ai-agent-provider").textContent = settings.provider || "-";
