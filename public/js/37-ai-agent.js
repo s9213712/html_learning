@@ -146,15 +146,38 @@ function aiAgentLineValue(text, patterns) {
   return "";
 }
 
+function aiAgentLooksLikeComfyuiPromptLine(line) {
+  const value = aiAgentStripFieldValue(line);
+  if (!value) return false;
+  if (/^\d{3,4}\s*[xX*×＊]\s*\d{3,4}$/.test(value)) return false;
+  if (/^(?:size|尺寸|解析度|cfg|steps?|步數|batch|張數|數量|seed|sampler|scheduler|vae|models?|模型|checkpoint|ckpt)\s*[:：]/i.test(value)) return false;
+  if (/(幫我|請|使用|用|生成|產生|生圖|產圖|畫|comfyui|txt2img|t2i|sdxl)/i.test(value) && !value.includes(",")) return false;
+  if (/,/.test(value)) return true;
+  return /\b(?:girl|boy|woman|man|landscape|portrait|anime|photo|bikini|dress|style|lighting|background)\b/i.test(value);
+}
+
+function aiAgentLooksLikeComfyuiModelLine(line) {
+  const value = aiAgentStripFieldValue(line);
+  if (!value || value.includes(",")) return false;
+  if (/^\d{3,4}\s*[xX*×＊]\s*\d{3,4}$/.test(value)) return false;
+  if (/(幫我|請|生成|產生|生圖|產圖|畫|txt2img|t2i)/i.test(value)) return false;
+  return /(?:v\s*\d+|v\d+|ckpt|checkpoint|model|模型|safetensors|janku|pony|illustrious|xl|sdxl|[A-Z]{2,}.*\d)/i.test(value);
+}
+
 function aiAgentParseComfyuiGenerateRequest(text) {
   const raw = String(text || "").trim();
   if (!raw) return null;
   const lower = raw.toLowerCase();
   const wantsImage = /生圖|產圖|生成圖片|畫圖|畫一張|做一張|comfyui|txt2img|t2i|sdxl|text\s*to\s*image/.test(lower);
   if (!wantsImage) return null;
-  const prompt = aiAgentLineValue(raw, [
+  let prompt = aiAgentLineValue(raw, [
     /^\s*(?:提示詞|prompt|positive prompt)\s*[:：]\s*(.+)$/i,
   ]);
+  const lines = raw.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  if (!prompt) {
+    const promptLine = lines.find((line) => aiAgentLooksLikeComfyuiPromptLine(line));
+    prompt = promptLine ? aiAgentStripFieldValue(promptLine) : "";
+  }
   if (!prompt) return null;
   const args = { prompt, confirm_billing: true };
   const negative = aiAgentLineValue(raw, [
@@ -169,7 +192,12 @@ function aiAgentParseComfyuiGenerateRequest(text) {
   const model = aiAgentLineValue(raw, [
     /^\s*(?:models?|模型|checkpoint|ckpt)\s*[:：]\s*(.+)$/i,
   ]);
-  if (model) args.checkpoint = model;
+  if (model) {
+    args.checkpoint = model;
+  } else {
+    const modelLine = lines.find((line) => aiAgentLooksLikeComfyuiModelLine(line) && aiAgentStripFieldValue(line) !== prompt);
+    if (modelLine) args.checkpoint = aiAgentStripFieldValue(modelLine);
+  }
   const cfg = raw.match(/(?:^|\n)\s*(?:cfg(?:[_\s-]?scale)?)\s*[:：]?\s*([0-9]+(?:\.[0-9]+)?)/i);
   if (cfg) args.cfg_scale = aiAgentClampNumber(cfg[1], 7, { min: 1, max: 20 });
   const steps = raw.match(/(?:^|\n)\s*(?:steps?|步數)\s*[:：]?\s*(\d+)/i);
@@ -454,7 +482,10 @@ function aiAgentComfyuiToolArguments(overrides = null) {
 async function runAiAgentComfyuiGenerate(overrides = null) {
   if (AI_AGENT_STATE.sendingTool) return;
   if (!aiAgentCanRunWriteTool("write_comfyui_generate")) {
-    setAiAgentMessage("目前不可執行 ComfyUI write-tool，請確認 root / write 模式 / 工具白名單。", "err");
+    const msg = "目前不可執行 ComfyUI write-tool，請確認 root / write 模式 / 工具白名單。";
+    AI_AGENT_STATE.messages.push({ role: "assistant", content: `ComfyUI 產圖未送出：${msg}` });
+    renderAiAgentThread();
+    setAiAgentMessage(msg, "err");
     return;
   }
   let args = {};
@@ -462,7 +493,10 @@ async function runAiAgentComfyuiGenerate(overrides = null) {
     args = aiAgentComfyuiToolArguments(overrides);
     if (!args.prompt) throw new Error("請先輸入提示詞");
   } catch (err) {
-    setAiAgentMessage(err?.message || "產圖參數不完整", "err");
+    const msg = err?.message || "產圖參數不完整";
+    AI_AGENT_STATE.messages.push({ role: "assistant", content: `ComfyUI 產圖未送出：${msg}` });
+    renderAiAgentThread();
+    setAiAgentMessage(msg, "err");
     return;
   }
   AI_AGENT_STATE.sendingTool = true;
@@ -481,7 +515,13 @@ async function runAiAgentComfyuiGenerate(overrides = null) {
     });
     const json = await res.json().catch(() => ({}));
     if (!res.ok || !json.ok) {
-      setAiAgentMessage(json.msg || `ComfyUI 產圖送出失敗（HTTP ${res.status}）`, "err");
+      const msg = json.msg || `ComfyUI 產圖送出失敗（HTTP ${res.status}）`;
+      AI_AGENT_STATE.messages.push({
+        role: "assistant",
+        content: `ComfyUI 產圖送出失敗（HTTP ${res.status}）：${msg}`,
+      });
+      renderAiAgentThread();
+      setAiAgentMessage(msg, "err");
       return;
     }
     const job = json.result?.job || json.payload?.job || json.job || {};
@@ -494,7 +534,10 @@ async function runAiAgentComfyuiGenerate(overrides = null) {
     setAiAgentMessage("ComfyUI 產圖已送出", "ok");
     await loadAiAgentReadOnly({ scope: "all", limit: 20, silent: true, force: true }).catch(() => undefined);
   } catch (err) {
-    setAiAgentMessage(`ComfyUI 產圖送出失敗：${err}`, "err");
+    const msg = `ComfyUI 產圖送出失敗：${err}`;
+    AI_AGENT_STATE.messages.push({ role: "assistant", content: msg });
+    renderAiAgentThread();
+    setAiAgentMessage(msg, "err");
   } finally {
     AI_AGENT_STATE.sendingTool = false;
     renderAiAgentWriteTools();
