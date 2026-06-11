@@ -430,7 +430,7 @@ AI_AGENT_ROLE_SCOPES = {
     },
     "super_admin": {
         "label": "最高管理者助手",
-        "description": "管理者能力加上伺服器資源與攻擊告警的唯讀診斷建議。",
+        "description": "管理者能力加上伺服器資源、攻擊告警與 root 專用白名單工具協調；實際寫入只在 write 模式、root 身分與確認碼通過後執行。",
         "capabilities": [
             "個人任務查詢（生圖 / 下載）",
             "站內流程導覽",
@@ -438,6 +438,7 @@ AI_AGENT_ROLE_SCOPES = {
             "失敗排查步驟建議（只提供指引）",
             "會員管理與帳號狀態（只提供唯讀建議）",
             "伺服器資源與攻擊訊號（只提供診斷建議）",
+            "write 模式下可協助 root 準備白名單 write-tool 操作，並提醒必須經伺服器端點與確認碼。",
         ],
         "additional_tasks": ["member_management", "attack_diagnosis"],
     },
@@ -551,6 +552,22 @@ def _agent_role_scope(role):
     return AI_AGENT_ROLE_SCOPES.get(role, AI_AGENT_ROLE_SCOPES["user"])
 
 
+def _ai_agent_actor_context(actor, actor_role):
+    username = ""
+    if isinstance(actor, dict):
+        username = str(actor.get("username") or "").strip()
+    elif actor:
+        username = str(actor or "").strip()
+    normalized_role = normalize_ai_agent_role(actor_role)
+    scope = _agent_role_scope(normalized_role)
+    if not username:
+        username = "unknown"
+    return (
+        f"目前登入者：{username}。\n"
+        f"目前權限：{normalized_role}（{scope['label']}）。\n"
+    )
+
+
 def _role_allows(required_role, actor_role):
     return AI_AGENT_ROLE_RANK.get(normalize_ai_agent_role(actor_role), 0) >= AI_AGENT_ROLE_RANK.get(normalize_ai_agent_role(required_role), 0)
 
@@ -574,8 +591,9 @@ def ai_agent_effective_tools(settings, *, actor_role="user"):
     return result
 
 
-def _ai_agent_system_prompt(behavior, *, role="user", allow_tool_runs=False, operation_mode=DEFAULT_AI_AGENT_OPERATION_MODE):
-    scope = _agent_role_scope(normalize_ai_agent_role(role))
+def _ai_agent_system_prompt(behavior, *, role="user", actor=None, allow_tool_runs=False, operation_mode=DEFAULT_AI_AGENT_OPERATION_MODE):
+    normalized_role = normalize_ai_agent_role(role)
+    scope = _agent_role_scope(normalized_role)
     persona_meta = AI_AGENT_PERSONA_PRESETS.get(behavior.get("persona"), AI_AGENT_PERSONA_PRESETS[DEFAULT_AI_AGENT_PERSONA])
     mode_policy = ai_agent_operation_mode_policy(operation_mode)
     enabled_tasks = [
@@ -591,17 +609,24 @@ def _ai_agent_system_prompt(behavior, *, role="user", allow_tool_runs=False, ope
     tool_lines = []
     for detail in behavior.get("tools") or []:
         tool_lines.append(f"- {detail.get('name')}（{detail.get('label')}）：{detail.get('description')}；資料範圍={detail.get('data_scope') or '-'}")
-    tool_scope = (
-        "工具僅提供可執行建議，不會直接呼叫系統 API 或修改站內狀態。"
-        if not allow_tool_runs
-        else "可提供建議型工具摘要，仍不直接下發站內變更操作。"
-    )
+    if mode_policy.get("write_enabled") and normalized_role == "super_admin":
+        tool_scope = (
+            "目前是 root 專用執行寫入模式：你不是一般使用者助手，也不是唯讀模式。"
+            "你可協助 root 準備白名單 write-tool 操作、檢查必要參數與說明風險；"
+            "真正寫入必須透過 /api/ai-agent/write-tools/execute，且同時通過 root 身分、目前 write 模式、工具白名單與 confirm=EXECUTE。"
+            "未收到工具端點成功結果前，不得聲稱已完成任何寫入。"
+        )
+    elif allow_tool_runs:
+        tool_scope = "可提供建議型工具摘要；若模式不是 write 或身分不是 root，不得下發站內變更操作。"
+    else:
+        tool_scope = "工具僅提供可執行建議，不會直接呼叫系統 API 或修改站內狀態。"
 
     return (
         "你是 hackme_web 網站內的 AI 助理，嚴格負責在本站功能邊界內回答。\n"
         f"角色：{persona_meta['label']}。\n"
         f"語氣：{persona_meta['tone']}。\n"
         f"基本原則：{persona_meta['guidance']}\n"
+        f"{_ai_agent_actor_context(actor, normalized_role)}"
         f"服務範圍：{scope['label']}。\n"
         f"用途：{scope['description']}\n"
         f"目前模式：{mode_policy['label']}（{mode_policy['mode']}）。{mode_policy['description']}\n"
@@ -1564,6 +1589,7 @@ def ai_agent_chat(settings, *, messages=None, prompt="", image_data_url="", mode
     system_prompt = _ai_agent_system_prompt(
         behavior,
         role=actor_role,
+        actor=actor,
         allow_tool_runs=bool(public["allow_tool_runs"]),
         operation_mode=public["operation_mode"],
     )

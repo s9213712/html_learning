@@ -47,7 +47,7 @@ def test_root_quick_settings_expose_service_fee_pricing_for_feature_pages():
     assert "/root/economy/catalog" in js
     assert "root-module-pricing-panel" in js
     assert "root-module-pricing-panel" in css
-    assert "/js/01-root-quick-settings.js?v=20260611-ai-agent-mode-quick" in html
+    assert "/js/01-root-quick-settings.js?v=20260611-ai-agent-mode-refresh" in html
     assert "服務費小帳本" not in js
     assert "pc0 站內帳本即時" in js
 
@@ -99,3 +99,13 @@ def test_ai_agent_quick_settings_expose_operation_mode_near_top():
     assert 'id: "s-ai-agent-operation-mode"' in block
     assert 'readonly/assist/write/audit' in block
     assert block.index('id: "s-ai-agent-operation-mode"') < block.index('id: "s-module-ai-agent-min-role"')
+
+
+def test_ai_agent_quick_settings_refreshes_agent_status_after_save():
+    quick_js = _read("public/js/01-root-quick-settings.js")
+
+    assert 'const moduleTab = overlay?.dataset.moduleTab || currentModuleTab;' in quick_js
+    assert 'if (moduleTab === "ai-agent" && typeof loadAiAgentStatus === "function")' in quick_js
+    assert 'await loadAiAgentStatus({ force: true });' in quick_js
+    assert 'loadAiAgentReadOnly({ scope: "all", limit: 20, silent: true, force: true })' in quick_js
+    assert 'loadAiAgentAuditStatus({ silent: true })' in quick_js

@@ -610,7 +610,8 @@ async function saveRootModulePricing(config) {
 
 async function saveRootModuleSettings() {
   const overlay = $("root-module-settings-overlay");
-  const config = rootModuleQuickConfig(overlay?.dataset.moduleTab || currentModuleTab);
+  const moduleTab = overlay?.dataset.moduleTab || currentModuleTab;
+  const config = rootModuleQuickConfig(moduleTab);
   const msg = $("root-module-settings-msg");
   const saveBtn = $("root-module-settings-save");
   if (!config || !overlay) return;
@@ -626,6 +627,15 @@ async function saveRootModuleSettings() {
     if (saves.has("trading") && typeof saveRootTradingSettings === "function") await saveRootTradingSettings();
     if (saves.has("settings") && typeof saveSettings === "function") await saveSettings();
     const pricingSaved = await saveRootModulePricing(config);
+    if (moduleTab === "ai-agent" && typeof loadAiAgentStatus === "function") {
+      await loadAiAgentStatus({ force: true });
+      if (typeof loadAiAgentReadOnly === "function") {
+        await loadAiAgentReadOnly({ scope: "all", limit: 20, silent: true, force: true }).catch(() => undefined);
+      }
+      if (typeof loadAiAgentAuditStatus === "function") {
+        await loadAiAgentAuditStatus({ silent: true }).catch(() => undefined);
+      }
+    }
     if (msg) {
       msg.textContent = `${config.label}設定已送出${pricingSaved ? `，服務扣點 ${pricingSaved} 項已更新` : ""}`;
       msg.className = "msg show ok";

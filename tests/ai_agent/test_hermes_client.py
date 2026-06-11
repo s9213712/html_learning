@@ -468,7 +468,10 @@ def test_ai_agent_chat_blocks_non_root_in_audit_mode(monkeypatch):
 
 
 def test_ai_agent_chat_write_mode_is_root_only(monkeypatch):
+    payloads = []
+
     def fake_json_request(_settings, method, path, payload=None, session_key="", timeout=None):
+        payloads.append(payload or {})
         return {"choices": [{"message": {"content": "root write ok"}}], "model": "hermes-agent"}
 
     monkeypatch.setattr(hermes_client, "_json_request", fake_json_request)
@@ -495,6 +498,12 @@ def test_ai_agent_chat_write_mode_is_root_only(monkeypatch):
         actor={"username": "root", "role": "user"},
     )
     assert result["content"] == "root write ok"
+    system_prompt = payloads[-1]["messages"][0]["content"]
+    assert "目前登入者：root" in system_prompt
+    assert "目前權限：super_admin" in system_prompt
+    assert "你不是一般使用者助手，也不是唯讀模式" in system_prompt
+    assert "/api/ai-agent/write-tools/execute" in system_prompt
+    assert "confirm=EXECUTE" in system_prompt
 
 
 def test_ai_agent_audit_scan_reports_anomalies_and_uses_cache(tmp_path):
