@@ -202,7 +202,11 @@ function aiAgentWantsComfyuiGeneration(text) {
     && /(產圖|生圖|comfyui|generation|下載|download)/i.test(raw)) {
     return false;
   }
-  return /生圖|產圖|生成圖片|畫圖|畫一張|做一張|參考.*圖|照.*圖|comfyui|txt2img|t2i|sdxl|text\s*to\s*image/i.test(raw);
+  if (/(描述|分析|解釋|辨識|看看|看一下|這張圖.*(是|有|哪|什麼)|what.*image|describe.*image)/i.test(raw)
+    && !/(生圖|產圖|生成|產生|畫|做一張|comfyui|txt2img|t2i|sdxl|text\s*to\s*image)/i.test(raw)) {
+    return false;
+  }
+  return /生圖|產圖|生成圖片|生成一張|產生圖片|產生一張|畫圖|畫一張|做一張|comfyui|txt2img|t2i|sdxl|text\s*to\s*image/i.test(raw);
 }
 
 function aiAgentParseComfyuiOptionOverrides(text) {

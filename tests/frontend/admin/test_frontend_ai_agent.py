@@ -44,7 +44,7 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert 'id="ai-agent-comfyui-vae"' in html
     assert 'id="ai-agent-comfyui-generate-btn"' in html
     assert 'id="s-module-ai-agent-min-role"' in html
-    assert "/js/37-ai-agent.js?v=20260612-ai-agent-natural-comfyui" in html
+    assert "/js/37-ai-agent.js?v=20260612-ai-agent-image-intent" in html
     assert "/js/90-bootstrap.js?v=20260611-ai-agent-comfyui-write-tool" in html
 
     assert '"ai-agent": "feature_ai_agent_enabled"' in core_js
@@ -84,6 +84,8 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert "function aiAgentImageAnalysisError" in ai_agent_js
     assert "function aiAgentReadonlyIntent" in ai_agent_js
     assert "aiAgentReadonlyIntent(prompt)" in ai_agent_js
+    assert "describe.*image" in ai_agent_js
+    assert "參考.*圖|照.*圖" not in ai_agent_js
     assert 'scope: "comfyui"' in ai_agent_js
     assert 'scope: "remote_download"' in ai_agent_js
     assert 'scope: "resources"' in ai_agent_js
