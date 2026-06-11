@@ -2194,6 +2194,23 @@
       cursor: pointer;
     }
 
+    .ai-agent-model-option.disabled {
+      opacity: .55;
+      cursor: not-allowed;
+    }
+
+    .grid3 {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: .6rem;
+    }
+
+    .compact-grid input,
+    .compact-grid select {
+      min-width: 0;
+      width: 100%;
+    }
+
     .economy-subtabs {
       margin: .7rem 0 .75rem;
     }
@@ -3091,12 +3108,11 @@
 
     .comfyui-output-gallery {
       width: 100%;
-      height: 100%;
       min-height: 0;
       padding: .7rem;
       display: grid;
-      grid-template-rows: auto minmax(0, 1fr) auto;
-      gap: .65rem;
+      grid-template-rows: auto auto auto;
+      gap: .6rem;
     }
 
     .comfyui-output-label {
@@ -3115,20 +3131,25 @@
     .comfyui-output-main {
       width: 100%;
       min-height: 0;
+      min-height: clamp(220px, 45vh, 400px);
       display: grid;
       place-items: center;
-      border: 1px solid rgba(255,255,255,.10);
-      border-radius: 8px;
-      background: rgba(0,0,0,.18);
+      border: 1px solid rgba(255,255,255,.14);
+      border-radius: 20px;
+      background: linear-gradient(150deg, rgba(17,22,36,.84), rgba(12,16,25,.72));
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 10px 24px rgba(2,6,20,.28);
       padding: 0;
       overflow: hidden;
       cursor: zoom-in;
+      aspect-ratio: 3 / 2;
     }
 
     .comfyui-output-main img {
       width: 100%;
-      max-height: 68vh;
+      max-width: 100%;
+      max-height: 100%;
       object-fit: contain;
+      border-radius: 16px;
     }
 
     .comfyui-image-lightbox {
@@ -3136,13 +3157,13 @@
       inset: 0;
       z-index: 9300;
       display: none;
-      grid-template-rows: auto 1fr;
+      flex-direction: column;
       background: rgba(4, 8, 16, .96);
       color: var(--text);
     }
 
     .comfyui-image-lightbox.show {
-      display: grid;
+      display: flex;
     }
 
     .comfyui-image-lightbox-bar {
@@ -3153,23 +3174,40 @@
       padding: .75rem 1rem;
       border-bottom: 1px solid rgba(255,255,255,.12);
       background: rgba(15, 20, 32, .92);
+      backdrop-filter: blur(6px);
+      z-index: 9302;
+      position: relative;
+    }
+
+    .comfyui-lightbox-close-btn {
+      width: 2rem;
+      height: 2rem;
+      min-width: 0;
+      border: 1px solid rgba(255,255,255,.25);
+      border-radius: 999px;
+      background: rgba(15,20,32,.84);
+      color: var(--text);
+      font-size: 1.1rem;
+      line-height: 1;
+      cursor: pointer;
     }
 
     .comfyui-image-lightbox-body {
       min-height: 0;
+      flex: 1;
       display: grid;
       place-items: center;
-      padding: 1rem 4.25rem;
+      padding: .65rem 4.25rem;
       overflow: auto;
       cursor: zoom-out;
     }
 
     .comfyui-image-lightbox-body img {
-      max-width: 100%;
-      max-height: calc(100vh - 96px);
+      max-width: min(100%, 100vw - 8.6rem);
+      max-height: calc(100vh - 160px);
       object-fit: contain;
-      border: 1px solid rgba(255,255,255,.12);
-      border-radius: 8px;
+      border: 1px solid rgba(255,255,255,.2);
+      border-radius: 14px;
       background: rgba(0,0,0,.32);
     }
 
@@ -3219,12 +3257,24 @@
     .comfyui-batch-grid.is-strip {
       height: auto;
       padding: 0;
-      grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
+      display: flex;
+      align-items: flex-start;
+      gap: .42rem;
+      overflow-x: auto;
+      overflow-y: hidden;
+      scroll-snap-type: x proximity;
+      -webkit-overflow-scrolling: touch;
+      scrollbar-width: none;
+      padding-bottom: .2rem;
+    }
+
+    .comfyui-batch-grid.is-strip::-webkit-scrollbar {
+      display: none;
     }
 
     .comfyui-batch-item {
       border: 1px solid rgba(255,255,255,.12);
-      border-radius: 8px;
+      border-radius: 11px;
       background: rgba(255,255,255,.04);
       color: var(--text);
       padding: .35rem;
@@ -3232,6 +3282,8 @@
       display: grid;
       gap: .35rem;
       text-align: left;
+      scroll-snap-align: center;
+      flex: 0 0 auto;
     }
 
     .comfyui-batch-item.active {
@@ -3243,16 +3295,29 @@
     .comfyui-batch-item img {
       width: 100%;
       aspect-ratio: 1 / 1;
-      max-height: none;
       object-fit: cover;
-      border-radius: 6px;
+      border-radius: 8px;
+    }
+
+    .comfyui-batch-grid.is-strip .comfyui-batch-item {
+      width: 92px;
+      aspect-ratio: 3 / 4;
+    }
+
+    .comfyui-batch-grid.is-strip .comfyui-batch-item img {
+      height: 66px;
     }
 
     .comfyui-batch-item span {
       font-size: .76rem;
       color: var(--muted);
-      min-height: 2.4em;
+      min-height: 2.05em;
       overflow-wrap: anywhere;
+      line-height: 1.24;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
     }
 
     .comfyui-template-checkbox {
@@ -16067,6 +16132,10 @@
   }
 
   .ai-agent-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .grid3 {
     grid-template-columns: 1fr;
   }
 

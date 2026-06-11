@@ -8,8 +8,33 @@ const AI_AGENT_STATE = {
   messages: [],
   imageDataUrl: "",
   settings: {},
+  actor: {},
+  audit: {},
   sessionId: "",
+  accountScope: "",
 };
+
+const AI_AGENT_OPERATION_MODE_LABELS = {
+  readonly: "唯讀",
+  assist: "協助",
+  write: "執行寫入",
+  audit: "僅審計",
+};
+
+function aiAgentCurrentAccountScope() {
+  return typeof getCurrentAccountStorageScope === "function"
+    ? getCurrentAccountStorageScope()
+    : "anonymous";
+}
+
+function aiAgentResetScopeState() {
+  const nextScope = aiAgentCurrentAccountScope();
+  const previousScope = AI_AGENT_STATE.accountScope;
+  AI_AGENT_STATE.accountScope = nextScope;
+  if (previousScope && previousScope !== nextScope) {
+    clearAiAgentConversation();
+  }
+}
 
 function aiAgentEnsureSessionId() {
   if (AI_AGENT_STATE.sessionId) return AI_AGENT_STATE.sessionId;
@@ -24,6 +49,17 @@ function setAiAgentMessage(text = "", kind = "info") {
   el.className = "msg";
   if (text) el.classList.add("show", kind === "err" ? "err" : kind === "ok" ? "ok" : "info");
 }
+
+function isMockAiAgentReply(text) {
+  const compact = String(text || "")
+    .toLowerCase()
+    .replace(/[^0-9a-zA-Z\u4e00-\u9fff]/g, "");
+  if (!compact) return false;
+  const hasTraditional = compact.includes("已收到你的請求");
+  const hasSimplified = compact.includes("已收到你的请求");
+  return compact.includes("mockhermesresponse") && (hasTraditional || hasSimplified);
+}
+
 
 function renderAiAgentThread() {
   const host = $("ai-agent-thread");
@@ -49,6 +85,8 @@ function renderAiAgentStatus(json) {
   const settings = json?.settings || {};
   AI_AGENT_STATE.settings = settings;
   const actor = json?.actor || {};
+  AI_AGENT_STATE.actor = actor;
+  AI_AGENT_STATE.audit = json?.audit || {};
   const health = json?.health || {};
   const status = $("ai-agent-status");
   if (status) {
@@ -59,6 +97,11 @@ function renderAiAgentStatus(json) {
   if ($("ai-agent-base-url")) $("ai-agent-base-url").textContent = settings.api_base_url || "-";
   if ($("ai-agent-key-state")) $("ai-agent-key-state").textContent = settings.api_key_configured ? "已設定" : "未設定";
   if ($("ai-agent-image-allowed")) $("ai-agent-image-allowed").textContent = settings.allow_image_input === false ? "關閉" : "開啟";
+  const mode = settings.operation_mode || "assist";
+  const modePolicy = settings.operation_mode_policy || {};
+  if ($("ai-agent-operation-mode-state")) $("ai-agent-operation-mode-state").textContent = `${modePolicy.label || AI_AGENT_OPERATION_MODE_LABELS[mode] || mode}：${modePolicy.description || ""}`;
+  if ($("ai-agent-allowed-models-state")) $("ai-agent-allowed-models-state").textContent = settings.allowed_models ? settings.allowed_models : "不限";
+  if ($("ai-agent-allowed-tools-state")) $("ai-agent-allowed-tools-state").textContent = settings.allowed_tools ? settings.allowed_tools : "依角色預設";
   const personaLabelMap = {
     concise_helper: "簡潔客服導向",
     strict_helper: "嚴謹流程助手",
@@ -72,7 +115,24 @@ function renderAiAgentStatus(json) {
   if (tasks.prompt) taskLines.push("提示詞與參數");
   if ($("ai-agent-tasks-state")) $("ai-agent-tasks-state").textContent = taskLines.length ? taskLines.join("、") : "未啟用";
   if ($("ai-agent-model-state")) $("ai-agent-model-state").textContent = `模型：${settings.model || "-"}`;
-  if ($("ai-agent-model") && !$("ai-agent-model").value) $("ai-agent-model").value = settings.model || "hermes-agent";
+  const allowedModels = String(settings.allowed_models || "").split(",").map((item) => item.trim()).filter(Boolean);
+  const modelInput = $("ai-agent-model");
+  if (modelInput && (!modelInput.value || (allowedModels.length && !allowedModels.includes(modelInput.value)))) {
+    modelInput.value = allowedModels[0] || settings.model || "hermes-agent";
+  }
+  if ($("ai-agent-safety-boundaries")) {
+    const rules = Array.isArray(settings.safety_boundaries) ? settings.safety_boundaries : [];
+    $("ai-agent-safety-boundaries").innerHTML = rules.length
+      ? rules.map((line) => `<div>${sanitize(line)}</div>`).join("")
+      : "尚未載入安全規則。";
+  }
+  if ($("ai-agent-effective-tools")) {
+    const tools = Array.isArray(settings.tools) ? settings.tools : [];
+    $("ai-agent-effective-tools").innerHTML = tools.length
+      ? tools.map((tool) => `<div>${sanitize(tool.label || tool.name || "-")}：${sanitize(tool.description || "")}<br><span class="drive-card-sub">${sanitize(tool.name || "")} / ${sanitize(tool.data_scope || "")}</span></div>`).join("")
+      : "目前沒有可調用工具。";
+  }
+  renderAiAgentAuditStatus(AI_AGENT_STATE.audit, actor);
 }
 
 function renderAiAgentReadOnly(payload = {}) {
@@ -87,7 +147,7 @@ function renderAiAgentReadOnly(payload = {}) {
   if ($("ai-agent-readonly-member-mgmt")) $("ai-agent-readonly-member-mgmt").textContent = canManageMembers ? "可" : "否";
   if ($("ai-agent-readonly-attack-diagnostic")) $("ai-agent-readonly-attack-diagnostic").textContent = canManageServers ? "可" : "否";
 
-  const capabilities = ["僅讀取模式"];
+  const capabilities = ["個別記憶隔離", "個人資料與任務只看自己"];
   if (canManageMembers) capabilities.push("會員管理報表（唯讀）");
   if (canManageServers) capabilities.push("伺服器資源與攻擊診斷（唯讀）");
   if ($("ai-agent-readonly-capabilities")) {
@@ -104,6 +164,9 @@ function renderAiAgentReadOnly(payload = {}) {
   }
   if (Array.isArray(payload.remote_download_jobs) && payload.remote_download_jobs.length) {
     jobs.push(`下載任務：${payload.remote_download_jobs.length} 筆`);
+  }
+  if (Array.isArray(payload.storage_files)) {
+    jobs.push(`檔案快照：${payload.storage_files.length} 筆${canManageServers ? "（root 全站摘要）" : "（個人隔離）"}`);
   }
 
   const summary = [
@@ -131,13 +194,23 @@ function renderAiAgentModels(modelsPayload) {
   const host = $("ai-agent-model-list");
   if (!host) return;
   const rawModels = Array.isArray(modelsPayload?.data) ? modelsPayload.data : [];
-  if (!rawModels.length) {
+  const allowedModels = String(AI_AGENT_STATE.settings?.allowed_models || "").split(",").map((item) => item.trim()).filter(Boolean);
+  const modelIds = [];
+  rawModels.forEach((model) => {
+    const id = typeof model === "string" ? model : model?.id || model?.name || "";
+    if (id && !modelIds.includes(id)) modelIds.push(id);
+  });
+  allowedModels.forEach((id) => {
+    if (id && !modelIds.includes(id)) modelIds.unshift(id);
+  });
+  if (!modelIds.length) {
     host.innerHTML = '<div class="drive-empty">尚未取得模型清單</div>';
     return;
   }
-  host.innerHTML = rawModels.slice(0, 12).map((model) => {
-    const id = typeof model === "string" ? model : model?.id || model?.name || "";
-    return `<button class="drive-file-row ai-agent-model-option" type="button" data-ai-agent-model="${sanitize(id)}">${sanitize(id || "-")}</button>`;
+  host.innerHTML = modelIds.slice(0, 16).map((id) => {
+    const allowed = !allowedModels.length || allowedModels.includes(id);
+    const suffix = allowed ? "" : "（未在允許清單）";
+    return `<button class="drive-file-row ai-agent-model-option${allowed ? "" : " disabled"}" type="button" ${allowed ? "" : "disabled"} data-ai-agent-model="${sanitize(id)}">${sanitize(id || "-")}${sanitize(suffix)}</button>`;
   }).join("");
   host.querySelectorAll("[data-ai-agent-model]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -145,6 +218,79 @@ function renderAiAgentModels(modelsPayload) {
       if (input) input.value = button.dataset.aiAgentModel || "";
     });
   });
+}
+
+function renderAiAgentAuditStatus(audit = {}, actor = {}) {
+  const host = $("ai-agent-audit-overview");
+  const actions = $("ai-agent-audit-actions");
+  const scope = actor?.scope || {};
+  const canManageServers = !!scope.can_manage_servers;
+  if (actions) actions.hidden = !canManageServers;
+  if (!host) return;
+  const scheduler = audit.scheduler || {};
+  const summary = audit.summary || {};
+  const mode = audit.mode || AI_AGENT_STATE.settings?.operation_mode || "-";
+  const lines = [
+    `模式：${AI_AGENT_OPERATION_MODE_LABELS[mode] || mode}`,
+    `排程：${scheduler.enabled ? "啟用" : "未啟用"} / ${scheduler.interval_minutes || "-"} 分鐘`,
+    `上次掃描：${scheduler.last_scanned_at || "尚未掃描"}`,
+    `下次預計：${scheduler.next_due_at || "-"}`,
+  ];
+  if (summary.status) {
+    lines.push(`結果：${summary.status}，異常 ${summary.anomaly_count || 0}，處置 ${summary.intervention_count || 0}，通知 ${summary.notification_count || 0}`);
+  }
+  if (!canManageServers) {
+    lines.push("完整審計資料限 root 檢視。");
+  }
+  host.innerHTML = lines.map((line) => `<div>${sanitize(line)}</div>`).join("");
+}
+
+async function loadAiAgentAuditStatus(options = {}) {
+  try {
+    const res = await apiFetch(API + "/ai-agent/audit-status", { credentials: "same-origin" });
+    const json = await res.json().catch(() => ({}));
+    if (!json.ok) {
+      if (!options.silent) setAiAgentMessage(json.msg || "審計狀態讀取失敗", "err");
+      return;
+    }
+    AI_AGENT_STATE.audit = json.audit_status || {};
+    renderAiAgentAuditStatus(AI_AGENT_STATE.audit, AI_AGENT_STATE.actor);
+    if (!options.silent) setAiAgentMessage("審計狀態已更新", "ok");
+  } catch (err) {
+    if (!options.silent) setAiAgentMessage(`審計狀態讀取失敗：${err}`, "err");
+  }
+}
+
+async function runAiAgentAuditScan() {
+  setAiAgentMessage("審計掃描中...", "info");
+  try {
+    const res = await apiFetch(API + "/ai-agent/audit-scan", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ force: true }),
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!json.ok) {
+      setAiAgentMessage(json.msg || "審計掃描失敗", "err");
+      return;
+    }
+    AI_AGENT_STATE.audit = {
+      ...(AI_AGENT_STATE.audit || {}),
+      summary: {
+        status: json.scan?.status || "unknown",
+        scanned_at: json.scan?.scanned_at || "",
+        anomaly_count: (json.scan?.anomalies || []).length,
+        intervention_count: (json.scan?.interventions || []).length,
+        notification_count: (json.scan?.notifications || []).length,
+      },
+      scan: json.scan || {},
+    };
+    renderAiAgentAuditStatus(AI_AGENT_STATE.audit, AI_AGENT_STATE.actor);
+    setAiAgentMessage("審計掃描完成", "ok");
+  } catch (err) {
+    setAiAgentMessage(`審計掃描失敗：${err}`, "err");
+  }
 }
 
 async function loadAiAgentStatus(options = {}) {
@@ -160,6 +306,9 @@ async function loadAiAgentStatus(options = {}) {
       }
       renderAiAgentStatus(json);
       await loadAiAgentReadOnly({ scope: "all", limit: 20, silent: true }).catch(() => undefined);
+      if (json?.actor?.scope?.can_manage_servers) {
+        await loadAiAgentAuditStatus({ silent: true }).catch(() => undefined);
+      }
       AI_AGENT_STATE.loaded = true;
       setAiAgentMessage("", "info");
       try {
@@ -209,6 +358,10 @@ function clearAiAgentConversation() {
   if ($("ai-agent-image-state")) $("ai-agent-image-state").textContent = "未附加圖片";
   renderAiAgentThread();
   setAiAgentMessage("", "info");
+}
+
+function handleAiAgentAccountContextChanged() {
+  aiAgentResetScopeState();
 }
 
 function handleAiAgentImagePick(event) {
@@ -279,16 +432,33 @@ async function sendAiAgentMessage() {
       messages: aiAgentBuildMessages(prompt, mode),
       image_data_url: mode === "image" ? AI_AGENT_STATE.imageDataUrl : "",
     };
-    const res = await apiFetch(API + "/ai-agent/chat", {
+    const raw = await apiFetch(API + "/ai-agent/chat", {
       method: "POST",
       credentials: "same-origin",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
+    }).then(async (res) => {
+      const text = await res.text();
+      let parsed = {};
+      try {
+        parsed = text ? JSON.parse(text) : {};
+      } catch (error) {
+        parsed = {};
+      }
+      return { res, text, parsed };
     });
-    const json = await res.json().catch(() => ({}));
-    if (!json.ok) {
-      AI_AGENT_STATE.messages.push({ role: "assistant", content: json.msg || "AI Agent 回應失敗" });
-      setAiAgentMessage(json.msg || "AI Agent 回應失敗", "err");
+
+    const { res, text, parsed: json } = raw;
+    const replied = json?.message?.content || "";
+    const statusHint = `（HTTP ${res.status} ${res.statusText || ""}）`.trim();
+    if (!json.ok || isMockAiAgentReply(replied)) {
+      const msg = json.msg || (text ? text.slice(0, 160) : `AI Agent 回應失敗 ${statusHint}`);
+      AI_AGENT_STATE.messages.push({ role: "assistant", content: msg || "AI Agent 回應失敗" });
+      if (!json.ok) {
+        setAiAgentMessage(json.msg ? `${json.msg} ${statusHint}` : `AI Agent 回應失敗 ${statusHint}`, "err");
+      } else {
+        setAiAgentMessage("AI Agent 後端仍回傳 mock 回覆，請確認 AI Agent Base URL 設定", "err");
+      }
     } else {
       AI_AGENT_STATE.messages.push(json.message || { role: "assistant", content: "" });
       setAiAgentMessage("已完成", "ok");
@@ -308,5 +478,9 @@ async function sendAiAgentMessage() {
 document.addEventListener("hackme:module-changed", (event) => {
   if (event?.detail?.current === "ai-agent") loadAiAgentStatus();
 });
+
+document.addEventListener("hackme:account-context-changed", handleAiAgentAccountContextChanged);
+
+aiAgentResetScopeState();
 
 renderAiAgentThread();

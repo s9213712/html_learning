@@ -2642,6 +2642,9 @@ async function loadSettings() {
       : "目前未儲存 AI Agent API Key。本機 Hermes local-only 模式可不填。";
   }
   if ($("s-ai-agent-model")) $("s-ai-agent-model").value = s.ai_agent_model || "hermes-agent";
+  if ($("s-ai-agent-operation-mode")) $("s-ai-agent-operation-mode").value = s.ai_agent_operation_mode || "assist";
+  if ($("s-ai-agent-allowed-models")) $("s-ai-agent-allowed-models").value = s.ai_agent_allowed_models || "";
+  if ($("s-ai-agent-allowed-tools")) $("s-ai-agent-allowed-tools").value = s.ai_agent_allowed_tools || "";
   if ($("s-ai-agent-request-timeout-seconds")) $("s-ai-agent-request-timeout-seconds").value = s.ai_agent_request_timeout_seconds || 120;
   if ($("s-ai-agent-max-prompt-chars")) $("s-ai-agent-max-prompt-chars").value = s.ai_agent_max_prompt_chars || 20000;
   if ($("s-ai-agent-allow-image-input")) $("s-ai-agent-allow-image-input").checked = s.ai_agent_allow_image_input !== false;
@@ -2650,6 +2653,17 @@ async function loadSettings() {
   if ($("s-ai-agent-task-site-guide")) $("s-ai-agent-task-site-guide").checked = s.ai_agent_task_site_guide !== false;
   if ($("s-ai-agent-task-troubleshoot")) $("s-ai-agent-task-troubleshoot").checked = s.ai_agent_task_troubleshoot !== false;
   if ($("s-ai-agent-task-prompt")) $("s-ai-agent-task-prompt").checked = s.ai_agent_task_prompt !== false;
+  if ($("s-ai-agent-audit-interval-minutes")) $("s-ai-agent-audit-interval-minutes").value = s.ai_agent_audit_interval_minutes || 5;
+  if ($("s-ai-agent-audit-cpu-percent-threshold")) $("s-ai-agent-audit-cpu-percent-threshold").value = s.ai_agent_audit_cpu_percent_threshold || 92;
+  if ($("s-ai-agent-audit-ram-percent-threshold")) $("s-ai-agent-audit-ram-percent-threshold").value = s.ai_agent_audit_ram_percent_threshold || 92;
+  if ($("s-ai-agent-audit-disk-percent-threshold")) $("s-ai-agent-audit-disk-percent-threshold").value = s.ai_agent_audit_disk_percent_threshold || 95;
+  if ($("s-ai-agent-audit-ip-event-rate-threshold")) $("s-ai-agent-audit-ip-event-rate-threshold").value = s.ai_agent_audit_ip_event_rate_threshold || 240;
+  if ($("s-ai-agent-audit-ip-event-rate-window-minutes")) $("s-ai-agent-audit-ip-event-rate-window-minutes").value = s.ai_agent_audit_ip_event_rate_window_minutes || 5;
+  if ($("s-ai-agent-audit-security-event-rate-threshold")) $("s-ai-agent-audit-security-event-rate-threshold").value = s.ai_agent_audit_security_event_rate_threshold || 120;
+  if ($("s-ai-agent-audit-security-event-rate-window-minutes")) $("s-ai-agent-audit-security-event-rate-window-minutes").value = s.ai_agent_audit_security_event_rate_window_minutes || 5;
+  if ($("s-ai-agent-audit-auto-block-suspect-ip")) $("s-ai-agent-audit-auto-block-suspect-ip").checked = !!s.ai_agent_audit_auto_block_suspect_ip;
+  if ($("s-ai-agent-audit-block-minutes")) $("s-ai-agent-audit-block-minutes").value = s.ai_agent_audit_block_minutes || 30;
+  if ($("s-ai-agent-audit-notify-root")) $("s-ai-agent-audit-notify-root").checked = !!s.ai_agent_audit_notify_root;
   updateComfyuiConnectionModeFields();
   if ($("s-comfyui-max-batch-size")) $("s-comfyui-max-batch-size").value = s.comfyui_max_batch_size || 1;
   if ($("s-comfyui-default-width")) $("s-comfyui-default-width").value = s.comfyui_default_width || 1024;
@@ -4958,6 +4972,9 @@ async function saveSettings() {
     ai_agent_api_key: ($("s-ai-agent-api-key")?.value || "").trim(),
     ai_agent_api_key_clear: !!$("s-ai-agent-api-key-clear")?.checked,
     ai_agent_model: ($("s-ai-agent-model")?.value || "hermes-agent").trim(),
+    ai_agent_operation_mode: $("s-ai-agent-operation-mode")?.value || "assist",
+    ai_agent_allowed_models: ($("s-ai-agent-allowed-models")?.value || "").trim(),
+    ai_agent_allowed_tools: ($("s-ai-agent-allowed-tools")?.value || "").trim(),
     ai_agent_request_timeout_seconds: parseInt($("s-ai-agent-request-timeout-seconds")?.value || "120", 10) || 120,
     ai_agent_max_prompt_chars: parseInt($("s-ai-agent-max-prompt-chars")?.value || "20000", 10) || 20000,
     ai_agent_allow_image_input: $("s-ai-agent-allow-image-input") ? !!$("s-ai-agent-allow-image-input").checked : true,
@@ -4966,6 +4983,17 @@ async function saveSettings() {
     ai_agent_task_site_guide: !!$("s-ai-agent-task-site-guide")?.checked,
     ai_agent_task_troubleshoot: !!$("s-ai-agent-task-troubleshoot")?.checked,
     ai_agent_task_prompt: !!$("s-ai-agent-task-prompt")?.checked,
+    ai_agent_audit_interval_minutes: parseInt($("s-ai-agent-audit-interval-minutes")?.value || "5", 10) || 5,
+    ai_agent_audit_cpu_percent_threshold: parseInt($("s-ai-agent-audit-cpu-percent-threshold")?.value || "92", 10) || 92,
+    ai_agent_audit_ram_percent_threshold: parseInt($("s-ai-agent-audit-ram-percent-threshold")?.value || "92", 10) || 92,
+    ai_agent_audit_disk_percent_threshold: parseInt($("s-ai-agent-audit-disk-percent-threshold")?.value || "95", 10) || 95,
+    ai_agent_audit_ip_event_rate_threshold: parseInt($("s-ai-agent-audit-ip-event-rate-threshold")?.value || "240", 10) || 240,
+    ai_agent_audit_ip_event_rate_window_minutes: parseInt($("s-ai-agent-audit-ip-event-rate-window-minutes")?.value || "5", 10) || 5,
+    ai_agent_audit_security_event_rate_threshold: parseInt($("s-ai-agent-audit-security-event-rate-threshold")?.value || "120", 10) || 120,
+    ai_agent_audit_security_event_rate_window_minutes: parseInt($("s-ai-agent-audit-security-event-rate-window-minutes")?.value || "5", 10) || 5,
+    ai_agent_audit_auto_block_suspect_ip: !!$("s-ai-agent-audit-auto-block-suspect-ip")?.checked,
+    ai_agent_audit_block_minutes: parseInt($("s-ai-agent-audit-block-minutes")?.value || "30", 10) || 30,
+    ai_agent_audit_notify_root: !!$("s-ai-agent-audit-notify-root")?.checked,
     comfyui_max_batch_size: parseInt($("s-comfyui-max-batch-size")?.value || "1"),
     comfyui_default_width: parseInt($("s-comfyui-default-width")?.value || "1024"),
     comfyui_default_height: parseInt($("s-comfyui-default-height")?.value || "1024"),

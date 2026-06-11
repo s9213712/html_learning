@@ -1,9 +1,11 @@
 import json
+import hashlib
 import sqlite3
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 
 from flask import Flask, jsonify, make_response
+from services.ai_agent.hermes import AiAgentError, clear_ai_agent_audit_scan_state
 
 from routes.ai_agent import register_ai_agent_routes
 
@@ -62,6 +64,35 @@ def _build_db(path):
             detail TEXT,
             created_at TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS uploaded_files (
+            id TEXT PRIMARY KEY,
+            owner_user_id INTEGER NOT NULL,
+            storage_path TEXT NOT NULL,
+            privacy_mode TEXT NOT NULL,
+            risk_level TEXT NOT NULL,
+            scan_status TEXT NOT NULL,
+            original_filename_plain_for_public TEXT,
+            mime_type_plain_for_public TEXT,
+            size_bytes INTEGER NOT NULL,
+            system_asset_type TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT,
+            deleted_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS storage_files (
+            id TEXT PRIMARY KEY,
+            file_id TEXT NOT NULL,
+            owner_user_id INTEGER NOT NULL,
+            parent_id TEXT,
+            display_name TEXT NOT NULL,
+            virtual_path TEXT NOT NULL,
+            is_trashed INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            deleted_at TEXT
+        );
         """
     )
     conn.execute("INSERT OR IGNORE INTO users (id, username, role, status, created_at) VALUES (1, 'root', 'super_admin', 'active', '2026-01-01T00:00:00')")
@@ -80,6 +111,22 @@ def _build_db(path):
     conn.execute(
         "INSERT OR IGNORE INTO security_events (event_type, ip_address, target_user, detail, created_at)\n"
         "VALUES ('attack', '203.0.113.10', 'userA', '多次嘗試', '2026-01-01T00:03:00')"
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO uploaded_files (id, owner_user_id, storage_path, privacy_mode, risk_level, scan_status, original_filename_plain_for_public, mime_type_plain_for_public, size_bytes, system_asset_type, created_at, updated_at, deleted_at)\n"
+        "VALUES ('file-user-a', 2, '/tmp/user-a.txt', 'standard_plain', 'low', 'clean', 'user-a.txt', 'text/plain', 12, '', '2026-01-01T00:04:00', '2026-01-01T00:04:10', NULL)"
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO uploaded_files (id, owner_user_id, storage_path, privacy_mode, risk_level, scan_status, original_filename_plain_for_public, mime_type_plain_for_public, size_bytes, system_asset_type, created_at, updated_at, deleted_at)\n"
+        "VALUES ('file-manager-a', 3, '/tmp/manager-a.txt', 'standard_plain', 'low', 'clean', 'manager-a.txt', 'text/plain', 24, '', '2026-01-01T00:05:00', '2026-01-01T00:05:10', NULL)"
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO storage_files (id, file_id, owner_user_id, parent_id, display_name, virtual_path, is_trashed, created_at, updated_at, deleted_at)\n"
+        "VALUES ('storage-user-a', 'file-user-a', 2, NULL, 'user-a.txt', '/user-a.txt', 0, '2026-01-01T00:04:00', '2026-01-01T00:04:10', NULL)"
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO storage_files (id, file_id, owner_user_id, parent_id, display_name, virtual_path, is_trashed, created_at, updated_at, deleted_at)\n"
+        "VALUES ('storage-manager-a', 'file-manager-a', 3, NULL, 'manager-a.txt', '/manager-a.txt', 0, '2026-01-01T00:05:00', '2026-01-01T00:05:10', NULL)"
     )
     conn.commit()
     conn.close()
@@ -124,6 +171,7 @@ def _insert_user(db_path, *, user_id, username, role):
 
 
 def test_ai_agent_status_includes_role_scope_and_settings(monkeypatch, tmp_path):
+    clear_ai_agent_audit_scan_state()
     db_path = tmp_path / "ai_agent_routes.db"
     _build_db(db_path)
     app = _build_app(db_path, {"id": 2, "username": "userA", "role": "user"})
@@ -139,6 +187,29 @@ def test_ai_agent_status_includes_role_scope_and_settings(monkeypatch, tmp_path)
     assert payload["actor"]["role"] == "user"
     assert payload["settings"]["role"] == "user"
     assert payload["settings"]["scope"]["label"] == "個別用戶助手"
+    assert payload["settings"]["operation_mode_policy"]["mode"] == "assist"
+    assert payload["settings"]["safety_boundaries"]
+    assert "scan" not in payload["audit"]
+
+
+def test_ai_agent_status_only_super_admin_gets_audit_scan(monkeypatch, tmp_path):
+    clear_ai_agent_audit_scan_state()
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    user_app = _build_app(db_path, {"id": 2, "username": "userA", "role": "user"}, settings={"ai_agent_operation_mode": "audit"})
+    super_app = _build_app(db_path, {"id": 1, "username": "root", "role": "user"}, settings={"ai_agent_operation_mode": "audit"})
+
+    monkeypatch.setattr("routes.ai_agent.ai_agent_health", lambda settings: {"ok": True, "url": "http://127.0.0.1:8642/health", "payload": {}})
+    monkeypatch.setattr("routes.ai_agent.ai_agent_capabilities", lambda settings: {"ok": True, "chat": True})
+
+    user_payload = user_app.test_client().get("/api/ai-agent/status").get_json()
+    root_payload = super_app.test_client().get("/api/ai-agent/status").get_json()
+
+    assert user_payload["ok"] is True
+    assert user_payload["audit"]["scheduler"]["enabled"] is True
+    assert "scan" not in user_payload["audit"]
+    assert root_payload["ok"] is True
+    assert "scan" in root_payload["audit"]
 
 
 def test_ai_agent_readonly_user_scope_filters_by_permissions(tmp_path):
@@ -159,6 +230,7 @@ def test_ai_agent_readonly_user_scope_filters_by_permissions(tmp_path):
     assert payload["resources"]["cpu"]
     assert payload["comfyui_jobs"]
     assert payload["remote_download_jobs"]
+    assert [item["owner_user_id"] for item in payload["storage_files"]] == [2]
 
 
 def test_ai_agent_readonly_manager_and_super_admin_incremental_permissions(tmp_path):
@@ -183,6 +255,7 @@ def test_ai_agent_readonly_manager_and_super_admin_incremental_permissions(tmp_p
     assert super_payload["permissions"]["manage_servers"] is True
     assert "member_management" in super_payload
     assert "attack_diagnosis" in super_payload
+    assert sorted(item["owner_user_id"] for item in super_payload["storage_files"]) == [2, 3]
 
 
 def test_ai_agent_readonly_admin_role_keeps_member_scope_only(tmp_path):
@@ -224,6 +297,36 @@ def test_ai_agent_status_admin_keeps_member_scope_only(tmp_path, monkeypatch):
     assert payload["actor"]["scope"]["can_manage_servers"] is False
     assert payload["settings"]["role"] == "manager"
     assert payload["settings"]["scope"]["label"] == "管理者助手"
+
+
+def test_ai_agent_readonly_handles_missing_job_tables(tmp_path):
+    db_path = tmp_path / "ai_agent_routes_missing_tables.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY,
+                username TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'user',
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at TEXT
+            );
+            """
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO users (id, username, role, status, created_at) VALUES (2, 'userA', 'user', 'active', '2026-01-01T00:00:01')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    app = _build_app(db_path, {"id": 2, "username": "userA", "role": "user"})
+    payload = app.test_client().get("/api/ai-agent/readonly?scope=all&limit=5").get_json()
+
+    assert payload["ok"] is True
+    assert payload["comfyui_jobs"] == []
+    assert payload["remote_download_jobs"] == []
 
 
 class _FakeHermesResponse:
@@ -325,6 +428,89 @@ def test_ai_agent_routes_smoke_with_fake_hermes_endpoints(tmp_path, monkeypatch)
     assert chat_calls and chat_calls[0][2]["messages"][0]["role"] == "system"
 
 
+def test_ai_agent_audit_scan_requires_super_admin(tmp_path, monkeypatch):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    user_app = _build_app(db_path, {"id": 2, "username": "userA", "role": "user"}, settings={"module_ai_agent_min_role": "user"})
+    super_app = _build_app(db_path, {"id": 1, "username": "root", "role": "user"}, settings={"module_ai_agent_min_role": "user"})
+
+    called = []
+
+    def fake_scan(settings, *, get_db, actor=None, force=False, get_client_ip=None, get_ua=None, audit=None):
+        called.append({"actor": actor, "force": force})
+        return {"status": "ok", "cached": False}
+
+    monkeypatch.setattr("routes.ai_agent.run_ai_agent_audit_scan", fake_scan)
+
+    user_resp = user_app.test_client().get("/api/ai-agent/audit-scan")
+    assert user_resp.status_code == 403
+    assert user_resp.get_json()["ok"] is False
+
+    super_resp = super_app.test_client().post("/api/ai-agent/audit-scan", json={"force": True})
+    assert super_resp.status_code == 200
+    payload = super_resp.get_json()
+    assert payload["ok"] is True
+    assert payload["scan"]["status"] == "ok"
+    assert called and called[-1]["force"] is True
+    assert called[-1]["actor"]["username"] == "root"
+
+
+def test_ai_agent_audit_scan_accepts_force_query_string(tmp_path, monkeypatch):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    super_app = _build_app(db_path, {"id": 1, "username": "root", "role": "user"}, settings={"module_ai_agent_min_role": "user"})
+
+    called = []
+
+    def fake_scan(settings, *, get_db, actor=None, force=False, get_client_ip=None, get_ua=None, audit=None):
+        called.append(force)
+        return {"status": "ok", "cached": False}
+
+    monkeypatch.setattr("routes.ai_agent.run_ai_agent_audit_scan", fake_scan)
+
+    with_force = super_app.test_client().get("/api/ai-agent/audit-scan?force=true")
+    plain = super_app.test_client().get("/api/ai-agent/audit-scan")
+
+    assert with_force.status_code == 200
+    assert plain.status_code == 200
+    assert called[0] is True
+    assert called[1] is False
+
+
+def test_ai_agent_audit_status_shows_scheduler_summary_for_super_admin(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    super_app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "module_ai_agent_min_role": "user",
+            "ai_agent_operation_mode": "audit",
+            "ai_agent_audit_interval_minutes": 7,
+        },
+    )
+    response = super_app.test_client().get("/api/ai-agent/audit-status")
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert payload["audit_status"]["scheduler"]["enabled"] is True
+    assert payload["audit_status"]["scheduler"]["interval_minutes"] == 7
+    assert "summary" in payload["audit_status"]
+
+
+def test_ai_agent_audit_status_forbidden_for_non_super_admin(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    user_app = _build_app(db_path, {"id": 2, "username": "userA", "role": "user"}, settings={"module_ai_agent_min_role": "user"})
+    response = user_app.test_client().get("/api/ai-agent/audit-status")
+
+    payload = response.get_json()
+    assert response.status_code == 403
+    assert payload["ok"] is False
+    assert "最高管理者" in payload["msg"]
+
+
 def test_ai_agent_chat_session_key_is_user_isolated(tmp_path, monkeypatch):
     db_path = tmp_path / "ai_agent_routes.db"
     _build_db(db_path)
@@ -360,3 +546,182 @@ def test_ai_agent_chat_session_key_is_user_isolated(tmp_path, monkeypatch):
     assert calls[0]["actor"] != calls[1]["actor"]
     assert calls[0]["session_key"] == "hackme:2:shared-session"
     assert calls[1]["session_key"] == "hackme:3:shared-session"
+
+
+def test_ai_agent_chat_session_key_is_bound_to_login_session_token(tmp_path, monkeypatch):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(db_path, {"id": 2, "username": "userA", "role": "user"}, settings={
+        "module_ai_agent_min_role": "user",
+        "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
+    })
+
+    calls = []
+
+    def fake_chat(settings, *, messages=None, prompt="", image_data_url="", model="", session_key="", actor=None):
+        calls.append({
+            "session_key": session_key,
+            "actor": actor.get("username") if isinstance(actor, dict) else None,
+        })
+        return {"content": "ok", "model": "hermes-agent", "usage": {}}
+
+    monkeypatch.setattr("routes.ai_agent.ai_agent_chat", fake_chat)
+
+    client = app.test_client()
+    client.set_cookie("session_token", "cookie-session")
+    payload = {"session_id": "shared-session", "messages": [{"role": "user", "content": "查一下任務"}]}
+    response = client.post("/api/ai-agent/chat", json=payload)
+
+    assert response.status_code == 200
+    assert len(calls) == 1
+    assert calls[0]["actor"] == "userA"
+    assert calls[0]["session_key"] == "hackme:2:%s:shared-session" % hashlib.sha256("cookie-session".encode()).hexdigest()[:16]
+
+
+def test_ai_agent_chat_rejects_actor_without_id(tmp_path, monkeypatch):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(db_path, {"username": "userA", "role": "user"}, settings={
+        "module_ai_agent_min_role": "user",
+        "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
+    })
+
+    def fake_chat(*_args, **_kwargs):
+        raise RuntimeError("should not be called")
+
+    monkeypatch.setattr("routes.ai_agent.ai_agent_chat", fake_chat)
+
+    response = app.test_client().post("/api/ai-agent/chat", json={
+        "session_id": "missing-id",
+        "messages": [{"role": "user", "content": "查一下任務"}],
+    })
+    payload = response.get_json()
+
+    assert response.status_code == 401
+    assert payload["ok"] is False
+    assert "無法辨識使用者身份" in payload["msg"]
+
+
+def test_ai_agent_chat_rejects_mock_reply(tmp_path, monkeypatch):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(db_path, {"id": 2, "username": "userA", "role": "user"}, settings={
+        "module_ai_agent_min_role": "user",
+        "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
+    })
+
+    def fake_chat(settings, *, messages=None, prompt="", image_data_url="", model="", session_key="", actor=None):
+        raise AiAgentError("AI Agent 後端仍回傳 mock 回覆，請確認 ai_agent_api_base_url 是否指向真實 Hermes endpoint")
+
+    monkeypatch.setattr("routes.ai_agent.ai_agent_chat", fake_chat)
+
+    response = app.test_client().post("/api/ai-agent/chat", json={
+        "session_id": "mock-test",
+        "messages": [{"role": "user", "content": "幫我看一下下載進度"}],
+    })
+    payload = response.get_json()
+
+    assert response.status_code == 502
+    assert payload["ok"] is False
+    assert "mock" in payload["msg"]
+
+
+def test_ai_agent_chat_rejects_mock_reply_even_if_service_bypasses_guard(tmp_path, monkeypatch):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(db_path, {"id": 2, "username": "userA", "role": "user"}, settings={
+        "module_ai_agent_min_role": "user",
+        "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
+    })
+
+    def fake_chat(settings, *, messages=None, prompt="", image_data_url="", model="", session_key="", actor=None):
+        return {"content": "Mock hermes response: 已收到你的請求。", "model": "hermes-agent", "usage": {}}
+
+    monkeypatch.setattr("routes.ai_agent.ai_agent_chat", fake_chat)
+
+    response = app.test_client().post("/api/ai-agent/chat", json={
+        "session_id": "mock-test",
+        "messages": [{"role": "user", "content": "幫我看一下下載進度"}],
+    })
+    payload = response.get_json()
+
+    assert response.status_code == 502
+    assert payload["ok"] is False
+    assert "mock 回覆" in payload["msg"]
+
+
+def test_ai_agent_chat_rejects_mock_reply_variants_with_whitespace(tmp_path, monkeypatch):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(db_path, {"id": 2, "username": "userA", "role": "user"}, settings={
+        "module_ai_agent_min_role": "user",
+        "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
+    })
+
+    def fake_chat(settings, *, messages=None, prompt="", image_data_url="", model="", session_key="", actor=None):
+        return {
+            "content": " mock\tHermes\nResponse :\u3000已\u6536\u5230\u4f60\u7684\u8bf7\u6c42。 ",
+            "model": "hermes-agent",
+            "usage": {},
+        }
+
+    monkeypatch.setattr("routes.ai_agent.ai_agent_chat", fake_chat)
+
+    response = app.test_client().post("/api/ai-agent/chat", json={
+        "session_id": "mock-test",
+        "messages": [{"role": "user", "content": "幫我看一下下載進度"}],
+    })
+    payload = response.get_json()
+
+    assert response.status_code == 502
+    assert payload["ok"] is False
+    assert "mock 回覆" in payload["msg"]
+
+
+def test_ai_agent_chat_rejects_simplified_mock_reply_even_if_service_bypasses_guard(tmp_path, monkeypatch):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(db_path, {"id": 2, "username": "userA", "role": "user"}, settings={
+        "module_ai_agent_min_role": "user",
+        "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
+    })
+
+    def fake_chat(settings, *, messages=None, prompt="", image_data_url="", model="", session_key="", actor=None):
+        return {"content": "Mock hermes response: 已收到你的请求。", "model": "hermes-agent", "usage": {}}
+
+    monkeypatch.setattr("routes.ai_agent.ai_agent_chat", fake_chat)
+
+    response = app.test_client().post("/api/ai-agent/chat", json={
+        "session_id": "mock-test",
+        "messages": [{"role": "user", "content": "幫我看一下下載進度"}],
+    })
+    payload = response.get_json()
+
+    assert response.status_code == 502
+    assert payload["ok"] is False
+    assert "mock 回覆" in payload["msg"]
+
+
+def test_ai_agent_status_marks_mock_health_as_warning(tmp_path, monkeypatch):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(db_path, {"id": 2, "username": "userA", "role": "user"}, settings={
+        "module_ai_agent_min_role": "user",
+        "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
+    })
+
+    monkeypatch.setattr("routes.ai_agent.ai_agent_health", lambda settings: {
+        "ok": False,
+        "url": "http://127.0.0.1:8642/health",
+        "msg": "偵測到 hermes-mock 後端，請改連到真實 AI Agent 服務",
+        "payload": {"service": "hermes-mock"},
+    })
+    monkeypatch.setattr("routes.ai_agent.ai_agent_capabilities", lambda settings: {"ok": False, "msg": "unavailable"})
+
+    response = app.test_client().get("/api/ai-agent/status")
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert payload["health"]["ok"] is False
+    assert "hermes-mock" in str(payload["health"]["msg"])

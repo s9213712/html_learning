@@ -274,6 +274,117 @@ def start_storage_maintenance_worker(*, get_db, run_storage_maintenance_if_due, 
     return worker
 
 
+def start_ai_agent_audit_worker(
+    *,
+    get_system_settings,
+    get_db,
+    audit,
+    notify_root=None,
+    shutdown_event=None,
+):
+    from services.ai_agent.hermes import (
+        AI_AGENT_AUDIT_INTERVAL_MINUTES_DEFAULT,
+        AI_AGENT_AUDIT_INTERVAL_MINUTES_MAX,
+        normalize_ai_agent_audit_bool,
+        normalize_ai_agent_audit_int,
+        normalize_ai_agent_operation_mode,
+        run_ai_agent_audit_scan,
+    )
+
+    def _audit_interval_seconds(settings):
+        raw = (settings or {}).get("ai_agent_audit_interval_minutes")
+        value = normalize_ai_agent_audit_int(
+            raw,
+            "ai_agent_audit_interval_minutes",
+            default=AI_AGENT_AUDIT_INTERVAL_MINUTES_DEFAULT,
+            minimum=1,
+            maximum=AI_AGENT_AUDIT_INTERVAL_MINUTES_MAX,
+        )
+        return max(1, int(value)) * 60
+
+    def _notify_root(scan):
+        if not callable(notify_root):
+            return
+        if not scan.get("notifications"):
+            return
+        status = str(scan.get("status") or "ok").lower()
+        if status == "ok":
+            return
+        anomaly_count = len(scan.get("anomalies") or [])
+        intervention_count = len(scan.get("interventions") or [])
+        messages = [
+            str(item.get("message") or "").strip()
+            for item in (scan.get("anomalies") or [])[:3]
+            if str(item.get("message") or "").strip()
+        ]
+        title = "AI Agent 審計異常"
+        body = (
+            f"時間：{scan.get('scanned_at', '-')}\n"
+            f"狀態：{status}\n"
+            f"異常數：{anomaly_count}，自動處置：{intervention_count}\n"
+        )
+        if messages:
+            body += "重點：\n" + "\n".join(f"- {msg}" for msg in messages)
+        try:
+            notify_root(type="AI_AGENT_AUDIT_ALERT", title=title, body=body, link="/security")
+        except Exception:
+            pass
+
+    def loop():
+        while True:
+            if shutdown_event is not None and shutdown_event.is_set():
+                break
+            settings = {}
+            try:
+                settings = get_system_settings() if callable(get_system_settings) else {}
+                operation_mode = normalize_ai_agent_operation_mode(settings.get("ai_agent_audit_operation_mode") or settings.get("ai_agent_operation_mode"))
+                if operation_mode != "audit":
+                    if _wait_or_stop(shutdown_event, max(30, _audit_interval_seconds(settings))):
+                        break
+                    continue
+                scan = run_ai_agent_audit_scan(
+                    settings,
+                    get_db=get_db,
+                    actor={"id": 0, "username": "system-audit-worker", "role": "super_admin"},
+                    get_client_ip=lambda: "0.0.0.0",
+                    get_ua=lambda: "ai-agent-audit-worker",
+                    audit=audit,
+                    force=False,
+                )
+                if normalize_ai_agent_audit_bool(settings.get("ai_agent_audit_notify_root"), False) and scan.get("status") != "ok":
+                    _notify_root(scan)
+                if scan.get("status") in {"warn", "alert"}:
+                    audit(
+                        "AI_AGENT_AUDIT_SCAN_WORKER",
+                        "0.0.0.0",
+                        user="system-audit-worker",
+                        success=scan.get("status") != "alert",
+                        detail=f"status={scan.get('status')}, anomalies={len(scan.get('anomalies') or [])}, interventions={len(scan.get('interventions') or [])}",
+                    )
+                else:
+                    audit(
+                        "AI_AGENT_AUDIT_SCAN_WORKER",
+                        "0.0.0.0",
+                        user="system-audit-worker",
+                        success=True,
+                        detail="status=ok",
+                    )
+            except Exception as exc:
+                audit(
+                    "AI_AGENT_AUDIT_SCAN_WORKER_FAILED",
+                    "0.0.0.0",
+                    user="system-audit-worker",
+                    success=False,
+                    detail=str(exc),
+                )
+            if _wait_or_stop(shutdown_event, _audit_interval_seconds(settings)):
+                break
+
+    worker = threading.Thread(target=loop, name="ai-agent-audit-worker", daemon=True)
+    worker.start()
+    return worker
+
+
 def start_points_chain_block_worker(
     *,
     points_service,
@@ -649,6 +760,7 @@ def run_server_main(
     start_points_chain_block_worker,
     start_trading_liquidation_worker,
     start_trading_bot_worker,
+    start_ai_agent_audit_worker=None,
     start_trading_background_worker=None,
     create_initial_startup_snapshot_if_due=None,
     get_runtime_server_mode=None,
@@ -766,6 +878,8 @@ def run_server_main(
         start_storage_maintenance_worker(shutdown_event=shutdown_event),
         start_points_chain_block_worker(shutdown_event=shutdown_event),
     ]
+    if start_ai_agent_audit_worker is not None:
+        workers.append(start_ai_agent_audit_worker(shutdown_event=shutdown_event))
     if start_trading_background_worker is not None:
         workers.append(start_trading_background_worker(shutdown_event=shutdown_event))
     else:

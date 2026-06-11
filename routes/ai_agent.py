@@ -1,5 +1,6 @@
 import json
 from datetime import datetime
+import hashlib
 import os
 import shutil
 
@@ -10,7 +11,10 @@ from services.ai_agent.hermes import (
     ai_agent_capabilities,
     ai_agent_chat,
     ai_agent_health,
+    public_ai_agent_audit_status,
+    run_ai_agent_audit_scan,
     ai_agent_models,
+    _is_mock_chat_reply,
     public_ai_agent_settings,
 )
 
@@ -319,6 +323,8 @@ def register_ai_agent_routes(app, deps):
             return []
         conn = get_db()
         try:
+            if not _table_exists(conn, "comfyui_generation_jobs"):
+                return []
             rows = conn.execute(
                 """
                 SELECT job_id, owner_user_id, owner_username, status, error, progress_json, created_at, updated_at
@@ -356,6 +362,8 @@ def register_ai_agent_routes(app, deps):
             return []
         conn = get_db()
         try:
+            if not _table_exists(conn, "job_center_jobs"):
+                return []
             cols = {
                 str(c[1] if not hasattr(c, "get") else c.get("name") or "")
                 for c in conn.execute("PRAGMA table_info(job_center_jobs)").fetchall()
@@ -398,16 +406,95 @@ def register_ai_agent_routes(app, deps):
         finally:
             conn.close()
 
+    def _agent_list_storage_files(actor, limit=20):
+        actor_id = int(_actor_value(actor, "id") or 0)
+        if actor_id <= 0:
+            return []
+        actor_level = _actor_scope_payload(actor)
+        conn = get_db()
+        try:
+            if not (_table_exists(conn, "storage_files") and _table_exists(conn, "uploaded_files")):
+                return []
+            where = "sf.deleted_at IS NULL AND f.deleted_at IS NULL AND COALESCE(f.system_asset_type, '')<>'avatar'"
+            params = []
+            if not actor_level["can_manage_servers"]:
+                where += " AND sf.owner_user_id=?"
+                params.append(actor_id)
+            rows = conn.execute(
+                f"""
+                SELECT sf.id, sf.file_id, sf.owner_user_id, COALESCE(u.username, '') AS owner_username,
+                       sf.display_name, sf.virtual_path, sf.is_trashed, sf.created_at, sf.updated_at,
+                       f.size_bytes, f.privacy_mode, f.risk_level, f.scan_status, f.mime_type_plain_for_public
+                FROM storage_files sf
+                JOIN uploaded_files f ON f.id=sf.file_id
+                LEFT JOIN users u ON u.id=sf.owner_user_id
+                WHERE {where}
+                ORDER BY sf.updated_at DESC, sf.created_at DESC
+                LIMIT ?
+                """,
+                (*params, limit),
+            ).fetchall()
+            result = []
+            for row in rows:
+                result.append({
+                    "id": _row_value(row, "id") or "",
+                    "file_id": _row_value(row, "file_id") or "",
+                    "owner_user_id": int(_row_value(row, "owner_user_id") or 0),
+                    "owner_username": _row_value(row, "owner_username") or "",
+                    "display_name": _row_value(row, "display_name") or "",
+                    "virtual_path": _row_value(row, "virtual_path") or "",
+                    "is_trashed": bool(_row_value(row, "is_trashed") or 0),
+                    "size_bytes": int(_row_value(row, "size_bytes") or 0),
+                    "privacy_mode": _row_value(row, "privacy_mode") or "",
+                    "risk_level": _row_value(row, "risk_level") or "",
+                    "scan_status": _row_value(row, "scan_status") or "",
+                    "mime_type": _row_value(row, "mime_type_plain_for_public") or "",
+                    "created_at": _row_value(row, "created_at") or "",
+                    "updated_at": _row_value(row, "updated_at") or "",
+                })
+            return result
+        finally:
+            conn.close()
+
+    def _actor_session_binding():
+        raw = request.cookies.get("session_token") or ""
+        raw = str(raw or "").strip()
+        if not raw:
+            return ""
+        return hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()[:16]
+
     def _actor_or_401():
         actor = get_current_user_ctx()
         if not actor:
             return None, json_resp({"ok": False, "msg": "請先登入"}, 401)
+        user_id = int(_actor_value(actor, "id") or 0)
+        if user_id <= 0:
+            return None, json_resp({"ok": False, "msg": "無法辨識使用者身份"}, 401)
         settings = get_system_settings() or {}
         min_role = str(settings.get("module_ai_agent_min_role") or "user")
         actor_role = _coerce_role(actor)
         if _actor_value(actor, "username") != "root" and role_rank(actor_role) < role_rank(min_role):
             return None, json_resp({"ok": False, "msg": "沒有 AI Agent 使用權限"}, 403)
         return actor, None
+
+    def _actor_is_manager_or_above(actor):
+        actor_role = _coerce_role(actor)
+        return role_rank(actor_role) >= role_rank("manager")
+
+    def _actor_is_super_admin(actor):
+        actor_role = _coerce_role(actor)
+        return role_rank(actor_role) >= role_rank("super_admin")
+
+    def _parse_bool(raw):
+        if isinstance(raw, bool):
+            return raw
+        if isinstance(raw, str):
+            value = raw.strip().lower()
+            if value in {"1", "true", "yes", "on", "y"}:
+                return True
+            if value in {"0", "false", "off", "no", "n"}:
+                return False
+        return None
 
     @app.route("/api/ai-agent/readonly", methods=["GET"])
     @require_csrf_safe
@@ -416,7 +503,7 @@ def register_ai_agent_routes(app, deps):
         if denied:
             return denied
         scope = str(request.args.get("scope") or "all").strip().lower()
-        if scope not in {"all", "resources", "comfyui", "remote_download", "jobs", "member_mgmt", "attack_diag"}:
+        if scope not in {"all", "resources", "comfyui", "remote_download", "jobs", "files", "storage", "member_mgmt", "attack_diag"}:
             return json_resp({"ok": False, "msg": "不支援的 scope"}, 400)
         limit = _coerce_limit(request.args.get("limit", "20"))
         actor_level = _actor_scope_payload(actor)
@@ -438,6 +525,8 @@ def register_ai_agent_routes(app, deps):
             payload["comfyui_jobs"] = _agent_list_comfyui_jobs(actor, limit=limit)
         if scope in {"all", "jobs", "remote_download"}:
             payload["remote_download_jobs"] = _agent_list_remote_download_jobs(actor, limit=limit)
+        if scope in {"all", "files", "storage"}:
+            payload["storage_files"] = _agent_list_storage_files(actor, limit=limit)
         if actor_level["can_manage_members"] and scope in {"all", "member_mgmt"}:
             payload["member_management"] = _member_management_payload(actor, limit=limit)
         if actor_level["can_manage_servers"] and scope in {"all", "attack_diag"}:
@@ -453,11 +542,13 @@ def register_ai_agent_routes(app, deps):
         actor_scope = _actor_scope_payload(actor)
         settings = get_system_settings() or {}
         public = public_ai_agent_settings(settings, actor=actor)
+        audit_status = public_ai_agent_audit_status(settings, include_scan=_actor_is_super_admin(actor))
         health = ai_agent_health(settings)
         capabilities = ai_agent_capabilities(settings) if health.get("ok") else {}
         return json_resp({
             "ok": True,
             "settings": public,
+            "audit": audit_status,
             "health": health,
             "capabilities": capabilities,
             "actor": {
@@ -480,6 +571,43 @@ def register_ai_agent_routes(app, deps):
             return json_resp({"ok": False, "msg": str(exc), "status": exc.status, "payload": exc.payload}), 502
         return json_resp({"ok": True, "models": models})
 
+    @app.route("/api/ai-agent/audit-scan", methods=["GET", "POST"])
+    @require_csrf
+    def ai_agent_audit_scan_route():
+        actor, denied = _actor_or_401()
+        if denied:
+            return denied
+        if not _actor_is_super_admin(actor):
+            return json_resp({"ok": False, "msg": "只有最高管理者可執行 AI Agent 審計掃描"}), 403
+        settings = get_system_settings() or {}
+        force = _parse_bool(request.args.get("force")) if request.method == "GET" else _parse_bool(request.json.get("force")) if request.is_json else False
+        if force is None:
+            force = False
+        try:
+            scan = run_ai_agent_audit_scan(
+                settings,
+                get_db=get_db,
+                actor=actor,
+                force=force,
+                get_client_ip=get_client_ip,
+                get_ua=get_ua,
+                audit=audit,
+            )
+        except Exception as exc:
+            return json_resp({"ok": False, "msg": str(exc)}), 502
+        return json_resp({"ok": True, "scan": scan})
+
+    @app.route("/api/ai-agent/audit-status", methods=["GET"])
+    @require_csrf
+    def ai_agent_audit_status_route():
+        actor, denied = _actor_or_401()
+        if denied:
+            return denied
+        if not _actor_is_super_admin(actor):
+            return json_resp({"ok": False, "msg": "只有最高管理者可檢視 AI Agent 審計狀態"}), 403
+        settings = get_system_settings() or {}
+        return json_resp({"ok": True, "audit_status": public_ai_agent_audit_status(settings, include_scan=True)})
+
     @app.route("/api/ai-agent/chat", methods=["POST"])
     @require_csrf
     def ai_agent_chat_route():
@@ -495,7 +623,9 @@ def register_ai_agent_routes(app, deps):
         settings = get_system_settings() or {}
         user_id = _actor_value(actor, "id", 0)
         session_id = str(data.get("session_id") or "").strip()[:120]
-        session_key = f"hackme:{user_id}:{session_id or 'default'}"
+        binding = _actor_session_binding()
+        base_key = f"hackme:{user_id}:{session_id or 'default'}"
+        session_key = f"hackme:{user_id}:{binding}:{session_id or 'default'}" if binding else base_key
         try:
             result = ai_agent_chat(
                 settings,
@@ -516,6 +646,13 @@ def register_ai_agent_routes(app, deps):
                 detail=f"status={exc.status or '-'},error={str(exc)[:180]}",
             )
             return json_resp({"ok": False, "msg": str(exc), "status": exc.status, "payload": exc.payload}), 502
+
+        if _is_mock_chat_reply(result.get("content", "")):
+            return json_resp({
+                "ok": False,
+                "msg": "AI Agent 後端仍回傳 mock 回覆，請確認 ai_agent_api_base_url 是否指向真實 Hermes endpoint",
+            }), 502
+
         audit(
             "AI_AGENT_CHAT",
             get_client_ip(),

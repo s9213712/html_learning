@@ -1,9 +1,19 @@
 import pytest
 import json
+import sqlite3
+from datetime import datetime, timedelta
 from urllib import error as urllib_error
 
 from services.ai_agent.hermes import (
     AiAgentError,
+    ai_agent_effective_tools,
+    ai_agent_operation_mode_policy,
+    get_ai_agent_audit_last_scan,
+    public_ai_agent_audit_status,
+    normalize_ai_agent_allowed_models,
+    normalize_ai_agent_allowed_tools,
+    clear_ai_agent_audit_scan_state,
+    normalize_ai_agent_operation_mode,
     normalize_ai_agent_role,
     _normalize_chat_messages,
     normalize_ai_agent_api_base_url,
@@ -13,6 +23,7 @@ from services.ai_agent.hermes import (
     validate_ai_agent_api_key,
 )
 from services.ai_agent import hermes as hermes_client
+from services.ai_agent.hermes import run_ai_agent_audit_scan
 
 
 def test_ai_agent_public_settings_redacts_secret_and_keeps_connection_fields():
@@ -162,3 +173,520 @@ def test_ai_agent_health_checks_base_path_when_present(monkeypatch):
     assert result["ok"] is True
     assert result["url"] == "http://127.0.0.1:8642/health"
     assert result["payload"] == {"ok": True}
+
+
+def test_ai_agent_health_marks_mock_backend_as_unhealthy(monkeypatch):
+    class FakeResponse:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def read(self, _size):
+            return json.dumps(self._payload).encode("utf-8")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    calls = []
+
+    def fake_urlopen(req, timeout=5):
+        url = getattr(req, "full_url", "")
+        calls.append(url)
+        if url == "http://127.0.0.1:8642/v1/health":
+            return FakeResponse({"service": "hermes-mock", "version": "mock-1"})
+        if url == "http://127.0.0.1:8642/health":
+            return FakeResponse({"service": "hermes-mock", "version": "mock-1"})
+        raise urllib_error.URLError("not found")
+
+    monkeypatch.setattr(hermes_client.urllib_request, "urlopen", fake_urlopen)
+
+    result = hermes_client.ai_agent_health({"ai_agent_api_base_url": "http://127.0.0.1:8642/v1"})
+
+    assert calls == ["http://127.0.0.1:8642/v1/health"]
+    assert result["ok"] is False
+    assert "hermes-mock" in str(result["msg"])
+    assert result["payload"]["service"] == "hermes-mock"
+
+
+def test_ai_agent_chat_detects_mock_reply(monkeypatch):
+    def fake_json_request(_settings, method, path, payload=None, session_key="", timeout=None):
+        assert path == "/chat/completions"
+        return {
+            "model": "hermes-agent",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "Mock hermes response: 已收到你的請求。",
+                    },
+                },
+            ],
+        }
+
+    monkeypatch.setattr(hermes_client, "_json_request", fake_json_request)
+
+    with pytest.raises(AiAgentError) as exc:
+        hermes_client.ai_agent_chat(
+            {
+                "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
+                "ai_agent_api_key": "dummy-key",
+            },
+            messages=[{"role": "user", "content": "幫我看一下下載進度"}],
+        )
+    assert "mock 回覆" in str(exc.value)
+
+
+def test_ai_agent_chat_detects_mock_reply_with_whitespace(monkeypatch):
+    def fake_json_request(_settings, method, path, payload=None, session_key="", timeout=None):
+        assert path == "/chat/completions"
+        return {
+            "model": "hermes-agent",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": " Mock  \nHermes  Response:   已收到你的請求。 ",
+                    },
+                },
+            ],
+        }
+
+    monkeypatch.setattr(hermes_client, "_json_request", fake_json_request)
+
+    with pytest.raises(AiAgentError) as exc:
+        hermes_client.ai_agent_chat(
+            {
+                "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
+                "ai_agent_api_key": "dummy-key",
+            },
+            messages=[{"role": "user", "content": "幫我看一下下載進度"}],
+        )
+    assert "mock 回覆" in str(exc.value)
+
+
+def test_ai_agent_chat_detects_mock_reply_simplified_chinese(monkeypatch):
+    def fake_json_request(_settings, method, path, payload=None, session_key="", timeout=None):
+        assert path == "/chat/completions"
+        return {
+            "model": "hermes-agent",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "Mock hermes response: 已收到你的请求。",
+                    },
+                },
+            ],
+        }
+
+    monkeypatch.setattr(hermes_client, "_json_request", fake_json_request)
+
+    with pytest.raises(AiAgentError) as exc:
+        hermes_client.ai_agent_chat(
+            {
+                "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
+                "ai_agent_api_key": "dummy-key",
+            },
+            messages=[{"role": "user", "content": "幫我看一下下載進度"}],
+        )
+    assert "mock 回覆" in str(exc.value)
+
+
+def test_ai_agent_chat_detects_mock_reply_in_nested_field(monkeypatch):
+    def fake_json_request(_settings, method, path, payload=None, session_key="", timeout=None):
+        assert path == "/chat/completions"
+        return {
+            "model": "hermes-agent",
+            "response": " Mock  \nHermes  Response:   已收到你的請求。 ",
+        }
+
+    monkeypatch.setattr(hermes_client, "_json_request", fake_json_request)
+
+    with pytest.raises(AiAgentError) as exc:
+        hermes_client.ai_agent_chat(
+            {
+                "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
+                "ai_agent_api_key": "dummy-key",
+            },
+            messages=[{"role": "user", "content": "幫我看一下下載進度"}],
+        )
+    assert "mock 回覆" in str(exc.value)
+
+
+def test_ai_agent_chat_detects_mock_reply_with_interleaving_whitespace(monkeypatch):
+    def fake_json_request(_settings, method, path, payload=None, session_key="", timeout=None):
+        assert path == "/chat/completions"
+        return {
+            "model": "hermes-agent",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": " mock\tHermes\nResponse :\u3000已\u6536\u5230\u4f60\u7684\u8bf7\u6c42。 ",
+                    },
+                },
+            ],
+        }
+
+    monkeypatch.setattr(hermes_client, "_json_request", fake_json_request)
+
+    with pytest.raises(AiAgentError) as exc:
+        hermes_client.ai_agent_chat(
+            {
+                "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
+                "ai_agent_api_key": "dummy-key",
+            },
+            messages=[{"role": "user", "content": "幫我看一下下載進度"}],
+        )
+    assert "mock 回覆" in str(exc.value)
+
+
+def test_ai_agent_operation_mode_normalizes_and_keeps_allowed_models():
+    assert normalize_ai_agent_operation_mode("readonly") == "readonly"
+    assert normalize_ai_agent_operation_mode("Read_Only") == "readonly"
+    assert normalize_ai_agent_operation_mode("audit") == "audit"
+    assert normalize_ai_agent_operation_mode("bad") is None
+
+    assert normalize_ai_agent_allowed_models("model-a,model-b") == "model-a,model-b"
+    assert normalize_ai_agent_allowed_models(["model-a", "model-b", "model-a"]) == "model-a,model-b"
+    assert normalize_ai_agent_allowed_models("  ") == ""
+    assert normalize_ai_agent_allowed_models("model\nx") is None
+    assert normalize_ai_agent_allowed_tools("check_resource_state,audit_scan") == "check_resource_state,audit_scan"
+    assert normalize_ai_agent_allowed_tools("bad_tool") is None
+
+    write_policy = ai_agent_operation_mode_policy("write")
+    assert write_policy["mode"] == "write"
+    assert write_policy["write_enabled"] is True
+    assert write_policy["min_role"] == "super_admin"
+
+
+def test_ai_agent_effective_tools_are_role_and_allowlist_scoped():
+    user_tools = {tool["name"] for tool in ai_agent_effective_tools({}, actor_role="user")}
+    root_tools = {tool["name"] for tool in ai_agent_effective_tools({}, actor_role="super_admin")}
+    restricted_root_tools = {
+        tool["name"]
+        for tool in ai_agent_effective_tools({"ai_agent_allowed_tools": "audit_scan,inspect_user_files"}, actor_role="super_admin")
+    }
+
+    assert "inspect_user_files" in user_tools
+    assert "audit_scan" not in user_tools
+    assert "audit_scan" in root_tools
+    assert restricted_root_tools == {"audit_scan", "inspect_user_files"}
+
+
+def test_ai_agent_chat_blocks_mutating_request_in_readonly_mode(monkeypatch):
+    def fake_json_request(_settings, method, path, payload=None, session_key="", timeout=None):
+        return {"choices": [{"message": {"content": "should not reach"}}], "model": "hermes-agent"}
+
+    monkeypatch.setattr(hermes_client, "_json_request", fake_json_request)
+
+    with pytest.raises(AiAgentError) as exc:
+        hermes_client.ai_agent_chat(
+            {
+                "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
+                "ai_agent_api_key": "dummy-key",
+                "ai_agent_operation_mode": "readonly",
+            },
+            messages=[{"role": "user", "content": "幫我刪除資料"}],
+            actor={"role": "user"},
+        )
+    assert "唯讀模式" in str(exc.value)
+
+
+def test_ai_agent_chat_blocks_non_root_in_audit_mode(monkeypatch):
+    def fake_json_request(_settings, method, path, payload=None, session_key="", timeout=None):
+        return {"choices": [{"message": {"content": "root audit ok"}}], "model": "hermes-agent"}
+
+    monkeypatch.setattr(hermes_client, "_json_request", fake_json_request)
+
+    with pytest.raises(AiAgentError) as exc:
+        hermes_client.ai_agent_chat(
+            {
+                "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
+                "ai_agent_api_key": "dummy-key",
+                "ai_agent_operation_mode": "audit",
+            },
+            messages=[{"role": "user", "content": "查一下目前任務進度"}],
+            actor={"role": "user"},
+        )
+    assert "審計模式" in str(exc.value)
+
+    with pytest.raises(AiAgentError) as exc:
+        hermes_client.ai_agent_chat(
+            {
+                "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
+                "ai_agent_api_key": "dummy-key",
+                "ai_agent_operation_mode": "audit",
+            },
+            messages=[{"role": "user", "content": "查一下目前任務進度"}],
+            actor={"role": "manager"},
+        )
+    assert "root" in str(exc.value)
+
+    result = hermes_client.ai_agent_chat(
+        {
+            "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
+            "ai_agent_api_key": "dummy-key",
+            "ai_agent_operation_mode": "audit",
+        },
+        messages=[{"role": "user", "content": "查一下目前任務進度"}],
+        actor={"username": "root", "role": "user"},
+    )
+    assert result["content"] == "root audit ok"
+
+
+def test_ai_agent_chat_write_mode_is_root_only(monkeypatch):
+    def fake_json_request(_settings, method, path, payload=None, session_key="", timeout=None):
+        return {"choices": [{"message": {"content": "root write ok"}}], "model": "hermes-agent"}
+
+    monkeypatch.setattr(hermes_client, "_json_request", fake_json_request)
+
+    with pytest.raises(AiAgentError) as exc:
+        hermes_client.ai_agent_chat(
+            {
+                "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
+                "ai_agent_api_key": "dummy-key",
+                "ai_agent_operation_mode": "write",
+            },
+            messages=[{"role": "user", "content": "幫我調整設定"}],
+            actor={"role": "manager"},
+        )
+    assert "執行寫入模式" in str(exc.value)
+
+    result = hermes_client.ai_agent_chat(
+        {
+            "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
+            "ai_agent_api_key": "dummy-key",
+            "ai_agent_operation_mode": "write",
+        },
+        messages=[{"role": "user", "content": "幫我調整設定"}],
+        actor={"username": "root", "role": "user"},
+    )
+    assert result["content"] == "root write ok"
+
+
+def test_ai_agent_audit_scan_reports_anomalies_and_uses_cache(tmp_path):
+    db_path = tmp_path / "ai_agent_audit_scan.sqlite"
+    conn = sqlite3.connect(db_path)
+    conn.execute("DROP TABLE IF EXISTS security_events")
+    conn.execute("DROP TABLE IF EXISTS secure_audit")
+    conn.execute(
+        """
+        CREATE TABLE security_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_type TEXT,
+            ip_address TEXT,
+            target_user TEXT,
+            detail TEXT,
+            created_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE secure_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT,
+            action TEXT,
+            ip TEXT,
+            user TEXT,
+            success INTEGER,
+            detail TEXT
+        )
+        """
+    )
+    now = datetime.now().replace(microsecond=0)
+    for idx in range(3):
+        created_at = (now - timedelta(seconds=idx * 5)).isoformat()
+        conn.execute(
+            "INSERT INTO security_events (event_type, ip_address, target_user, detail, created_at) VALUES (?, ?, ?, ?, ?)",
+            ("ip_block", "198.51.100.10", "userA", f"event-{idx}", created_at),
+        )
+    for idx in range(12):
+        ts = (now - timedelta(seconds=idx)).isoformat()
+        conn.execute(
+            "INSERT INTO secure_audit (ts, action, ip, user, success, detail) VALUES (?, ?, ?, ?, ?, ?)",
+            (ts, "ai_agent", "198.51.100.10", "userA", 1, f"probe-{idx}"),
+        )
+    conn.commit()
+    conn.close()
+
+    actor = {"id": 1, "username": "root", "role": "super_admin"}
+    settings = {
+        "ai_agent_audit_interval_minutes": 1,
+        "ai_agent_audit_cpu_percent_threshold": 1,
+        "ai_agent_audit_ram_percent_threshold": 1,
+        "ai_agent_audit_disk_percent_threshold": 1,
+        "ai_agent_audit_ip_event_rate_threshold": 1,
+        "ai_agent_audit_ip_event_rate_window_minutes": 1,
+        "ai_agent_audit_security_event_rate_threshold": 1,
+        "ai_agent_audit_security_event_rate_window_minutes": 1,
+        "ai_agent_audit_auto_block_suspect_ip": False,
+        "ai_agent_audit_notify_root": False,
+    }
+
+    calls = {"db": 0}
+
+    def get_db():
+        calls["db"] += 1
+        db = sqlite3.connect(db_path)
+        db.row_factory = sqlite3.Row
+        return db
+
+    first = run_ai_agent_audit_scan(
+        settings,
+        get_db=get_db,
+        actor=actor,
+        force=True,
+        get_client_ip=lambda: "127.0.0.1",
+        get_ua=lambda: "pytest",
+        audit=lambda *args, **kwargs: None,
+    )
+    assert isinstance(first, dict)
+    assert first["status"] in {"warn", "alert"}
+    assert first["anomalies"], first
+    assert first["aggregates"]["security_events_total"] == 3
+    assert first["aggregates"]["secure_audit_total"] == 12
+    assert calls["db"] == 1
+
+    second = run_ai_agent_audit_scan(
+        settings,
+        get_db=get_db,
+        actor=actor,
+        force=False,
+        get_client_ip=lambda: "127.0.0.1",
+        get_ua=lambda: "pytest",
+        audit=lambda *args, **kwargs: None,
+    )
+    assert second["cached"] is True
+    assert calls["db"] == 1
+
+    third = run_ai_agent_audit_scan(
+        settings,
+        get_db=get_db,
+        actor=actor,
+        force=True,
+        get_client_ip=lambda: "127.0.0.1",
+        get_ua=lambda: "pytest",
+        audit=lambda *args, **kwargs: None,
+    )
+    assert third["cached"] is False
+    assert calls["db"] >= 2
+
+
+def test_ai_agent_audit_scan_auto_block_suspect_ip(monkeypatch, tmp_path):
+    db_path = tmp_path / "ai_agent_audit_block.sqlite"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE secure_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT,
+            action TEXT,
+            ip TEXT,
+            user TEXT,
+            success INTEGER,
+            detail TEXT
+        )
+        """
+    )
+    now = datetime.now().replace(microsecond=0)
+    for idx in range(12):
+        ts = (now - timedelta(seconds=idx)).isoformat()
+        conn.execute(
+            "INSERT INTO secure_audit (ts, action, ip, user, success, detail) VALUES (?, ?, ?, ?, ?, ?)",
+            (ts, "ai_agent", "198.51.100.20", "userA", 1, f"probe-{idx}"),
+        )
+    conn.commit()
+    conn.close()
+
+    blocked_ips = []
+
+    def fake_block_ip(ip, *, minutes, reason):
+        blocked_ips.append({"ip": ip, "minutes": minutes, "reason": reason})
+
+    monkeypatch.setattr("services.security.events.block_ip", fake_block_ip)
+
+    def get_db():
+        db = sqlite3.connect(db_path)
+        db.row_factory = sqlite3.Row
+        return db
+
+    scan = run_ai_agent_audit_scan(
+        {
+            "ai_agent_audit_interval_minutes": 1,
+            "ai_agent_audit_ip_event_rate_threshold": 1,
+            "ai_agent_audit_ip_event_rate_window_minutes": 1,
+            "ai_agent_audit_security_event_rate_threshold": 100,
+            "ai_agent_audit_security_event_rate_window_minutes": 1,
+            "ai_agent_audit_cpu_percent_threshold": 100,
+            "ai_agent_audit_ram_percent_threshold": 100,
+            "ai_agent_audit_disk_percent_threshold": 100,
+            "ai_agent_audit_auto_block_suspect_ip": True,
+            "ai_agent_audit_block_minutes": 8,
+            "ai_agent_audit_notify_root": False,
+        },
+        get_db=get_db,
+        actor={"id": 1, "username": "root", "role": "super_admin"},
+        force=True,
+        get_client_ip=lambda: "127.0.0.1",
+        get_ua=lambda: "pytest",
+        audit=lambda *args, **kwargs: None,
+    )
+
+    assert scan["interventions"], scan
+    assert blocked_ips and blocked_ips[0]["ip"] == "198.51.100.20"
+    assert blocked_ips[0]["minutes"] == 8
+
+
+def test_public_ai_agent_audit_status_uses_last_scan_cache(tmp_path):
+    clear_ai_agent_audit_scan_state()
+    db_path = tmp_path / "ai_agent_audit_status.sqlite"
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE IF NOT EXISTS security_events (id INTEGER PRIMARY KEY AUTOINCREMENT, event_type TEXT, ip_address TEXT, target_user TEXT, detail TEXT, created_at TEXT)")
+    conn.execute("CREATE TABLE IF NOT EXISTS secure_audit (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, action TEXT, ip TEXT, user TEXT, success INTEGER, detail TEXT)")
+    conn.commit()
+    conn.close()
+
+    status = public_ai_agent_audit_status({
+        "ai_agent_operation_mode": "audit",
+        "ai_agent_audit_interval_minutes": 1,
+        "ai_agent_audit_auto_block_suspect_ip": False,
+        "ai_agent_audit_notify_root": False,
+    })
+    assert status["mode"] == "audit"
+    assert status["scheduler"]["enabled"] is True
+    assert status["scheduler"]["has_scan"] is False
+
+    state = get_ai_agent_audit_last_scan()
+    assert state["has_result"] is False
+
+    settings = {
+        "ai_agent_audit_interval_minutes": 1,
+        "ai_agent_audit_auto_block_suspect_ip": False,
+        "ai_agent_audit_notify_root": False,
+    }
+    def get_db():
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    run_ai_agent_audit_scan(
+        settings,
+        get_db=get_db,
+        actor={"id": 1, "username": "root", "role": "super_admin"},
+        force=True,
+        get_client_ip=lambda: "127.0.0.1",
+        get_ua=lambda: "pytest",
+        audit=lambda *args, **kwargs: None,
+    )
+    status_after = public_ai_agent_audit_status({
+        "ai_agent_operation_mode": "audit",
+        "ai_agent_audit_interval_minutes": 1,
+        "ai_agent_audit_auto_block_suspect_ip": False,
+        "ai_agent_audit_notify_root": False,
+    })
+    assert status_after["scheduler"]["has_scan"] is True
+    assert "status" in status_after["summary"]

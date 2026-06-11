@@ -342,6 +342,22 @@ SETTING_DETAILS = {
         "label": "AI Agent 模型",
         "description": "預設送往 /v1/chat/completions 的 model 名稱。",
     },
+    "ai_agent_operation_mode": {
+        "label": "AI Agent 運作模式",
+        "description": "readonly（唯讀）、assist（協助）、write（執行寫入候選）或 audit（僅審計），可在四種邏輯邊界間切換。",
+    },
+    "ai_agent_allowed_models": {
+        "label": "AI Agent 允許模型清單",
+        "description": "指定可用模型清單（逗號分隔），非空值時 chat 僅允許這些模型。",
+    },
+    "ai_agent_allowed_tools": {
+        "label": "AI Agent 可調用工具清單",
+        "description": "指定可用工具名稱（逗號分隔）；空白時依角色套用預設工具，root 可用完整工具集合。",
+    },
+    "ai_agent_audit_interval_minutes": {
+        "label": "AI Agent 審計間隔（分鐘）",
+        "description": "兩次審計掃描之最小間隔；同一 token cache 期限約束。",
+    },
     "ai_agent_request_timeout_seconds": {
         "label": "AI Agent 逾時秒數",
         "description": "等待 Hermes / OpenAI-compatible API 回應的最長時間。",
@@ -349,6 +365,46 @@ SETTING_DETAILS = {
     "ai_agent_max_prompt_chars": {
         "label": "AI Agent 文字上限",
         "description": "單次請求文字內容的最大字元數，避免用戶把主 server thread 卡住太久。",
+    },
+    "ai_agent_audit_cpu_percent_threshold": {
+        "label": "AI Agent 審計 CPU 閾值 (%)",
+        "description": "CPU 佔用超過此值會納入異常。",
+    },
+    "ai_agent_audit_ram_percent_threshold": {
+        "label": "AI Agent 審計 RAM 閾值 (%)",
+        "description": "RAM 佔用超過此值會納入異常。",
+    },
+    "ai_agent_audit_disk_percent_threshold": {
+        "label": "AI Agent 審計磁碟閾值 (%)",
+        "description": "磁碟使用率超過此值會納入異常。",
+    },
+    "ai_agent_audit_ip_event_rate_threshold": {
+        "label": "AI Agent 審計 IP 請求速率（每分鐘）",
+        "description": "指定每分鐘每個 IP 可接受的 sec-audit 請求次數，超過會警示。",
+    },
+    "ai_agent_audit_ip_event_rate_window_minutes": {
+        "label": "AI Agent 審計 IP 速率窗口（分鐘）",
+        "description": "用於聚合 secure_audit 的 IP 請求速率分析窗口。",
+    },
+    "ai_agent_audit_security_event_rate_threshold": {
+        "label": "AI Agent 審計安全事件速率（每分鐘）",
+        "description": "指定每分鐘安全事件總量上限，超過會警示。",
+    },
+    "ai_agent_audit_security_event_rate_window_minutes": {
+        "label": "AI Agent 審計安全事件窗口（分鐘）",
+        "description": "用於安全事件聚合窗口。",
+    },
+    "ai_agent_audit_auto_block_suspect_ip": {
+        "label": "AI Agent 審計啟用疑似 IP 自動封鎖",
+        "description": "觸發 IP 異常時自動封鎖來源 IP。",
+    },
+    "ai_agent_audit_block_minutes": {
+        "label": "AI Agent 自動封鎖持續分鐘",
+        "description": "AI Agent 審計自動封鎖 IP 的持續時間。",
+    },
+    "ai_agent_audit_notify_root": {
+        "label": "AI Agent 審計異常通知根帳號",
+        "description": "審計發現異常時是否在結果中產生 root 通知訊息。",
     },
     "ai_agent_allow_image_input": {
         "label": "允許圖片理解",
