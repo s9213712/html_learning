@@ -39,12 +39,12 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert 'id="ai-agent-effective-tools"' in html
     assert 'id="ai-agent-audit-overview"' in html
     assert 'id="ai-agent-audit-scan-btn"' in html
-    assert 'id="ai-agent-write-tools-panel"' in html
+    assert 'id="ai-agent-write-tools-panel" hidden aria-hidden="true" data-agent-internal-tool-panel="true"' in html
     assert 'id="ai-agent-comfyui-prompt"' in html
     assert 'id="ai-agent-comfyui-vae"' in html
     assert 'id="ai-agent-comfyui-generate-btn"' in html
     assert 'id="s-module-ai-agent-min-role"' in html
-    assert "/js/37-ai-agent.js?v=20260611-ai-agent-image-to-comfyui" in html
+    assert "/js/37-ai-agent.js?v=20260612-ai-agent-hidden-write-tool-form" in html
     assert "/js/90-bootstrap.js?v=20260611-ai-agent-comfyui-write-tool" in html
 
     assert '"ai-agent": "feature_ai_agent_enabled"' in core_js
@@ -97,6 +97,8 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert "localStorage.setItem" in ai_agent_js
     assert 'official_workflow_id = "origin_sdxl_txt2img"' in ai_agent_js
     assert 'ai-agent-write-tools-panel' in ai_agent_js
+    assert 'panel.hidden = true;' in ai_agent_js
+    assert '對話解析後會直接送出' in ai_agent_js
     assert "OpenAI-compatible" in ai_agent_js
     assert "Hermes Agent" in ai_agent_js
     assert "Hermes API 已連線" not in ai_agent_js

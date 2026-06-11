@@ -350,12 +350,13 @@ function renderAiAgentWriteTools() {
   if (!panel) return;
   const isRoot = AI_AGENT_STATE.actor?.role === "super_admin";
   const canRunComfyui = aiAgentCanRunWriteTool("write_comfyui_generate");
-  panel.hidden = !isRoot;
+  panel.hidden = true;
+  panel.setAttribute("aria-hidden", "true");
   if (state) {
     if (!isRoot) {
       state.textContent = "僅 root 可使用 write-tool。";
     } else if (canRunComfyui) {
-      state.textContent = "已啟用 write_comfyui_generate；送出時會自動附帶 confirm=EXECUTE。";
+      state.textContent = "已啟用 write_comfyui_generate；對話解析後會直接送出，並自動附帶 confirm=EXECUTE。";
     } else {
       state.textContent = "需切換為 write 模式，且工具白名單需允許 write_comfyui_generate。";
     }
