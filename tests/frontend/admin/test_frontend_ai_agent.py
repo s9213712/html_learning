@@ -44,7 +44,7 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert 'id="ai-agent-comfyui-vae"' in html
     assert 'id="ai-agent-comfyui-generate-btn"' in html
     assert 'id="s-module-ai-agent-min-role"' in html
-    assert "/js/37-ai-agent.js?v=20260611-ai-agent-direct-comfyui" in html
+    assert "/js/37-ai-agent.js?v=20260611-ai-agent-image-to-comfyui" in html
     assert "/js/90-bootstrap.js?v=20260611-ai-agent-comfyui-write-tool" in html
 
     assert '"ai-agent": "feature_ai_agent_enabled"' in core_js
@@ -78,6 +78,15 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert "function aiAgentParseComfyuiGenerateRequest" in ai_agent_js
     assert "aiAgentParseComfyuiGenerateRequest(prompt)" in ai_agent_js
     assert "aiAgentFillComfyuiToolForm(directComfyuiArgs)" in ai_agent_js
+    assert "function aiAgentAnalyzeImageForComfyui" in ai_agent_js
+    assert "function aiAgentVisionModel" in ai_agent_js
+    assert "const selectedModel = aiAgentVisionModel();" in ai_agent_js
+    assert "qwen3-vl" in ai_agent_js
+    assert "圖片分析與提示詞生成中" in ai_agent_js
+    assert "await aiAgentAnalyzeImageForComfyui(userText)" in ai_agent_js
+    assert "await runAiAgentComfyuiGenerate(analyzed.args)" in ai_agent_js
+    assert "aiAgentConversationStorageKey" in ai_agent_js
+    assert "localStorage.setItem" in ai_agent_js
     assert 'official_workflow_id = "origin_sdxl_txt2img"' in ai_agent_js
     assert 'ai-agent-write-tools-panel' in ai_agent_js
     assert "OpenAI-compatible" in ai_agent_js

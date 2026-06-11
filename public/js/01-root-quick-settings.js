@@ -30,7 +30,7 @@ const AI_AGENT_PROVIDER_QUICK_PRESETS = {
   openai_compatible: {
     apiBaseUrl: "http://127.0.0.1:11434/v1",
     model: "gpt-oss:120b-cloud",
-    allowedModels: "gpt-oss:120b-cloud,minimax-m2.7:cloud",
+    allowedModels: "gpt-oss:120b-cloud,qwen3-vl:235b-instruct-cloud,minimax-m2.7:cloud",
   },
 };
 

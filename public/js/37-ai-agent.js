@@ -29,12 +29,57 @@ function aiAgentCurrentAccountScope() {
     : "anonymous";
 }
 
+function aiAgentConversationStorageKey(scope = AI_AGENT_STATE.accountScope || aiAgentCurrentAccountScope()) {
+  return `hackme:ai-agent:conversation:${scope || "anonymous"}`;
+}
+
+function aiAgentPersistConversation(scope = AI_AGENT_STATE.accountScope) {
+  if (!scope || typeof localStorage === "undefined") return;
+  try {
+    localStorage.setItem(aiAgentConversationStorageKey(scope), JSON.stringify({
+      sessionId: AI_AGENT_STATE.sessionId || "",
+      messages: AI_AGENT_STATE.messages.slice(-80),
+      updatedAt: Date.now(),
+    }));
+  } catch (err) {
+    // localStorage can be disabled or full; chat still works without persistence.
+  }
+}
+
+function aiAgentLoadConversation(scope) {
+  AI_AGENT_STATE.messages = [];
+  AI_AGENT_STATE.sessionId = "";
+  AI_AGENT_STATE.imageDataUrl = "";
+  if (!scope || typeof localStorage === "undefined") return;
+  try {
+    const raw = localStorage.getItem(aiAgentConversationStorageKey(scope));
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    const messages = Array.isArray(parsed?.messages) ? parsed.messages : [];
+    AI_AGENT_STATE.messages = messages
+      .filter((message) => message && ["user", "assistant"].includes(message.role))
+      .slice(-80)
+      .map((message) => ({
+        role: message.role,
+        content: String(message.content || "").slice(0, 20000),
+      }));
+    AI_AGENT_STATE.sessionId = String(parsed?.sessionId || "").slice(0, 120);
+  } catch (err) {
+    AI_AGENT_STATE.messages = [];
+    AI_AGENT_STATE.sessionId = "";
+  }
+}
+
 function aiAgentResetScopeState() {
   const nextScope = aiAgentCurrentAccountScope();
   const previousScope = AI_AGENT_STATE.accountScope;
-  AI_AGENT_STATE.accountScope = nextScope;
   if (previousScope && previousScope !== nextScope) {
-    clearAiAgentConversation();
+    aiAgentPersistConversation(previousScope);
+  }
+  AI_AGENT_STATE.accountScope = nextScope;
+  if (!previousScope || previousScope !== nextScope) {
+    aiAgentLoadConversation(nextScope);
+    renderAiAgentThread();
   }
 }
 
@@ -149,6 +194,121 @@ function aiAgentParseComfyuiGenerateRequest(text) {
     args.official_workflow_id = "origin_sdxl_txt2img";
   }
   return args;
+}
+
+function aiAgentWantsComfyuiGeneration(text) {
+  return /生圖|產圖|生成圖片|參考.*圖|照.*圖|comfyui|txt2img|t2i|sdxl|text\s*to\s*image/i.test(String(text || ""));
+}
+
+function aiAgentParseComfyuiOptionOverrides(text) {
+  const raw = String(text || "");
+  const args = {};
+  const size = raw.match(/(?:size|尺寸|解析度)?\s*[:：]?\s*(\d{3,4})\s*[xX*×＊]\s*(\d{3,4})/i);
+  if (size) {
+    args.width = aiAgentClampNumber(size[1], 1024, { min: 256, max: 2048, integer: true });
+    args.height = aiAgentClampNumber(size[2], 1024, { min: 256, max: 2048, integer: true });
+  }
+  const model = aiAgentLineValue(raw, [
+    /^\s*(?:models?|模型|checkpoint|ckpt)\s*[:：]\s*(.+)$/i,
+  ]);
+  if (model) args.checkpoint = model;
+  const cfg = raw.match(/(?:^|\n)\s*(?:cfg(?:[_\s-]?scale)?)\s*[:：]?\s*([0-9]+(?:\.[0-9]+)?)/i);
+  if (cfg) args.cfg_scale = aiAgentClampNumber(cfg[1], 7, { min: 1, max: 20 });
+  const steps = raw.match(/(?:^|\n)\s*(?:steps?|步數)\s*[:：]?\s*(\d+)/i);
+  if (steps) args.steps = aiAgentClampNumber(steps[1], 20, { min: 1, max: 80, integer: true });
+  const vae = aiAgentLineValue(raw, [
+    /^\s*(?:vae)\s*[:：]\s*(.+)$/i,
+  ]);
+  if (vae) args.vae = vae;
+  if (/sdxl|sdxl\s*t2i|sdxl[-_\s]*txt2img|sdxl[-_\s]*text\s*to\s*image/i.test(raw)) {
+    args.official_workflow_id = "origin_sdxl_txt2img";
+  }
+  return args;
+}
+
+function aiAgentExtractJsonObject(text) {
+  const raw = String(text || "").trim();
+  if (!raw) return null;
+  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const candidates = [];
+  if (fenced) candidates.push(fenced[1]);
+  candidates.push(raw);
+  const first = raw.indexOf("{");
+  const last = raw.lastIndexOf("}");
+  if (first >= 0 && last > first) candidates.push(raw.slice(first, last + 1));
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate);
+      if (parsed && typeof parsed === "object") return parsed;
+    } catch (err) {}
+  }
+  return null;
+}
+
+function aiAgentNormalizeAnalysisArgs(parsed, userText) {
+  const source = parsed?.arguments && typeof parsed.arguments === "object" ? parsed.arguments : parsed;
+  const prompt = aiAgentStripFieldValue(source?.prompt || source?.positive_prompt || source?.comfyui_prompt || "");
+  if (!prompt) throw new Error("圖片分析沒有產生可用提示詞");
+  const args = {
+    prompt,
+    negative_prompt: aiAgentStripFieldValue(source?.negative_prompt || source?.negative || ""),
+    width: source?.width,
+    height: source?.height,
+    steps: source?.steps,
+    cfg_scale: source?.cfg_scale ?? source?.cfg,
+    batch_size: source?.batch_size,
+    checkpoint: aiAgentStripFieldValue(source?.checkpoint || source?.model || ""),
+    vae: aiAgentStripFieldValue(source?.vae || ""),
+    sampler: aiAgentStripFieldValue(source?.sampler || ""),
+    scheduler: aiAgentStripFieldValue(source?.scheduler || ""),
+    official_workflow_id: source?.official_workflow_id || "",
+    confirm_billing: true,
+    ...aiAgentParseComfyuiOptionOverrides(userText),
+  };
+  Object.keys(args).forEach((key) => {
+    if (args[key] === "" || args[key] === undefined || args[key] === null) delete args[key];
+  });
+  return args;
+}
+
+async function aiAgentAnalyzeImageForComfyui(userText) {
+  const selectedModel = aiAgentVisionModel();
+  const selectableModels = aiAgentSelectableModels();
+  if (selectableModels.length && !selectableModels.includes(selectedModel)) {
+    throw new Error("請從模型選單選擇可用模型後再做圖片分析。");
+  }
+  const analysisPrompt = [
+    "請先分析使用者附上的圖片，產生可用於 ComfyUI text-to-image 的提示詞。",
+    "請只輸出 JSON，不要 Markdown，不要表格，不要操作教學。",
+    "JSON 欄位：prompt, negative_prompt, width, height, steps, cfg_scale, checkpoint, vae, sampler, scheduler, official_workflow_id。",
+    "如果使用者文字指定尺寸、模型、CFG、VAE 或 SDXL T2I，請保留那些指定。",
+    `使用者需求：${userText || "參考圖片產生相似風格圖片"}`,
+  ].join("\n");
+  const started = performance.now();
+  const res = await apiFetch(API + "/ai-agent/chat", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      session_id: aiAgentEnsureSessionId(),
+      model: selectedModel,
+      mode: "image",
+      messages: [{ role: "user", content: analysisPrompt }],
+      image_data_url: AI_AGENT_STATE.imageDataUrl,
+    }),
+  });
+  const json = await res.json().catch(() => ({}));
+  const content = json?.message?.content || json?.msg || "";
+  if (!res.ok || !json.ok || isMockAiAgentReply(content)) {
+    throw new Error(json.msg || `圖片分析失敗（HTTP ${res.status}）`);
+  }
+  const parsed = aiAgentExtractJsonObject(content);
+  const args = aiAgentNormalizeAnalysisArgs(parsed || { prompt: content }, userText);
+  return {
+    args,
+    analysis: content,
+    elapsedMs: Math.round(performance.now() - started),
+  };
 }
 
 function aiAgentFillComfyuiToolForm(args = {}) {
@@ -293,6 +453,7 @@ async function runAiAgentComfyuiGenerate(overrides = null) {
 function renderAiAgentThread() {
   const host = $("ai-agent-thread");
   if (!host) return;
+  aiAgentPersistConversation();
   if (!AI_AGENT_STATE.messages.length) {
     host.innerHTML = '<div class="drive-empty">目前沒有訊息</div>';
     return;
@@ -433,6 +594,13 @@ function aiAgentSelectableModels() {
   const configured = AI_AGENT_STATE.settings?.model || "";
   if (configured && !modelIds.includes(configured)) modelIds.unshift(configured);
   return modelIds.filter((id) => !allowedModels.length || allowedModels.includes(id));
+}
+
+function aiAgentVisionModel() {
+  const options = aiAgentSelectableModels();
+  const selected = ($("ai-agent-model")?.value || "").trim();
+  const vision = options.find((id) => /(?:^|[-_:])vl(?:[-_:]|$)|vision|qwen3-vl/i.test(id));
+  return vision || selected || options[0] || AI_AGENT_STATE.settings?.model || "";
 }
 
 function syncAiAgentModelSelect() {
@@ -619,9 +787,13 @@ async function loadAiAgentReadOnly(options = {}) {
 }
 
 function clearAiAgentConversation() {
+  const scope = AI_AGENT_STATE.accountScope || aiAgentCurrentAccountScope();
   AI_AGENT_STATE.messages = [];
   AI_AGENT_STATE.imageDataUrl = "";
   AI_AGENT_STATE.sessionId = "";
+  try {
+    if (scope && typeof localStorage !== "undefined") localStorage.removeItem(aiAgentConversationStorageKey(scope));
+  } catch (err) {}
   if ($("ai-agent-input")) $("ai-agent-input").value = "";
   if ($("ai-agent-image-file")) $("ai-agent-image-file").value = "";
   if ($("ai-agent-image-state")) $("ai-agent-image-state").textContent = "未附加圖片";
@@ -684,6 +856,37 @@ async function sendAiAgentMessage() {
   }
   if (mode === "image" && !AI_AGENT_STATE.imageDataUrl) {
     setAiAgentMessage("請選擇圖片", "err");
+    return;
+  }
+  if (mode === "image" && AI_AGENT_STATE.imageDataUrl && aiAgentWantsComfyuiGeneration(prompt)) {
+    if (!AI_AGENT_STATE.loaded && typeof loadAiAgentStatus === "function") {
+      await loadAiAgentStatus({ force: true }).catch(() => undefined);
+    }
+    const userText = prompt || "參考圖片生圖";
+    AI_AGENT_STATE.messages.push({ role: "user", content: `${userText}\n[已附加圖片]` });
+    renderAiAgentThread();
+    if (input) input.value = "";
+    AI_AGENT_STATE.sending = true;
+    const sendBtn = $("ai-agent-send-btn");
+    if (sendBtn) sendBtn.disabled = true;
+    setAiAgentMessage("圖片分析與提示詞生成中...", "info");
+    try {
+      const analyzed = await aiAgentAnalyzeImageForComfyui(userText);
+      aiAgentFillComfyuiToolForm(analyzed.args);
+      AI_AGENT_STATE.messages.push({
+        role: "assistant",
+        content: `圖片分析完成（${analyzed.elapsedMs} ms）。\n產生提示詞：${analyzed.args.prompt}`,
+      });
+      renderAiAgentThread();
+      await runAiAgentComfyuiGenerate(analyzed.args);
+    } catch (err) {
+      AI_AGENT_STATE.messages.push({ role: "assistant", content: `圖片分析失敗，未送出生圖：${err?.message || err}` });
+      renderAiAgentThread();
+      setAiAgentMessage(`圖片分析失敗：${err?.message || err}`, "err");
+    } finally {
+      AI_AGENT_STATE.sending = false;
+      if (sendBtn) sendBtn.disabled = false;
+    }
     return;
   }
   const directComfyuiArgs = mode === "text" ? aiAgentParseComfyuiGenerateRequest(prompt) : null;
