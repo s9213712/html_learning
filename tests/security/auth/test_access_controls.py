@@ -773,6 +773,7 @@ def test_ai_agent_audit_settings_are_configurable_and_validated():
         json={
             "ai_agent_operation_mode": "readonly",
             "ai_agent_allowed_models": "hermes-agent,stable-diffusion-xl-base-1.0",
+            "ai_agent_allowed_tools": "check_resource_state,audit_scan",
             "ai_agent_audit_interval_minutes": 8,
             "ai_agent_audit_cpu_percent_threshold": 89,
             "ai_agent_audit_ram_percent_threshold": 88,
@@ -789,6 +790,7 @@ def test_ai_agent_audit_settings_are_configurable_and_validated():
     assert saved.status_code == 200, saved.get_json()
     assert state["ai_agent_operation_mode"] == "readonly"
     assert state["ai_agent_allowed_models"] == "hermes-agent,stable-diffusion-xl-base-1.0"
+    assert state["ai_agent_allowed_tools"] == "check_resource_state,audit_scan"
     assert state["ai_agent_audit_interval_minutes"] == 8
     assert state["ai_agent_audit_cpu_percent_threshold"] == 89
     assert state["ai_agent_audit_ram_percent_threshold"] == 88
@@ -804,9 +806,11 @@ def test_ai_agent_audit_settings_are_configurable_and_validated():
     payload = saved.get_json()["settings"]
     assert payload["ai_agent_operation_mode"] == "readonly"
     assert payload["ai_agent_allowed_models"] == "hermes-agent,stable-diffusion-xl-base-1.0"
+    assert payload["ai_agent_allowed_tools"] == "check_resource_state,audit_scan"
 
     assert client.put("/api/admin/settings", json={"ai_agent_operation_mode": "invalid"}).status_code == 400
     assert client.put("/api/admin/settings", json={"ai_agent_allowed_models": ["hermes\nagent"]}).status_code == 400
+    assert client.put("/api/admin/settings", json={"ai_agent_allowed_tools": "bad_tool"}).status_code == 400
     assert client.put("/api/admin/settings", json={"ai_agent_audit_interval_minutes": 0}).status_code == 400
     assert client.put("/api/admin/settings", json={"ai_agent_audit_cpu_percent_threshold": 101}).status_code == 400
     assert client.put("/api/admin/settings", json={"ai_agent_audit_ip_event_rate_threshold": 10001}).status_code == 400

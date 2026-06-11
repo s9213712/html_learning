@@ -64,6 +64,35 @@ def _build_db(path):
             detail TEXT,
             created_at TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS uploaded_files (
+            id TEXT PRIMARY KEY,
+            owner_user_id INTEGER NOT NULL,
+            storage_path TEXT NOT NULL,
+            privacy_mode TEXT NOT NULL,
+            risk_level TEXT NOT NULL,
+            scan_status TEXT NOT NULL,
+            original_filename_plain_for_public TEXT,
+            mime_type_plain_for_public TEXT,
+            size_bytes INTEGER NOT NULL,
+            system_asset_type TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT,
+            deleted_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS storage_files (
+            id TEXT PRIMARY KEY,
+            file_id TEXT NOT NULL,
+            owner_user_id INTEGER NOT NULL,
+            parent_id TEXT,
+            display_name TEXT NOT NULL,
+            virtual_path TEXT NOT NULL,
+            is_trashed INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            deleted_at TEXT
+        );
         """
     )
     conn.execute("INSERT OR IGNORE INTO users (id, username, role, status, created_at) VALUES (1, 'root', 'super_admin', 'active', '2026-01-01T00:00:00')")
@@ -82,6 +111,22 @@ def _build_db(path):
     conn.execute(
         "INSERT OR IGNORE INTO security_events (event_type, ip_address, target_user, detail, created_at)\n"
         "VALUES ('attack', '203.0.113.10', 'userA', '多次嘗試', '2026-01-01T00:03:00')"
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO uploaded_files (id, owner_user_id, storage_path, privacy_mode, risk_level, scan_status, original_filename_plain_for_public, mime_type_plain_for_public, size_bytes, system_asset_type, created_at, updated_at, deleted_at)\n"
+        "VALUES ('file-user-a', 2, '/tmp/user-a.txt', 'standard_plain', 'low', 'clean', 'user-a.txt', 'text/plain', 12, '', '2026-01-01T00:04:00', '2026-01-01T00:04:10', NULL)"
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO uploaded_files (id, owner_user_id, storage_path, privacy_mode, risk_level, scan_status, original_filename_plain_for_public, mime_type_plain_for_public, size_bytes, system_asset_type, created_at, updated_at, deleted_at)\n"
+        "VALUES ('file-manager-a', 3, '/tmp/manager-a.txt', 'standard_plain', 'low', 'clean', 'manager-a.txt', 'text/plain', 24, '', '2026-01-01T00:05:00', '2026-01-01T00:05:10', NULL)"
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO storage_files (id, file_id, owner_user_id, parent_id, display_name, virtual_path, is_trashed, created_at, updated_at, deleted_at)\n"
+        "VALUES ('storage-user-a', 'file-user-a', 2, NULL, 'user-a.txt', '/user-a.txt', 0, '2026-01-01T00:04:00', '2026-01-01T00:04:10', NULL)"
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO storage_files (id, file_id, owner_user_id, parent_id, display_name, virtual_path, is_trashed, created_at, updated_at, deleted_at)\n"
+        "VALUES ('storage-manager-a', 'file-manager-a', 3, NULL, 'manager-a.txt', '/manager-a.txt', 0, '2026-01-01T00:05:00', '2026-01-01T00:05:10', NULL)"
     )
     conn.commit()
     conn.close()
@@ -185,6 +230,7 @@ def test_ai_agent_readonly_user_scope_filters_by_permissions(tmp_path):
     assert payload["resources"]["cpu"]
     assert payload["comfyui_jobs"]
     assert payload["remote_download_jobs"]
+    assert [item["owner_user_id"] for item in payload["storage_files"]] == [2]
 
 
 def test_ai_agent_readonly_manager_and_super_admin_incremental_permissions(tmp_path):
@@ -209,6 +255,7 @@ def test_ai_agent_readonly_manager_and_super_admin_incremental_permissions(tmp_p
     assert super_payload["permissions"]["manage_servers"] is True
     assert "member_management" in super_payload
     assert "attack_diagnosis" in super_payload
+    assert sorted(item["owner_user_id"] for item in super_payload["storage_files"]) == [2, 3]
 
 
 def test_ai_agent_readonly_admin_role_keeps_member_scope_only(tmp_path):

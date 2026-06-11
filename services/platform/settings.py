@@ -160,6 +160,7 @@ DEFAULT_SETTINGS = {
     "ai_agent_model": DEFAULT_AI_AGENT_MODEL,
     "ai_agent_operation_mode": DEFAULT_AI_AGENT_OPERATION_MODE,
     "ai_agent_allowed_models": "",
+    "ai_agent_allowed_tools": "",
     "ai_agent_audit_interval_minutes": AI_AGENT_AUDIT_INTERVAL_MINUTES_DEFAULT,
     "ai_agent_request_timeout_seconds": 120,
     "ai_agent_max_prompt_chars": 20000,

@@ -21,6 +21,7 @@ MAX_AI_AGENT_IMAGE_DATA_URL_CHARS = 3 * 1024 * 1024
 AI_AGENT_AUDIT_INTERVAL_MINUTES_DEFAULT = 5
 AI_AGENT_AUDIT_INTERVAL_MINUTES_MAX = 60
 AI_AGENT_OPERATION_MODES = {"readonly", "assist", "write", "audit"}
+AI_AGENT_ROLE_RANK = {"user": 0, "manager": 1, "super_admin": 2}
 AI_AGENT_OPERATION_MODE_POLICIES = {
     "readonly": {
         "label": "唯讀",
@@ -38,10 +39,10 @@ AI_AGENT_OPERATION_MODE_POLICIES = {
     },
     "write": {
         "label": "執行寫入",
-        "description": "保留給白名單工具型任務；仍需通過角色權限、任務白名單與伺服器端 API 檢查。",
+        "description": "root 專用白名單工具型任務；仍需通過任務白名單與伺服器端 API 檢查。",
         "write_enabled": True,
         "audit_enabled": False,
-        "min_role": "manager",
+        "min_role": "super_admin",
     },
     "audit": {
         "label": "僅審計",
@@ -150,6 +151,30 @@ def normalize_ai_agent_allowed_models(value):
     return ",".join(models)
 
 
+def normalize_ai_agent_allowed_tools(value):
+    if value is None:
+        return ""
+    if isinstance(value, (list, tuple, set)):
+        parts = [str(item or "").strip() for item in value]
+    else:
+        raw = str(value)
+        if "\n" in raw or "\r" in raw or "\t" in raw:
+            return None
+        parts = [part.strip() for part in raw.split(",")]
+    tools = []
+    seen = set()
+    valid = set(AI_AGENT_TOOL_BLUEPRINT)
+    for part in parts:
+        if not part:
+            continue
+        if part not in valid:
+            return None
+        if part not in seen:
+            seen.add(part)
+            tools.append(part)
+    return ",".join(tools)
+
+
 def clear_ai_agent_audit_scan_state():
     with _AUDIT_SCAN_LOCK:
         _AUDIT_SCAN_STATE["audit"] = {"at": 0.0, "data": {}}
@@ -239,17 +264,71 @@ AI_AGENT_TASKS = {
 }
 
 AI_AGENT_TOOL_BLUEPRINT = {
+    "check_resource_state": {
+        "label": "資源快照",
+        "description": "查看 CPU、RAM、磁碟與基本服務狀態。",
+        "min_role": "user",
+        "data_scope": "own_session",
+    },
+    "check_generation_progress": {
+        "label": "產圖進度",
+        "description": "查看目前登入用戶自己的 ComfyUI 產圖任務進度。",
+        "min_role": "user",
+        "data_scope": "own_user",
+    },
+    "check_download_progress": {
+        "label": "下載排查",
+        "description": "查看目前登入用戶自己的下載任務與錯誤摘要。",
+        "min_role": "user",
+        "data_scope": "own_user",
+    },
+    "inspect_user_files": {
+        "label": "檔案快照",
+        "description": "查看雲端硬碟檔案摘要；一般用戶只限自己的檔案，root 可看全站摘要。",
+        "min_role": "user",
+        "data_scope": "own_user_or_root_all",
+    },
     "check_download_state": {
         "label": "下載排查",
         "description": "依下載、輸出與錯誤訊息提供下一步檢查順序。",
+        "min_role": "user",
+        "data_scope": "own_user",
     },
     "suggest_navigation_step": {
         "label": "導覽建議",
         "description": "指出網站畫面、頁面與操作路徑。",
+        "min_role": "user",
+        "data_scope": "public_site",
     },
     "suggest_prompt": {
         "label": "提示詞建議",
         "description": "提供可直接複製調整的提示詞與參數草稿。",
+        "min_role": "user",
+        "data_scope": "user_prompt",
+    },
+    "member_management_readonly": {
+        "label": "會員管理唯讀",
+        "description": "查看會員統計與帳號狀態摘要；目前僅 manager 以上可用。",
+        "min_role": "manager",
+        "data_scope": "member_summary",
+    },
+    "attack_diagnosis_readonly": {
+        "label": "攻擊診斷唯讀",
+        "description": "查看安全事件、失敗任務與攻擊跡象摘要；root 專用。",
+        "min_role": "super_admin",
+        "data_scope": "server_security_summary",
+    },
+    "audit_status": {
+        "label": "審計狀態",
+        "description": "查看 AI Agent 僅審計 worker 的狀態與摘要；root 專用。",
+        "min_role": "super_admin",
+        "data_scope": "audit_summary",
+    },
+    "audit_scan": {
+        "label": "立即審計掃描",
+        "description": "手動觸發 logs、審計資料、網路流量、IP 請求與資源異常掃描；root 專用。",
+        "min_role": "super_admin",
+        "data_scope": "audit_scan",
     },
 }
 
@@ -367,20 +446,14 @@ def _normalize_ai_agent_task_flag(value, *, default=True):
     return default
 
 
-def _normalize_ai_agent_behavior(settings):
+def _normalize_ai_agent_behavior(settings, *, actor_role="user"):
     persona = normalize_ai_agent_persona(settings.get("ai_agent_persona")) or DEFAULT_AI_AGENT_PERSONA
     tasks = {
         "site_guide": _normalize_ai_agent_task_flag(settings.get("ai_agent_task_site_guide"), default=True),
         "troubleshoot": _normalize_ai_agent_task_flag(settings.get("ai_agent_task_troubleshoot"), default=True),
         "prompt": _normalize_ai_agent_task_flag(settings.get("ai_agent_task_prompt"), default=True),
     }
-    tools = []
-    for tool_key, details in AI_AGENT_TOOL_BLUEPRINT.items():
-        tools.append({
-            "name": tool_key,
-            "label": details["label"],
-            "description": details["description"],
-        })
+    tools = ai_agent_effective_tools(settings, actor_role=actor_role)
     return {
         "persona": persona,
         "tasks": tasks,
@@ -399,8 +472,40 @@ def normalize_ai_agent_role(value):
     return "user"
 
 
+def normalize_ai_agent_actor_role(actor):
+    if isinstance(actor, dict):
+        username = str(actor.get("username") or "").strip()
+        if username == "root":
+            return "super_admin"
+        return normalize_ai_agent_role(actor.get("role"))
+    return normalize_ai_agent_role(actor)
+
+
 def _agent_role_scope(role):
     return AI_AGENT_ROLE_SCOPES.get(role, AI_AGENT_ROLE_SCOPES["user"])
+
+
+def _role_allows(required_role, actor_role):
+    return AI_AGENT_ROLE_RANK.get(normalize_ai_agent_role(actor_role), 0) >= AI_AGENT_ROLE_RANK.get(normalize_ai_agent_role(required_role), 0)
+
+
+def ai_agent_effective_tools(settings, *, actor_role="user"):
+    configured = normalize_ai_agent_allowed_tools((settings or {}).get("ai_agent_allowed_tools"))
+    configured_set = set(configured.split(",")) if configured else set()
+    result = []
+    for tool_name, details in AI_AGENT_TOOL_BLUEPRINT.items():
+        if configured_set and tool_name not in configured_set:
+            continue
+        if not _role_allows(details.get("min_role") or "user", actor_role):
+            continue
+        result.append({
+            "name": tool_name,
+            "label": details["label"],
+            "description": details["description"],
+            "min_role": details.get("min_role") or "user",
+            "data_scope": details.get("data_scope") or "",
+        })
+    return result
 
 
 def _ai_agent_system_prompt(behavior, *, role="user", allow_tool_runs=False, operation_mode=DEFAULT_AI_AGENT_OPERATION_MODE):
@@ -419,7 +524,7 @@ def _ai_agent_system_prompt(behavior, *, role="user", allow_tool_runs=False, ope
     ]
     tool_lines = []
     for detail in behavior.get("tools") or []:
-        tool_lines.append(f"- {detail.get('name')}（{detail.get('label')}）：{detail.get('description')}")
+        tool_lines.append(f"- {detail.get('name')}（{detail.get('label')}）：{detail.get('description')}；資料範圍={detail.get('data_scope') or '-'}")
     tool_scope = (
         "工具僅提供可執行建議，不會直接呼叫系統 API 或修改站內狀態。"
         if not allow_tool_runs
@@ -626,8 +731,8 @@ def _row_get(row, key, default=None):
 def public_ai_agent_settings(settings, *, actor=None):
     settings = settings or {}
     key = str(settings.get("ai_agent_api_key") or "").strip()
-    behavior = _normalize_ai_agent_behavior(settings)
-    actor_role = normalize_ai_agent_role((actor or {}).get("role") if isinstance(actor, dict) else "user")
+    actor_role = normalize_ai_agent_actor_role(actor if actor is not None else "user")
+    behavior = _normalize_ai_agent_behavior(settings, actor_role=actor_role)
     audit_settings = _coerce_audit_settings(settings)
     mode_policy = ai_agent_operation_mode_policy(audit_settings["operation_mode"])
     return {
@@ -645,6 +750,7 @@ def public_ai_agent_settings(settings, *, actor=None):
         "operation_mode": audit_settings["operation_mode"],
         "operation_mode_policy": mode_policy,
         "allowed_models": audit_settings["allowed_models"],
+        "allowed_tools": normalize_ai_agent_allowed_tools(settings.get("ai_agent_allowed_tools")) or "",
         "audit_interval_minutes": audit_settings["audit_interval_minutes"],
         "audit_thresholds": {
             "cpu_percent": audit_settings["audit_cpu_percent_threshold"],
@@ -1352,7 +1458,7 @@ def _normalize_chat_messages(messages, *, prompt="", image_data_url="", allow_im
 
 
 def ai_agent_chat(settings, *, messages=None, prompt="", image_data_url="", model="", session_key="", actor=None):
-    public = public_ai_agent_settings(settings)
+    public = public_ai_agent_settings(settings, actor=actor)
     normalized_messages = _normalize_chat_messages(
         messages,
         prompt=prompt,
@@ -1369,14 +1475,17 @@ def ai_agent_chat(settings, *, messages=None, prompt="", image_data_url="", mode
     ]
     if not sanitized_messages:
         raise AiAgentError("請輸入訊息")
-    behavior = _normalize_ai_agent_behavior(settings)
-    actor_role = normalize_ai_agent_role((actor or {}).get("role") if isinstance(actor, dict) else "user")
+    actor_role = normalize_ai_agent_actor_role(actor if actor is not None else "user")
+    behavior = _normalize_ai_agent_behavior(settings, actor_role=actor_role)
 
     if public["operation_mode"] == "readonly" and _contains_audit_mode_prohibited_action(_extract_text_from_messages(normalized_messages)):
         raise AiAgentError("AI Agent 目前為唯讀模式，僅提供查詢與排查建議，不接受操作類指令。")
 
-    if public["operation_mode"] == "audit" and actor_role not in {"manager", "super_admin"}:
-        raise AiAgentError("AI Agent 目前為審計模式，僅管理者可執行。")
+    if public["operation_mode"] == "audit" and actor_role != "super_admin":
+        raise AiAgentError("AI Agent 目前為審計模式，僅 root 可執行。")
+
+    if public["operation_mode"] == "write" and actor_role != "super_admin":
+        raise AiAgentError("AI Agent 目前為執行寫入模式，僅 root 可執行。")
 
     system_prompt = _ai_agent_system_prompt(
         behavior,

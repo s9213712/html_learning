@@ -11,6 +11,7 @@ from services.platform.settings import DangerousChangeBlocked, FEATURE_FLAG_KEYS
 from services.ai_agent.hermes import (
     normalize_ai_agent_api_base_url,
     normalize_ai_agent_allowed_models,
+    normalize_ai_agent_allowed_tools,
     normalize_ai_agent_model,
     normalize_ai_agent_provider,
     normalize_ai_agent_persona,
@@ -388,6 +389,11 @@ def register_system_admin_settings_routes(app, ctx):
             if allowed_models is None:
                 return json_resp({"ok":False,"msg":"ai_agent_allowed_models 只能是逗號分隔模型名稱，不可包含換行或過長項目"}), 400
             data["ai_agent_allowed_models"] = allowed_models
+        if "ai_agent_allowed_tools" in data:
+            allowed_tools = normalize_ai_agent_allowed_tools(data.get("ai_agent_allowed_tools"))
+            if allowed_tools is None:
+                return json_resp({"ok":False,"msg":"ai_agent_allowed_tools 只能填入已知工具名稱，並以逗號分隔"}), 400
+            data["ai_agent_allowed_tools"] = allowed_tools
         if "ai_agent_persona" in data:
             persona = normalize_ai_agent_persona(data.get("ai_agent_persona"))
             if persona is None:

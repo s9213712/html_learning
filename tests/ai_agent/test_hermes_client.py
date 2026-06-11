@@ -6,10 +6,12 @@ from urllib import error as urllib_error
 
 from services.ai_agent.hermes import (
     AiAgentError,
+    ai_agent_effective_tools,
     ai_agent_operation_mode_policy,
     get_ai_agent_audit_last_scan,
     public_ai_agent_audit_status,
     normalize_ai_agent_allowed_models,
+    normalize_ai_agent_allowed_tools,
     clear_ai_agent_audit_scan_state,
     normalize_ai_agent_operation_mode,
     normalize_ai_agent_role,
@@ -351,11 +353,27 @@ def test_ai_agent_operation_mode_normalizes_and_keeps_allowed_models():
     assert normalize_ai_agent_allowed_models(["model-a", "model-b", "model-a"]) == "model-a,model-b"
     assert normalize_ai_agent_allowed_models("  ") == ""
     assert normalize_ai_agent_allowed_models("model\nx") is None
+    assert normalize_ai_agent_allowed_tools("check_resource_state,audit_scan") == "check_resource_state,audit_scan"
+    assert normalize_ai_agent_allowed_tools("bad_tool") is None
 
     write_policy = ai_agent_operation_mode_policy("write")
     assert write_policy["mode"] == "write"
     assert write_policy["write_enabled"] is True
-    assert write_policy["min_role"] == "manager"
+    assert write_policy["min_role"] == "super_admin"
+
+
+def test_ai_agent_effective_tools_are_role_and_allowlist_scoped():
+    user_tools = {tool["name"] for tool in ai_agent_effective_tools({}, actor_role="user")}
+    root_tools = {tool["name"] for tool in ai_agent_effective_tools({}, actor_role="super_admin")}
+    restricted_root_tools = {
+        tool["name"]
+        for tool in ai_agent_effective_tools({"ai_agent_allowed_tools": "audit_scan,inspect_user_files"}, actor_role="super_admin")
+    }
+
+    assert "inspect_user_files" in user_tools
+    assert "audit_scan" not in user_tools
+    assert "audit_scan" in root_tools
+    assert restricted_root_tools == {"audit_scan", "inspect_user_files"}
 
 
 def test_ai_agent_chat_blocks_mutating_request_in_readonly_mode(monkeypatch):
@@ -377,7 +395,12 @@ def test_ai_agent_chat_blocks_mutating_request_in_readonly_mode(monkeypatch):
     assert "唯讀模式" in str(exc.value)
 
 
-def test_ai_agent_chat_blocks_non_manager_in_audit_mode():
+def test_ai_agent_chat_blocks_non_root_in_audit_mode(monkeypatch):
+    def fake_json_request(_settings, method, path, payload=None, session_key="", timeout=None):
+        return {"choices": [{"message": {"content": "root audit ok"}}], "model": "hermes-agent"}
+
+    monkeypatch.setattr(hermes_client, "_json_request", fake_json_request)
+
     with pytest.raises(AiAgentError) as exc:
         hermes_client.ai_agent_chat(
             {
@@ -400,7 +423,48 @@ def test_ai_agent_chat_blocks_non_manager_in_audit_mode():
             messages=[{"role": "user", "content": "查一下目前任務進度"}],
             actor={"role": "manager"},
         )
-    assert "審計模式" not in str(exc.value)
+    assert "root" in str(exc.value)
+
+    result = hermes_client.ai_agent_chat(
+        {
+            "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
+            "ai_agent_api_key": "dummy-key",
+            "ai_agent_operation_mode": "audit",
+        },
+        messages=[{"role": "user", "content": "查一下目前任務進度"}],
+        actor={"username": "root", "role": "user"},
+    )
+    assert result["content"] == "root audit ok"
+
+
+def test_ai_agent_chat_write_mode_is_root_only(monkeypatch):
+    def fake_json_request(_settings, method, path, payload=None, session_key="", timeout=None):
+        return {"choices": [{"message": {"content": "root write ok"}}], "model": "hermes-agent"}
+
+    monkeypatch.setattr(hermes_client, "_json_request", fake_json_request)
+
+    with pytest.raises(AiAgentError) as exc:
+        hermes_client.ai_agent_chat(
+            {
+                "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
+                "ai_agent_api_key": "dummy-key",
+                "ai_agent_operation_mode": "write",
+            },
+            messages=[{"role": "user", "content": "幫我調整設定"}],
+            actor={"role": "manager"},
+        )
+    assert "執行寫入模式" in str(exc.value)
+
+    result = hermes_client.ai_agent_chat(
+        {
+            "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
+            "ai_agent_api_key": "dummy-key",
+            "ai_agent_operation_mode": "write",
+        },
+        messages=[{"role": "user", "content": "幫我調整設定"}],
+        actor={"username": "root", "role": "user"},
+    )
+    assert result["content"] == "root write ok"
 
 
 def test_ai_agent_audit_scan_reports_anomalies_and_uses_cache(tmp_path):

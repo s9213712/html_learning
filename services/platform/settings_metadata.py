@@ -350,6 +350,10 @@ SETTING_DETAILS = {
         "label": "AI Agent 允許模型清單",
         "description": "指定可用模型清單（逗號分隔），非空值時 chat 僅允許這些模型。",
     },
+    "ai_agent_allowed_tools": {
+        "label": "AI Agent 可調用工具清單",
+        "description": "指定可用工具名稱（逗號分隔）；空白時依角色套用預設工具，root 可用完整工具集合。",
+    },
     "ai_agent_audit_interval_minutes": {
         "label": "AI Agent 審計間隔（分鐘）",
         "description": "兩次審計掃描之最小間隔；同一 token cache 期限約束。",

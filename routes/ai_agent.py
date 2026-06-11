@@ -406,6 +406,56 @@ def register_ai_agent_routes(app, deps):
         finally:
             conn.close()
 
+    def _agent_list_storage_files(actor, limit=20):
+        actor_id = int(_actor_value(actor, "id") or 0)
+        if actor_id <= 0:
+            return []
+        actor_level = _actor_scope_payload(actor)
+        conn = get_db()
+        try:
+            if not (_table_exists(conn, "storage_files") and _table_exists(conn, "uploaded_files")):
+                return []
+            where = "sf.deleted_at IS NULL AND f.deleted_at IS NULL AND COALESCE(f.system_asset_type, '')<>'avatar'"
+            params = []
+            if not actor_level["can_manage_servers"]:
+                where += " AND sf.owner_user_id=?"
+                params.append(actor_id)
+            rows = conn.execute(
+                f"""
+                SELECT sf.id, sf.file_id, sf.owner_user_id, COALESCE(u.username, '') AS owner_username,
+                       sf.display_name, sf.virtual_path, sf.is_trashed, sf.created_at, sf.updated_at,
+                       f.size_bytes, f.privacy_mode, f.risk_level, f.scan_status, f.mime_type_plain_for_public
+                FROM storage_files sf
+                JOIN uploaded_files f ON f.id=sf.file_id
+                LEFT JOIN users u ON u.id=sf.owner_user_id
+                WHERE {where}
+                ORDER BY sf.updated_at DESC, sf.created_at DESC
+                LIMIT ?
+                """,
+                (*params, limit),
+            ).fetchall()
+            result = []
+            for row in rows:
+                result.append({
+                    "id": _row_value(row, "id") or "",
+                    "file_id": _row_value(row, "file_id") or "",
+                    "owner_user_id": int(_row_value(row, "owner_user_id") or 0),
+                    "owner_username": _row_value(row, "owner_username") or "",
+                    "display_name": _row_value(row, "display_name") or "",
+                    "virtual_path": _row_value(row, "virtual_path") or "",
+                    "is_trashed": bool(_row_value(row, "is_trashed") or 0),
+                    "size_bytes": int(_row_value(row, "size_bytes") or 0),
+                    "privacy_mode": _row_value(row, "privacy_mode") or "",
+                    "risk_level": _row_value(row, "risk_level") or "",
+                    "scan_status": _row_value(row, "scan_status") or "",
+                    "mime_type": _row_value(row, "mime_type_plain_for_public") or "",
+                    "created_at": _row_value(row, "created_at") or "",
+                    "updated_at": _row_value(row, "updated_at") or "",
+                })
+            return result
+        finally:
+            conn.close()
+
     def _actor_session_binding():
         raw = request.cookies.get("session_token") or ""
         raw = str(raw or "").strip()
@@ -453,7 +503,7 @@ def register_ai_agent_routes(app, deps):
         if denied:
             return denied
         scope = str(request.args.get("scope") or "all").strip().lower()
-        if scope not in {"all", "resources", "comfyui", "remote_download", "jobs", "member_mgmt", "attack_diag"}:
+        if scope not in {"all", "resources", "comfyui", "remote_download", "jobs", "files", "storage", "member_mgmt", "attack_diag"}:
             return json_resp({"ok": False, "msg": "不支援的 scope"}, 400)
         limit = _coerce_limit(request.args.get("limit", "20"))
         actor_level = _actor_scope_payload(actor)
@@ -475,6 +525,8 @@ def register_ai_agent_routes(app, deps):
             payload["comfyui_jobs"] = _agent_list_comfyui_jobs(actor, limit=limit)
         if scope in {"all", "jobs", "remote_download"}:
             payload["remote_download_jobs"] = _agent_list_remote_download_jobs(actor, limit=limit)
+        if scope in {"all", "files", "storage"}:
+            payload["storage_files"] = _agent_list_storage_files(actor, limit=limit)
         if actor_level["can_manage_members"] and scope in {"all", "member_mgmt"}:
             payload["member_management"] = _member_management_payload(actor, limit=limit)
         if actor_level["can_manage_servers"] and scope in {"all", "attack_diag"}:

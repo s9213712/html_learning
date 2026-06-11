@@ -2644,6 +2644,7 @@ async function loadSettings() {
   if ($("s-ai-agent-model")) $("s-ai-agent-model").value = s.ai_agent_model || "hermes-agent";
   if ($("s-ai-agent-operation-mode")) $("s-ai-agent-operation-mode").value = s.ai_agent_operation_mode || "assist";
   if ($("s-ai-agent-allowed-models")) $("s-ai-agent-allowed-models").value = s.ai_agent_allowed_models || "";
+  if ($("s-ai-agent-allowed-tools")) $("s-ai-agent-allowed-tools").value = s.ai_agent_allowed_tools || "";
   if ($("s-ai-agent-request-timeout-seconds")) $("s-ai-agent-request-timeout-seconds").value = s.ai_agent_request_timeout_seconds || 120;
   if ($("s-ai-agent-max-prompt-chars")) $("s-ai-agent-max-prompt-chars").value = s.ai_agent_max_prompt_chars || 20000;
   if ($("s-ai-agent-allow-image-input")) $("s-ai-agent-allow-image-input").checked = s.ai_agent_allow_image_input !== false;
@@ -4973,6 +4974,7 @@ async function saveSettings() {
     ai_agent_model: ($("s-ai-agent-model")?.value || "hermes-agent").trim(),
     ai_agent_operation_mode: $("s-ai-agent-operation-mode")?.value || "assist",
     ai_agent_allowed_models: ($("s-ai-agent-allowed-models")?.value || "").trim(),
+    ai_agent_allowed_tools: ($("s-ai-agent-allowed-tools")?.value || "").trim(),
     ai_agent_request_timeout_seconds: parseInt($("s-ai-agent-request-timeout-seconds")?.value || "120", 10) || 120,
     ai_agent_max_prompt_chars: parseInt($("s-ai-agent-max-prompt-chars")?.value || "20000", 10) || 20000,
     ai_agent_allow_image_input: $("s-ai-agent-allow-image-input") ? !!$("s-ai-agent-allow-image-input").checked : true,

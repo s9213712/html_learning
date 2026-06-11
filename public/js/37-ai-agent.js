@@ -101,6 +101,7 @@ function renderAiAgentStatus(json) {
   const modePolicy = settings.operation_mode_policy || {};
   if ($("ai-agent-operation-mode-state")) $("ai-agent-operation-mode-state").textContent = `${modePolicy.label || AI_AGENT_OPERATION_MODE_LABELS[mode] || mode}：${modePolicy.description || ""}`;
   if ($("ai-agent-allowed-models-state")) $("ai-agent-allowed-models-state").textContent = settings.allowed_models ? settings.allowed_models : "不限";
+  if ($("ai-agent-allowed-tools-state")) $("ai-agent-allowed-tools-state").textContent = settings.allowed_tools ? settings.allowed_tools : "依角色預設";
   const personaLabelMap = {
     concise_helper: "簡潔客服導向",
     strict_helper: "嚴謹流程助手",
@@ -124,6 +125,12 @@ function renderAiAgentStatus(json) {
     $("ai-agent-safety-boundaries").innerHTML = rules.length
       ? rules.map((line) => `<div>${sanitize(line)}</div>`).join("")
       : "尚未載入安全規則。";
+  }
+  if ($("ai-agent-effective-tools")) {
+    const tools = Array.isArray(settings.tools) ? settings.tools : [];
+    $("ai-agent-effective-tools").innerHTML = tools.length
+      ? tools.map((tool) => `<div>${sanitize(tool.label || tool.name || "-")}：${sanitize(tool.description || "")}<br><span class="drive-card-sub">${sanitize(tool.name || "")} / ${sanitize(tool.data_scope || "")}</span></div>`).join("")
+      : "目前沒有可調用工具。";
   }
   renderAiAgentAuditStatus(AI_AGENT_STATE.audit, actor);
 }
@@ -157,6 +164,9 @@ function renderAiAgentReadOnly(payload = {}) {
   }
   if (Array.isArray(payload.remote_download_jobs) && payload.remote_download_jobs.length) {
     jobs.push(`下載任務：${payload.remote_download_jobs.length} 筆`);
+  }
+  if (Array.isArray(payload.storage_files)) {
+    jobs.push(`檔案快照：${payload.storage_files.length} 筆${canManageServers ? "（root 全站摘要）" : "（個人隔離）"}`);
   }
 
   const summary = [

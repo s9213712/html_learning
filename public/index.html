@@ -2271,11 +2271,14 @@
             <span>圖片輸入</span><strong id="ai-agent-image-allowed">-</strong>
             <span>運作模式</span><strong id="ai-agent-operation-mode-state">-</strong>
             <span>允許模型</span><strong id="ai-agent-allowed-models-state">-</strong>
+            <span>工具策略</span><strong id="ai-agent-allowed-tools-state">依角色預設</strong>
             <span>人格</span><strong id="ai-agent-persona-state">預設</strong>
             <span>任務</span><strong id="ai-agent-tasks-state">未啟用</strong>
           </div>
           <div class="drive-card-title" style="margin-top:1rem;">安全鐵則</div>
           <div class="ai-agent-readonly-panel" id="ai-agent-safety-boundaries">尚未載入安全規則。</div>
+          <div class="drive-card-title" style="margin-top:1rem;">可調用工具</div>
+          <div class="ai-agent-readonly-panel" id="ai-agent-effective-tools">尚未載入工具策略。</div>
           <div class="drive-card-title" style="margin-top:1rem;">Models</div>
           <div class="drive-file-list ai-agent-model-list" id="ai-agent-model-list"></div>
 
@@ -5991,6 +5994,11 @@
               <div class="field">
                 <label>允許模型清單（逗號分隔，空白代表不限）</label>
                 <input type="text" id="s-ai-agent-allowed-models" placeholder="hermes-agent, llama3.1:8b" autocomplete="off" />
+              </div>
+              <div class="field">
+                <label>可調用工具清單（逗號分隔，空白代表依角色預設）</label>
+                <input type="text" id="s-ai-agent-allowed-tools" placeholder="check_resource_state,inspect_user_files,audit_scan" autocomplete="off" />
+                <div class="field-hint">root 可使用完整工具；一般用戶與 admin 仍會被最低角色和資料隔離限制。</div>
               </div>
               <div class="field">
                 <label>請求逾時秒數</label>

@@ -181,6 +181,7 @@ const ROOT_MODULE_QUICK_SETTINGS = {
       { id: "s-ai-agent-model", label: "模型" },
       { id: "s-ai-agent-operation-mode", label: "運作模式" },
       { id: "s-ai-agent-allowed-models", label: "允許模型清單" },
+      { id: "s-ai-agent-allowed-tools", label: "可調用工具清單" },
       { id: "s-ai-agent-allow-image-input", label: "允許圖片理解" },
     ],
   },

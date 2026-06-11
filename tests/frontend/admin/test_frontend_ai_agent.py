@@ -26,11 +26,14 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert 'id="s-ai-agent-api-key"' in html
     assert 'id="s-ai-agent-operation-mode"' in html
     assert 'id="s-ai-agent-allowed-models"' in html
+    assert 'id="s-ai-agent-allowed-tools"' in html
     assert 'id="s-ai-agent-audit-interval-minutes"' in html
     assert 'id="s-ai-agent-audit-auto-block-suspect-ip"' in html
     assert 'id="ai-agent-operation-mode-state"' in html
     assert 'id="ai-agent-allowed-models-state"' in html
+    assert 'id="ai-agent-allowed-tools-state"' in html
     assert 'id="ai-agent-safety-boundaries"' in html
+    assert 'id="ai-agent-effective-tools"' in html
     assert 'id="ai-agent-audit-overview"' in html
     assert 'id="ai-agent-audit-scan-btn"' in html
     assert 'id="s-module-ai-agent-min-role"' in html
@@ -51,6 +54,7 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert 'ai_agent_api_key_clear' in admin_js
     assert 'ai_agent_operation_mode' in admin_js
     assert 'ai_agent_allowed_models' in admin_js
+    assert 'ai_agent_allowed_tools' in admin_js
     assert 'ai_agent_audit_auto_block_suspect_ip' in admin_js
     assert 'feature_ai_agent_enabled' in admin_js
 
@@ -60,6 +64,7 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert 'API + "/ai-agent/audit-scan"' in ai_agent_js
     assert 'operation_mode_policy' in ai_agent_js
     assert 'safety_boundaries' in ai_agent_js
+    assert 'ai-agent-effective-tools' in ai_agent_js
     assert 'image_url' in ai_agent_js
     assert 'hackme:account-context-changed' in ai_agent_js
 
@@ -78,3 +83,4 @@ def test_ai_agent_root_quick_settings_use_reserved_pricing_key():
     assert 'id: "s-module-ai-agent-min-role"' in quick_js
     assert 'id: "s-ai-agent-operation-mode"' in quick_js
     assert 'id: "s-ai-agent-allowed-models"' in quick_js
+    assert 'id: "s-ai-agent-allowed-tools"' in quick_js
