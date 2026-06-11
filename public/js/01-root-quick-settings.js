@@ -21,6 +21,19 @@ const ROOT_SERVICE_FEE_QUICK_PRESETS = [
 
 window.HACKME_SERVICE_FEE_PRICING_PRESETS = ROOT_SERVICE_FEE_QUICK_PRESETS;
 
+const AI_AGENT_PROVIDER_QUICK_PRESETS = {
+  hermes: {
+    apiBaseUrl: "http://127.0.0.1:8642/v1",
+    model: "hermes-agent",
+    allowedModels: "hermes-agent",
+  },
+  openai_compatible: {
+    apiBaseUrl: "http://127.0.0.1:11434/v1",
+    model: "gpt-oss:120b-cloud",
+    allowedModels: "gpt-oss:120b-cloud,minimax-m2.7:cloud",
+  },
+};
+
 let rootModuleEconomyCatalogCache = [];
 
 const ROOT_MODULE_QUICK_SETTINGS = {
@@ -342,6 +355,22 @@ function rootModuleProxyId(sourceId) {
   return `root-module-setting-${sourceId}`;
 }
 
+function setRootModuleFieldValue(id, value) {
+  const el = $(rootModuleProxyId(id)) || $(id);
+  if (!el) return;
+  el.value = value;
+  el.dispatchEvent(new Event("input", { bubbles: true }));
+  el.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
+function applyAiAgentProviderQuickPreset(provider) {
+  const preset = AI_AGENT_PROVIDER_QUICK_PRESETS[provider];
+  if (!preset) return;
+  setRootModuleFieldValue("s-ai-agent-api-base-url", preset.apiBaseUrl);
+  setRootModuleFieldValue("s-ai-agent-model", preset.model);
+  setRootModuleFieldValue("s-ai-agent-allowed-models", preset.allowedModels);
+}
+
 function rootModuleFieldValue(source) {
   if (!source) return "";
   if (source.type === "checkbox") return !!source.checked;
@@ -522,6 +551,10 @@ function renderRootModuleSettingsFields(tab) {
     el.addEventListener("input", updateRootModuleConditionalFields);
     el.addEventListener("change", updateRootModuleConditionalFields);
   });
+  if (tab === "ai-agent") {
+    const provider = $(rootModuleProxyId("s-ai-agent-provider"));
+    provider?.addEventListener("change", () => applyAiAgentProviderQuickPreset(provider.value));
+  }
   updateRootModuleConditionalFields();
 }
 

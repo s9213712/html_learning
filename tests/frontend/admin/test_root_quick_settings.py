@@ -47,7 +47,7 @@ def test_root_quick_settings_expose_service_fee_pricing_for_feature_pages():
     assert "/root/economy/catalog" in js
     assert "root-module-pricing-panel" in js
     assert "root-module-pricing-panel" in css
-    assert "/js/01-root-quick-settings.js?v=20260611-ai-agent-mode-refresh" in html
+    assert "/js/01-root-quick-settings.js?v=20260611-ai-agent-provider-presets" in html
     assert "服務費小帳本" not in js
     assert "pc0 站內帳本即時" in js
 
@@ -109,3 +109,19 @@ def test_ai_agent_quick_settings_refreshes_agent_status_after_save():
     assert 'await loadAiAgentStatus({ force: true });' in quick_js
     assert 'loadAiAgentReadOnly({ scope: "all", limit: 20, silent: true, force: true })' in quick_js
     assert 'loadAiAgentAuditStatus({ silent: true })' in quick_js
+
+
+def test_ai_agent_quick_settings_provider_presets_update_connection_fields():
+    quick_js = _read("public/js/01-root-quick-settings.js")
+
+    assert "AI_AGENT_PROVIDER_QUICK_PRESETS" in quick_js
+    assert 'apiBaseUrl: "http://127.0.0.1:8642/v1"' in quick_js
+    assert 'model: "hermes-agent"' in quick_js
+    assert 'allowedModels: "hermes-agent"' in quick_js
+    assert 'apiBaseUrl: "http://127.0.0.1:11434/v1"' in quick_js
+    assert 'model: "gpt-oss:120b-cloud"' in quick_js
+    assert 'allowedModels: "gpt-oss:120b-cloud,minimax-m2.7:cloud"' in quick_js
+    assert 'applyAiAgentProviderQuickPreset(provider.value)' in quick_js
+    assert 'setRootModuleFieldValue("s-ai-agent-api-base-url", preset.apiBaseUrl)' in quick_js
+    assert 'setRootModuleFieldValue("s-ai-agent-model", preset.model)' in quick_js
+    assert 'setRootModuleFieldValue("s-ai-agent-allowed-models", preset.allowedModels)' in quick_js
