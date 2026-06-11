@@ -257,6 +257,8 @@ function bindUiEvents() {
   const aiAgentSendBtn = $("ai-agent-send-btn");
   const aiAgentClearBtn = $("ai-agent-clear-btn");
   const aiAgentImageFile = $("ai-agent-image-file");
+  const aiAgentAuditRefreshBtn = $("ai-agent-audit-refresh-btn");
+  const aiAgentAuditScanBtn = $("ai-agent-audit-scan-btn");
   const economyRefreshBtn = $("economy-refresh-btn");
   const economyAdminRefreshBtn = $("economy-admin-refresh-btn");
   const economyAdjustBtn = $("economy-adjust-btn");
@@ -328,6 +330,8 @@ function bindUiEvents() {
   if (aiAgentRefreshBtn && typeof loadAiAgentStatus === "function") aiAgentRefreshBtn.addEventListener("click", () => loadAiAgentStatus({ force: true }));
   if (aiAgentSendBtn && typeof sendAiAgentMessage === "function") aiAgentSendBtn.addEventListener("click", () => sendAiAgentMessage());
   if (aiAgentClearBtn && typeof clearAiAgentConversation === "function") aiAgentClearBtn.addEventListener("click", () => clearAiAgentConversation());
+  if (aiAgentAuditRefreshBtn && typeof loadAiAgentAuditStatus === "function") aiAgentAuditRefreshBtn.addEventListener("click", () => loadAiAgentAuditStatus());
+  if (aiAgentAuditScanBtn && typeof runAiAgentAuditScan === "function") aiAgentAuditScanBtn.addEventListener("click", () => runAiAgentAuditScan());
   if (aiAgentImageFile && typeof handleAiAgentImagePick === "function") aiAgentImageFile.addEventListener("change", handleAiAgentImagePick);
   bindAuthSubmitEvents();
   if (typeof bindRegisterFieldHelpers === "function") bindRegisterFieldHelpers();

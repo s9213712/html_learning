@@ -5,7 +5,7 @@ from urllib import error as urllib_error
 from urllib import request as urllib_request
 
 from flask import Flask, jsonify, make_response
-from services.ai_agent.hermes import AiAgentError
+from services.ai_agent.hermes import AiAgentError, clear_ai_agent_audit_scan_state
 
 from routes.ai_agent import register_ai_agent_routes
 
@@ -126,6 +126,7 @@ def _insert_user(db_path, *, user_id, username, role):
 
 
 def test_ai_agent_status_includes_role_scope_and_settings(monkeypatch, tmp_path):
+    clear_ai_agent_audit_scan_state()
     db_path = tmp_path / "ai_agent_routes.db"
     _build_db(db_path)
     app = _build_app(db_path, {"id": 2, "username": "userA", "role": "user"})
@@ -141,6 +142,29 @@ def test_ai_agent_status_includes_role_scope_and_settings(monkeypatch, tmp_path)
     assert payload["actor"]["role"] == "user"
     assert payload["settings"]["role"] == "user"
     assert payload["settings"]["scope"]["label"] == "個別用戶助手"
+    assert payload["settings"]["operation_mode_policy"]["mode"] == "assist"
+    assert payload["settings"]["safety_boundaries"]
+    assert "scan" not in payload["audit"]
+
+
+def test_ai_agent_status_only_super_admin_gets_audit_scan(monkeypatch, tmp_path):
+    clear_ai_agent_audit_scan_state()
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    user_app = _build_app(db_path, {"id": 2, "username": "userA", "role": "user"}, settings={"ai_agent_operation_mode": "audit"})
+    super_app = _build_app(db_path, {"id": 1, "username": "root", "role": "user"}, settings={"ai_agent_operation_mode": "audit"})
+
+    monkeypatch.setattr("routes.ai_agent.ai_agent_health", lambda settings: {"ok": True, "url": "http://127.0.0.1:8642/health", "payload": {}})
+    monkeypatch.setattr("routes.ai_agent.ai_agent_capabilities", lambda settings: {"ok": True, "chat": True})
+
+    user_payload = user_app.test_client().get("/api/ai-agent/status").get_json()
+    root_payload = super_app.test_client().get("/api/ai-agent/status").get_json()
+
+    assert user_payload["ok"] is True
+    assert user_payload["audit"]["scheduler"]["enabled"] is True
+    assert "scan" not in user_payload["audit"]
+    assert root_payload["ok"] is True
+    assert "scan" in root_payload["audit"]
 
 
 def test_ai_agent_readonly_user_scope_filters_by_permissions(tmp_path):

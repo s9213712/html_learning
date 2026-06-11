@@ -490,7 +490,7 @@ def register_ai_agent_routes(app, deps):
         actor_scope = _actor_scope_payload(actor)
         settings = get_system_settings() or {}
         public = public_ai_agent_settings(settings, actor=actor)
-        audit_status = public_ai_agent_audit_status(settings)
+        audit_status = public_ai_agent_audit_status(settings, include_scan=_actor_is_super_admin(actor))
         health = ai_agent_health(settings)
         capabilities = ai_agent_capabilities(settings) if health.get("ok") else {}
         return json_resp({
@@ -554,7 +554,7 @@ def register_ai_agent_routes(app, deps):
         if not _actor_is_super_admin(actor):
             return json_resp({"ok": False, "msg": "只有最高管理者可檢視 AI Agent 審計狀態"}), 403
         settings = get_system_settings() or {}
-        return json_resp({"ok": True, "audit_status": public_ai_agent_audit_status(settings)})
+        return json_resp({"ok": True, "audit_status": public_ai_agent_audit_status(settings, include_scan=True)})
 
     @app.route("/api/ai-agent/chat", methods=["POST"])
     @require_csrf

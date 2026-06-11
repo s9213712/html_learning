@@ -2269,9 +2269,13 @@
             <span>Base URL</span><strong id="ai-agent-base-url">-</strong>
             <span>API Key</span><strong id="ai-agent-key-state">-</strong>
             <span>圖片輸入</span><strong id="ai-agent-image-allowed">-</strong>
+            <span>運作模式</span><strong id="ai-agent-operation-mode-state">-</strong>
+            <span>允許模型</span><strong id="ai-agent-allowed-models-state">-</strong>
             <span>人格</span><strong id="ai-agent-persona-state">預設</strong>
             <span>任務</span><strong id="ai-agent-tasks-state">未啟用</strong>
           </div>
+          <div class="drive-card-title" style="margin-top:1rem;">安全鐵則</div>
+          <div class="ai-agent-readonly-panel" id="ai-agent-safety-boundaries">尚未載入安全規則。</div>
           <div class="drive-card-title" style="margin-top:1rem;">Models</div>
           <div class="drive-file-list ai-agent-model-list" id="ai-agent-model-list"></div>
 
@@ -2285,6 +2289,12 @@
           <div class="ai-agent-readonly-panel" id="ai-agent-readonly-capabilities" aria-live="polite">尚未載入只讀能力。</div>
           <div class="drive-card-title" style="margin-top:1rem;">資源與任務快照</div>
           <div class="ai-agent-readonly-section" id="ai-agent-readonly-overview">尚未載入快照。</div>
+          <div class="drive-card-title" style="margin-top:1rem;">審計狀態</div>
+          <div class="ai-agent-readonly-section" id="ai-agent-audit-overview">尚未載入審計摘要。</div>
+          <div class="edit-user-actions" id="ai-agent-audit-actions" hidden>
+            <button class="btn btn-sm" id="ai-agent-audit-refresh-btn" type="button">刷新審計</button>
+            <button class="btn btn-primary btn-sm" id="ai-agent-audit-scan-btn" type="button">立即掃描</button>
+          </div>
         </aside>
       </div>
     </div>
@@ -5969,6 +5979,20 @@
                 <input type="text" id="s-ai-agent-model" placeholder="hermes-agent" autocomplete="off" />
               </div>
               <div class="field">
+                <label>運作模式</label>
+                <select id="s-ai-agent-operation-mode">
+                  <option value="readonly">唯讀</option>
+                  <option value="assist">協助</option>
+                  <option value="write">執行寫入</option>
+                  <option value="audit">僅審計</option>
+                </select>
+                <div class="field-hint">執行寫入仍需工具白名單與角色權限；僅審計會啟用週期掃描。</div>
+              </div>
+              <div class="field">
+                <label>允許模型清單（逗號分隔，空白代表不限）</label>
+                <input type="text" id="s-ai-agent-allowed-models" placeholder="hermes-agent, llama3.1:8b" autocomplete="off" />
+              </div>
+              <div class="field">
                 <label>請求逾時秒數</label>
                 <input type="number" id="s-ai-agent-request-timeout-seconds" min="5" max="600" step="1" value="120" />
               </div>
@@ -5995,6 +6019,40 @@
                 <label style="display:block;margin:.3rem 0 0;"><input type="checkbox" id="s-ai-agent-task-site-guide" /> 網站導覽</label>
                 <label style="display:block;margin:.3rem 0 0;"><input type="checkbox" id="s-ai-agent-task-troubleshoot" /> 生圖 / 下載排錯</label>
                 <label style="display:block;margin:.3rem 0 0;"><input type="checkbox" id="s-ai-agent-task-prompt" /> 生圖提示詞與參數</label>
+              </div>
+              <div class="field">
+                <label>審計間隔（分鐘）</label>
+                <input type="number" id="s-ai-agent-audit-interval-minutes" min="1" max="60" step="1" value="5" />
+              </div>
+              <div class="field">
+                <label>資源警戒門檻（CPU / RAM / Disk %）</label>
+                <div class="grid3 compact-grid">
+                  <input type="number" id="s-ai-agent-audit-cpu-percent-threshold" min="10" max="100" step="1" placeholder="CPU" />
+                  <input type="number" id="s-ai-agent-audit-ram-percent-threshold" min="10" max="100" step="1" placeholder="RAM" />
+                  <input type="number" id="s-ai-agent-audit-disk-percent-threshold" min="10" max="100" step="1" placeholder="Disk" />
+                </div>
+              </div>
+              <div class="field">
+                <label>IP 請求速率門檻 / 窗口分鐘</label>
+                <div class="grid2 compact-grid">
+                  <input type="number" id="s-ai-agent-audit-ip-event-rate-threshold" min="1" max="10000" step="1" placeholder="每分鐘" />
+                  <input type="number" id="s-ai-agent-audit-ip-event-rate-window-minutes" min="1" max="1440" step="1" placeholder="窗口" />
+                </div>
+              </div>
+              <div class="field">
+                <label>安全事件速率門檻 / 窗口分鐘</label>
+                <div class="grid2 compact-grid">
+                  <input type="number" id="s-ai-agent-audit-security-event-rate-threshold" min="1" max="10000" step="1" placeholder="每分鐘" />
+                  <input type="number" id="s-ai-agent-audit-security-event-rate-window-minutes" min="1" max="1440" step="1" placeholder="窗口" />
+                </div>
+              </div>
+              <div class="field">
+                <label><input type="checkbox" id="s-ai-agent-audit-auto-block-suspect-ip" /> 異常 IP 自動封鎖</label>
+                <input type="number" id="s-ai-agent-audit-block-minutes" min="1" max="10080" step="1" value="30" />
+                <div class="field-hint">封鎖分鐘數；預設關閉，建議先以警告與通知觀察。</div>
+              </div>
+              <div class="field">
+                <label><input type="checkbox" id="s-ai-agent-audit-notify-root" /> 審計異常通知 root</label>
               </div>
             </div>
               </div>

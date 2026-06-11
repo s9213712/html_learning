@@ -2194,6 +2194,23 @@
       cursor: pointer;
     }
 
+    .ai-agent-model-option.disabled {
+      opacity: .55;
+      cursor: not-allowed;
+    }
+
+    .grid3 {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: .6rem;
+    }
+
+    .compact-grid input,
+    .compact-grid select {
+      min-width: 0;
+      width: 100%;
+    }
+
     .economy-subtabs {
       margin: .7rem 0 .75rem;
     }
@@ -16115,6 +16132,10 @@
   }
 
   .ai-agent-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .grid3 {
     grid-template-columns: 1fr;
   }
 

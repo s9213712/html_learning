@@ -6,6 +6,7 @@ from urllib import error as urllib_error
 
 from services.ai_agent.hermes import (
     AiAgentError,
+    ai_agent_operation_mode_policy,
     get_ai_agent_audit_last_scan,
     public_ai_agent_audit_status,
     normalize_ai_agent_allowed_models,
@@ -350,6 +351,11 @@ def test_ai_agent_operation_mode_normalizes_and_keeps_allowed_models():
     assert normalize_ai_agent_allowed_models(["model-a", "model-b", "model-a"]) == "model-a,model-b"
     assert normalize_ai_agent_allowed_models("  ") == ""
     assert normalize_ai_agent_allowed_models("model\nx") is None
+
+    write_policy = ai_agent_operation_mode_policy("write")
+    assert write_policy["mode"] == "write"
+    assert write_policy["write_enabled"] is True
+    assert write_policy["min_role"] == "manager"
 
 
 def test_ai_agent_chat_blocks_mutating_request_in_readonly_mode(monkeypatch):

@@ -21,6 +21,36 @@ MAX_AI_AGENT_IMAGE_DATA_URL_CHARS = 3 * 1024 * 1024
 AI_AGENT_AUDIT_INTERVAL_MINUTES_DEFAULT = 5
 AI_AGENT_AUDIT_INTERVAL_MINUTES_MAX = 60
 AI_AGENT_OPERATION_MODES = {"readonly", "assist", "write", "audit"}
+AI_AGENT_OPERATION_MODE_POLICIES = {
+    "readonly": {
+        "label": "唯讀",
+        "description": "只回答查詢、導覽、排錯與狀態判讀；拒絕刪除、重啟、封鎖、寫入等操作型要求。",
+        "write_enabled": False,
+        "audit_enabled": False,
+        "min_role": "user",
+    },
+    "assist": {
+        "label": "協助",
+        "description": "可提供站內操作建議與草稿，但不直接修改系統狀態。",
+        "write_enabled": False,
+        "audit_enabled": False,
+        "min_role": "user",
+    },
+    "write": {
+        "label": "執行寫入",
+        "description": "保留給白名單工具型任務；仍需通過角色權限、任務白名單與伺服器端 API 檢查。",
+        "write_enabled": True,
+        "audit_enabled": False,
+        "min_role": "manager",
+    },
+    "audit": {
+        "label": "僅審計",
+        "description": "週期檢查 logs、審計資料、資源、網路流量與 IP 請求異常；root 可檢視完整掃描與觸發手動掃描。",
+        "write_enabled": False,
+        "audit_enabled": True,
+        "min_role": "manager",
+    },
+}
 AI_AGENT_AUDIT_IP_EVENT_RATE_THRESHOLD_DEFAULT = 240
 AI_AGENT_AUDIT_IP_EVENT_RATE_WINDOW_MINUTES_DEFAULT = 5
 AI_AGENT_AUDIT_SECURITY_EVENT_RATE_THRESHOLD_DEFAULT = 120
@@ -135,6 +165,13 @@ def normalize_ai_agent_operation_mode(value):
     if raw in {"write_candidate", "execution", "action"}:
         return "write"
     return None
+
+
+def ai_agent_operation_mode_policy(mode):
+    normalized = normalize_ai_agent_operation_mode(mode) or DEFAULT_AI_AGENT_OPERATION_MODE
+    policy = dict(AI_AGENT_OPERATION_MODE_POLICIES.get(normalized, AI_AGENT_OPERATION_MODE_POLICIES[DEFAULT_AI_AGENT_OPERATION_MODE]))
+    policy["mode"] = normalized
+    return policy
 
 
 def normalize_ai_agent_audit_interval_minutes(value, *, default=None):
@@ -366,9 +403,10 @@ def _agent_role_scope(role):
     return AI_AGENT_ROLE_SCOPES.get(role, AI_AGENT_ROLE_SCOPES["user"])
 
 
-def _ai_agent_system_prompt(behavior, *, role="user", allow_tool_runs=False):
+def _ai_agent_system_prompt(behavior, *, role="user", allow_tool_runs=False, operation_mode=DEFAULT_AI_AGENT_OPERATION_MODE):
     scope = _agent_role_scope(normalize_ai_agent_role(role))
     persona_meta = AI_AGENT_PERSONA_PRESETS.get(behavior.get("persona"), AI_AGENT_PERSONA_PRESETS[DEFAULT_AI_AGENT_PERSONA])
+    mode_policy = ai_agent_operation_mode_policy(operation_mode)
     enabled_tasks = [
         f"- {AI_AGENT_TASKS[task_id]['label']}: {AI_AGENT_TASKS[task_id]['description']}"
         for task_id in AI_AGENT_TASKS
@@ -395,6 +433,7 @@ def _ai_agent_system_prompt(behavior, *, role="user", allow_tool_runs=False):
         f"基本原則：{persona_meta['guidance']}\n"
         f"服務範圍：{scope['label']}。\n"
         f"用途：{scope['description']}\n"
+        f"目前模式：{mode_policy['label']}（{mode_policy['mode']}）。{mode_policy['description']}\n"
         "可執行任務：\n"
         + "\n".join(enabled_tasks or ["- 目前未啟用任務，請管理端先啟用任務後再處理。"]) + "\n"
         "可提供服務：\n"
@@ -590,6 +629,7 @@ def public_ai_agent_settings(settings, *, actor=None):
     behavior = _normalize_ai_agent_behavior(settings)
     actor_role = normalize_ai_agent_role((actor or {}).get("role") if isinstance(actor, dict) else "user")
     audit_settings = _coerce_audit_settings(settings)
+    mode_policy = ai_agent_operation_mode_policy(audit_settings["operation_mode"])
     return {
         "provider": normalize_ai_agent_provider(settings.get("ai_agent_provider")) or DEFAULT_AI_AGENT_PROVIDER,
         "api_base_url": normalize_ai_agent_api_base_url(
@@ -603,6 +643,7 @@ def public_ai_agent_settings(settings, *, actor=None):
         "allow_image_input": bool(settings.get("ai_agent_allow_image_input", True)),
         "allow_tool_runs": bool(settings.get("ai_agent_allow_tool_runs", False)),
         "operation_mode": audit_settings["operation_mode"],
+        "operation_mode_policy": mode_policy,
         "allowed_models": audit_settings["allowed_models"],
         "audit_interval_minutes": audit_settings["audit_interval_minutes"],
         "audit_thresholds": {
@@ -619,6 +660,7 @@ def public_ai_agent_settings(settings, *, actor=None):
         },
         "role": actor_role,
         "scope": _agent_role_scope(actor_role),
+        "safety_boundaries": list(AI_AGENT_SAFETY_BOUNDARIES),
         "persona": behavior["persona"],
         "tasks": behavior["tasks"],
         "tools": behavior["tools"],
@@ -1186,7 +1228,7 @@ def _safe_datetime_from_timestamp(ts):
         return ""
 
 
-def public_ai_agent_audit_status(settings):
+def public_ai_agent_audit_status(settings, *, include_scan=False):
     settings = settings or {}
     audit_settings = _coerce_audit_settings(settings)
     interval_minutes = int(audit_settings["audit_interval_minutes"])
@@ -1204,7 +1246,7 @@ def public_ai_agent_audit_status(settings):
             "notification_count": len(scan.get("notifications") or []),
             "cache_expires_at": scan.get("cache_expires_at"),
         }
-    return {
+    result = {
         "mode": audit_settings["operation_mode"],
         "scheduler": {
             "enabled": audit_settings["operation_mode"] == "audit",
@@ -1214,7 +1256,6 @@ def public_ai_agent_audit_status(settings):
             "has_scan": last_scan.get("has_result"),
         },
         "summary": summary,
-        "scan": scan,
         "settings": {
             "audit_thresholds": {
                 "cpu_percent": audit_settings["audit_cpu_percent_threshold"],
@@ -1230,6 +1271,9 @@ def public_ai_agent_audit_status(settings):
             }
         },
     }
+    if include_scan:
+        result["scan"] = scan
+    return result
 
 
 def ai_agent_capabilities(settings):
@@ -1338,6 +1382,7 @@ def ai_agent_chat(settings, *, messages=None, prompt="", image_data_url="", mode
         behavior,
         role=actor_role,
         allow_tool_runs=bool(public["allow_tool_runs"]),
+        operation_mode=public["operation_mode"],
     )
     sanitized_messages = [{"role": "system", "content": system_prompt}, *sanitized_messages]
 

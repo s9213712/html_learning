@@ -344,7 +344,7 @@ SETTING_DETAILS = {
     },
     "ai_agent_operation_mode": {
         "label": "AI Agent 運作模式",
-        "description": "readonly（唯讀）、assist（協助）或 audit（僅管理者審計），可在三種邏輯邊界間切換。",
+        "description": "readonly（唯讀）、assist（協助）、write（執行寫入候選）或 audit（僅審計），可在四種邏輯邊界間切換。",
     },
     "ai_agent_allowed_models": {
         "label": "AI Agent 允許模型清單",
