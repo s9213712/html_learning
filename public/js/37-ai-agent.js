@@ -150,7 +150,7 @@ function aiAgentParseComfyuiGenerateRequest(text) {
   const raw = String(text || "").trim();
   if (!raw) return null;
   const lower = raw.toLowerCase();
-  const wantsImage = /生圖|產圖|comfyui|txt2img|t2i|sdxl|text\s*to\s*image/.test(lower);
+  const wantsImage = /生圖|產圖|生成圖片|畫圖|畫一張|做一張|comfyui|txt2img|t2i|sdxl|text\s*to\s*image/.test(lower);
   if (!wantsImage) return null;
   const prompt = aiAgentLineValue(raw, [
     /^\s*(?:提示詞|prompt|positive prompt)\s*[:：]\s*(.+)$/i,
@@ -197,7 +197,12 @@ function aiAgentParseComfyuiGenerateRequest(text) {
 }
 
 function aiAgentWantsComfyuiGeneration(text) {
-  return /生圖|產圖|生成圖片|參考.*圖|照.*圖|comfyui|txt2img|t2i|sdxl|text\s*to\s*image/i.test(String(text || ""));
+  const raw = String(text || "");
+  if (/(查|看|顯示|確認|status|progress|進度|狀態|queue|running|pending|任務)/i.test(raw)
+    && /(產圖|生圖|comfyui|generation|下載|download)/i.test(raw)) {
+    return false;
+  }
+  return /生圖|產圖|生成圖片|畫圖|畫一張|做一張|參考.*圖|照.*圖|comfyui|txt2img|t2i|sdxl|text\s*to\s*image/i.test(raw);
 }
 
 function aiAgentParseComfyuiOptionOverrides(text) {
@@ -301,6 +306,48 @@ async function aiAgentAnalyzeImageForComfyui(userText) {
   const content = json?.message?.content || json?.msg || "";
   if (!res.ok || !json.ok || isMockAiAgentReply(content)) {
     throw new Error(aiAgentImageAnalysisError(json, res.status));
+  }
+  const parsed = aiAgentExtractJsonObject(content);
+  const args = aiAgentNormalizeAnalysisArgs(parsed || { prompt: content }, userText);
+  return {
+    args,
+    analysis: content,
+    elapsedMs: Math.round(performance.now() - started),
+  };
+}
+
+async function aiAgentAnalyzeTextForComfyui(userText) {
+  const selectedModel = ($("ai-agent-model")?.value || "").trim() || AI_AGENT_STATE.settings?.model || "";
+  const selectableModels = aiAgentSelectableModels();
+  if (selectableModels.length && selectedModel && !selectableModels.includes(selectedModel)) {
+    throw new Error("請從模型選單選擇可用模型後再做生圖解析。");
+  }
+  const analysisPrompt = [
+    "請把使用者的自然語言生圖需求轉成 ComfyUI text-to-image write-tool 參數。",
+    "請只輸出 JSON，不要 Markdown，不要表格，不要操作教學。",
+    "JSON 欄位：prompt, negative_prompt, width, height, steps, cfg_scale, batch_size, seed, checkpoint, vae, sampler, scheduler, official_workflow_id。",
+    "如果使用者提到 SDXL T2I、SDXL txt2img 或文字生圖，official_workflow_id 設為 origin_sdxl_txt2img。",
+    "如果使用者指定模型、Checkpoint、VAE、尺寸、CFG、步數或張數，必須保留。",
+    "prompt 欄位要是可直接送 ComfyUI 的正向提示詞，不要包含解釋文字。",
+    `使用者需求：${userText}`,
+  ].join("\n");
+  const started = performance.now();
+  const res = await apiFetch(API + "/ai-agent/chat", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      session_id: aiAgentEnsureSessionId(),
+      model: selectedModel,
+      mode: "text",
+      messages: [{ role: "user", content: analysisPrompt }],
+      image_data_url: "",
+    }),
+  });
+  const json = await res.json().catch(() => ({}));
+  const content = json?.message?.content || json?.msg || "";
+  if (!res.ok || !json.ok || isMockAiAgentReply(content)) {
+    throw new Error(json.msg || `生圖需求解析失敗（HTTP ${res.status}）`);
   }
   const parsed = aiAgentExtractJsonObject(content);
   const args = aiAgentNormalizeAnalysisArgs(parsed || { prompt: content }, userText);
@@ -959,6 +1006,37 @@ async function sendAiAgentMessage() {
     aiAgentFillComfyuiToolForm(directComfyuiArgs);
     if (input) input.value = "";
     await runAiAgentComfyuiGenerate(directComfyuiArgs);
+    return;
+  }
+  if (mode === "text" && aiAgentWantsComfyuiGeneration(prompt)) {
+    if (!AI_AGENT_STATE.loaded && typeof loadAiAgentStatus === "function") {
+      await loadAiAgentStatus({ force: true }).catch(() => undefined);
+    }
+    const userText = prompt;
+    AI_AGENT_STATE.messages.push({ role: "user", content: userText });
+    renderAiAgentThread();
+    if (input) input.value = "";
+    AI_AGENT_STATE.sending = true;
+    const sendBtn = $("ai-agent-send-btn");
+    if (sendBtn) sendBtn.disabled = true;
+    setAiAgentMessage("生圖需求解析中...", "info");
+    try {
+      const analyzed = await aiAgentAnalyzeTextForComfyui(userText);
+      aiAgentFillComfyuiToolForm(analyzed.args);
+      AI_AGENT_STATE.messages.push({
+        role: "assistant",
+        content: `生圖需求解析完成（${analyzed.elapsedMs} ms）。\n產生提示詞：${analyzed.args.prompt}`,
+      });
+      renderAiAgentThread();
+      await runAiAgentComfyuiGenerate(analyzed.args);
+    } catch (err) {
+      AI_AGENT_STATE.messages.push({ role: "assistant", content: `生圖需求解析失敗，未送出生圖：${err?.message || err}` });
+      renderAiAgentThread();
+      setAiAgentMessage(`生圖需求解析失敗：${err?.message || err}`, "err");
+    } finally {
+      AI_AGENT_STATE.sending = false;
+      if (sendBtn) sendBtn.disabled = false;
+    }
     return;
   }
   const readonlyIntent = mode === "text" ? aiAgentReadonlyIntent(prompt) : null;

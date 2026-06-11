@@ -44,7 +44,7 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert 'id="ai-agent-comfyui-vae"' in html
     assert 'id="ai-agent-comfyui-generate-btn"' in html
     assert 'id="s-module-ai-agent-min-role"' in html
-    assert "/js/37-ai-agent.js?v=20260612-ai-agent-hidden-write-tool-form" in html
+    assert "/js/37-ai-agent.js?v=20260612-ai-agent-natural-comfyui" in html
     assert "/js/90-bootstrap.js?v=20260611-ai-agent-comfyui-write-tool" in html
 
     assert '"ai-agent": "feature_ai_agent_enabled"' in core_js
@@ -79,6 +79,7 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert "aiAgentParseComfyuiGenerateRequest(prompt)" in ai_agent_js
     assert "aiAgentFillComfyuiToolForm(directComfyuiArgs)" in ai_agent_js
     assert "function aiAgentAnalyzeImageForComfyui" in ai_agent_js
+    assert "function aiAgentAnalyzeTextForComfyui" in ai_agent_js
     assert "function aiAgentVisionModel" in ai_agent_js
     assert "function aiAgentImageAnalysisError" in ai_agent_js
     assert "function aiAgentReadonlyIntent" in ai_agent_js
@@ -91,7 +92,9 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert "qwen3-vl" in ai_agent_js
     assert "圖片分析後端目前不可用" in ai_agent_js
     assert "圖片分析與提示詞生成中" in ai_agent_js
+    assert "生圖需求解析中" in ai_agent_js
     assert "await aiAgentAnalyzeImageForComfyui(userText)" in ai_agent_js
+    assert "await aiAgentAnalyzeTextForComfyui(userText)" in ai_agent_js
     assert "await runAiAgentComfyuiGenerate(analyzed.args)" in ai_agent_js
     assert "aiAgentConversationStorageKey" in ai_agent_js
     assert "localStorage.setItem" in ai_agent_js
