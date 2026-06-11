@@ -44,7 +44,7 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert 'id="ai-agent-comfyui-vae"' in html
     assert 'id="ai-agent-comfyui-generate-btn"' in html
     assert 'id="s-module-ai-agent-min-role"' in html
-    assert "/js/37-ai-agent.js?v=20260611-ai-agent-comfyui-write-tool" in html
+    assert "/js/37-ai-agent.js?v=20260611-ai-agent-direct-comfyui" in html
     assert "/js/90-bootstrap.js?v=20260611-ai-agent-comfyui-write-tool" in html
 
     assert '"ai-agent": "feature_ai_agent_enabled"' in core_js
@@ -75,6 +75,10 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert 'tool: "write_comfyui_generate"' in ai_agent_js
     assert 'confirm: "EXECUTE"' in ai_agent_js
     assert 'aiAgentCanRunWriteTool("write_comfyui_generate")' in ai_agent_js
+    assert "function aiAgentParseComfyuiGenerateRequest" in ai_agent_js
+    assert "aiAgentParseComfyuiGenerateRequest(prompt)" in ai_agent_js
+    assert "aiAgentFillComfyuiToolForm(directComfyuiArgs)" in ai_agent_js
+    assert 'official_workflow_id = "origin_sdxl_txt2img"' in ai_agent_js
     assert 'ai-agent-write-tools-panel' in ai_agent_js
     assert "OpenAI-compatible" in ai_agent_js
     assert "Hermes Agent" in ai_agent_js

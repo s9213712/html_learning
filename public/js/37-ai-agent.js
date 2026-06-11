@@ -73,6 +73,104 @@ function aiAgentNumberInput(id, fallback, { min = null, max = null, integer = fa
   return value;
 }
 
+function aiAgentClampNumber(value, fallback, { min = null, max = null, integer = false } = {}) {
+  let parsed = Number(value);
+  if (!Number.isFinite(parsed)) parsed = fallback;
+  if (integer) parsed = Math.round(parsed);
+  if (min !== null) parsed = Math.max(min, parsed);
+  if (max !== null) parsed = Math.min(max, parsed);
+  return parsed;
+}
+
+function aiAgentStripFieldValue(value) {
+  return String(value || "")
+    .trim()
+    .replace(/^[："“”"'`]+/, "")
+    .replace(/[："“”"'`]+$/, "")
+    .trim();
+}
+
+function aiAgentLineValue(text, patterns) {
+  const lines = String(text || "").split(/\r?\n/);
+  for (const line of lines) {
+    for (const pattern of patterns) {
+      const match = line.match(pattern);
+      if (match) return aiAgentStripFieldValue(match[1] || "");
+    }
+  }
+  return "";
+}
+
+function aiAgentParseComfyuiGenerateRequest(text) {
+  const raw = String(text || "").trim();
+  if (!raw) return null;
+  const lower = raw.toLowerCase();
+  const wantsImage = /生圖|產圖|comfyui|txt2img|t2i|sdxl|text\s*to\s*image/.test(lower);
+  if (!wantsImage) return null;
+  const prompt = aiAgentLineValue(raw, [
+    /^\s*(?:提示詞|prompt|positive prompt)\s*[:：]\s*(.+)$/i,
+  ]);
+  if (!prompt) return null;
+  const args = { prompt, confirm_billing: true };
+  const negative = aiAgentLineValue(raw, [
+    /^\s*(?:負面提示詞|negative prompt|negative|neg)\s*[:：]\s*(.+)$/i,
+  ]);
+  if (negative) args.negative_prompt = negative;
+  const size = raw.match(/(?:size|尺寸|解析度)?\s*[:：]?\s*(\d{3,4})\s*[xX*×＊]\s*(\d{3,4})/i);
+  if (size) {
+    args.width = aiAgentClampNumber(size[1], 1024, { min: 256, max: 2048, integer: true });
+    args.height = aiAgentClampNumber(size[2], 1024, { min: 256, max: 2048, integer: true });
+  }
+  const model = aiAgentLineValue(raw, [
+    /^\s*(?:models?|模型|checkpoint|ckpt)\s*[:：]\s*(.+)$/i,
+  ]);
+  if (model) args.checkpoint = model;
+  const cfg = raw.match(/(?:^|\n)\s*(?:cfg(?:[_\s-]?scale)?)\s*[:：]?\s*([0-9]+(?:\.[0-9]+)?)/i);
+  if (cfg) args.cfg_scale = aiAgentClampNumber(cfg[1], 7, { min: 1, max: 20 });
+  const steps = raw.match(/(?:^|\n)\s*(?:steps?|步數)\s*[:：]?\s*(\d+)/i);
+  if (steps) args.steps = aiAgentClampNumber(steps[1], 20, { min: 1, max: 80, integer: true });
+  const batch = raw.match(/(?:^|\n)\s*(?:batch(?:[_\s-]?size)?|張數|數量)\s*[:：]?\s*(\d+)/i);
+  if (batch) args.batch_size = aiAgentClampNumber(batch[1], 1, { min: 1, max: 8, integer: true });
+  const seed = raw.match(/(?:^|\n)\s*(?:seed|種子)\s*[:：]?\s*(-?\d+)/i);
+  if (seed) args.seed = aiAgentClampNumber(seed[1], -1, { integer: true });
+  const sampler = aiAgentLineValue(raw, [
+    /^\s*(?:sampler|採樣器|取樣器)\s*[:：]\s*(.+)$/i,
+  ]);
+  if (sampler) args.sampler = sampler;
+  const scheduler = aiAgentLineValue(raw, [
+    /^\s*(?:scheduler|排程器)\s*[:：]\s*(.+)$/i,
+  ]);
+  if (scheduler) args.scheduler = scheduler;
+  const vae = aiAgentLineValue(raw, [
+    /^\s*(?:vae)\s*[:：]\s*(.+)$/i,
+  ]);
+  if (vae) args.vae = vae;
+  if (/sdxl|sdxl\s*t2i|sdxl[-_\s]*txt2img|sdxl[-_\s]*text\s*to\s*image/i.test(raw)) {
+    args.official_workflow_id = "origin_sdxl_txt2img";
+  }
+  return args;
+}
+
+function aiAgentFillComfyuiToolForm(args = {}) {
+  const map = {
+    "ai-agent-comfyui-prompt": args.prompt,
+    "ai-agent-comfyui-negative": args.negative_prompt,
+    "ai-agent-comfyui-width": args.width,
+    "ai-agent-comfyui-height": args.height,
+    "ai-agent-comfyui-steps": args.steps,
+    "ai-agent-comfyui-cfg": args.cfg_scale,
+    "ai-agent-comfyui-batch-size": args.batch_size,
+    "ai-agent-comfyui-seed": args.seed,
+    "ai-agent-comfyui-checkpoint": args.checkpoint,
+    "ai-agent-comfyui-vae": args.vae,
+  };
+  Object.entries(map).forEach(([id, value]) => {
+    const el = $(id);
+    if (!el || value === undefined || value === null || value === "") return;
+    el.value = String(value);
+  });
+}
+
 function aiAgentHasEffectiveTool(toolName) {
   return (AI_AGENT_STATE.settings?.tools || []).some((tool) => tool?.name === toolName);
 }
@@ -106,7 +204,20 @@ function renderAiAgentWriteTools() {
   if (button) button.disabled = !canRunComfyui || AI_AGENT_STATE.sendingTool;
 }
 
-function aiAgentComfyuiToolArguments() {
+function aiAgentComfyuiToolArguments(overrides = null) {
+  if (overrides && typeof overrides === "object") {
+    return {
+      ...overrides,
+      prompt: String(overrides.prompt || "").trim(),
+      negative_prompt: String(overrides.negative_prompt || "").trim(),
+      width: aiAgentClampNumber(overrides.width, 1024, { min: 256, max: 2048, integer: true }),
+      height: aiAgentClampNumber(overrides.height, 1024, { min: 256, max: 2048, integer: true }),
+      steps: aiAgentClampNumber(overrides.steps, 20, { min: 1, max: 80, integer: true }),
+      cfg_scale: aiAgentClampNumber(overrides.cfg_scale, 7, { min: 1, max: 20 }),
+      batch_size: aiAgentClampNumber(overrides.batch_size, 1, { min: 1, max: 8, integer: true }),
+      confirm_billing: true,
+    };
+  }
   const prompt = ($("ai-agent-comfyui-prompt")?.value || "").trim();
   if (!prompt) throw new Error("請先輸入提示詞");
   const args = {
@@ -128,7 +239,7 @@ function aiAgentComfyuiToolArguments() {
   return args;
 }
 
-async function runAiAgentComfyuiGenerate() {
+async function runAiAgentComfyuiGenerate(overrides = null) {
   if (AI_AGENT_STATE.sendingTool) return;
   if (!aiAgentCanRunWriteTool("write_comfyui_generate")) {
     setAiAgentMessage("目前不可執行 ComfyUI write-tool，請確認 root / write 模式 / 工具白名單。", "err");
@@ -136,7 +247,8 @@ async function runAiAgentComfyuiGenerate() {
   }
   let args = {};
   try {
-    args = aiAgentComfyuiToolArguments();
+    args = aiAgentComfyuiToolArguments(overrides);
+    if (!args.prompt) throw new Error("請先輸入提示詞");
   } catch (err) {
     setAiAgentMessage(err?.message || "產圖參數不完整", "err");
     return;
@@ -572,6 +684,19 @@ async function sendAiAgentMessage() {
   }
   if (mode === "image" && !AI_AGENT_STATE.imageDataUrl) {
     setAiAgentMessage("請選擇圖片", "err");
+    return;
+  }
+  const directComfyuiArgs = mode === "text" ? aiAgentParseComfyuiGenerateRequest(prompt) : null;
+  if (directComfyuiArgs) {
+    if (!AI_AGENT_STATE.loaded && typeof loadAiAgentStatus === "function") {
+      await loadAiAgentStatus({ force: true }).catch(() => undefined);
+    }
+    const userText = prompt;
+    AI_AGENT_STATE.messages.push({ role: "user", content: userText });
+    renderAiAgentThread();
+    aiAgentFillComfyuiToolForm(directComfyuiArgs);
+    if (input) input.value = "";
+    await runAiAgentComfyuiGenerate(directComfyuiArgs);
     return;
   }
   AI_AGENT_STATE.sending = true;
