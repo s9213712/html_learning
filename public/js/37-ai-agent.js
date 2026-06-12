@@ -505,6 +505,34 @@ function aiAgentComfyuiToolArguments(overrides = null) {
   return args;
 }
 
+function aiAgentFindComfyuiJobPayload(value, seen = new Set()) {
+  if (!value || typeof value !== "object") return null;
+  if (seen.has(value)) return null;
+  seen.add(value);
+  if (value.job_id) return value;
+  const preferred = [
+    value.job,
+    value.result?.job,
+    value.result?.payload?.job,
+    value.payload?.job,
+    value.data?.job,
+    value.result,
+    value.payload,
+    value.data,
+  ];
+  for (const item of preferred) {
+    const found = aiAgentFindComfyuiJobPayload(item, seen);
+    if (found) return found;
+  }
+  if (Array.isArray(value.jobs)) {
+    for (const item of value.jobs) {
+      const found = aiAgentFindComfyuiJobPayload(item, seen);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
 async function runAiAgentComfyuiGenerate(overrides = null) {
   if (AI_AGENT_STATE.sendingTool) return;
   if (!aiAgentCanRunWriteTool("write_comfyui_generate")) {
@@ -550,8 +578,8 @@ async function runAiAgentComfyuiGenerate(overrides = null) {
       setAiAgentMessage(msg, "err");
       return;
     }
-    const job = json.result?.job || json.payload?.job || json.job || {};
-    const jobId = job.job_id || json.result?.job_id || "-";
+    const job = aiAgentFindComfyuiJobPayload(json) || {};
+    const jobId = job.job_id || json.result?.job_id || json.payload?.job_id || json.job_id || "-";
     const initialStatus = job.status || "queued";
     AI_AGENT_STATE.messages.push({
       role: "assistant",
@@ -561,6 +589,13 @@ async function runAiAgentComfyuiGenerate(overrides = null) {
     setAiAgentMessage("ComfyUI 產圖已送出，正在確認狀態", "info");
     if (jobId && jobId !== "-") {
       aiAgentWatchComfyuiJob(jobId);
+    } else {
+      AI_AGENT_STATE.messages.push({
+        role: "assistant",
+        content: "ComfyUI 產圖已送出，但回傳內容缺少 Job ID，無法自動追蹤進度。我會嘗試從只讀任務摘要接回最近的 ComfyUI 任務。",
+      });
+      renderAiAgentThread();
+      setAiAgentMessage("ComfyUI 回傳缺少 Job ID，嘗試從任務摘要接回", "err");
     }
     await loadAiAgentReadOnly({ scope: "all", limit: 20, silent: true, force: true }).catch(() => undefined);
   } catch (err) {
@@ -1041,6 +1076,22 @@ function renderAiAgentReadOnly(payload = {}) {
   }
 }
 
+function aiAgentResumeComfyuiWatchJobs(payload = {}) {
+  const jobs = Array.isArray(payload.comfyui_jobs) ? payload.comfyui_jobs : [];
+  jobs.forEach((job) => {
+    const jobId = String(job?.job_id || "").trim();
+    const status = String(job?.status || "").toLowerCase();
+    if (!jobId || !["queued", "running", "pending"].includes(status)) return;
+    if (AI_AGENT_STATE.comfyuiWatchJobs[jobId]) return;
+    AI_AGENT_STATE.messages.push({
+      role: "assistant",
+      content: `接回 ComfyUI 任務進度追蹤。\nJob ID：${jobId}\n狀態：${job.status || "running"}\n進度：${Math.round(Number(job.progress_percent || 0))}%`,
+    });
+    renderAiAgentThread();
+    aiAgentWatchComfyuiJob(jobId);
+  });
+}
+
 function aiAgentAllowedModels() {
   return String(AI_AGENT_STATE.settings?.allowed_models || "").split(",").map((item) => item.trim()).filter(Boolean);
 }
@@ -1298,6 +1349,7 @@ async function loadAiAgentReadOnly(options = {}) {
       return;
     }
     renderAiAgentReadOnly(json);
+    aiAgentResumeComfyuiWatchJobs(json);
     if (options.silent) {
       return;
     }
