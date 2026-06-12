@@ -15,7 +15,10 @@ const AI_AGENT_STATE = {
   sessionId: "",
   accountScope: "",
   comfyuiWatchJobs: {},
+  comfyuiSubmittedJobs: {},
+  comfyuiAnnouncedJobs: {},
   lastComfyuiJob: null,
+  lastComfyuiArgs: null,
   comfyuiPreviewLoads: {},
   persistTimer: null,
   loadingConversation: false,
@@ -250,7 +253,7 @@ function aiAgentParseComfyuiGenerateRequest(text) {
   if (!prompt) return null;
   const args = { prompt, confirm_billing: true };
   const negative = aiAgentLineValue(raw, [
-    /^\s*(?:負面提示詞|負面詞|反向提示詞|反向詞|negative prompt|negative|neg)\s*[:：]\s*(.+)$/i,
+    /^\s*(?:負面提示詞|負面詞|反向提示詞|反向詞|negative prompt|negative|neg)\s*(?:加上|加入|新增|改成|設為|變成)?\s*[:：]?\s*(.+)$/i,
   ]);
   if (negative) args.negative_prompt = negative;
   const size = raw.match(/(?:size|尺寸|解析度)?\s*[:：]?\s*(\d{3,4})\s*[xX*×＊]\s*(\d{3,4})/i);
@@ -332,6 +335,10 @@ function aiAgentComfyuiClarificationMessage() {
 function aiAgentParseComfyuiOptionOverrides(text) {
   const raw = aiAgentNormalizeUserText(text);
   const args = {};
+  const negative = aiAgentLineValue(raw, [
+    /^\s*(?:負面提示詞|負面詞|反向提示詞|反向詞|negative prompt|negative|neg)\s*(?:加上|加入|新增|改成|設為|變成)?\s*[:：]?\s*(.+)$/i,
+  ]);
+  if (negative) args.negative_prompt = negative;
   const size = raw.match(/(?:size|尺寸|解析度)?\s*[:：]?\s*(\d{3,4})\s*[xX*×＊]\s*(\d{3,4})/i);
   if (size) {
     args.width = aiAgentClampNumber(size[1], 1024, { min: 256, max: 2048, integer: true });
@@ -353,6 +360,67 @@ function aiAgentParseComfyuiOptionOverrides(text) {
     args.official_workflow_id = "origin_sdxl_txt2img";
   }
   return args;
+}
+
+function aiAgentHasComfyuiOverrideIntent(text) {
+  const raw = aiAgentNormalizeUserText(text).trim();
+  if (!raw) return false;
+  if (/(負面提示詞|負面詞|反向提示詞|反向詞|negative prompt|negative|neg|cfg|steps?|步數|尺寸|解析度|模型|checkpoint|ckpt|vae|seed|種子|張數|數量)/i.test(raw)
+    && /(加上|加入|新增|改成|設為|變成|調整|修改|重跑|再跑|再生|重新|rerun|again|換成|改)/i.test(raw)) {
+    return true;
+  }
+  return /(重跑|再跑|再生|重新產圖|重新生圖|rerun|run again)/i.test(raw);
+}
+
+function aiAgentMergeCommaList(base, extra) {
+  const values = [];
+  String(base || "").split(/[，,]/).concat(String(extra || "").split(/[，,]/)).forEach((item) => {
+    const value = item.trim();
+    if (value && !values.some((existing) => existing.toLowerCase() === value.toLowerCase())) values.push(value);
+  });
+  return values.join(", ");
+}
+
+function aiAgentCurrentComfyuiArgs() {
+  if (AI_AGENT_STATE.lastComfyuiArgs?.prompt) return { ...AI_AGENT_STATE.lastComfyuiArgs };
+  try {
+    const args = aiAgentComfyuiToolArguments();
+    return args?.prompt ? args : null;
+  } catch (err) {
+    return null;
+  }
+}
+
+function aiAgentParseComfyuiRerunRequest(text) {
+  if (!aiAgentHasComfyuiOverrideIntent(text)) return null;
+  const base = aiAgentCurrentComfyuiArgs();
+  if (!base?.prompt) return null;
+  const raw = aiAgentNormalizeUserText(text);
+  const overrides = aiAgentParseComfyuiOptionOverrides(raw);
+  const merged = { ...base, ...overrides, confirm_billing: true };
+  if (overrides.negative_prompt && /(加上|加入|新增|append|add)/i.test(raw)) {
+    merged.negative_prompt = aiAgentMergeCommaList(base.negative_prompt, overrides.negative_prompt);
+  }
+  return merged;
+}
+
+function aiAgentRememberComfyuiSubmit(args = {}, job = {}) {
+  if (args?.prompt) {
+    AI_AGENT_STATE.lastComfyuiArgs = {
+      ...args,
+      prompt: String(args.prompt || "").trim(),
+      negative_prompt: String(args.negative_prompt || "").trim(),
+    };
+  }
+  const jobId = String(job?.job_id || "").trim();
+  if (jobId) {
+    AI_AGENT_STATE.comfyuiSubmittedJobs[jobId] = {
+      job_id: jobId,
+      status: job.status || "queued",
+      args: AI_AGENT_STATE.lastComfyuiArgs ? { ...AI_AGENT_STATE.lastComfyuiArgs } : {},
+      submittedAt: Date.now(),
+    };
+  }
 }
 
 function aiAgentWriteIntent(text) {
@@ -745,6 +813,11 @@ async function runAiAgentComfyuiGenerate(overrides = null) {
     const job = aiAgentFindComfyuiJobPayload(json) || {};
     const jobId = job.job_id || json.result?.job_id || json.payload?.job_id || json.job_id || "-";
     const initialStatus = job.status || "queued";
+    if (jobId && jobId !== "-") {
+      job.job_id = jobId;
+      job.status = initialStatus;
+      aiAgentRememberComfyuiSubmit(args, job);
+    }
     AI_AGENT_STATE.messages.push({
       role: "assistant",
       content: `ComfyUI 產圖已送出，正在確認後端接收狀態。\n工具：write_comfyui_generate\nJob ID：${jobId}\n狀態：${initialStatus}`,
@@ -815,6 +888,8 @@ function aiAgentComfyuiImagesFromJob(job = {}) {
 }
 
 function aiAgentComfyuiCompletionMessage(job = {}) {
+  const jobId = String(job.job_id || "").trim();
+  if (jobId) AI_AGENT_STATE.comfyuiAnnouncedJobs[jobId] = "completed";
   return {
     role: "assistant",
     content: aiAgentComfyuiResultSummary(job),
@@ -913,6 +988,8 @@ function aiAgentMarkComfyuiProgressNotified(watch = {}, snapshot = {}) {
 }
 
 function aiAgentComfyuiFailureSummary(job = {}) {
+  const jobId = String(job.job_id || "").trim();
+  if (jobId) AI_AGENT_STATE.comfyuiAnnouncedJobs[jobId] = "error";
   const progress = job.progress || {};
   const detail = progress.error_message || progress.detail || job.error || "後端回報失敗，但沒有提供詳細訊息。";
   return `ComfyUI 產圖失敗。\nJob ID：${job.job_id || "-"}\n狀態：${job.status || "error"}\n錯誤：${detail}\n\n請修正模型、VAE、尺寸或提示詞後再叫我重送。`;
@@ -951,6 +1028,10 @@ async function aiAgentPollComfyuiJob(jobId) {
   try {
     const job = await aiAgentFetchComfyuiJob(jobId);
     AI_AGENT_STATE.lastComfyuiJob = job;
+    if (AI_AGENT_STATE.comfyuiSubmittedJobs[jobId]) {
+      AI_AGENT_STATE.comfyuiSubmittedJobs[jobId].status = job.status || AI_AGENT_STATE.comfyuiSubmittedJobs[jobId].status;
+      AI_AGENT_STATE.comfyuiSubmittedJobs[jobId].updatedAt = Date.now();
+    }
     const status = String(job.status || "").toLowerCase();
     const progress = job.progress || {};
     const phase = String(progress.phase || "").toLowerCase();
@@ -1244,7 +1325,24 @@ function aiAgentResumeComfyuiWatchJobs(payload = {}) {
   jobs.forEach((job) => {
     const jobId = String(job?.job_id || "").trim();
     const status = String(job?.status || "").toLowerCase();
-    if (!jobId || !["queued", "running", "pending"].includes(status)) return;
+    if (!jobId) return;
+    if (["completed", "error", "failed", "cancelled"].includes(status)) {
+      const isKnown = !!AI_AGENT_STATE.comfyuiSubmittedJobs[jobId] || AI_AGENT_STATE.lastComfyuiJob?.job_id === jobId;
+      if (!isKnown || AI_AGENT_STATE.comfyuiAnnouncedJobs[jobId]) return;
+      aiAgentFetchComfyuiJob(jobId).then((fullJob) => {
+        const fullStatus = String(fullJob?.status || status).toLowerCase();
+        if (["error", "failed", "cancelled"].includes(fullStatus)) {
+          AI_AGENT_STATE.messages.push({ role: "assistant", content: aiAgentComfyuiFailureSummary(fullJob || job) });
+        } else if (fullStatus === "completed") {
+          const message = aiAgentComfyuiCompletionMessage(fullJob || job);
+          AI_AGENT_STATE.messages.push(message);
+          aiAgentHydrateComfyuiMessageImages(message).catch(() => undefined);
+        }
+        renderAiAgentThread();
+      }).catch(() => undefined);
+      return;
+    }
+    if (!["queued", "running", "pending"].includes(status)) return;
     if (AI_AGENT_STATE.comfyuiWatchJobs[jobId]) return;
     AI_AGENT_STATE.messages.push({
       role: "assistant",
@@ -1301,7 +1399,11 @@ function aiAgentReadonlyIntent(prompt) {
   const text = String(prompt || "").toLowerCase();
   if (!text) return null;
   const asksStatus = /(查|看|顯示|確認|狀態|status|progress|進度|摘要|目前)/i.test(text);
-  if (!asksStatus) return null;
+  const asksLatestRun = /(跑出來了嗎|好了嗎|完成了嗎|產完了嗎|生完了嗎|有結果了嗎|結果呢|圖呢|出圖了嗎|done yet|finished yet)/i.test(text);
+  if (!asksStatus && !asksLatestRun) return null;
+  if (asksLatestRun && (AI_AGENT_STATE.lastComfyuiJob || Object.keys(AI_AGENT_STATE.comfyuiSubmittedJobs || {}).length)) {
+    return { scope: "comfyui", label: "ComfyUI 產圖進度" };
+  }
   if (/(產圖|生圖|comfyui|generation|queue|任務)/i.test(text) && /(進度|狀態|queue|排隊|running|pending|完成|失敗)/i.test(text)) {
     return { scope: "comfyui", label: "ComfyUI 產圖進度" };
   }
@@ -1327,7 +1429,13 @@ function aiAgentReadonlySummary(payload = {}, intent = {}) {
     lines.push(`資源：CPU ${cpu !== undefined && cpu !== null ? `${Number(cpu).toFixed(1)}%` : "-"} / RAM ${ram !== undefined && ram !== null ? `${Number(ram).toFixed(1)}%` : "-"} / Disk ${disk !== undefined && disk !== null ? `${Number(disk).toFixed(1)}%` : "-"}`);
   }
   if (Array.isArray(payload.comfyui_jobs)) {
-    const jobs = payload.comfyui_jobs.slice(0, 5).map((job) => `${job.status || "-"} ${job.title || job.prompt || job.id || ""}`.trim());
+    const jobs = payload.comfyui_jobs.slice(0, 5).map((job) => {
+      const jobId = String(job.job_id || job.id || "").trim();
+      const shortId = jobId ? jobId.slice(0, 8) : "-";
+      const percent = Number(job.progress_percent || 0);
+      const detail = job.error || job.progress?.detail || job.progress?.phase || "";
+      return `#${shortId} ${job.status || "-"} ${Number.isFinite(percent) ? `${Math.round(percent)}%` : ""}${detail ? ` ${detail}` : ""}`.trim();
+    });
     lines.push(`ComfyUI 任務：${payload.comfyui_jobs.length ? jobs.join("；") : "目前沒有可見任務"}`);
   }
   if (Array.isArray(payload.remote_download_jobs)) {
@@ -1638,6 +1746,23 @@ async function sendAiAgentMessage() {
     return;
   }
   const directComfyuiArgs = mode === "text" ? aiAgentParseComfyuiGenerateRequest(prompt) : null;
+  const rerunComfyuiArgs = mode === "text" ? aiAgentParseComfyuiRerunRequest(prompt) : null;
+  if (rerunComfyuiArgs) {
+    if (!AI_AGENT_STATE.loaded && typeof loadAiAgentStatus === "function") {
+      await loadAiAgentStatus({ force: true }).catch(() => undefined);
+    }
+    const userText = prompt;
+    AI_AGENT_STATE.messages.push({ role: "user", content: userText });
+    AI_AGENT_STATE.messages.push({
+      role: "assistant",
+      content: `已套用上一筆生圖參數並準備重跑。\n提示詞：${rerunComfyuiArgs.prompt}\n負面詞：${rerunComfyuiArgs.negative_prompt || "-"}`,
+    });
+    renderAiAgentThread();
+    aiAgentFillComfyuiToolForm(rerunComfyuiArgs);
+    if (input) input.value = "";
+    await runAiAgentComfyuiGenerate(rerunComfyuiArgs);
+    return;
+  }
   if (mode === "text" && aiAgentWantsComfyuiGeneration(prompt) && !directComfyuiArgs && !aiAgentComfyuiTextHasSubject(prompt)) {
     const userText = prompt;
     AI_AGENT_STATE.messages.push({ role: "user", content: userText });
@@ -1709,6 +1834,7 @@ async function sendAiAgentMessage() {
         throw new Error(json.msg || `唯讀查詢失敗（HTTP ${res.status}）`);
       }
       renderAiAgentReadOnly(json);
+      aiAgentResumeComfyuiWatchJobs(json);
       AI_AGENT_STATE.messages.push({ role: "assistant", content: aiAgentReadonlySummary(json, readonlyIntent) });
       renderAiAgentThread();
       setAiAgentMessage("已完成唯讀查詢", "ok");
