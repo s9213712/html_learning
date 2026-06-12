@@ -46,7 +46,7 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert 'id="ai-agent-comfyui-vae"' in html
     assert 'id="ai-agent-comfyui-generate-btn"' in html
     assert 'id="s-module-ai-agent-min-role"' in html
-    assert "/js/37-ai-agent.js?v=20260612-ai-agent-comfyui-confirm-status" in html
+    assert "/js/37-ai-agent.js?v=20260612-ai-agent-negative-alias" in html
     assert "/js/90-bootstrap.js?v=20260611-ai-agent-comfyui-write-tool" in html
 
     assert '"ai-agent": "feature_ai_agent_enabled"' in core_js
@@ -78,6 +78,7 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert 'confirm: "EXECUTE"' in ai_agent_js
     assert 'aiAgentCanRunWriteTool("write_comfyui_generate")' in ai_agent_js
     assert "function aiAgentParseComfyuiGenerateRequest" in ai_agent_js
+    assert "負面詞|反向提示詞|反向詞" in ai_agent_js
     assert "function aiAgentLooksLikeComfyuiPromptLine" in ai_agent_js
     assert "function aiAgentLooksLikeComfyuiModelLine" in ai_agent_js
     assert "aiAgentParseComfyuiGenerateRequest(prompt)" in ai_agent_js

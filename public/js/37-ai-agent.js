@@ -183,7 +183,7 @@ function aiAgentParseComfyuiGenerateRequest(text) {
   if (!prompt) return null;
   const args = { prompt, confirm_billing: true };
   const negative = aiAgentLineValue(raw, [
-    /^\s*(?:負面提示詞|negative prompt|negative|neg)\s*[:：]\s*(.+)$/i,
+    /^\s*(?:負面提示詞|負面詞|反向提示詞|反向詞|negative prompt|negative|neg)\s*[:：]\s*(.+)$/i,
   ]);
   if (negative) args.negative_prompt = negative;
   const size = raw.match(/(?:size|尺寸|解析度)?\s*[:：]?\s*(\d{3,4})\s*[xX*×＊]\s*(\d{3,4})/i);
