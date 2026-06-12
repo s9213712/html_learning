@@ -1271,6 +1271,11 @@ function aiAgentImageAnalysisError(json = {}, status = 0) {
   return raw || `圖片分析失敗（HTTP ${status || "-"}）`;
 }
 
+function aiAgentImageTransportError(err) {
+  const raw = String(err?.message || err || "Load failed").trim();
+  return `圖片分析請求傳輸失敗：${raw}。請重試或改用較小圖片；若仍失敗，代表目前 Hermes/Ollama vision 後端不可用。`;
+}
+
 function aiAgentReadonlyIntent(prompt) {
   const text = String(prompt || "").toLowerCase();
   if (!text) return null;
@@ -1730,7 +1735,7 @@ async function sendAiAgentMessage() {
       model: selectedModel,
       mode,
       messages: aiAgentBuildMessages(prompt, mode),
-      image_data_url: mode === "image" ? AI_AGENT_STATE.imageDataUrl : "",
+      image_data_url: "",
     };
     const raw = await apiFetch(API + "/ai-agent/chat", {
       method: "POST",
@@ -1753,9 +1758,12 @@ async function sendAiAgentMessage() {
     const statusHint = `（HTTP ${res.status} ${res.statusText || ""}）`.trim();
     if (!json.ok || isMockAiAgentReply(replied)) {
       const msg = json.msg || (text ? text.slice(0, 160) : `AI Agent 回應失敗 ${statusHint}`);
-      AI_AGENT_STATE.messages.push({ role: "assistant", content: msg || "AI Agent 回應失敗" });
+      const shownMsg = mode === "image"
+        ? aiAgentImageAnalysisError(json, res.status)
+        : (msg || "AI Agent 回應失敗");
+      AI_AGENT_STATE.messages.push({ role: "assistant", content: shownMsg });
       if (!json.ok) {
-        setAiAgentMessage(json.msg ? `${json.msg} ${statusHint}` : `AI Agent 回應失敗 ${statusHint}`, "err");
+        setAiAgentMessage(mode === "image" ? shownMsg : (json.msg ? `${json.msg} ${statusHint}` : `AI Agent 回應失敗 ${statusHint}`), "err");
       } else {
         setAiAgentMessage("AI Agent 後端仍回傳 mock 回覆，請確認 AI Agent Base URL 設定", "err");
       }
@@ -1766,9 +1774,10 @@ async function sendAiAgentMessage() {
     }
     renderAiAgentThread();
   } catch (err) {
-    AI_AGENT_STATE.messages.push({ role: "assistant", content: `AI Agent 回應失敗：${err}` });
+    const msg = mode === "image" ? aiAgentImageTransportError(err) : `AI Agent 回應失敗：${err}`;
+    AI_AGENT_STATE.messages.push({ role: "assistant", content: msg });
     renderAiAgentThread();
-    setAiAgentMessage(`AI Agent 回應失敗：${err}`, "err");
+    setAiAgentMessage(msg, "err");
   } finally {
     AI_AGENT_STATE.sending = false;
     if (sendBtn) sendBtn.disabled = false;

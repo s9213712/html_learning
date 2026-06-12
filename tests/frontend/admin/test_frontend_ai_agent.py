@@ -46,7 +46,7 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert 'id="ai-agent-comfyui-vae"' in html
     assert 'id="ai-agent-comfyui-generate-btn"' in html
     assert 'id="s-module-ai-agent-min-role"' in html
-    assert "/js/37-ai-agent.js?v=20260612-ai-agent-vague-generation-guard" in html
+    assert "/js/37-ai-agent.js?v=20260612-ai-agent-image-error-handling" in html
     assert "/js/90-bootstrap.js?v=20260611-ai-agent-comfyui-write-tool" in html
 
     assert '"ai-agent": "feature_ai_agent_enabled"' in core_js
@@ -89,6 +89,8 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert "不會自行沿用前文、記憶或模型猜提示詞" in ai_agent_js
     assert "function aiAgentVisionModel" in ai_agent_js
     assert "function aiAgentImageAnalysisError" in ai_agent_js
+    assert "function aiAgentImageTransportError" in ai_agent_js
+    assert "圖片分析請求傳輸失敗" in ai_agent_js
     assert "function aiAgentReadonlyIntent" in ai_agent_js
     assert "aiAgentReadonlyIntent(prompt)" in ai_agent_js
     assert "describe.*image" in ai_agent_js
