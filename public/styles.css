@@ -2131,6 +2131,50 @@
       line-height: 1.5;
     }
 
+    .ai-agent-image-results {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: .55rem;
+      margin-top: .7rem;
+      max-width: min(680px, 100%);
+    }
+
+    .ai-agent-image-result {
+      display: flex;
+      flex-direction: column;
+      gap: .35rem;
+      color: var(--text);
+      text-decoration: none;
+      border: 1px solid rgba(255,255,255,.12);
+      border-radius: 8px;
+      background: rgba(0,0,0,.18);
+      padding: .4rem;
+      min-width: 0;
+    }
+
+    .ai-agent-image-result img {
+      width: 100%;
+      aspect-ratio: 1 / 1;
+      object-fit: cover;
+      border-radius: 6px;
+      background: rgba(0,0,0,.25);
+      display: block;
+    }
+
+    .ai-agent-image-result span {
+      font-size: .78rem;
+      color: var(--muted);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .ai-agent-image-result.loading {
+      justify-content: center;
+      min-height: 96px;
+      border-style: dashed;
+    }
+
     .ai-agent-composer textarea {
       resize: vertical;
       min-height: 130px;

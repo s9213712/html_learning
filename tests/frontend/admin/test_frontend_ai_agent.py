@@ -46,7 +46,7 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert 'id="ai-agent-comfyui-vae"' in html
     assert 'id="ai-agent-comfyui-generate-btn"' in html
     assert 'id="s-module-ai-agent-min-role"' in html
-    assert "/js/37-ai-agent.js?v=20260612-ai-agent-negative-alias" in html
+    assert "/js/37-ai-agent.js?v=20260612-ai-agent-image-preview" in html
     assert "/js/90-bootstrap.js?v=20260611-ai-agent-comfyui-write-tool" in html
 
     assert '"ai-agent": "feature_ai_agent_enabled"' in core_js
@@ -104,6 +104,10 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert "function aiAgentWatchComfyuiJob" in ai_agent_js
     assert "function aiAgentPollComfyuiJob" in ai_agent_js
     assert "function aiAgentComfyuiResultSummary" in ai_agent_js
+    assert "function aiAgentComfyuiCompletionMessage" in ai_agent_js
+    assert "function aiAgentHydrateComfyuiMessageImages" in ai_agent_js
+    assert "function aiAgentRenderMessageImages" in ai_agent_js
+    assert "comfyui/image-preview" in ai_agent_js
     assert "接下來要我怎麼處理？" in ai_agent_js
     assert "修改參數重跑" in ai_agent_js
     assert "儲存或加入收藏" in ai_agent_js
@@ -131,6 +135,8 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
 
     assert ".ai-agent-layout" in css
     assert ".ai-agent-thread" in css
+    assert ".ai-agent-image-results" in css
+    assert ".ai-agent-image-result img" in css
     assert ".ai-agent-tool-panel" in css
     assert "@media (max-width: 640px)" in css
 

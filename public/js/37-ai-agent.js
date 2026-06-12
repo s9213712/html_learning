@@ -16,6 +16,7 @@ const AI_AGENT_STATE = {
   accountScope: "",
   comfyuiWatchJobs: {},
   lastComfyuiJob: null,
+  comfyuiPreviewLoads: {},
 };
 
 const AI_AGENT_OPERATION_MODE_LABELS = {
@@ -40,7 +41,18 @@ function aiAgentPersistConversation(scope = AI_AGENT_STATE.accountScope) {
   try {
     localStorage.setItem(aiAgentConversationStorageKey(scope), JSON.stringify({
       sessionId: AI_AGENT_STATE.sessionId || "",
-      messages: AI_AGENT_STATE.messages.slice(-80),
+      messages: AI_AGENT_STATE.messages.slice(-80).map((message) => ({
+        role: message.role,
+        content: String(message.content || "").slice(0, 20000),
+        images: Array.isArray(message.images)
+          ? message.images.slice(0, 4).map((image) => ({
+            image_ref: image?.image_ref || null,
+            prompt_id: String(image?.prompt_id || "").slice(0, 160),
+            filename: String(image?.filename || "").slice(0, 260),
+            mime_type: String(image?.mime_type || "").slice(0, 80),
+          })).filter((image) => image.image_ref && image.filename)
+          : [],
+      })),
       updatedAt: Date.now(),
     }));
   } catch (err) {
@@ -64,6 +76,14 @@ function aiAgentLoadConversation(scope) {
       .map((message) => ({
         role: message.role,
         content: String(message.content || "").slice(0, 20000),
+        images: Array.isArray(message.images)
+          ? message.images.slice(0, 4).map((image) => ({
+            image_ref: image?.image_ref || null,
+            prompt_id: String(image?.prompt_id || "").slice(0, 160),
+            filename: String(image?.filename || "").slice(0, 260),
+            mime_type: String(image?.mime_type || "").slice(0, 80),
+          })).filter((image) => image.image_ref && image.filename)
+          : [],
       }));
     AI_AGENT_STATE.sessionId = String(parsed?.sessionId || "").slice(0, 120);
   } catch (err) {
@@ -82,6 +102,7 @@ function aiAgentResetScopeState() {
   if (!previousScope || previousScope !== nextScope) {
     aiAgentLoadConversation(nextScope);
     renderAiAgentThread();
+    aiAgentHydratePersistedComfyuiImages();
   }
 }
 
@@ -575,6 +596,82 @@ function aiAgentComfyuiResultSummary(job = {}) {
   return lines.join("\n");
 }
 
+function aiAgentComfyuiImagesFromJob(job = {}) {
+  const result = job.result || {};
+  const rawImages = Array.isArray(result.images) ? result.images : (result.image ? [result.image] : []);
+  return rawImages
+    .map((item) => {
+      const imageRef = item?.image_ref || item?.file_ref || null;
+      const filename = imageRef?.filename || item?.filename || "";
+      if (!imageRef || !filename) return null;
+      return {
+        image_ref: imageRef,
+        prompt_id: item?.prompt_id || result?.image?.prompt_id || job?.progress?.prompt_id || "",
+        filename,
+        mime_type: item?.mime_type || "image/png",
+      };
+    })
+    .filter(Boolean)
+    .slice(0, 4);
+}
+
+function aiAgentComfyuiCompletionMessage(job = {}) {
+  return {
+    role: "assistant",
+    content: aiAgentComfyuiResultSummary(job),
+    images: aiAgentComfyuiImagesFromJob(job),
+  };
+}
+
+function aiAgentComfyuiImageKey(image = {}) {
+  const ref = image?.image_ref || {};
+  return [ref.type || "", ref.subfolder || "", ref.filename || "", image.prompt_id || ""].join("|");
+}
+
+async function aiAgentFetchComfyuiPreview(image = {}) {
+  const res = await apiFetch(`${API}/comfyui/image-preview`, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ image_ref: image.image_ref }),
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok || !json.ok) {
+    throw new Error(json.msg || `HTTP ${res.status}`);
+  }
+  return json.image || {};
+}
+
+async function aiAgentHydrateComfyuiMessageImages(message) {
+  const images = Array.isArray(message?.images) ? message.images : [];
+  const pending = images.filter((image) => image?.image_ref && !image.data_url && !image.error);
+  if (!pending.length) return;
+  await Promise.all(pending.map(async (image) => {
+    const key = aiAgentComfyuiImageKey(image);
+    if (AI_AGENT_STATE.comfyuiPreviewLoads[key]) return;
+    AI_AGENT_STATE.comfyuiPreviewLoads[key] = true;
+    try {
+      const preview = await aiAgentFetchComfyuiPreview(image);
+      image.data_url = preview.data_url || "";
+      image.mime_type = preview.mime_type || image.mime_type || "image/png";
+      image.size_bytes = preview.size_bytes || 0;
+    } catch (err) {
+      image.error = err?.message || String(err || "圖片預覽讀取失敗");
+    } finally {
+      delete AI_AGENT_STATE.comfyuiPreviewLoads[key];
+    }
+  }));
+  renderAiAgentThread();
+}
+
+function aiAgentHydratePersistedComfyuiImages() {
+  AI_AGENT_STATE.messages
+    .filter((message) => Array.isArray(message.images) && message.images.some((image) => image?.image_ref && !image.data_url && !image.error))
+    .forEach((message) => {
+      aiAgentHydrateComfyuiMessageImages(message).catch(() => undefined);
+    });
+}
+
 function aiAgentComfyuiRunningSummary(job = {}) {
   const progress = job.progress || {};
   const detail = progress.detail || progress.phase || "running";
@@ -627,10 +724,12 @@ async function aiAgentPollComfyuiJob(jobId) {
       return;
     }
     if (status === "completed") {
-      AI_AGENT_STATE.messages.push({ role: "assistant", content: aiAgentComfyuiResultSummary(job) });
+      const message = aiAgentComfyuiCompletionMessage(job);
+      AI_AGENT_STATE.messages.push(message);
       renderAiAgentThread();
       setAiAgentMessage("ComfyUI 產圖完成", "ok");
       delete AI_AGENT_STATE.comfyuiWatchJobs[jobId];
+      aiAgentHydrateComfyuiMessageImages(message).catch(() => undefined);
       await loadAiAgentReadOnly({ scope: "all", limit: 20, silent: true, force: true }).catch(() => undefined);
       return;
     }
@@ -699,12 +798,11 @@ async function aiAgentConfirmComfyuiJob(jobId) {
       return;
     }
     if (status === "completed") {
-      AI_AGENT_STATE.messages.push({
-        role: "assistant",
-        content: aiAgentComfyuiResultSummary(lastJob),
-      });
+      const message = aiAgentComfyuiCompletionMessage(lastJob);
+      AI_AGENT_STATE.messages.push(message);
       renderAiAgentThread();
       setAiAgentMessage("ComfyUI 產圖完成", "ok");
+      aiAgentHydrateComfyuiMessageImages(message).catch(() => undefined);
       return;
     }
     if (status === "running") {
@@ -738,14 +836,41 @@ function renderAiAgentThread() {
   host.innerHTML = AI_AGENT_STATE.messages.map((message) => {
     const role = message.role === "assistant" ? "assistant" : "user";
     const label = role === "assistant" ? "AI" : "你";
+    const imageHtml = aiAgentRenderMessageImages(message);
     return `
       <div class="ai-agent-message ${role}">
         <div class="ai-agent-message-role">${sanitize(label)}</div>
         <div class="ai-agent-message-body">${sanitize(message.content || "")}</div>
+        ${imageHtml}
       </div>
     `;
   }).join("");
   host.scrollTop = host.scrollHeight;
+}
+
+function aiAgentRenderMessageImages(message = {}) {
+  const images = Array.isArray(message.images) ? message.images : [];
+  if (!images.length) return "";
+  return `
+    <div class="ai-agent-image-results">
+      ${images.map((image, index) => {
+        const filename = image.filename || image?.image_ref?.filename || `output-${index + 1}.png`;
+        if (image.data_url) {
+          return `
+            <a class="ai-agent-image-result" href="${sanitize(image.data_url)}" download="${sanitize(filename)}" title="開啟或下載 ${sanitize(filename)}">
+              <img src="${sanitize(image.data_url)}" alt="${sanitize(filename)}" loading="lazy" />
+              <span>${sanitize(filename)}</span>
+            </a>
+          `;
+        }
+        return `
+          <div class="ai-agent-image-result loading">
+            <span>${sanitize(image.error ? `圖片預覽讀取失敗：${image.error}` : `圖片預覽載入中：${filename}`)}</span>
+          </div>
+        `;
+      }).join("")}
+    </div>
+  `;
 }
 
 function renderAiAgentStatus(json) {
@@ -1375,3 +1500,4 @@ document.addEventListener("hackme:account-context-changed", handleAiAgentAccount
 aiAgentResetScopeState();
 
 renderAiAgentThread();
+aiAgentHydratePersistedComfyuiImages();
