@@ -816,6 +816,56 @@ def register_ai_agent_routes(app, deps):
             if token and token not in {"model", "checkpoint", "ckpt", "safetensor", "safetensors"}
         ]
 
+    def _is_generic_sdxl_checkpoint_request(value):
+        tokens = _comfyui_model_query_tokens(value)
+        if not tokens:
+            return False
+        allowed = {"sdxl", "sd", "xl", "base", "1", "0", "10", "t2i", "txt2img", "text", "to", "image", "default"}
+        if not set(tokens).issubset(allowed):
+            return False
+        key = _comfyui_model_match_key(value)
+        return bool(
+            key in {
+                "sdxl",
+                "sdxlbase",
+                "sdxlbase1",
+                "sdxlbase10",
+                "sdxl10",
+                "sdxlt2i",
+                "sdxltxt2img",
+                "sdxltexttoimage",
+                "sdxldefault",
+            }
+            or key.startswith("sdxlbase")
+        )
+
+    def _preferred_comfyui_checkpoint_option(model_options):
+        options = [
+            str(option or "").strip()
+            for option in (model_options or [])
+            if str(option or "").strip()
+        ]
+        if not options:
+            return ""
+        preferred_terms = (
+            ("v777", 100),
+            ("jankutrainedchenkinnoobai", 90),
+            ("janku", 80),
+            ("noob", 70),
+            ("illustrious", 60),
+            ("ilxl", 55),
+            ("perfectionrealistic", 50),
+            ("sdxl", 40),
+            ("xl", 20),
+        )
+        scored = []
+        for index, option in enumerate(options):
+            key = _comfyui_model_match_key(option)
+            score = sum(weight for term, weight in preferred_terms if term in key)
+            scored.append((score, -index, option))
+        scored.sort(reverse=True)
+        return scored[0][2]
+
     def _resolve_comfyui_checkpoint_name(raw_name, model_options):
         requested = str(raw_name or "").strip()
         if not requested:
@@ -827,6 +877,10 @@ def register_ai_agent_routes(app, deps):
         ]
         if not options:
             return requested, "", []
+        if _is_generic_sdxl_checkpoint_request(requested):
+            preferred = _preferred_comfyui_checkpoint_option(options)
+            if preferred:
+                return preferred, "", []
         for option in options:
             if option == requested:
                 return option, "", []
@@ -930,8 +984,6 @@ def register_ai_agent_routes(app, deps):
             or next_body.get("checkpoint_name")
             or ""
         ).strip()
-        if not requested:
-            return next_body, ""
         status_code, models_payload = _dispatch_internal_api("GET", "/api/comfyui/models", None)
         model_options = []
         if 200 <= int(status_code or 500) < 400 and isinstance(models_payload, dict):
@@ -942,6 +994,13 @@ def register_ai_agent_routes(app, deps):
                 msg = str(models_payload.get("msg") or "").strip()
             suffix = f"：{msg}" if msg else ""
             return None, f"目前無法讀取 ComfyUI checkpoint 清單，已取消送出產圖{suffix}"
+        if not requested:
+            resolved = _preferred_comfyui_checkpoint_option(model_options)
+            if resolved:
+                next_body["model"] = resolved
+                next_body["checkpoint"] = resolved
+                next_body["checkpoint_name"] = resolved
+            return next_body, ""
         resolved, msg, _matches = _resolve_comfyui_checkpoint_name(requested, model_options)
         if msg:
             return None, msg

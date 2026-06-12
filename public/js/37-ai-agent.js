@@ -446,6 +446,7 @@ async function aiAgentAnalyzeImageForComfyui(userText) {
     "請只輸出 JSON，不要 Markdown，不要表格，不要操作教學。",
     "JSON 欄位：prompt, negative_prompt, width, height, steps, cfg_scale, checkpoint, vae, sampler, scheduler, official_workflow_id。",
     "如果使用者文字指定尺寸、模型、CFG、VAE 或 SDXL T2I，請保留那些指定。",
+    "checkpoint 只能填使用者明確提供的實際 checkpoint 名稱；如果只提到 SDXL、SDXL T2I 或泛稱，不要填 sdxl_base_1.0.ckpt，請省略 checkpoint。",
     `使用者需求：${userText || "參考圖片產生相似風格圖片"}`,
   ].join("\n");
   const started = performance.now();
@@ -487,6 +488,7 @@ async function aiAgentAnalyzeTextForComfyui(userText) {
     "JSON 欄位：prompt, negative_prompt, width, height, steps, cfg_scale, batch_size, seed, checkpoint, vae, sampler, scheduler, official_workflow_id。",
     "如果使用者提到 SDXL T2I、SDXL txt2img 或文字生圖，official_workflow_id 設為 origin_sdxl_txt2img。",
     "如果使用者指定模型、Checkpoint、VAE、尺寸、CFG、步數或張數，必須保留。",
+    "checkpoint 只能填使用者明確提供的實際 checkpoint 名稱；如果只提到 SDXL、SDXL T2I 或泛稱，不要填 sdxl_base_1.0.ckpt，請省略 checkpoint。",
     "prompt 欄位要是可直接送 ComfyUI 的正向提示詞，不要包含解釋文字。",
     `使用者需求：${userText}`,
   ].join("\n");

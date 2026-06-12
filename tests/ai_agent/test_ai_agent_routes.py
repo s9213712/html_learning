@@ -482,6 +482,97 @@ def test_ai_agent_comfyui_write_tool_resolves_natural_checkpoint_name(tmp_path):
     assert captured["checkpoint"] == "JANKUTrainedChenkinNoobai_v777.safetensors"
 
 
+def test_ai_agent_comfyui_write_tool_resolves_generic_sdxl_checkpoint(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "write",
+            "ai_agent_allowed_tools": "write_comfyui_generate",
+        },
+    )
+    captured = {}
+
+    @app.route("/api/comfyui/models", methods=["GET"])
+    def fake_comfyui_models():
+        return _json_resp({
+            "ok": True,
+            "models": [
+                "JANKUTrainedChenkinNoobai_v69.safetensors",
+                "JANKUTrainedChenkinNoobai_v777.safetensors",
+                "netayumeLuminaNetaLumina_v40.safetensors",
+                "perfectionRealisticILXL_60.safetensors",
+            ],
+        })
+
+    @app.route("/api/comfyui/generate", methods=["POST"])
+    def fake_comfyui_generate():
+        captured.update(request.get_json(silent=True) or {})
+        return _json_resp({"ok": True, "job": {"job_id": "job-generic-sdxl", "status": "queued"}})
+
+    response = app.test_client().post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_comfyui_generate",
+        "confirm": "EXECUTE",
+        "arguments": {
+            "prompt": "by ogipote, 2girls, bikini",
+            "checkpoint": "sdxl_base_1.0.ckpt",
+            "official_workflow_id": "origin_sdxl_txt2img",
+        },
+    })
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert captured["model"] == "JANKUTrainedChenkinNoobai_v777.safetensors"
+    assert captured["checkpoint"] == "JANKUTrainedChenkinNoobai_v777.safetensors"
+
+
+def test_ai_agent_comfyui_write_tool_defaults_missing_checkpoint(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "write",
+            "ai_agent_allowed_tools": "write_comfyui_generate",
+        },
+    )
+    captured = {}
+
+    @app.route("/api/comfyui/models", methods=["GET"])
+    def fake_comfyui_models():
+        return _json_resp({
+            "ok": True,
+            "models": [
+                "JANKUTrainedChenkinNoobai_v69.safetensors",
+                "JANKUTrainedChenkinNoobai_v777.safetensors",
+            ],
+        })
+
+    @app.route("/api/comfyui/generate", methods=["POST"])
+    def fake_comfyui_generate():
+        captured.update(request.get_json(silent=True) or {})
+        return _json_resp({"ok": True, "job": {"job_id": "job-default-model", "status": "queued"}})
+
+    response = app.test_client().post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_comfyui_generate",
+        "confirm": "EXECUTE",
+        "arguments": {
+            "prompt": "by ogipote, 2girls, bikini",
+            "official_workflow_id": "origin_sdxl_txt2img",
+        },
+    })
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert captured["model"] == "JANKUTrainedChenkinNoobai_v777.safetensors"
+    assert captured["checkpoint"] == "JANKUTrainedChenkinNoobai_v777.safetensors"
+
+
 def test_ai_agent_comfyui_write_tool_rejects_unknown_checkpoint_before_queue(tmp_path):
     db_path = tmp_path / "ai_agent_routes.db"
     _build_db(db_path)
