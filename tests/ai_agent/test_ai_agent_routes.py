@@ -915,6 +915,9 @@ def test_ai_agent_routes_smoke_with_fake_hermes_endpoints(tmp_path, monkeypatch)
     assert any(path.endswith("/chat/completions") for _, path, _ in recorded)
     chat_calls = [item for item in recorded if item[1].endswith("/chat/completions")]
     assert chat_calls and chat_calls[0][2]["messages"][0]["role"] == "system"
+    system_prompt = chat_calls[0][2]["messages"][0]["content"]
+    assert "不能在一般聊天中聲稱已呼叫" in system_prompt
+    assert "工具：check_generation_progress" in system_prompt
 
 
 def test_ai_agent_audit_scan_requires_super_admin(tmp_path, monkeypatch):

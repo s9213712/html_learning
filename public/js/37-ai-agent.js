@@ -423,7 +423,7 @@ function aiAgentRememberComfyuiSubmit(args = {}, job = {}) {
   }
 }
 
-function aiAgentPlannerContext() {
+function aiAgentPlannerContext(options = {}) {
   const submittedJobs = Object.values(AI_AGENT_STATE.comfyuiSubmittedJobs || {})
     .sort((a, b) => Number(b.submittedAt || 0) - Number(a.submittedAt || 0))
     .slice(0, 6)
@@ -438,7 +438,29 @@ function aiAgentPlannerContext() {
     role: message.role === "assistant" ? "assistant" : "user",
     content: String(message.content || "").slice(0, 1200),
   }));
+  const effectiveTools = Array.isArray(AI_AGENT_STATE.settings?.tools)
+    ? AI_AGENT_STATE.settings.tools.map((tool) => ({
+      name: tool.name || "",
+      label: tool.label || "",
+      description: tool.description || "",
+      data_scope: tool.data_scope || "",
+      write: !!tool.write,
+      available: aiAgentHasEffectiveTool(tool.name || ""),
+      can_execute_now: tool.name ? aiAgentCanRunWriteTool(tool.name) : false,
+      can_request_elevation: tool.name ? aiAgentCanRequestWriteElevation(tool.name) : false,
+    }))
+    : [];
   return {
+    input_mode: options.mode || "text",
+    has_image: !!options.hasImage,
+    actor: {
+      role: AI_AGENT_STATE.actor?.role || "anonymous",
+      username: AI_AGENT_STATE.actor?.username || "",
+    },
+    operation_mode: AI_AGENT_STATE.settings?.operation_mode || "assist",
+    operation_mode_policy: AI_AGENT_STATE.settings?.operation_mode_policy || {},
+    effective_tools: effectiveTools,
+    writable_tools: effectiveTools.filter((tool) => tool.write && (tool.can_execute_now || tool.can_request_elevation)).map((tool) => tool.name),
     last_comfyui_args: aiAgentCurrentComfyuiArgs() || null,
     last_comfyui_job: AI_AGENT_STATE.lastComfyuiJob ? {
       job_id: AI_AGENT_STATE.lastComfyuiJob.job_id || "",
@@ -453,30 +475,28 @@ function aiAgentPlannerContext() {
 function aiAgentShouldUseToolPlanner(text) {
   const raw = aiAgentNormalizeUserText(text).trim();
   if (!raw) return false;
-  if (aiAgentWantsComfyuiGeneration(raw) || aiAgentReadonlyIntent(raw) || aiAgentWriteIntent(raw)) return true;
-  if (!aiAgentCurrentComfyuiArgs() && !AI_AGENT_STATE.lastComfyuiJob) return false;
-  return /(再來|再一張|再跑|重跑|試試|修一下|改一下|調一下|換一下|加上|加入|好了嗎|跑出來|圖呢|結果呢|存起來|收藏|發文|分享|post|again|rerun|try|fix|tweak|adjust|done|result)/i.test(raw);
+  return true;
 }
 
-async function aiAgentPlanToolAction(userText) {
+async function aiAgentPlanToolAction(userText, options = {}) {
   if (!aiAgentShouldUseToolPlanner(userText)) return null;
   const selectedModel = ($("ai-agent-model")?.value || "").trim() || AI_AGENT_STATE.settings?.model || "";
   const selectableModels = aiAgentSelectableModels();
   if (selectableModels.length && selectedModel && !selectableModels.includes(selectedModel)) return null;
-  const context = aiAgentPlannerContext();
+  const context = aiAgentPlannerContext(options);
   const planningPrompt = [
-    "你是網站 AI Agent 的工具路由器。請理解使用者真正想做什麼，並只輸出 JSON。",
+    "你是網站 AI Agent 的工具路由器。你的任務是理解使用者意圖、檢查可用工具與權限，然後只輸出 JSON 決策。",
+    "不要用關鍵字索引決策；請根據完整上下文、使用者目的、input_mode、has_image、effective_tools、operation_mode_policy 判斷。",
     "可用 action：chat、clarify、readonly、comfyui_status、comfyui_generate、comfyui_rerun、community_post_draft。",
     "JSON 欄位：action, confidence, reason, question, readonly_scope, merge_strategy, args。",
     "args 可含：prompt, negative_prompt, width, height, steps, cfg_scale, batch_size, seed, checkpoint, vae, sampler, scheduler, official_workflow_id。",
-    "規則：",
-    "1. 使用者說「再來、再一張、再跑、試試」且有 last_comfyui_args 時，action=comfyui_rerun，args 可空，merge_strategy=merge_with_last。",
-    "2. 使用者說「修一下、調一下、改一下」但沒有說要改什麼，action=clarify，question 要直接追問要改哪個參數或畫面問題，不要自行猜。",
-    "3. 使用者要求加負面詞、改 CFG、步數、尺寸、模型或 VAE 時，action=comfyui_rerun，args 只放明確修改項；負面詞若是「加上/加入」則 merge_strategy=append_negative。",
-    "4. 使用者問「跑出來了嗎、好了嗎、圖呢、結果呢」時，action=comfyui_status，readonly_scope=comfyui。",
-    "5. 使用者要求新生圖且有主題或提示詞，action=comfyui_generate；若只說生圖但沒有主題，action=clarify。",
-    "6. checkpoint 只能填使用者明確提供的實際 checkpoint 名稱；如果只提 SDXL/SDXL T2I，省略 checkpoint 並設 official_workflow_id=origin_sdxl_txt2img。",
-    "7. 不要產生教學文字，不要叫使用者自己去 ComfyUI 操作；若 action 需要工具，由前端執行。",
+    "工具語意：readonly=讀取資源/下載/任務/審計/會員等唯讀資料；comfyui_status=讀取 ComfyUI 生圖進度；comfyui_generate=建立新的 ComfyUI 生圖任務；comfyui_rerun=沿用上一筆生圖參數並套用使用者修改；community_post_draft=只產生發文草稿，不直接發布。",
+    "若使用者目的需要工具，但 effective_tools 或權限不足，仍可輸出該 action；前端會處理提權、拒絕或反問。",
+    "若使用者目的不明或缺少必要資料，action=clarify 並用 question 提出一個具體反問。",
+    "若使用者以短句詢問某件事是否開始、完成、跑出結果或目前進度，請先依 recent_messages 與 submitted_comfyui_jobs 判斷目標；若仍不確定，action=readonly 並 readonly_scope=all，讓前端回報真實可見任務狀態。",
+    "若 input_mode=image，請判斷使用者是要圖片問答、圖片分析產 prompt，還是分析後執行生圖；只有後者輸出 comfyui_generate。",
+    "checkpoint 只能填使用者明確提供的實際 checkpoint 名稱；泛稱模型請省略 checkpoint，必要時用 official_workflow_id。",
+    "不要產生教學文字，不要宣稱已送出、正在查詢或正在執行；若 action 需要工具，由前端執行後回報實際結果。",
     `context=${JSON.stringify(context)}`,
     `user=${userText}`,
   ].join("\n");
@@ -580,7 +600,7 @@ async function aiAgentRunReadonlyQuery(intent, userText, input) {
   }
 }
 
-async function aiAgentExecuteToolPlan(plan, userText, input) {
+async function aiAgentExecuteToolPlan(plan, userText, input, options = {}) {
   const action = String(plan?.action || "").trim().toLowerCase();
   const confidence = Number(plan?.confidence ?? 0.75);
   if (!action || action === "chat" || confidence < 0.45) return false;
@@ -602,13 +622,17 @@ async function aiAgentExecuteToolPlan(plan, userText, input) {
   if (action === "comfyui_generate" || action === "comfyui_rerun") {
     let args = null;
     try {
-      args = action === "comfyui_generate"
-        ? aiAgentPlannerArgs(plan, userText)
-        : aiAgentPlannerRerunArgs(plan, userText);
+      if (action === "comfyui_generate" && options.hasImage) {
+        args = null;
+      } else {
+        args = action === "comfyui_generate"
+          ? aiAgentPlannerArgs(plan, userText)
+          : aiAgentPlannerRerunArgs(plan, userText);
+      }
     } catch (err) {
       args = null;
     }
-    if (!args?.prompt) {
+    if (!options.hasImage && !args?.prompt) {
       AI_AGENT_STATE.messages.push({ role: "user", content: userText });
       AI_AGENT_STATE.messages.push({ role: "assistant", content: plan.question || "我需要知道要畫什麼，或要基於哪一筆生圖重跑。" });
       renderAiAgentThread();
@@ -616,14 +640,34 @@ async function aiAgentExecuteToolPlan(plan, userText, input) {
       setAiAgentMessage("需要補充生圖資訊", "info");
       return true;
     }
-    AI_AGENT_STATE.messages.push({ role: "user", content: userText });
-    AI_AGENT_STATE.messages.push({
-      role: "assistant",
-      content: `${action === "comfyui_rerun" ? "我理解為修改上一筆參數後重跑。" : "我理解為直接執行生圖。"}\n提示詞：${args.prompt}\n負面詞：${args.negative_prompt || "-"}\n規劃耗時：${plan.elapsedMs || 0} ms`,
-    });
+    AI_AGENT_STATE.messages.push({ role: "user", content: options.hasImage ? `${userText}\n[已附加圖片]` : userText });
     renderAiAgentThread();
-    aiAgentFillComfyuiToolForm(args);
     if (input) input.value = "";
+    if (options.hasImage && action === "comfyui_generate") {
+      setAiAgentMessage("圖片分析與生圖參數生成中...", "info");
+      try {
+        const analyzed = await aiAgentAnalyzeImageForComfyui(userText);
+        args = analyzed.args;
+        aiAgentFillComfyuiToolForm(args);
+        AI_AGENT_STATE.messages.push({
+          role: "assistant",
+          content: `圖片分析完成，將依分析結果執行生圖。\n提示詞：${args.prompt}\n負面詞：${args.negative_prompt || "-"}\n規劃耗時：${plan.elapsedMs || 0} ms；圖片分析耗時：${analyzed.elapsedMs} ms`,
+        });
+        renderAiAgentThread();
+      } catch (err) {
+        AI_AGENT_STATE.messages.push({ role: "assistant", content: `圖片分析失敗，未送出生圖：${err?.message || err}` });
+        renderAiAgentThread();
+        setAiAgentMessage(`圖片分析失敗：${err?.message || err}`, "err");
+        return true;
+      }
+    } else {
+      AI_AGENT_STATE.messages.push({
+        role: "assistant",
+        content: `${action === "comfyui_rerun" ? "我理解為修改上一筆參數後重跑。" : "我理解為直接執行生圖。"}\n提示詞：${args.prompt}\n負面詞：${args.negative_prompt || "-"}\n規劃耗時：${plan.elapsedMs || 0} ms`,
+      });
+      renderAiAgentThread();
+      aiAgentFillComfyuiToolForm(args);
+    }
     await runAiAgentComfyuiGenerate(args);
     return true;
   }
@@ -1607,9 +1651,9 @@ function aiAgentReadonlyIntent(prompt) {
   const text = String(prompt || "").toLowerCase();
   if (!text) return null;
   const asksStatus = /(查|看|顯示|確認|狀態|status|progress|進度|摘要|目前)/i.test(text);
-  const asksLatestRun = /(跑出來了嗎|好了嗎|完成了嗎|產完了嗎|生完了嗎|有結果了嗎|結果呢|圖呢|出圖了嗎|done yet|finished yet)/i.test(text);
+  const asksLatestRun = /(開始了嗎|有開始嗎|跑了嗎|跑出來了嗎|好了嗎|完成了嗎|產完了嗎|生完了嗎|有結果了嗎|結果呢|圖呢|出圖了嗎|done yet|started yet|finished yet)/i.test(text);
   if (!asksStatus && !asksLatestRun) return null;
-  if (asksLatestRun && (AI_AGENT_STATE.lastComfyuiJob || Object.keys(AI_AGENT_STATE.comfyuiSubmittedJobs || {}).length)) {
+  if (asksLatestRun) {
     return { scope: "comfyui", label: "ComfyUI 產圖進度" };
   }
   if (/(產圖|生圖|comfyui|generation|queue|任務)/i.test(text) && /(進度|狀態|queue|排隊|running|pending|完成|失敗)/i.test(text)) {
@@ -1922,170 +1966,33 @@ async function sendAiAgentMessage() {
     setAiAgentMessage("請選擇圖片", "err");
     return;
   }
-  if (mode === "image" && AI_AGENT_STATE.imageDataUrl && aiAgentWantsComfyuiGeneration(prompt)) {
+  const plannerText = prompt || (mode === "image" ? "請分析這張圖片" : "");
+  if (aiAgentShouldUseToolPlanner(plannerText)) {
     if (!AI_AGENT_STATE.loaded && typeof loadAiAgentStatus === "function") {
       await loadAiAgentStatus({ force: true }).catch(() => undefined);
     }
-    const userText = prompt || "參考圖片生圖";
-    AI_AGENT_STATE.messages.push({ role: "user", content: `${userText}\n[已附加圖片]` });
-    renderAiAgentThread();
-    if (input) input.value = "";
-    AI_AGENT_STATE.sending = true;
-    const sendBtn = $("ai-agent-send-btn");
-    if (sendBtn) sendBtn.disabled = true;
-    setAiAgentMessage("圖片分析與提示詞生成中...", "info");
-    try {
-      const analyzed = await aiAgentAnalyzeImageForComfyui(userText);
-      aiAgentFillComfyuiToolForm(analyzed.args);
-      AI_AGENT_STATE.messages.push({
-        role: "assistant",
-        content: `圖片分析完成（${analyzed.elapsedMs} ms）。\n產生提示詞：${analyzed.args.prompt}`,
-      });
-      renderAiAgentThread();
-      await runAiAgentComfyuiGenerate(analyzed.args);
-    } catch (err) {
-      AI_AGENT_STATE.messages.push({ role: "assistant", content: `圖片分析失敗，未送出生圖：${err?.message || err}` });
-      renderAiAgentThread();
-      setAiAgentMessage(`圖片分析失敗：${err?.message || err}`, "err");
-    } finally {
-      AI_AGENT_STATE.sending = false;
-      if (sendBtn) sendBtn.disabled = false;
-    }
-    return;
-  }
-  if (mode === "text" && aiAgentShouldUseToolPlanner(prompt)) {
     const sendBtn = $("ai-agent-send-btn");
     AI_AGENT_STATE.sending = true;
     if (sendBtn) sendBtn.disabled = true;
     setAiAgentMessage("理解需求與規劃工具中...", "info");
     let plan = null;
     try {
-      plan = await aiAgentPlanToolAction(prompt);
+      plan = await aiAgentPlanToolAction(plannerText, {
+        mode,
+        hasImage: mode === "image" && !!AI_AGENT_STATE.imageDataUrl,
+      });
     } catch (err) {
       plan = null;
     } finally {
       AI_AGENT_STATE.sending = false;
       if (sendBtn) sendBtn.disabled = false;
     }
-    if (plan && await aiAgentExecuteToolPlan(plan, prompt, input)) {
+    if (plan && await aiAgentExecuteToolPlan(plan, plannerText, input, {
+      mode,
+      hasImage: mode === "image" && !!AI_AGENT_STATE.imageDataUrl,
+    })) {
       return;
     }
-  }
-  const directComfyuiArgs = mode === "text" ? aiAgentParseComfyuiGenerateRequest(prompt) : null;
-  const rerunComfyuiArgs = mode === "text" ? aiAgentParseComfyuiRerunRequest(prompt) : null;
-  if (rerunComfyuiArgs) {
-    if (!AI_AGENT_STATE.loaded && typeof loadAiAgentStatus === "function") {
-      await loadAiAgentStatus({ force: true }).catch(() => undefined);
-    }
-    const userText = prompt;
-    AI_AGENT_STATE.messages.push({ role: "user", content: userText });
-    AI_AGENT_STATE.messages.push({
-      role: "assistant",
-      content: `已套用上一筆生圖參數並準備重跑。\n提示詞：${rerunComfyuiArgs.prompt}\n負面詞：${rerunComfyuiArgs.negative_prompt || "-"}`,
-    });
-    renderAiAgentThread();
-    aiAgentFillComfyuiToolForm(rerunComfyuiArgs);
-    if (input) input.value = "";
-    await runAiAgentComfyuiGenerate(rerunComfyuiArgs);
-    return;
-  }
-  if (mode === "text" && aiAgentWantsComfyuiGeneration(prompt) && !directComfyuiArgs && !aiAgentComfyuiTextHasSubject(prompt)) {
-    const userText = prompt;
-    AI_AGENT_STATE.messages.push({ role: "user", content: userText });
-    AI_AGENT_STATE.messages.push({ role: "assistant", content: aiAgentComfyuiClarificationMessage() });
-    renderAiAgentThread();
-    if (input) input.value = "";
-    setAiAgentMessage("需要補充生圖提示詞後才能執行", "info");
-    return;
-  }
-  if (directComfyuiArgs) {
-    if (!AI_AGENT_STATE.loaded && typeof loadAiAgentStatus === "function") {
-      await loadAiAgentStatus({ force: true }).catch(() => undefined);
-    }
-    const userText = prompt;
-    AI_AGENT_STATE.messages.push({ role: "user", content: userText });
-    renderAiAgentThread();
-    aiAgentFillComfyuiToolForm(directComfyuiArgs);
-    if (input) input.value = "";
-    await runAiAgentComfyuiGenerate(directComfyuiArgs);
-    return;
-  }
-  if (mode === "text" && aiAgentWantsComfyuiGeneration(prompt)) {
-    if (!AI_AGENT_STATE.loaded && typeof loadAiAgentStatus === "function") {
-      await loadAiAgentStatus({ force: true }).catch(() => undefined);
-    }
-    const userText = prompt;
-    AI_AGENT_STATE.messages.push({ role: "user", content: userText });
-    renderAiAgentThread();
-    if (input) input.value = "";
-    AI_AGENT_STATE.sending = true;
-    const sendBtn = $("ai-agent-send-btn");
-    if (sendBtn) sendBtn.disabled = true;
-    setAiAgentMessage("生圖需求解析中...", "info");
-    try {
-      const analyzed = await aiAgentAnalyzeTextForComfyui(userText);
-      aiAgentFillComfyuiToolForm(analyzed.args);
-      AI_AGENT_STATE.messages.push({
-        role: "assistant",
-        content: `生圖需求解析完成（${analyzed.elapsedMs} ms）。\n產生提示詞：${analyzed.args.prompt}`,
-      });
-      renderAiAgentThread();
-      await runAiAgentComfyuiGenerate(analyzed.args);
-    } catch (err) {
-      AI_AGENT_STATE.messages.push({ role: "assistant", content: `生圖需求解析失敗，未送出生圖：${err?.message || err}` });
-      renderAiAgentThread();
-      setAiAgentMessage(`生圖需求解析失敗：${err?.message || err}`, "err");
-    } finally {
-      AI_AGENT_STATE.sending = false;
-      if (sendBtn) sendBtn.disabled = false;
-    }
-    return;
-  }
-  const readonlyIntent = mode === "text" ? aiAgentReadonlyIntent(prompt) : null;
-  if (readonlyIntent) {
-    AI_AGENT_STATE.sending = true;
-    const sendBtn = $("ai-agent-send-btn");
-    if (sendBtn) sendBtn.disabled = true;
-    const userText = prompt;
-    AI_AGENT_STATE.messages.push({ role: "user", content: userText });
-    renderAiAgentThread();
-    if (input) input.value = "";
-    setAiAgentMessage(`${readonlyIntent.label}讀取中...`, "info");
-    try {
-      const res = await apiFetch(`${API}/ai-agent/readonly?scope=${encodeURIComponent(readonlyIntent.scope)}&limit=20`, {
-        credentials: "same-origin",
-      });
-      const json = await res.json().catch(() => ({}));
-      if (!res.ok || !json.ok) {
-        throw new Error(json.msg || `唯讀查詢失敗（HTTP ${res.status}）`);
-      }
-      renderAiAgentReadOnly(json);
-      aiAgentResumeComfyuiWatchJobs(json);
-      AI_AGENT_STATE.messages.push({ role: "assistant", content: aiAgentReadonlySummary(json, readonlyIntent) });
-      renderAiAgentThread();
-      setAiAgentMessage("已完成唯讀查詢", "ok");
-    } catch (err) {
-      AI_AGENT_STATE.messages.push({ role: "assistant", content: `唯讀查詢失敗：${err?.message || err}` });
-      renderAiAgentThread();
-      setAiAgentMessage(`唯讀查詢失敗：${err?.message || err}`, "err");
-    } finally {
-      AI_AGENT_STATE.sending = false;
-      if (sendBtn) sendBtn.disabled = false;
-    }
-    return;
-  }
-  const writeIntent = mode === "text" ? aiAgentWriteIntent(prompt) : null;
-  if (writeIntent) {
-    if (!AI_AGENT_STATE.loaded && typeof loadAiAgentStatus === "function") {
-      await loadAiAgentStatus({ force: true }).catch(() => undefined);
-    }
-    const userText = prompt;
-    AI_AGENT_STATE.messages.push({ role: "user", content: userText });
-    AI_AGENT_STATE.messages.push({ role: "assistant", content: aiAgentWriteIntentFollowup(writeIntent) });
-    renderAiAgentThread();
-    if (input) input.value = "";
-    setAiAgentMessage("需要補充資料後才能執行寫入", "info");
-    return;
   }
   AI_AGENT_STATE.sending = true;
   const sendBtn = $("ai-agent-send-btn");
@@ -2099,7 +2006,7 @@ async function sendAiAgentMessage() {
     setAiAgentMessage("請從模型選單選擇可用模型。", "err");
     return;
   }
-  const userText = prompt || "[圖片]";
+  const userText = prompt || (mode === "image" ? "請分析這張圖片" : "[圖片]");
   AI_AGENT_STATE.messages.push({ role: "user", content: mode === "image" && AI_AGENT_STATE.imageDataUrl ? `${userText}\n[已附加圖片]` : userText });
   renderAiAgentThread();
   try {
@@ -2107,7 +2014,7 @@ async function sendAiAgentMessage() {
       session_id: aiAgentEnsureSessionId(),
       model: selectedModel,
       mode,
-      messages: aiAgentBuildMessages(prompt, mode),
+      messages: aiAgentBuildMessages(userText, mode),
       image_data_url: "",
     };
     const raw = await apiFetch(API + "/ai-agent/chat", {

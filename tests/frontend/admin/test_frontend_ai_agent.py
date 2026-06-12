@@ -46,7 +46,7 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert 'id="ai-agent-comfyui-vae"' in html
     assert 'id="ai-agent-comfyui-generate-btn"' in html
     assert 'id="s-module-ai-agent-min-role"' in html
-    assert "/js/37-ai-agent.js?v=20260613-ai-agent-tool-planner" in html
+    assert "/js/37-ai-agent.js?v=20260613-ai-agent-capability-planner-v2" in html
     assert "/js/90-bootstrap.js?v=20260611-ai-agent-comfyui-write-tool" in html
 
     assert '"ai-agent": "feature_ai_agent_enabled"' in core_js
@@ -81,8 +81,8 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert "負面詞|反向提示詞|反向詞" in ai_agent_js
     assert "function aiAgentLooksLikeComfyuiPromptLine" in ai_agent_js
     assert "function aiAgentLooksLikeComfyuiModelLine" in ai_agent_js
-    assert "aiAgentParseComfyuiGenerateRequest(prompt)" in ai_agent_js
-    assert "aiAgentFillComfyuiToolForm(directComfyuiArgs)" in ai_agent_js
+    assert "aiAgentPlanToolAction(plannerText" in ai_agent_js
+    assert "aiAgentExecuteToolPlan(plan, plannerText" in ai_agent_js
     assert "function aiAgentAnalyzeImageForComfyui" in ai_agent_js
     assert "function aiAgentAnalyzeTextForComfyui" in ai_agent_js
     assert "function aiAgentComfyuiTextHasSubject" in ai_agent_js
@@ -92,7 +92,6 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert "function aiAgentImageTransportError" in ai_agent_js
     assert "圖片分析請求傳輸失敗" in ai_agent_js
     assert "function aiAgentReadonlyIntent" in ai_agent_js
-    assert "aiAgentReadonlyIntent(prompt)" in ai_agent_js
     assert "describe.*image" in ai_agent_js
     assert "參考.*圖|照.*圖" not in ai_agent_js
     assert 'scope: "comfyui"' in ai_agent_js
@@ -102,8 +101,7 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert "const selectedModel = aiAgentVisionModel();" in ai_agent_js
     assert "qwen3-vl" in ai_agent_js
     assert "圖片分析後端目前不可用" in ai_agent_js
-    assert "圖片分析與提示詞生成中" in ai_agent_js
-    assert "生圖需求解析中" in ai_agent_js
+    assert "圖片分析與生圖參數生成中" in ai_agent_js
     assert "ComfyUI 產圖送出失敗（HTTP ${res.status}）" in ai_agent_js
     assert "function aiAgentWatchComfyuiJob" in ai_agent_js
     assert "function aiAgentPollComfyuiJob" in ai_agent_js
@@ -115,9 +113,18 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert "function aiAgentRememberComfyuiSubmit" in ai_agent_js
     assert "function aiAgentPlanToolAction" in ai_agent_js
     assert "function aiAgentExecuteToolPlan" in ai_agent_js
-    assert "action=comfyui_rerun" in ai_agent_js
+    assert "effective_tools" in ai_agent_js
+    assert "writable_tools" in ai_agent_js
+    assert "不要用關鍵字索引決策" in ai_agent_js
+    assert "input_mode=image" in ai_agent_js
+    assert "圖片分析與生圖參數生成中" in ai_agent_js
+    assert "comfyui_rerun=沿用上一筆生圖參數" in ai_agent_js
     assert "理解需求與規劃工具中" in ai_agent_js
     assert "AI_AGENT_STATE.comfyuiSubmittedJobs" in ai_agent_js
+    assert "directComfyuiArgs" not in ai_agent_js
+    assert "rerunComfyuiArgs" not in ai_agent_js
+    assert "aiAgentHasPendingComfyuiClarification" not in ai_agent_js
+    assert "aiAgentLooksLikeImageDescription" not in ai_agent_js
     assert "跑出來了嗎" in ai_agent_js
     assert "再來" in ai_agent_js
     assert "接回 ComfyUI 任務進度追蹤" in ai_agent_js
@@ -133,8 +140,7 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert "儲存或加入收藏" in ai_agent_js
     assert "發文分享" in ai_agent_js
     assert "await aiAgentAnalyzeImageForComfyui(userText)" in ai_agent_js
-    assert "await aiAgentAnalyzeTextForComfyui(userText)" in ai_agent_js
-    assert "await runAiAgentComfyuiGenerate(analyzed.args)" in ai_agent_js
+    assert "await runAiAgentComfyuiGenerate(args)" in ai_agent_js
     assert "aiAgentConversationStorageKey" in ai_agent_js
     assert 'API + "/ai-agent/conversation"' in ai_agent_js
     assert "localStorage.setItem" not in ai_agent_js

@@ -640,6 +640,9 @@ def _ai_agent_system_prompt(behavior, *, role="user", actor=None, allow_tool_run
         + "工具公告：\n"
         + "\n".join(tool_lines) + "\n"
         f"{tool_scope}\n"
+        "工具鐵則：你不能在一般聊天中聲稱已呼叫、正在呼叫或已完成任何工具/API。"
+        "禁止輸出「工具：check_generation_progress」、「送出產圖任務」、「執行寫入中」等假工具狀態。"
+        "若需要工具，請說明需要由前台工具流程處理或等待實際工具結果；只有系統/前端回傳工具結果後才能回報狀態。\n"
         + (f"未啟用任務提示：{', '.join(disabled_tasks)}\n" if disabled_tasks else "")
         + "回應時若使用者需求不在可執行任務範圍，請明確回應無法執行並引導到可用功能。\n"
     )
