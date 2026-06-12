@@ -309,6 +309,26 @@ function aiAgentWantsComfyuiGeneration(text) {
   return /生圖|產圖|生成圖片|生成一張|產生圖片|產生一張|畫圖|畫一張|做一張|comfyui|txt2img|t2i|sdxl|text\s*to\s*image/i.test(raw);
 }
 
+function aiAgentComfyuiTextHasSubject(text) {
+  const raw = aiAgentNormalizeUserText(text).trim();
+  if (!raw) return false;
+  const direct = aiAgentParseComfyuiGenerateRequest(raw);
+  if (direct?.prompt) return true;
+  const cleaned = raw
+    .replace(/(?:幫我|請|使用|用|生成|產生|生圖|產圖|生成圖片|生成一張|產生圖片|產生一張|畫圖|畫一張|做一張|comfyui|txt2img|t2i|sdxl|text\s*to\s*image)/gi, " ")
+    .replace(/(?:size|尺寸|解析度|cfg(?:[_\s-]?scale)?|steps?|步數|batch(?:[_\s-]?size)?|張數|數量|seed|種子|sampler|scheduler|vae|models?|模型|checkpoint|ckpt|負面提示詞|負面詞|negative prompt|negative|neg)\s*[:：]?\s*[^\n,，;；]*/gi, " ")
+    .replace(/\d{3,4}\s*[xX*×＊]\s*\d{3,4}/g, " ")
+    .replace(/[,\s，。；;：:、"'`“”]+/g, "");
+  return cleaned.length >= 2;
+}
+
+function aiAgentComfyuiClarificationMessage() {
+  return [
+    "我還不知道你要畫什麼，所以不會自行沿用前文、記憶或模型猜提示詞，也不會送出生圖。",
+    "請補充提示詞或主題，例如：提示詞、尺寸、模型、負面詞；只給「生圖」不足以執行。",
+  ].join("\n");
+}
+
 function aiAgentParseComfyuiOptionOverrides(text) {
   const raw = aiAgentNormalizeUserText(text);
   const args = {};
@@ -1592,6 +1612,15 @@ async function sendAiAgentMessage() {
     return;
   }
   const directComfyuiArgs = mode === "text" ? aiAgentParseComfyuiGenerateRequest(prompt) : null;
+  if (mode === "text" && aiAgentWantsComfyuiGeneration(prompt) && !directComfyuiArgs && !aiAgentComfyuiTextHasSubject(prompt)) {
+    const userText = prompt;
+    AI_AGENT_STATE.messages.push({ role: "user", content: userText });
+    AI_AGENT_STATE.messages.push({ role: "assistant", content: aiAgentComfyuiClarificationMessage() });
+    renderAiAgentThread();
+    if (input) input.value = "";
+    setAiAgentMessage("需要補充生圖提示詞後才能執行", "info");
+    return;
+  }
   if (directComfyuiArgs) {
     if (!AI_AGENT_STATE.loaded && typeof loadAiAgentStatus === "function") {
       await loadAiAgentStatus({ force: true }).catch(() => undefined);
