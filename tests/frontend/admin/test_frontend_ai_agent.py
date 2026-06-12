@@ -149,6 +149,9 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert ".ai-agent-thread" in css
     assert ".ai-agent-image-results" in css
     assert ".ai-agent-image-result img" in css
+    assert "grid-template-columns: repeat(auto-fit, minmax(116px, 156px));" in css
+    assert "max-height: 156px;" in css
+    assert "object-fit: contain;" in css
     assert ".ai-agent-tool-panel" in css
     assert "@media (max-width: 640px)" in css
 

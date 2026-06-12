@@ -2133,10 +2133,12 @@
 
     .ai-agent-image-results {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(116px, 156px));
       gap: .55rem;
       margin-top: .7rem;
-      max-width: min(680px, 100%);
+      max-width: 100%;
+      overflow-x: auto;
+      padding-bottom: .2rem;
     }
 
     .ai-agent-image-result {
@@ -2150,12 +2152,15 @@
       background: rgba(0,0,0,.18);
       padding: .4rem;
       min-width: 0;
+      max-width: 156px;
     }
 
     .ai-agent-image-result img {
       width: 100%;
+      height: auto;
+      max-height: 156px;
       aspect-ratio: 1 / 1;
-      object-fit: cover;
+      object-fit: contain;
       border-radius: 6px;
       background: rgba(0,0,0,.25);
       display: block;
