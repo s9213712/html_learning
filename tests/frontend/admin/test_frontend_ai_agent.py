@@ -15,15 +15,20 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     bootstrap_js = _read("public/js/90-bootstrap.js")
     ai_agent_js = _read("public/js/37-ai-agent.js")
     public_routes_py = _read("routes/public.py")
+    ai_agent_routes_py = _read("routes/ai_agent.py")
+    backpressure_py = _read("services/server/backpressure.py")
     css = _read("public/styles.css")
 
     assert 'id="tab-module-ai-agent" style="display:none;"' in html
     assert 'id="module-ai-agent"' in html
     assert 'id="ai-agent-thread"' in html
     assert 'id="ai-agent-image-file" accept="image/*"' in html
+    assert '<select id="ai-agent-model">' in html
+    assert '<input type="text" id="ai-agent-model"' not in html
     assert 'id="sec-settings-ai-agent"' in html
     assert 'id="s-ai-agent-api-base-url"' in html
     assert 'id="s-ai-agent-api-key"' in html
+    assert 'id="s-ai-agent-model"' in html
     assert 'id="s-ai-agent-operation-mode"' in html
     assert 'id="s-ai-agent-allowed-models"' in html
     assert 'id="s-ai-agent-allowed-tools"' in html
@@ -36,8 +41,13 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert 'id="ai-agent-effective-tools"' in html
     assert 'id="ai-agent-audit-overview"' in html
     assert 'id="ai-agent-audit-scan-btn"' in html
+    assert 'id="ai-agent-write-tools-panel" hidden aria-hidden="true" data-agent-internal-tool-panel="true"' in html
+    assert 'id="ai-agent-comfyui-prompt"' in html
+    assert 'id="ai-agent-comfyui-vae"' in html
+    assert 'id="ai-agent-comfyui-generate-btn"' in html
     assert 'id="s-module-ai-agent-min-role"' in html
-    assert "/js/37-ai-agent.js?v=20260609-ai-agent-debug-msg" in html
+    assert "/js/37-ai-agent.js?v=20260612-ai-agent-progress-updates-v2" in html
+    assert "/js/90-bootstrap.js?v=20260611-ai-agent-comfyui-write-tool" in html
 
     assert '"ai-agent": "feature_ai_agent_enabled"' in core_js
     assert "normalizeModuleSettingKey(moduleKey)" in core_js
@@ -48,6 +58,7 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert 'loadAiAgentStatus({ force: true })' in bootstrap_js
     assert 'loadAiAgentAuditStatus' in bootstrap_js
     assert 'runAiAgentAuditScan' in bootstrap_js
+    assert 'runAiAgentComfyuiGenerate' in bootstrap_js
 
     assert 'const canAccessAiAgent = !!currentUser && canAccessModule("ai-agent");' in admin_js
     assert 'modAiAgent.classList.toggle("active", normTab === "ai-agent")' in admin_js
@@ -62,14 +73,75 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert 'API + "/ai-agent/chat"' in ai_agent_js
     assert 'API + "/ai-agent/audit-status"' in ai_agent_js
     assert 'API + "/ai-agent/audit-scan"' in ai_agent_js
+    assert 'API + "/ai-agent/write-tools/execute"' in ai_agent_js
+    assert 'tool: "write_comfyui_generate"' in ai_agent_js
+    assert 'confirm: "EXECUTE"' in ai_agent_js
+    assert 'aiAgentCanRunWriteTool("write_comfyui_generate")' in ai_agent_js
+    assert "function aiAgentParseComfyuiGenerateRequest" in ai_agent_js
+    assert "負面詞|反向提示詞|反向詞" in ai_agent_js
+    assert "function aiAgentLooksLikeComfyuiPromptLine" in ai_agent_js
+    assert "function aiAgentLooksLikeComfyuiModelLine" in ai_agent_js
+    assert "aiAgentParseComfyuiGenerateRequest(prompt)" in ai_agent_js
+    assert "aiAgentFillComfyuiToolForm(directComfyuiArgs)" in ai_agent_js
+    assert "function aiAgentAnalyzeImageForComfyui" in ai_agent_js
+    assert "function aiAgentAnalyzeTextForComfyui" in ai_agent_js
+    assert "function aiAgentVisionModel" in ai_agent_js
+    assert "function aiAgentImageAnalysisError" in ai_agent_js
+    assert "function aiAgentReadonlyIntent" in ai_agent_js
+    assert "aiAgentReadonlyIntent(prompt)" in ai_agent_js
+    assert "describe.*image" in ai_agent_js
+    assert "參考.*圖|照.*圖" not in ai_agent_js
+    assert 'scope: "comfyui"' in ai_agent_js
+    assert 'scope: "remote_download"' in ai_agent_js
+    assert 'scope: "resources"' in ai_agent_js
+    assert 'scope: "attack_diag"' in ai_agent_js
+    assert "const selectedModel = aiAgentVisionModel();" in ai_agent_js
+    assert "qwen3-vl" in ai_agent_js
+    assert "圖片分析後端目前不可用" in ai_agent_js
+    assert "圖片分析與提示詞生成中" in ai_agent_js
+    assert "生圖需求解析中" in ai_agent_js
+    assert "ComfyUI 產圖送出失敗（HTTP ${res.status}）" in ai_agent_js
+    assert "function aiAgentWatchComfyuiJob" in ai_agent_js
+    assert "function aiAgentPollComfyuiJob" in ai_agent_js
+    assert "function aiAgentShouldNotifyComfyuiProgress" in ai_agent_js
+    assert "function aiAgentMarkComfyuiProgressNotified" in ai_agent_js
+    assert "ComfyUI 產圖進度更新" in ai_agent_js
+    assert "ComfyUI 任務仍在佇列中" in ai_agent_js
+    assert "function aiAgentComfyuiResultSummary" in ai_agent_js
+    assert "function aiAgentComfyuiCompletionMessage" in ai_agent_js
+    assert "function aiAgentHydrateComfyuiMessageImages" in ai_agent_js
+    assert "function aiAgentRenderMessageImages" in ai_agent_js
+    assert "comfyui/image-preview" in ai_agent_js
+    assert "接下來要我怎麼處理？" in ai_agent_js
+    assert "修改參數重跑" in ai_agent_js
+    assert "儲存或加入收藏" in ai_agent_js
+    assert "發文分享" in ai_agent_js
+    assert "await aiAgentAnalyzeImageForComfyui(userText)" in ai_agent_js
+    assert "await aiAgentAnalyzeTextForComfyui(userText)" in ai_agent_js
+    assert "await runAiAgentComfyuiGenerate(analyzed.args)" in ai_agent_js
+    assert "aiAgentConversationStorageKey" in ai_agent_js
+    assert "localStorage.setItem" in ai_agent_js
+    assert 'official_workflow_id = "origin_sdxl_txt2img"' in ai_agent_js
+    assert 'ai-agent-write-tools-panel' in ai_agent_js
+    assert 'panel.hidden = true;' in ai_agent_js
+    assert '對話解析後會直接送出' in ai_agent_js
+    assert "OpenAI-compatible" in ai_agent_js
+    assert "Hermes Agent" in ai_agent_js
+    assert "Hermes API 已連線" not in ai_agent_js
+    assert "AI Agent 後端已連線" not in ai_agent_js
     assert 'operation_mode_policy' in ai_agent_js
     assert 'safety_boundaries' in ai_agent_js
     assert 'ai-agent-effective-tools' in ai_agent_js
     assert 'image_url' in ai_agent_js
     assert 'hackme:account-context-changed' in ai_agent_js
+    assert 'environ_base={"hackme.internal_dispatch": "ai_agent_write_tool"}' in ai_agent_routes_py
+    assert 'request.environ.get("hackme.internal_dispatch") == "ai_agent_write_tool"' in backpressure_py
 
     assert ".ai-agent-layout" in css
     assert ".ai-agent-thread" in css
+    assert ".ai-agent-image-results" in css
+    assert ".ai-agent-image-result img" in css
+    assert ".ai-agent-tool-panel" in css
     assert "@media (max-width: 640px)" in css
 
 

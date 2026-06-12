@@ -2244,7 +2244,9 @@
               </div>
               <div class="field">
                 <label>模型</label>
-                <input type="text" id="ai-agent-model" placeholder="hermes-agent" autocomplete="off" />
+                <select id="ai-agent-model">
+                  <option value="">載入模型中</option>
+                </select>
               </div>
             </div>
             <div class="field">
@@ -2259,6 +2261,65 @@
             <div id="ai-agent-msg" class="msg"></div>
             <div class="edit-user-actions">
               <button class="btn btn-primary" id="ai-agent-send-btn" type="button">送出</button>
+            </div>
+          </div>
+          <div class="ai-agent-tool-panel" id="ai-agent-write-tools-panel" hidden aria-hidden="true" data-agent-internal-tool-panel="true">
+            <div class="drive-card-heading compact-heading">
+              <div>
+                <div class="drive-card-title">Root 工具執行</div>
+                <div class="drive-card-sub" id="ai-agent-write-tools-state">write-tool 狀態尚未讀取</div>
+              </div>
+            </div>
+            <div class="ai-agent-tool-form" id="ai-agent-comfyui-tool-form">
+              <div class="field">
+                <label>提示詞</label>
+                <textarea id="ai-agent-comfyui-prompt" rows="3" maxlength="4000" placeholder="輸入要產生的圖片內容"></textarea>
+              </div>
+              <div class="field">
+                <label>負面提示詞</label>
+                <textarea id="ai-agent-comfyui-negative" rows="2" maxlength="4000" placeholder="可留空"></textarea>
+              </div>
+              <div class="grid3 compact-grid">
+                <div class="field">
+                  <label>寬</label>
+                  <input id="ai-agent-comfyui-width" type="number" min="256" max="2048" step="64" value="1024" />
+                </div>
+                <div class="field">
+                  <label>高</label>
+                  <input id="ai-agent-comfyui-height" type="number" min="256" max="2048" step="64" value="1024" />
+                </div>
+                <div class="field">
+                  <label>張數</label>
+                  <input id="ai-agent-comfyui-batch-size" type="number" min="1" max="8" step="1" value="1" />
+                </div>
+              </div>
+              <div class="grid3 compact-grid">
+                <div class="field">
+                  <label>Steps</label>
+                  <input id="ai-agent-comfyui-steps" type="number" min="1" max="80" step="1" value="20" />
+                </div>
+                <div class="field">
+                  <label>CFG</label>
+                  <input id="ai-agent-comfyui-cfg" type="number" min="1" max="20" step="0.5" value="7" />
+                </div>
+                <div class="field">
+                  <label>Seed</label>
+                  <input id="ai-agent-comfyui-seed" type="number" step="1" placeholder="留空隨機" />
+                </div>
+              </div>
+              <div class="grid2 compact-grid">
+                <div class="field">
+                  <label>Checkpoint</label>
+                  <input id="ai-agent-comfyui-checkpoint" type="text" autocomplete="off" placeholder="可留空使用目前設定" />
+                </div>
+                <div class="field">
+                  <label>VAE</label>
+                  <input id="ai-agent-comfyui-vae" type="text" autocomplete="off" placeholder="可留空" />
+                </div>
+              </div>
+              <div class="edit-user-actions">
+                <button class="btn btn-primary" id="ai-agent-comfyui-generate-btn" type="button">送出產圖</button>
+              </div>
             </div>
           </div>
         </section>
@@ -7695,7 +7756,7 @@
 
 <script src="/js/00-core.js?v=20260607-comfyui-dashboard-refresh" defer></script>
 <script src="/js/05-i18n.js?v=20260603-drive-bulk-actions" defer></script>
-<script src="/js/01-root-quick-settings.js?v=20260603-drive-bulk-actions" defer></script>
+<script src="/js/01-root-quick-settings.js?v=20260611-ai-agent-vision-preset" defer></script>
 <script src="/js/10-users.js?v=20260525-governance-finish" defer></script>
 <script src="/js/20-chat.js?v=20260525-chat-emoji-insert" defer></script>
 <script src="/js/25-community.js?v=20260518-inline-media" defer></script>
@@ -7707,7 +7768,7 @@
 <!-- cache marker retained for template-import regression: /js/36-comfyui.js?v=20260509-comfyui-template-embeddings -->
 <script src="/js/36-comfyui.js?v=20260607-image-favorites-history-favorite-dashboard" defer></script>
 <script src="/js/36-comfyui-workflows.js?v=20260607-template-filter-reset" defer></script>
-<script src="/js/37-ai-agent.js?v=20260609-ai-agent-debug-msg" defer></script>
+<script src="/js/37-ai-agent.js?v=20260612-ai-agent-progress-updates-v2" defer></script>
 <script src="/js/37-bug-report.js?v=20260502-device-feature" defer></script>
 <script src="/js/41-game-modules.js?v=20260601-rubiks-visible" defer></script>
 <script src="/js/games/game-view-registry.js?v=20260513-legacy-modules" defer></script>
@@ -7726,6 +7787,6 @@
 <script src="/js/56-trading-bots.js?v=20260601-trading-bot-module" defer></script>
 <script src="/js/57-platform-centers.js?v=20260524-trading-status-split" defer></script>
 <script src="/js/58-profile-friends.js?v=20260606-avatar-star-mask-600" defer></script>
-<script src="/js/90-bootstrap.js?v=20260602-transmission-test" defer></script>
+<script src="/js/90-bootstrap.js?v=20260611-ai-agent-comfyui-write-tool" defer></script>
 </body>
 </html>

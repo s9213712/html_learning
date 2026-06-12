@@ -6,6 +6,7 @@ from urllib import error as urllib_error
 
 from services.ai_agent.hermes import (
     AiAgentError,
+    ai_agent_capabilities,
     ai_agent_effective_tools,
     ai_agent_operation_mode_policy,
     get_ai_agent_audit_last_scan,
@@ -210,6 +211,51 @@ def test_ai_agent_health_marks_mock_backend_as_unhealthy(monkeypatch):
     assert result["payload"]["service"] == "hermes-mock"
 
 
+def test_ai_agent_health_openai_compatible_uses_models_endpoint(monkeypatch):
+    class FakeResponse:
+        def read(self, _size):
+            return json.dumps({"object": "list", "data": [{"id": "gpt-oss:120b-cloud"}]}).encode("utf-8")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    calls = []
+
+    def fake_urlopen(req, timeout=5):
+        calls.append(getattr(req, "full_url", ""))
+        return FakeResponse()
+
+    monkeypatch.setattr(hermes_client.urllib_request, "urlopen", fake_urlopen)
+
+    result = hermes_client.ai_agent_health({
+        "ai_agent_provider": "openai_compatible",
+        "ai_agent_api_base_url": "http://127.0.0.1:11434/v1",
+    })
+
+    assert calls == ["http://127.0.0.1:11434/v1/models"]
+    assert result["ok"] is True
+    assert result["url"] == "http://127.0.0.1:11434/v1/models"
+    assert result["payload"]["data"][0]["id"] == "gpt-oss:120b-cloud"
+
+
+def test_ai_agent_capabilities_openai_compatible_is_synthetic(monkeypatch):
+    def fail_json_request(*_args, **_kwargs):
+        raise AssertionError("openai-compatible capabilities must not call /capabilities")
+
+    monkeypatch.setattr(hermes_client, "_json_request", fail_json_request)
+
+    result = ai_agent_capabilities({"ai_agent_provider": "openai_compatible"})
+
+    assert result["ok"] is True
+    assert result["provider"] == "openai_compatible"
+    assert result["chat"] is True
+    assert result["models"] is True
+    assert result["capabilities_endpoint"] is False
+
+
 def test_ai_agent_chat_detects_mock_reply(monkeypatch):
     def fake_json_request(_settings, method, path, payload=None, session_key="", timeout=None):
         assert path == "/chat/completions"
@@ -236,6 +282,73 @@ def test_ai_agent_chat_detects_mock_reply(monkeypatch):
             messages=[{"role": "user", "content": "幫我看一下下載進度"}],
         )
     assert "mock 回覆" in str(exc.value)
+
+
+def test_ai_agent_chat_detects_hermes_failed_envelope(monkeypatch):
+    def fake_json_request(_settings, method, path, payload=None, session_key="", timeout=None):
+        assert path == "/chat/completions"
+        return {
+            "model": "qwen3-vl:235b-instruct-cloud",
+            "choices": [
+                {
+                    "finish_reason": "error",
+                    "message": {
+                        "role": "assistant",
+                        "content": "API call failed after 3 retries: HTTP 500: Internal Server Error",
+                    },
+                },
+            ],
+            "hermes": {
+                "completed": False,
+                "failed": True,
+                "error": "HTTP 500: Internal Server Error",
+            },
+        }
+
+    monkeypatch.setattr(hermes_client, "_json_request", fake_json_request)
+
+    with pytest.raises(AiAgentError) as exc:
+        hermes_client.ai_agent_chat(
+            {
+                "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
+                "ai_agent_api_key": "dummy-key",
+                "ai_agent_allowed_models": "qwen3-vl:235b-instruct-cloud",
+            },
+            messages=[{"role": "user", "content": "分析圖片"}],
+            model="qwen3-vl:235b-instruct-cloud",
+        )
+    assert "後端執行失敗" in str(exc.value)
+
+
+def test_ai_agent_chat_detects_error_finish_reason(monkeypatch):
+    def fake_json_request(_settings, method, path, payload=None, session_key="", timeout=None):
+        assert path == "/chat/completions"
+        return {
+            "model": "qwen3-vl:235b-instruct-cloud",
+            "choices": [
+                {
+                    "finish_reason": "error",
+                    "message": {
+                        "role": "assistant",
+                        "content": "API call failed after 3 retries: HTTP 500: Internal Server Error",
+                    },
+                },
+            ],
+        }
+
+    monkeypatch.setattr(hermes_client, "_json_request", fake_json_request)
+
+    with pytest.raises(AiAgentError) as exc:
+        hermes_client.ai_agent_chat(
+            {
+                "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
+                "ai_agent_api_key": "dummy-key",
+                "ai_agent_allowed_models": "qwen3-vl:235b-instruct-cloud",
+            },
+            messages=[{"role": "user", "content": "分析圖片"}],
+            model="qwen3-vl:235b-instruct-cloud",
+        )
+    assert "後端執行失敗" in str(exc.value)
 
 
 def test_ai_agent_chat_detects_mock_reply_with_whitespace(monkeypatch):
@@ -438,7 +551,10 @@ def test_ai_agent_chat_blocks_non_root_in_audit_mode(monkeypatch):
 
 
 def test_ai_agent_chat_write_mode_is_root_only(monkeypatch):
+    payloads = []
+
     def fake_json_request(_settings, method, path, payload=None, session_key="", timeout=None):
+        payloads.append(payload or {})
         return {"choices": [{"message": {"content": "root write ok"}}], "model": "hermes-agent"}
 
     monkeypatch.setattr(hermes_client, "_json_request", fake_json_request)
@@ -465,6 +581,14 @@ def test_ai_agent_chat_write_mode_is_root_only(monkeypatch):
         actor={"username": "root", "role": "user"},
     )
     assert result["content"] == "root write ok"
+    system_prompt = payloads[-1]["messages"][0]["content"]
+    assert "目前登入者：root" in system_prompt
+    assert "目前權限：super_admin" in system_prompt
+    assert "你不是一般使用者助手，也不是唯讀模式" in system_prompt
+    assert "前台直接執行" in system_prompt
+    assert "不要要求複製 JSON 或手動 POST" in system_prompt
+    assert "/api/ai-agent/write-tools/execute" in system_prompt
+    assert "confirm=EXECUTE" in system_prompt
 
 
 def test_ai_agent_audit_scan_reports_anomalies_and_uses_cache(tmp_path):

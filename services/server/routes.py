@@ -188,6 +188,7 @@ OPERATION_ROUTE_KEYS = (
     "detect_chat_violation",
     "get_client_ip",
     "get_current_user_ctx",
+    "get_audit_db",
     "get_db",
     "get_latest_violation",
     "get_feature_settings",

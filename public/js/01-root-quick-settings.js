@@ -21,6 +21,19 @@ const ROOT_SERVICE_FEE_QUICK_PRESETS = [
 
 window.HACKME_SERVICE_FEE_PRICING_PRESETS = ROOT_SERVICE_FEE_QUICK_PRESETS;
 
+const AI_AGENT_PROVIDER_QUICK_PRESETS = {
+  hermes: {
+    apiBaseUrl: "http://127.0.0.1:8642/v1",
+    model: "hermes-agent",
+    allowedModels: "hermes-agent",
+  },
+  openai_compatible: {
+    apiBaseUrl: "http://127.0.0.1:11434/v1",
+    model: "gpt-oss:120b-cloud",
+    allowedModels: "gpt-oss:120b-cloud,qwen3-vl:235b-instruct-cloud,minimax-m2.7:cloud",
+  },
+};
+
 let rootModuleEconomyCatalogCache = [];
 
 const ROOT_MODULE_QUICK_SETTINGS = {
@@ -175,11 +188,11 @@ const ROOT_MODULE_QUICK_SETTINGS = {
     pricingKeys: ["ai_agent_task_basic"],
     fields: [
       { id: "s-feature-ai-agent-enabled", label: "開放 AI Agent / LLM" },
+      { id: "s-ai-agent-operation-mode", label: "運作模式", hint: "readonly/assist/write/audit；write 仍只開放 root 的白名單工具。" },
       { id: "s-module-ai-agent-min-role", label: "最低可用角色" },
       { id: "s-ai-agent-provider", label: "Provider" },
       { id: "s-ai-agent-api-base-url", label: "API Base URL" },
       { id: "s-ai-agent-model", label: "模型" },
-      { id: "s-ai-agent-operation-mode", label: "運作模式" },
       { id: "s-ai-agent-allowed-models", label: "允許模型清單" },
       { id: "s-ai-agent-allowed-tools", label: "可調用工具清單" },
       { id: "s-ai-agent-allow-image-input", label: "允許圖片理解" },
@@ -340,6 +353,22 @@ function ensureRootModuleSettingsModal() {
 
 function rootModuleProxyId(sourceId) {
   return `root-module-setting-${sourceId}`;
+}
+
+function setRootModuleFieldValue(id, value) {
+  const el = $(rootModuleProxyId(id)) || $(id);
+  if (!el) return;
+  el.value = value;
+  el.dispatchEvent(new Event("input", { bubbles: true }));
+  el.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
+function applyAiAgentProviderQuickPreset(provider) {
+  const preset = AI_AGENT_PROVIDER_QUICK_PRESETS[provider];
+  if (!preset) return;
+  setRootModuleFieldValue("s-ai-agent-api-base-url", preset.apiBaseUrl);
+  setRootModuleFieldValue("s-ai-agent-model", preset.model);
+  setRootModuleFieldValue("s-ai-agent-allowed-models", preset.allowedModels);
 }
 
 function rootModuleFieldValue(source) {
@@ -522,6 +551,10 @@ function renderRootModuleSettingsFields(tab) {
     el.addEventListener("input", updateRootModuleConditionalFields);
     el.addEventListener("change", updateRootModuleConditionalFields);
   });
+  if (tab === "ai-agent") {
+    const provider = $(rootModuleProxyId("s-ai-agent-provider"));
+    provider?.addEventListener("change", () => applyAiAgentProviderQuickPreset(provider.value));
+  }
   updateRootModuleConditionalFields();
 }
 
@@ -610,7 +643,8 @@ async function saveRootModulePricing(config) {
 
 async function saveRootModuleSettings() {
   const overlay = $("root-module-settings-overlay");
-  const config = rootModuleQuickConfig(overlay?.dataset.moduleTab || currentModuleTab);
+  const moduleTab = overlay?.dataset.moduleTab || currentModuleTab;
+  const config = rootModuleQuickConfig(moduleTab);
   const msg = $("root-module-settings-msg");
   const saveBtn = $("root-module-settings-save");
   if (!config || !overlay) return;
@@ -626,6 +660,15 @@ async function saveRootModuleSettings() {
     if (saves.has("trading") && typeof saveRootTradingSettings === "function") await saveRootTradingSettings();
     if (saves.has("settings") && typeof saveSettings === "function") await saveSettings();
     const pricingSaved = await saveRootModulePricing(config);
+    if (moduleTab === "ai-agent" && typeof loadAiAgentStatus === "function") {
+      await loadAiAgentStatus({ force: true });
+      if (typeof loadAiAgentReadOnly === "function") {
+        await loadAiAgentReadOnly({ scope: "all", limit: 20, silent: true, force: true }).catch(() => undefined);
+      }
+      if (typeof loadAiAgentAuditStatus === "function") {
+        await loadAiAgentAuditStatus({ silent: true }).catch(() => undefined);
+      }
+    }
     if (msg) {
       msg.textContent = `${config.label}設定已送出${pricingSaved ? `，服務扣點 ${pricingSaved} 項已更新` : ""}`;
       msg.className = "msg show ok";

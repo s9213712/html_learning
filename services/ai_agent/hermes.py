@@ -330,6 +330,72 @@ AI_AGENT_TOOL_BLUEPRINT = {
         "min_role": "super_admin",
         "data_scope": "audit_scan",
     },
+    "write_community_create_thread": {
+        "label": "發表主題",
+        "description": "root 專用白名單寫入工具：在指定討論版建立主題。",
+        "min_role": "super_admin",
+        "data_scope": "write_tool:community",
+    },
+    "write_community_reply_thread": {
+        "label": "回覆主題",
+        "description": "root 專用白名單寫入工具：在指定主題留言。",
+        "min_role": "super_admin",
+        "data_scope": "write_tool:community",
+    },
+    "write_comfyui_generate": {
+        "label": "執行生圖",
+        "description": "root 專用白名單寫入工具：送出 ComfyUI 生圖任務。",
+        "min_role": "super_admin",
+        "data_scope": "write_tool:comfyui",
+    },
+    "write_chess_create_practice": {
+        "label": "建立西洋棋練習",
+        "description": "root 專用白名單寫入工具：建立電腦對局練習。",
+        "min_role": "super_admin",
+        "data_scope": "write_tool:games",
+    },
+    "write_chess_make_move": {
+        "label": "西洋棋走子",
+        "description": "root 專用白名單寫入工具：在指定棋局送出一步棋。",
+        "min_role": "super_admin",
+        "data_scope": "write_tool:games",
+    },
+    "write_member_create_user": {
+        "label": "新增會員",
+        "description": "root 專用白名單寫入工具：透過既有會員管理 API 新增帳號。",
+        "min_role": "super_admin",
+        "data_scope": "write_tool:members",
+    },
+    "write_member_update_user": {
+        "label": "更新會員",
+        "description": "root 專用白名單寫入工具：透過既有會員管理 API 更新指定帳號。",
+        "min_role": "super_admin",
+        "data_scope": "write_tool:members",
+    },
+    "write_bug_report_review": {
+        "label": "審核 Bug 回報",
+        "description": "root 專用白名單寫入工具：審核 bug report 並可設定獎勵點數。",
+        "min_role": "super_admin",
+        "data_scope": "write_tool:bug_reports",
+    },
+    "write_launch_requirements_check": {
+        "label": "上線需求檢查",
+        "description": "root 專用白名單工具：執行上線前需求檢查。",
+        "min_role": "super_admin",
+        "data_scope": "write_tool:launch_check",
+    },
+    "write_launch_logs_verify": {
+        "label": "上線 log 鏈驗證",
+        "description": "root 專用白名單工具：驗證 server-mode log chain。",
+        "min_role": "super_admin",
+        "data_scope": "write_tool:launch_check",
+    },
+    "write_launch_doc_read": {
+        "label": "上線文件讀取",
+        "description": "root 專用白名單工具：讀取 docs/ 內的上線檢查文件。",
+        "min_role": "super_admin",
+        "data_scope": "write_tool:launch_check",
+    },
 }
 
 AI_AGENT_SAFETY_BOUNDARIES = (
@@ -364,7 +430,7 @@ AI_AGENT_ROLE_SCOPES = {
     },
     "super_admin": {
         "label": "最高管理者助手",
-        "description": "管理者能力加上伺服器資源與攻擊告警的唯讀診斷建議。",
+        "description": "管理者能力加上伺服器資源、攻擊告警與 root 專用白名單工具協調；實際寫入只在 write 模式、root 身分與確認碼通過後執行。",
         "capabilities": [
             "個人任務查詢（生圖 / 下載）",
             "站內流程導覽",
@@ -372,6 +438,7 @@ AI_AGENT_ROLE_SCOPES = {
             "失敗排查步驟建議（只提供指引）",
             "會員管理與帳號狀態（只提供唯讀建議）",
             "伺服器資源與攻擊訊號（只提供診斷建議）",
+            "write 模式下可協助 root 準備白名單 write-tool 操作，並提醒必須經伺服器端點與確認碼。",
         ],
         "additional_tasks": ["member_management", "attack_diagnosis"],
     },
@@ -485,6 +552,22 @@ def _agent_role_scope(role):
     return AI_AGENT_ROLE_SCOPES.get(role, AI_AGENT_ROLE_SCOPES["user"])
 
 
+def _ai_agent_actor_context(actor, actor_role):
+    username = ""
+    if isinstance(actor, dict):
+        username = str(actor.get("username") or "").strip()
+    elif actor:
+        username = str(actor or "").strip()
+    normalized_role = normalize_ai_agent_role(actor_role)
+    scope = _agent_role_scope(normalized_role)
+    if not username:
+        username = "unknown"
+    return (
+        f"目前登入者：{username}。\n"
+        f"目前權限：{normalized_role}（{scope['label']}）。\n"
+    )
+
+
 def _role_allows(required_role, actor_role):
     return AI_AGENT_ROLE_RANK.get(normalize_ai_agent_role(actor_role), 0) >= AI_AGENT_ROLE_RANK.get(normalize_ai_agent_role(required_role), 0)
 
@@ -508,8 +591,9 @@ def ai_agent_effective_tools(settings, *, actor_role="user"):
     return result
 
 
-def _ai_agent_system_prompt(behavior, *, role="user", allow_tool_runs=False, operation_mode=DEFAULT_AI_AGENT_OPERATION_MODE):
-    scope = _agent_role_scope(normalize_ai_agent_role(role))
+def _ai_agent_system_prompt(behavior, *, role="user", actor=None, allow_tool_runs=False, operation_mode=DEFAULT_AI_AGENT_OPERATION_MODE):
+    normalized_role = normalize_ai_agent_role(role)
+    scope = _agent_role_scope(normalized_role)
     persona_meta = AI_AGENT_PERSONA_PRESETS.get(behavior.get("persona"), AI_AGENT_PERSONA_PRESETS[DEFAULT_AI_AGENT_PERSONA])
     mode_policy = ai_agent_operation_mode_policy(operation_mode)
     enabled_tasks = [
@@ -525,17 +609,25 @@ def _ai_agent_system_prompt(behavior, *, role="user", allow_tool_runs=False, ope
     tool_lines = []
     for detail in behavior.get("tools") or []:
         tool_lines.append(f"- {detail.get('name')}（{detail.get('label')}）：{detail.get('description')}；資料範圍={detail.get('data_scope') or '-'}")
-    tool_scope = (
-        "工具僅提供可執行建議，不會直接呼叫系統 API 或修改站內狀態。"
-        if not allow_tool_runs
-        else "可提供建議型工具摘要，仍不直接下發站內變更操作。"
-    )
+    if mode_policy.get("write_enabled") and normalized_role == "super_admin":
+        tool_scope = (
+            "目前是 root 專用執行寫入模式：你不是一般使用者助手，也不是唯讀模式。"
+            "你可協助 root 準備白名單 write-tool 操作、檢查必要參數與說明風險；"
+            "若站內前台已提供對應工具面板（例如 ComfyUI 產圖），請優先引導 root 在前台直接執行，不要要求複製 JSON 或手動 POST；"
+            "真正寫入必須透過 /api/ai-agent/write-tools/execute，且同時通過 root 身分、目前 write 模式、工具白名單與 confirm=EXECUTE。"
+            "未收到工具端點成功結果前，不得聲稱已完成任何寫入。"
+        )
+    elif allow_tool_runs:
+        tool_scope = "可提供建議型工具摘要；若模式不是 write 或身分不是 root，不得下發站內變更操作。"
+    else:
+        tool_scope = "工具僅提供可執行建議，不會直接呼叫系統 API 或修改站內狀態。"
 
     return (
         "你是 hackme_web 網站內的 AI 助理，嚴格負責在本站功能邊界內回答。\n"
         f"角色：{persona_meta['label']}。\n"
         f"語氣：{persona_meta['tone']}。\n"
         f"基本原則：{persona_meta['guidance']}\n"
+        f"{_ai_agent_actor_context(actor, normalized_role)}"
         f"服務範圍：{scope['label']}。\n"
         f"用途：{scope['description']}\n"
         f"目前模式：{mode_policy['label']}（{mode_policy['mode']}）。{mode_policy['description']}\n"
@@ -955,7 +1047,7 @@ def _snapshot_network_delta():
         "interfaces": {},
         "total_rx_bytes_delta": 0,
         "total_tx_bytes_delta": 0,
-        "total_kbps": 0.0,
+        "total_kib_per_s": 0.0,
     }
     if not prev:
         _AUDIT_SCAN_STATE["network_last"] = {"at": now_ts, "data": now}
@@ -977,18 +1069,18 @@ def _snapshot_network_delta():
         if rx < 0 or tx < 0:
             rx = max(0, rx)
             tx = max(0, tx)
-        kbps = (rx + tx) / max(1.0, window) / 1024
-        if kbps >= 1:
+        kib_per_s = (rx + tx) / max(1.0, window) / 1024
+        if kib_per_s >= 1:
             delta["interfaces"][iface] = {
                 "rx_delta": rx,
                 "tx_delta": tx,
-                "kbps": round(kbps, 3),
+                "kib_per_s": round(kib_per_s, 3),
             }
             delta["total_rx_bytes_delta"] += rx
             delta["total_tx_bytes_delta"] += tx
 
     total_bytes = delta["total_rx_bytes_delta"] + delta["total_tx_bytes_delta"]
-    delta["total_kbps"] = round((total_bytes / max(1.0, window)) / 1024, 3)
+    delta["total_kib_per_s"] = round((total_bytes / max(1.0, window)) / 1024, 3)
     _AUDIT_SCAN_STATE["network_last"] = {"at": now_ts, "data": now}
     return delta
 
@@ -1189,13 +1281,13 @@ def run_ai_agent_audit_scan(settings, *, get_db, actor=None, force=False, get_cl
         )
         recommendations.append("請檢視 security_events、login/fail 及 rate_limit 類型事件的來源IP是否異常。")
 
-    if network_delta.get("total_kbps", 0.0) >= 512000:
+    if network_delta.get("total_kib_per_s", 0.0) >= 512000:
         add_anomaly(
             "network.traffic_spike",
             "warn",
-            f"網路傳輸速率較高：{network_delta.get('total_kbps', 0)} KB/s",
+            f"網路傳輸速率較高：{network_delta.get('total_kib_per_s', 0)} KB/s",
             {
-                "total_kbps": network_delta.get("total_kbps", 0),
+                "total_kib_per_s": network_delta.get("total_kib_per_s", 0),
                 "window_seconds": network_delta.get("window_seconds", 0),
             },
         )
@@ -1279,6 +1371,14 @@ def run_ai_agent_audit_scan(settings, *, get_db, actor=None, force=False, get_cl
 
 
 def ai_agent_health(settings):
+    provider = normalize_ai_agent_provider((settings or {}).get("ai_agent_provider")) or DEFAULT_AI_AGENT_PROVIDER
+    if provider == "openai_compatible":
+        try:
+            payload = _json_request(settings, "GET", "/models", timeout=min(_backend_timeout(settings), 8))
+            return {"ok": True, "url": urljoin(_backend_base_url(settings).rstrip("/") + "/", "models"), "payload": payload}
+        except AiAgentError as exc:
+            return {"ok": False, "url": urljoin(_backend_base_url(settings).rstrip("/") + "/", "models"), "msg": str(exc), "status": exc.status, "payload": exc.payload}
+
     base_url = _backend_base_url(settings)
     parsed = urlparse(base_url)
     path = (parsed.path or "").rstrip("/")
@@ -1383,6 +1483,16 @@ def public_ai_agent_audit_status(settings, *, include_scan=False):
 
 
 def ai_agent_capabilities(settings):
+    provider = normalize_ai_agent_provider((settings or {}).get("ai_agent_provider")) or DEFAULT_AI_AGENT_PROVIDER
+    if provider == "openai_compatible":
+        return {
+            "ok": True,
+            "provider": provider,
+            "chat": True,
+            "models": True,
+            "capabilities_endpoint": False,
+            "tools": [],
+        }
     try:
         return _json_request(settings, "GET", "/capabilities", timeout=min(_backend_timeout(settings), 8))
     except AiAgentError as exc:
@@ -1490,6 +1600,7 @@ def ai_agent_chat(settings, *, messages=None, prompt="", image_data_url="", mode
     system_prompt = _ai_agent_system_prompt(
         behavior,
         role=actor_role,
+        actor=actor,
         allow_tool_runs=bool(public["allow_tool_runs"]),
         operation_mode=public["operation_mode"],
     )
@@ -1510,13 +1621,28 @@ def ai_agent_chat(settings, *, messages=None, prompt="", image_data_url="", mode
     response = _json_request(settings, "POST", "/chat/completions", payload, session_key=session_key)
     if _contains_mock_phrase(response):
         raise AiAgentError("AI Agent 後端仍回傳 mock 回覆，請確認 ai_agent_api_base_url 是否指向真實 Hermes endpoint")
+    if isinstance(response, dict):
+        hermes_meta = response.get("hermes") if isinstance(response.get("hermes"), dict) else {}
+        hermes_error = str(hermes_meta.get("error") or "").strip()
+        if hermes_meta.get("failed") is True or hermes_meta.get("completed") is False:
+            raise AiAgentError(
+                f"AI Agent 後端執行失敗：{hermes_error or 'Hermes 回報 failed'}",
+                payload=response,
+            )
     choices = response.get("choices") if isinstance(response, dict) else None
     message = {}
+    finish_reason = ""
     if choices and isinstance(choices, list) and isinstance(choices[0], dict):
         message = choices[0].get("message") or {}
+        finish_reason = str(choices[0].get("finish_reason") or "")
     content = message.get("content") if isinstance(message, dict) else ""
     if isinstance(content, list):
         content = "\n".join(str(part.get("text") or "") for part in content if isinstance(part, dict))
+    if finish_reason == "error" or str(content or "").lstrip().lower().startswith("api call failed after"):
+        raise AiAgentError(
+            f"AI Agent 後端執行失敗：{str(content or '').strip() or 'chat completion failed'}",
+            payload=response if isinstance(response, dict) else None,
+        )
     normalized = str(content or "").strip().lower()
     if _is_mock_chat_reply(normalized):
         raise AiAgentError("AI Agent 後端仍回傳 mock 回覆，請確認 ai_agent_api_base_url 是否指向真實 Hermes endpoint")

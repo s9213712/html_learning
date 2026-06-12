@@ -2,7 +2,9 @@ import json
 from datetime import datetime
 import hashlib
 import os
+import re
 import shutil
+from urllib.parse import urlencode
 
 from flask import request
 
@@ -17,6 +19,142 @@ from services.ai_agent.hermes import (
     _is_mock_chat_reply,
     public_ai_agent_settings,
 )
+
+
+AI_AGENT_WRITE_TOOL_SPECS = {
+    "write_community_create_thread": {
+        "label": "發表主題",
+        "description": "在指定討論版建立主題。",
+        "method": "POST",
+        "path": "/api/community/boards/{board_id}/threads",
+        "path_params": {"board_id": "positive_int"},
+        "body_fields": {"title", "content", "post_type"},
+        "required": {"board_id", "title", "content"},
+        "write": True,
+    },
+    "write_community_reply_thread": {
+        "label": "回覆主題",
+        "description": "在指定主題留言。",
+        "method": "POST",
+        "path": "/api/community/threads/{thread_id}/posts",
+        "path_params": {"thread_id": "positive_int"},
+        "body_fields": {"content"},
+        "required": {"thread_id", "content"},
+        "write": True,
+    },
+    "write_comfyui_generate": {
+        "label": "執行生圖",
+        "description": "送出 ComfyUI 生圖任務，參數仍由 ComfyUI API 驗證。",
+        "method": "POST",
+        "path": "/api/comfyui/generate",
+        "path_params": {},
+        "body_fields": {
+            "prompt", "negative_prompt", "model", "checkpoint", "checkpoint_name", "width", "height",
+            "steps", "cfg", "cfg_scale", "sampler", "scheduler", "seed", "batch_size",
+            "workflow", "workflow_id", "official_workflow_id", "template_id", "lora",
+            "loras", "vae", "vae_name", "timeout_seconds", "confirm_billing",
+            "backend_url", "comfyui_backend_url",
+        },
+        "required": {"prompt"},
+        "write": True,
+    },
+    "write_chess_create_practice": {
+        "label": "建立西洋棋練習",
+        "description": "建立電腦對局練習。",
+        "method": "POST",
+        "path": "/api/games/chess/practice",
+        "path_params": {},
+        "body_fields": {"side", "human_side", "difficulty", "computer_difficulty"},
+        "required": set(),
+        "write": True,
+    },
+    "write_chess_make_move": {
+        "label": "西洋棋走子",
+        "description": "在指定棋局送出一步棋。",
+        "method": "POST",
+        "path": "/api/games/chess/matches/{match_id}/move",
+        "path_params": {"match_id": "positive_int"},
+        "body_fields": {"from", "to", "promotion"},
+        "required": {"match_id", "from", "to"},
+        "write": True,
+    },
+    "write_member_create_user": {
+        "label": "新增會員",
+        "description": "新增一般會員或管理者帳號；仍套用既有會員 API 限制。",
+        "method": "POST",
+        "path": "/api/admin/users",
+        "path_params": {},
+        "body_fields": {
+            "username", "password", "password_confirm", "nickname", "real_name",
+            "id_number", "birthdate", "phone", "role", "status", "member_level",
+        },
+        "required": {"username", "password", "password_confirm", "nickname"},
+        "write": True,
+    },
+    "write_member_update_user": {
+        "label": "更新會員",
+        "description": "更新指定會員資料；此工具不提供刪除帳號。",
+        "method": "PUT",
+        "path": "/api/admin/users/{user_id}",
+        "path_params": {"user_id": "positive_int"},
+        "body_fields": {
+            "nickname", "real_name", "id_number", "birthdate", "phone", "role",
+            "status", "member_level", "base_level", "level_update_reason",
+            "sanction_status", "sanction_until",
+        },
+        "required": {"user_id"},
+        "write": True,
+    },
+    "write_bug_report_review": {
+        "label": "審核 Bug 回報",
+        "description": "審核 bug report，核准時可設定獎勵點數。",
+        "method": "POST",
+        "path": "/api/admin/bug-reports/{report_id}/review",
+        "path_params": {"report_id": "safe_id"},
+        "body_fields": {"decision", "review_note", "reward_points"},
+        "required": {"report_id", "decision"},
+        "write": True,
+    },
+    "write_launch_requirements_check": {
+        "label": "上線需求檢查",
+        "description": "讀取上線前 requirements gate 結果。",
+        "method": "GET",
+        "path": "/api/root/server-mode/requirements",
+        "path_params": {},
+        "query_fields": set(),
+        "required": set(),
+        "write": False,
+    },
+    "write_launch_logs_verify": {
+        "label": "上線 log 鏈驗證",
+        "description": "驗證 server-mode log chain。",
+        "method": "GET",
+        "path": "/api/root/server-mode/logs/verify",
+        "path_params": {},
+        "query_fields": set(),
+        "required": set(),
+        "write": False,
+    },
+    "write_launch_doc_read": {
+        "label": "上線文件讀取",
+        "description": "讀取 docs/ 內的 Markdown 上線文件。",
+        "method": "GET",
+        "path": "/api/root/launch-check/doc",
+        "path_params": {},
+        "query_fields": {"path"},
+        "required": {"path"},
+        "write": False,
+    },
+    "audit_scan": {
+        "label": "立即審計掃描",
+        "description": "觸發 AI Agent 審計掃描。",
+        "method": "DIRECT",
+        "path_params": {},
+        "body_fields": {"force"},
+        "required": set(),
+        "write": False,
+    },
+}
 
 
 def _actor_value(actor, key, default=None):
@@ -496,6 +634,394 @@ def register_ai_agent_routes(app, deps):
                 return False
         return None
 
+    def _audit_agent_event(action, actor=None, *, success=True, detail=""):
+        audit(
+            action,
+            get_client_ip(),
+            user=_actor_value(actor, "username", "-"),
+            ua=get_ua(),
+            success=success,
+            detail=str(detail or "")[:500],
+        )
+
+    def _write_tool_public_spec(name, spec):
+        return {
+            "name": name,
+            "label": spec.get("label") or name,
+            "description": spec.get("description") or "",
+            "method": spec.get("method") if spec.get("method") != "DIRECT" else "POST",
+            "required": sorted(spec.get("required") or []),
+            "path_params": sorted((spec.get("path_params") or {}).keys()),
+            "body_fields": sorted(spec.get("body_fields") or []),
+            "query_fields": sorted(spec.get("query_fields") or []),
+            "write": bool(spec.get("write")),
+            "root_only": True,
+            "requires_confirm": bool(spec.get("write")),
+        }
+
+    def _write_tool_effective_names(settings, actor):
+        public = public_ai_agent_settings(settings, actor=actor)
+        return {
+            str(tool.get("name") or "")
+            for tool in public.get("tools") or []
+            if tool.get("name")
+        }
+
+    def _require_write_tool_actor():
+        actor, denied = _actor_or_401()
+        if denied:
+            return None, denied
+        if not _actor_is_super_admin(actor):
+            _audit_agent_event("AI_AGENT_WRITE_TOOLS_DENIED", actor, success=False, detail="root_only")
+            return None, (json_resp({"ok": False, "msg": "write-tool endpoint 目前僅開放 root"}), 403)
+        return actor, None
+
+    def _request_json_dict():
+        try:
+            data = request.get_json(force=True)
+        except Exception:
+            return None, (json_resp({"ok": False, "msg": "請求 JSON 格式錯誤"}), 400)
+        if not isinstance(data, dict):
+            return None, (json_resp({"ok": False, "msg": "請求內容格式錯誤"}), 400)
+        return data, None
+
+    def _is_missing_arg(value):
+        return value is None or (isinstance(value, str) and not value.strip())
+
+    def _coerce_write_path_param(name, value, kind):
+        if kind == "positive_int":
+            try:
+                parsed = int(value)
+            except Exception:
+                return None, f"{name} 必須是正整數"
+            if parsed <= 0:
+                return None, f"{name} 必須是正整數"
+            return parsed, ""
+        if kind == "safe_id":
+            raw = str(value or "").strip()
+            if not raw or len(raw) > 120:
+                return None, f"{name} 格式錯誤"
+            allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-.:")
+            if any(ch not in allowed for ch in raw):
+                return None, f"{name} 只能包含英數、底線、減號、冒號或點"
+            return raw, ""
+        return str(value or "").strip(), ""
+
+    def _validate_launch_doc_path(raw):
+        value = str(raw or "").strip()
+        if not value.startswith("docs/") or not value.endswith(".md"):
+            return None, "path 只允許 docs/ 內的 Markdown 文件"
+        parts = [part for part in value.split("/") if part]
+        if any(part in {".", ".."} for part in parts):
+            return None, "path 不可包含相對跳脫"
+        return value, ""
+
+    def _comfyui_model_match_key(value):
+        text = str(value or "").strip().lower().replace("\\", "/")
+        text = text.rsplit("/", 1)[-1]
+        text = re.sub(r"\.(?:safetensors|ckpt|pt|pth|bin|gguf)$", "", text)
+        return re.sub(r"[^0-9a-z]+", "", text)
+
+    def _comfyui_model_query_tokens(value):
+        text = str(value or "").strip().lower().replace("\\", "/")
+        text = text.rsplit("/", 1)[-1]
+        text = re.sub(r"\.(?:safetensors|ckpt|pt|pth|bin|gguf)$", "", text)
+        return [
+            token
+            for token in re.split(r"[^0-9a-z]+", text)
+            if token and token not in {"model", "checkpoint", "ckpt", "safetensors"}
+        ]
+
+    def _resolve_comfyui_checkpoint_name(raw_name, model_options):
+        requested = str(raw_name or "").strip()
+        if not requested:
+            return "", "", []
+        options = [
+            str(option or "").strip()
+            for option in (model_options or [])
+            if str(option or "").strip()
+        ]
+        if not options:
+            return requested, "", []
+        for option in options:
+            if option == requested:
+                return option, "", []
+        requested_path = requested.replace("\\", "/").lower()
+        for option in options:
+            if option.replace("\\", "/").lower() == requested_path:
+                return option, "", []
+        requested_base = requested_path.rsplit("/", 1)[-1]
+        exact_base = [
+            option
+            for option in options
+            if option.replace("\\", "/").lower().rsplit("/", 1)[-1] == requested_base
+        ]
+        if len(set(exact_base)) == 1:
+            return exact_base[0], "", []
+
+        requested_key = _comfyui_model_match_key(requested)
+        keyed = [
+            option
+            for option in options
+            if _comfyui_model_match_key(option) == requested_key
+        ] if requested_key else []
+        if len(set(keyed)) == 1:
+            return keyed[0], "", []
+
+        tokens = _comfyui_model_query_tokens(requested)
+        token_matches = []
+        if tokens:
+            for option in options:
+                option_key = _comfyui_model_match_key(option)
+                if all(token in option_key for token in tokens):
+                    token_matches.append(option)
+        unique_matches = sorted(set(token_matches))
+        if len(unique_matches) == 1:
+            return unique_matches[0], "", unique_matches
+        if unique_matches:
+            preview = "、".join(unique_matches[:8])
+            return "", f"模型名稱「{requested}」符合多個 checkpoint，請指定完整名稱：{preview}", unique_matches
+
+        preview = "、".join(options[:8])
+        return "", f"模型名稱「{requested}」不在 ComfyUI checkpoint 清單中。可用模型：{preview}", []
+
+    def _build_write_tool_request(tool_name, spec, args):
+        missing = [
+            key for key in sorted(spec.get("required") or [])
+            if _is_missing_arg(args.get(key))
+        ]
+        if missing:
+            return None, None, f"缺少必要參數：{', '.join(missing)}"
+
+        path = spec.get("path") or ""
+        for name, kind in (spec.get("path_params") or {}).items():
+            value, msg = _coerce_write_path_param(name, args.get(name), kind)
+            if msg:
+                return None, None, msg
+            path = path.replace("{" + name + "}", str(value))
+
+        query = {}
+        for key in spec.get("query_fields") or set():
+            if key not in args:
+                continue
+            value = args.get(key)
+            if tool_name == "write_launch_doc_read" and key == "path":
+                value, msg = _validate_launch_doc_path(value)
+                if msg:
+                    return None, None, msg
+            query[key] = value
+        if query:
+            path = f"{path}?{urlencode(query)}"
+
+        body_fields = spec.get("body_fields") or set()
+        body = {key: args.get(key) for key in body_fields if key in args}
+        if tool_name == "write_community_create_thread" and "post_type" in body:
+            post_type = str(body.get("post_type") or "").strip().lower()
+            post_type_aliases = {
+                "": "normal",
+                "discussion": "normal",
+                "general": "normal",
+                "post": "normal",
+                "thread": "normal",
+                "討論": "normal",
+                "一般": "normal",
+                "普通": "normal",
+                "guide": "howto",
+                "教學": "howto",
+                "問題": "question",
+                "提問": "question",
+            }
+            body["post_type"] = post_type_aliases.get(post_type, post_type)
+        if tool_name == "write_comfyui_generate" and not str(body.get("model") or "").strip():
+            fallback_model = str(body.get("checkpoint") or body.get("checkpoint_name") or "").strip()
+            if fallback_model:
+                body["model"] = fallback_model
+        return path, body, ""
+
+    def _prepare_comfyui_write_body(body):
+        next_body = dict(body or {})
+        requested = str(
+            next_body.get("model")
+            or next_body.get("checkpoint")
+            or next_body.get("checkpoint_name")
+            or ""
+        ).strip()
+        if not requested:
+            return next_body, ""
+        status_code, models_payload = _dispatch_internal_api("GET", "/api/comfyui/models", None)
+        model_options = []
+        if 200 <= int(status_code or 500) < 400 and isinstance(models_payload, dict):
+            model_options = list(models_payload.get("models") or [])
+        if not model_options:
+            msg = ""
+            if isinstance(models_payload, dict):
+                msg = str(models_payload.get("msg") or "").strip()
+            suffix = f"：{msg}" if msg else ""
+            return None, f"目前無法讀取 ComfyUI checkpoint 清單，已取消送出產圖{suffix}"
+        resolved, msg, _matches = _resolve_comfyui_checkpoint_name(requested, model_options)
+        if msg:
+            return None, msg
+        if resolved:
+            next_body["model"] = resolved
+            next_body["checkpoint"] = resolved
+            next_body["checkpoint_name"] = resolved
+        return next_body, ""
+
+    def _dispatch_internal_api(method, path, body):
+        headers = {}
+        csrf = request.headers.get("X-CSRF-Token") or request.headers.get("X-CSRFToken") or request.cookies.get("csrf_token") or ""
+        if csrf:
+            headers["X-CSRF-Token"] = csrf
+        with app.test_client() as client:
+            for name, value in request.cookies.items():
+                client.set_cookie(str(name), str(value))
+            response = client.open(
+                path,
+                method=method,
+                json=body if method in {"POST", "PUT", "PATCH"} else None,
+                headers=headers,
+                environ_base={"hackme.internal_dispatch": "ai_agent_write_tool"},
+            )
+        payload = response.get_json(silent=True)
+        if payload is None:
+            payload = {"raw": response.get_data(as_text=True)[:4000]}
+        return response.status_code, payload
+
+    def _safe_tool_payload(payload, *, max_chars=16000):
+        try:
+            raw = json.dumps(payload, ensure_ascii=False, default=str)
+        except Exception:
+            raw = str(payload)
+        if len(raw) <= max_chars:
+            return payload
+        return {
+            "truncated": True,
+            "preview": raw[:max_chars],
+            "omitted_chars": len(raw) - max_chars,
+        }
+
+    @app.route("/api/ai-agent/write-tools", methods=["GET"])
+    @require_csrf_safe
+    def ai_agent_write_tools_route():
+        actor, denied = _require_write_tool_actor()
+        if denied:
+            return denied
+        settings = get_system_settings() or {}
+        public = public_ai_agent_settings(settings, actor=actor)
+        effective_names = _write_tool_effective_names(settings, actor)
+        tools = [
+            _write_tool_public_spec(name, spec)
+            for name, spec in AI_AGENT_WRITE_TOOL_SPECS.items()
+            if name in effective_names
+        ]
+        _audit_agent_event(
+            "AI_AGENT_WRITE_TOOLS_LIST",
+            actor,
+            success=True,
+            detail=f"mode={public.get('operation_mode')},tools={len(tools)}",
+        )
+        return json_resp({
+            "ok": True,
+            "root_only": True,
+            "operation_mode": public.get("operation_mode"),
+            "write_enabled": bool((public.get("operation_mode_policy") or {}).get("write_enabled")),
+            "tools": tools,
+        })
+
+    @app.route("/api/ai-agent/write-tools/execute", methods=["POST"])
+    @require_csrf
+    def ai_agent_write_tool_execute_route():
+        actor, denied = _require_write_tool_actor()
+        if denied:
+            return denied
+        data, bad_request = _request_json_dict()
+        if bad_request:
+            return bad_request
+        tool_name = str(data.get("tool") or "").strip()
+        spec = AI_AGENT_WRITE_TOOL_SPECS.get(tool_name)
+        if not spec:
+            _audit_agent_event("AI_AGENT_WRITE_TOOL", actor, success=False, detail=f"tool={tool_name or '-'},error=unsupported_tool")
+            return json_resp({"ok": False, "msg": "不支援的 write tool"}), 400
+        args = data.get("arguments")
+        if args is None:
+            args = data.get("params")
+        if args is None:
+            args = {}
+        if not isinstance(args, dict):
+            _audit_agent_event("AI_AGENT_WRITE_TOOL", actor, success=False, detail=f"tool={tool_name},error=arguments_not_object")
+            return json_resp({"ok": False, "msg": "arguments 必須是物件"}), 400
+
+        settings = get_system_settings() or {}
+        effective_names = _write_tool_effective_names(settings, actor)
+        if tool_name not in effective_names:
+            _audit_agent_event("AI_AGENT_WRITE_TOOL", actor, success=False, detail=f"tool={tool_name},error=tool_not_allowed")
+            return json_resp({"ok": False, "msg": "此工具未在目前 AI Agent allowed_tools/角色範圍內啟用"}), 403
+
+        public = public_ai_agent_settings(settings, actor=actor)
+        write_enabled = bool((public.get("operation_mode_policy") or {}).get("write_enabled"))
+        if spec.get("write") and not write_enabled:
+            _audit_agent_event("AI_AGENT_WRITE_TOOL", actor, success=False, detail=f"tool={tool_name},error=operation_mode_not_write,mode={public.get('operation_mode')}")
+            return json_resp({
+                "ok": False,
+                "msg": "寫入型工具必須先將 AI Agent operation mode 切換為 write",
+                "operation_mode": public.get("operation_mode"),
+            }), 409
+        if spec.get("write") and data.get("confirm") not in {True, "EXECUTE", "execute"}:
+            _audit_agent_event("AI_AGENT_WRITE_TOOL", actor, success=False, detail=f"tool={tool_name},error=missing_confirm")
+            return json_resp({"ok": False, "msg": "寫入型工具需要 confirm=true 或 confirm=\"EXECUTE\""}), 400
+
+        status_code = 200
+        try:
+            if spec.get("method") == "DIRECT" and tool_name == "audit_scan":
+                force = _parse_bool(args.get("force"))
+                scan = run_ai_agent_audit_scan(
+                    settings,
+                    get_db=get_db,
+                    actor=actor,
+                    force=bool(force),
+                    get_client_ip=get_client_ip,
+                    get_ua=get_ua,
+                    audit=audit,
+                )
+                payload = {"ok": True, "scan": scan}
+            else:
+                path, body, msg = _build_write_tool_request(tool_name, spec, args)
+                if msg:
+                    _audit_agent_event("AI_AGENT_WRITE_TOOL", actor, success=False, detail=f"tool={tool_name},error={msg[:180]}")
+                    return json_resp({"ok": False, "msg": msg}), 400
+                if tool_name == "write_comfyui_generate":
+                    body, msg = _prepare_comfyui_write_body(body)
+                    if msg:
+                        _audit_agent_event("AI_AGENT_WRITE_TOOL", actor, success=False, detail=f"tool={tool_name},error={msg[:180]}")
+                        return json_resp({"ok": False, "msg": msg}), 400
+                status_code, payload = _dispatch_internal_api(spec.get("method"), path, body)
+        except Exception as exc:
+            audit(
+                "AI_AGENT_WRITE_TOOL",
+                get_client_ip(),
+                user=_actor_value(actor, "username", "-"),
+                ua=get_ua(),
+                success=False,
+                detail=f"tool={tool_name},error={str(exc)[:180]}",
+            )
+            return json_resp({"ok": False, "msg": str(exc), "tool": tool_name}), 502
+
+        ok = 200 <= int(status_code or 500) < 400 and bool(payload.get("ok", True) if isinstance(payload, dict) else True)
+        audit(
+            "AI_AGENT_WRITE_TOOL",
+            get_client_ip(),
+            user=_actor_value(actor, "username", "-"),
+            ua=get_ua(),
+            success=ok,
+            detail=f"tool={tool_name},status={status_code}",
+        )
+        return json_resp({
+            "ok": ok,
+            "tool": tool_name,
+            "status": status_code,
+            "result": _safe_tool_payload(payload),
+        }), (200 if ok else int(status_code or 500))
+
     @app.route("/api/ai-agent/readonly", methods=["GET"])
     @require_csrf_safe
     def ai_agent_readonly():
@@ -531,6 +1057,12 @@ def register_ai_agent_routes(app, deps):
             payload["member_management"] = _member_management_payload(actor, limit=limit)
         if actor_level["can_manage_servers"] and scope in {"all", "attack_diag"}:
             payload["attack_diagnosis"] = _attack_diagnosis_payload(actor, limit=limit)
+        _audit_agent_event(
+            "AI_AGENT_READONLY",
+            actor,
+            success=True,
+            detail=f"scope={scope},limit={limit},role={actor_level['role']}",
+        )
         return json_resp(payload)
 
     @app.route("/api/ai-agent/status", methods=["GET"])
@@ -545,6 +1077,12 @@ def register_ai_agent_routes(app, deps):
         audit_status = public_ai_agent_audit_status(settings, include_scan=_actor_is_super_admin(actor))
         health = ai_agent_health(settings)
         capabilities = ai_agent_capabilities(settings) if health.get("ok") else {}
+        _audit_agent_event(
+            "AI_AGENT_STATUS",
+            actor,
+            success=bool(health.get("ok")),
+            detail=f"provider={public.get('provider')},mode={public.get('operation_mode')},health_url={health.get('url') or ''},health_msg={str(health.get('msg') or '')[:120]}",
+        )
         return json_resp({
             "ok": True,
             "settings": public,
@@ -561,14 +1099,17 @@ def register_ai_agent_routes(app, deps):
     @app.route("/api/ai-agent/models", methods=["GET"])
     @require_csrf_safe
     def ai_agent_models_route():
-        _actor, denied = _actor_or_401()
+        actor, denied = _actor_or_401()
         if denied:
             return denied
         settings = get_system_settings() or {}
         try:
             models = ai_agent_models(settings)
         except AiAgentError as exc:
+            _audit_agent_event("AI_AGENT_MODELS", actor, success=False, detail=f"status={exc.status or '-'},error={str(exc)[:180]}")
             return json_resp({"ok": False, "msg": str(exc), "status": exc.status, "payload": exc.payload}), 502
+        model_count = len(models.get("data") or []) if isinstance(models, dict) else 0
+        _audit_agent_event("AI_AGENT_MODELS", actor, success=True, detail=f"models={model_count}")
         return json_resp({"ok": True, "models": models})
 
     @app.route("/api/ai-agent/audit-scan", methods=["GET", "POST"])
@@ -578,6 +1119,7 @@ def register_ai_agent_routes(app, deps):
         if denied:
             return denied
         if not _actor_is_super_admin(actor):
+            _audit_agent_event("AI_AGENT_AUDIT_SCAN_DENIED", actor, success=False, detail="root_only")
             return json_resp({"ok": False, "msg": "只有最高管理者可執行 AI Agent 審計掃描"}), 403
         settings = get_system_settings() or {}
         force = _parse_bool(request.args.get("force")) if request.method == "GET" else _parse_bool(request.json.get("force")) if request.is_json else False
@@ -594,7 +1136,9 @@ def register_ai_agent_routes(app, deps):
                 audit=audit,
             )
         except Exception as exc:
+            _audit_agent_event("AI_AGENT_AUDIT_SCAN", actor, success=False, detail=f"force={force},error={str(exc)[:180]}")
             return json_resp({"ok": False, "msg": str(exc)}), 502
+        _audit_agent_event("AI_AGENT_AUDIT_SCAN", actor, success=True, detail=f"force={force}")
         return json_resp({"ok": True, "scan": scan})
 
     @app.route("/api/ai-agent/audit-status", methods=["GET"])
@@ -604,8 +1148,10 @@ def register_ai_agent_routes(app, deps):
         if denied:
             return denied
         if not _actor_is_super_admin(actor):
+            _audit_agent_event("AI_AGENT_AUDIT_STATUS_DENIED", actor, success=False, detail="root_only")
             return json_resp({"ok": False, "msg": "只有最高管理者可檢視 AI Agent 審計狀態"}), 403
         settings = get_system_settings() or {}
+        _audit_agent_event("AI_AGENT_AUDIT_STATUS", actor, success=True, detail="include_scan=true")
         return json_resp({"ok": True, "audit_status": public_ai_agent_audit_status(settings, include_scan=True)})
 
     @app.route("/api/ai-agent/chat", methods=["POST"])
@@ -648,6 +1194,7 @@ def register_ai_agent_routes(app, deps):
             return json_resp({"ok": False, "msg": str(exc), "status": exc.status, "payload": exc.payload}), 502
 
         if _is_mock_chat_reply(result.get("content", "")):
+            _audit_agent_event("AI_AGENT_CHAT", actor, success=False, detail="mock_backend_reply")
             return json_resp({
                 "ok": False,
                 "msg": "AI Agent 後端仍回傳 mock 回覆，請確認 ai_agent_api_base_url 是否指向真實 Hermes endpoint",
