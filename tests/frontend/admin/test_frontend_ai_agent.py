@@ -46,7 +46,7 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert 'id="ai-agent-comfyui-vae"' in html
     assert 'id="ai-agent-comfyui-generate-btn"' in html
     assert 'id="s-module-ai-agent-min-role"' in html
-    assert "/js/37-ai-agent.js?v=20260613-ai-agent-comfyui-rerun-watch" in html
+    assert "/js/37-ai-agent.js?v=20260613-ai-agent-tool-planner" in html
     assert "/js/90-bootstrap.js?v=20260611-ai-agent-comfyui-write-tool" in html
 
     assert '"ai-agent": "feature_ai_agent_enabled"' in core_js
@@ -113,8 +113,13 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert "function aiAgentResumeComfyuiWatchJobs" in ai_agent_js
     assert "function aiAgentParseComfyuiRerunRequest" in ai_agent_js
     assert "function aiAgentRememberComfyuiSubmit" in ai_agent_js
+    assert "function aiAgentPlanToolAction" in ai_agent_js
+    assert "function aiAgentExecuteToolPlan" in ai_agent_js
+    assert "action=comfyui_rerun" in ai_agent_js
+    assert "理解需求與規劃工具中" in ai_agent_js
     assert "AI_AGENT_STATE.comfyuiSubmittedJobs" in ai_agent_js
     assert "跑出來了嗎" in ai_agent_js
+    assert "再來" in ai_agent_js
     assert "接回 ComfyUI 任務進度追蹤" in ai_agent_js
     assert "ComfyUI 產圖進度更新" in ai_agent_js
     assert "ComfyUI 任務仍在佇列中" in ai_agent_js
