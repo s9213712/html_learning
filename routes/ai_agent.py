@@ -984,6 +984,26 @@ def register_ai_agent_routes(app, deps):
             "omitted_chars": len(raw) - max_chars,
         }
 
+    def _tool_payload_error_summary(payload):
+        if not isinstance(payload, dict):
+            return ""
+        candidates = [
+            payload.get("msg"),
+            payload.get("message"),
+            payload.get("error"),
+        ]
+        nested = payload.get("result")
+        if isinstance(nested, dict):
+            candidates.extend([nested.get("msg"), nested.get("message"), nested.get("error")])
+        nested = payload.get("payload")
+        if isinstance(nested, dict):
+            candidates.extend([nested.get("msg"), nested.get("message"), nested.get("error")])
+        for item in candidates:
+            text = str(item or "").strip()
+            if text:
+                return text[:180]
+        return ""
+
     @app.route("/api/ai-agent/write-tools", methods=["GET"])
     @require_csrf_safe
     def ai_agent_write_tools_route():
@@ -1093,13 +1113,17 @@ def register_ai_agent_routes(app, deps):
             return json_resp({"ok": False, "msg": str(exc), "tool": tool_name}), 502
 
         ok = 200 <= int(status_code or 500) < 400 and bool(payload.get("ok", True) if isinstance(payload, dict) else True)
+        error_summary = _tool_payload_error_summary(payload) if not ok else ""
         audit(
             "AI_AGENT_WRITE_TOOL",
             get_client_ip(),
             user=_actor_value(actor, "username", "-"),
             ua=get_ua(),
             success=ok,
-            detail=f"tool={tool_name},status={status_code}",
+            detail=(
+                f"tool={tool_name},status={status_code}"
+                + (f",error={error_summary}" if error_summary else "")
+            ),
         )
         return json_resp({
             "ok": ok,

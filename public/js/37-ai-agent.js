@@ -654,6 +654,25 @@ function aiAgentFindComfyuiJobPayload(value, seen = new Set()) {
   return null;
 }
 
+function aiAgentWriteToolErrorMessage(json = {}, status = 0) {
+  const candidates = [
+    json.msg,
+    json.message,
+    json.error,
+    json.result?.msg,
+    json.result?.message,
+    json.result?.error,
+    json.payload?.msg,
+    json.payload?.message,
+    json.payload?.error,
+    json.result?.result?.msg,
+    json.result?.result?.message,
+    json.result?.result?.error,
+  ];
+  const msg = candidates.map((item) => String(item || "").trim()).find(Boolean);
+  return msg || `ComfyUI 產圖送出失敗（HTTP ${status || "-"})`;
+}
+
 async function runAiAgentComfyuiGenerate(overrides = null) {
   if (AI_AGENT_STATE.sendingTool) return;
   const canRunDirectly = aiAgentCanRunWriteTool("write_comfyui_generate");
@@ -712,7 +731,7 @@ async function runAiAgentComfyuiGenerate(overrides = null) {
     });
     const json = await res.json().catch(() => ({}));
     if (!res.ok || !json.ok) {
-      const msg = json.msg || `ComfyUI 產圖送出失敗（HTTP ${res.status}）`;
+      const msg = aiAgentWriteToolErrorMessage(json, res.status);
       AI_AGENT_STATE.messages.push({
         role: "assistant",
         content: `ComfyUI 產圖送出失敗（HTTP ${res.status}）：${msg}`,
