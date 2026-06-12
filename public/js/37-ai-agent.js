@@ -518,7 +518,11 @@ function aiAgentFillComfyuiToolForm(args = {}) {
 }
 
 function aiAgentHasEffectiveTool(toolName) {
-  return (AI_AGENT_STATE.settings?.tools || []).some((tool) => tool?.name === toolName);
+  const tools = Array.isArray(AI_AGENT_STATE.settings?.tools) ? AI_AGENT_STATE.settings.tools : [];
+  if (tools.some((tool) => tool?.name === toolName)) return true;
+  const configured = String(AI_AGENT_STATE.settings?.allowed_tools || "").trim();
+  if (!configured) return AI_AGENT_STATE.actor?.role === "super_admin";
+  return configured.split(",").map((item) => item.trim()).filter(Boolean).includes(toolName);
 }
 
 function aiAgentCanRunWriteTool(toolName) {
@@ -532,6 +536,13 @@ function aiAgentCanRequestWriteElevation(toolName) {
   return AI_AGENT_STATE.actor?.role === "super_admin"
     && AI_AGENT_STATE.settings?.operation_mode !== "write"
     && aiAgentHasEffectiveTool(toolName);
+}
+
+function aiAgentAuditTimeLabel(value, fallback = "尚未掃描") {
+  const raw = String(value || "").trim();
+  if (!raw) return fallback;
+  if (/^1970-01-01(?:T| )/.test(raw)) return fallback;
+  return raw;
 }
 
 function renderAiAgentWriteTools() {
@@ -646,7 +657,7 @@ async function runAiAgentComfyuiGenerate(overrides = null) {
       });
       renderAiAgentThread();
     } else {
-      const msg = "目前不可執行 ComfyUI write-tool，請確認 root 權限與工具白名單。";
+      const msg = "目前不可執行 ComfyUI write-tool：需要 root 身分，且工具需在白名單或角色預設工具內。";
       AI_AGENT_STATE.messages.push({ role: "assistant", content: `ComfyUI 產圖未送出：${msg}` });
       renderAiAgentThread();
       setAiAgentMessage(msg, "err");
@@ -1353,8 +1364,8 @@ function renderAiAgentAuditStatus(audit = {}, actor = {}) {
   const lines = [
     `模式：${AI_AGENT_OPERATION_MODE_LABELS[mode] || mode}`,
     `排程：${scheduler.enabled ? "啟用" : "未啟用"} / ${scheduler.interval_minutes || "-"} 分鐘`,
-    `上次掃描：${scheduler.last_scanned_at || "尚未掃描"}`,
-    `下次預計：${scheduler.next_due_at || "-"}`,
+    `上次掃描：${aiAgentAuditTimeLabel(scheduler.last_scanned_at)}`,
+    `下次預計：${scheduler.enabled ? aiAgentAuditTimeLabel(scheduler.next_due_at, "-") : "-"}`,
   ];
   if (summary.status) {
     lines.push(`結果：${summary.status}，異常 ${summary.anomaly_count || 0}，處置 ${summary.intervention_count || 0}，通知 ${summary.notification_count || 0}`);
