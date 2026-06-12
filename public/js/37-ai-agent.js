@@ -672,10 +672,45 @@ function aiAgentHydratePersistedComfyuiImages() {
     });
 }
 
-function aiAgentComfyuiRunningSummary(job = {}) {
+function aiAgentComfyuiRunningSummary(job = {}, options = {}) {
   const progress = job.progress || {};
   const detail = progress.detail || progress.phase || "running";
-  return `ComfyUI 後端已開始處理。\nJob ID：${job.job_id || "-"}\n進度：${Math.round(Number(progress.percent || 0))}%\n狀態：${detail}`;
+  const queuedLike = /佇列|queue/i.test(detail);
+  const title = options.update
+    ? "ComfyUI 產圖進度更新。"
+    : queuedLike
+      ? "ComfyUI 任務已進入後端佇列。"
+      : "ComfyUI 後端已開始處理。";
+  return `${title}\nJob ID：${job.job_id || "-"}\n進度：${Math.round(Number(progress.percent || 0))}%\n狀態：${detail}`;
+}
+
+function aiAgentShouldNotifyComfyuiProgress(watch = {}, job = {}) {
+  const progress = job.progress || {};
+  const percent = Math.max(0, Math.min(100, Math.round(Number(progress.percent || 0))));
+  const detail = String(progress.detail || progress.phase || job.status || "running");
+  const now = Date.now();
+  if (!watch.runningNotified) {
+    return { notify: true, percent, detail, initial: true };
+  }
+  const lastPercent = Number.isFinite(watch.lastNotifiedPercent) ? watch.lastNotifiedPercent : 0;
+  const lastAt = Number.isFinite(watch.lastNotifiedAt) ? watch.lastNotifiedAt : 0;
+  const detailChanged = detail && detail !== watch.lastNotifiedDetail;
+  const enoughProgress = percent >= Math.min(95, lastPercent + 10);
+  const enoughTimeForDetail = detailChanged && now - lastAt >= 15000;
+  const heartbeat = now - lastAt >= 30000 && percent > lastPercent;
+  return {
+    notify: enoughProgress || enoughTimeForDetail || heartbeat,
+    percent,
+    detail,
+    initial: false,
+  };
+}
+
+function aiAgentMarkComfyuiProgressNotified(watch = {}, snapshot = {}) {
+  watch.runningNotified = true;
+  watch.lastNotifiedPercent = snapshot.percent;
+  watch.lastNotifiedDetail = snapshot.detail;
+  watch.lastNotifiedAt = Date.now();
 }
 
 function aiAgentComfyuiFailureSummary(job = {}) {
@@ -703,6 +738,10 @@ function aiAgentWatchComfyuiJob(jobId) {
     startedAt: Date.now(),
     lastPhase: "",
     runningNotified: false,
+    lastNotifiedPercent: -1,
+    lastNotifiedDetail: "",
+    lastNotifiedAt: 0,
+    lastQueuedNotifiedAt: Date.now(),
   };
   aiAgentPollComfyuiJob(id);
 }
@@ -733,11 +772,33 @@ async function aiAgentPollComfyuiJob(jobId) {
       await loadAiAgentReadOnly({ scope: "all", limit: 20, silent: true, force: true }).catch(() => undefined);
       return;
     }
-    if (status === "running" && !watch.runningNotified) {
-      watch.runningNotified = true;
-      AI_AGENT_STATE.messages.push({ role: "assistant", content: aiAgentComfyuiRunningSummary(job) });
-      renderAiAgentThread();
-      setAiAgentMessage("ComfyUI 後端已開始處理", "ok");
+    if (status === "running") {
+      const progressNotice = aiAgentShouldNotifyComfyuiProgress(watch, job);
+      if (progressNotice.notify) {
+        aiAgentMarkComfyuiProgressNotified(watch, progressNotice);
+        AI_AGENT_STATE.messages.push({
+          role: "assistant",
+          content: aiAgentComfyuiRunningSummary(job, { update: !progressNotice.initial }),
+        });
+        renderAiAgentThread();
+        setAiAgentMessage(progressNotice.initial && /佇列|queue/i.test(progressNotice.detail)
+          ? "ComfyUI 任務已進入後端佇列"
+          : progressNotice.initial
+            ? "ComfyUI 後端已開始處理"
+            : `ComfyUI 產圖進度 ${progressNotice.percent}%`, "ok");
+      }
+    }
+    if (status === "queued") {
+      const now = Date.now();
+      if (!watch.lastQueuedNotifiedAt || now - watch.lastQueuedNotifiedAt >= 30000) {
+        watch.lastQueuedNotifiedAt = now;
+        AI_AGENT_STATE.messages.push({
+          role: "assistant",
+          content: `ComfyUI 任務仍在佇列中。\nJob ID：${jobId}\n狀態：${job.status || "queued"}`,
+        });
+        renderAiAgentThread();
+        setAiAgentMessage("ComfyUI 任務仍在佇列中", "info");
+      }
     }
     const elapsed = Date.now() - watch.startedAt;
     if (elapsed >= 30 * 60 * 1000) {

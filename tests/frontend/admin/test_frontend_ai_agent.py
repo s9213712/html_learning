@@ -46,7 +46,7 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert 'id="ai-agent-comfyui-vae"' in html
     assert 'id="ai-agent-comfyui-generate-btn"' in html
     assert 'id="s-module-ai-agent-min-role"' in html
-    assert "/js/37-ai-agent.js?v=20260612-ai-agent-image-preview" in html
+    assert "/js/37-ai-agent.js?v=20260612-ai-agent-progress-updates-v2" in html
     assert "/js/90-bootstrap.js?v=20260611-ai-agent-comfyui-write-tool" in html
 
     assert '"ai-agent": "feature_ai_agent_enabled"' in core_js
@@ -103,6 +103,10 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert "ComfyUI 產圖送出失敗（HTTP ${res.status}）" in ai_agent_js
     assert "function aiAgentWatchComfyuiJob" in ai_agent_js
     assert "function aiAgentPollComfyuiJob" in ai_agent_js
+    assert "function aiAgentShouldNotifyComfyuiProgress" in ai_agent_js
+    assert "function aiAgentMarkComfyuiProgressNotified" in ai_agent_js
+    assert "ComfyUI 產圖進度更新" in ai_agent_js
+    assert "ComfyUI 任務仍在佇列中" in ai_agent_js
     assert "function aiAgentComfyuiResultSummary" in ai_agent_js
     assert "function aiAgentComfyuiCompletionMessage" in ai_agent_js
     assert "function aiAgentHydrateComfyuiMessageImages" in ai_agent_js
