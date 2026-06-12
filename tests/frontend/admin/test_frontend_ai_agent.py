@@ -15,6 +15,8 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     bootstrap_js = _read("public/js/90-bootstrap.js")
     ai_agent_js = _read("public/js/37-ai-agent.js")
     public_routes_py = _read("routes/public.py")
+    ai_agent_routes_py = _read("routes/ai_agent.py")
+    backpressure_py = _read("services/server/backpressure.py")
     css = _read("public/styles.css")
 
     assert 'id="tab-module-ai-agent" style="display:none;"' in html
@@ -44,7 +46,7 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert 'id="ai-agent-comfyui-vae"' in html
     assert 'id="ai-agent-comfyui-generate-btn"' in html
     assert 'id="s-module-ai-agent-min-role"' in html
-    assert "/js/37-ai-agent.js?v=20260612-ai-agent-comfyui-error-report" in html
+    assert "/js/37-ai-agent.js?v=20260612-ai-agent-comfyui-confirm-status" in html
     assert "/js/90-bootstrap.js?v=20260611-ai-agent-comfyui-write-tool" in html
 
     assert '"ai-agent": "feature_ai_agent_enabled"' in core_js
@@ -98,6 +100,13 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert "圖片分析與提示詞生成中" in ai_agent_js
     assert "生圖需求解析中" in ai_agent_js
     assert "ComfyUI 產圖送出失敗（HTTP ${res.status}）" in ai_agent_js
+    assert "function aiAgentWatchComfyuiJob" in ai_agent_js
+    assert "function aiAgentPollComfyuiJob" in ai_agent_js
+    assert "function aiAgentComfyuiResultSummary" in ai_agent_js
+    assert "接下來要我怎麼處理？" in ai_agent_js
+    assert "修改參數重跑" in ai_agent_js
+    assert "儲存或加入收藏" in ai_agent_js
+    assert "發文分享" in ai_agent_js
     assert "await aiAgentAnalyzeImageForComfyui(userText)" in ai_agent_js
     assert "await aiAgentAnalyzeTextForComfyui(userText)" in ai_agent_js
     assert "await runAiAgentComfyuiGenerate(analyzed.args)" in ai_agent_js
@@ -116,6 +125,8 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert 'ai-agent-effective-tools' in ai_agent_js
     assert 'image_url' in ai_agent_js
     assert 'hackme:account-context-changed' in ai_agent_js
+    assert 'environ_base={"hackme.internal_dispatch": "ai_agent_write_tool"}' in ai_agent_routes_py
+    assert 'request.environ.get("hackme.internal_dispatch") == "ai_agent_write_tool"' in backpressure_py
 
     assert ".ai-agent-layout" in css
     assert ".ai-agent-thread" in css

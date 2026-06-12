@@ -2,6 +2,7 @@ import json
 from datetime import datetime
 import hashlib
 import os
+import re
 import shutil
 from urllib.parse import urlencode
 
@@ -715,6 +716,75 @@ def register_ai_agent_routes(app, deps):
             return None, "path 不可包含相對跳脫"
         return value, ""
 
+    def _comfyui_model_match_key(value):
+        text = str(value or "").strip().lower().replace("\\", "/")
+        text = text.rsplit("/", 1)[-1]
+        text = re.sub(r"\.(?:safetensors|ckpt|pt|pth|bin|gguf)$", "", text)
+        return re.sub(r"[^0-9a-z]+", "", text)
+
+    def _comfyui_model_query_tokens(value):
+        text = str(value or "").strip().lower().replace("\\", "/")
+        text = text.rsplit("/", 1)[-1]
+        text = re.sub(r"\.(?:safetensors|ckpt|pt|pth|bin|gguf)$", "", text)
+        return [
+            token
+            for token in re.split(r"[^0-9a-z]+", text)
+            if token and token not in {"model", "checkpoint", "ckpt", "safetensors"}
+        ]
+
+    def _resolve_comfyui_checkpoint_name(raw_name, model_options):
+        requested = str(raw_name or "").strip()
+        if not requested:
+            return "", "", []
+        options = [
+            str(option or "").strip()
+            for option in (model_options or [])
+            if str(option or "").strip()
+        ]
+        if not options:
+            return requested, "", []
+        for option in options:
+            if option == requested:
+                return option, "", []
+        requested_path = requested.replace("\\", "/").lower()
+        for option in options:
+            if option.replace("\\", "/").lower() == requested_path:
+                return option, "", []
+        requested_base = requested_path.rsplit("/", 1)[-1]
+        exact_base = [
+            option
+            for option in options
+            if option.replace("\\", "/").lower().rsplit("/", 1)[-1] == requested_base
+        ]
+        if len(set(exact_base)) == 1:
+            return exact_base[0], "", []
+
+        requested_key = _comfyui_model_match_key(requested)
+        keyed = [
+            option
+            for option in options
+            if _comfyui_model_match_key(option) == requested_key
+        ] if requested_key else []
+        if len(set(keyed)) == 1:
+            return keyed[0], "", []
+
+        tokens = _comfyui_model_query_tokens(requested)
+        token_matches = []
+        if tokens:
+            for option in options:
+                option_key = _comfyui_model_match_key(option)
+                if all(token in option_key for token in tokens):
+                    token_matches.append(option)
+        unique_matches = sorted(set(token_matches))
+        if len(unique_matches) == 1:
+            return unique_matches[0], "", unique_matches
+        if unique_matches:
+            preview = "、".join(unique_matches[:8])
+            return "", f"模型名稱「{requested}」符合多個 checkpoint，請指定完整名稱：{preview}", unique_matches
+
+        preview = "、".join(options[:8])
+        return "", f"模型名稱「{requested}」不在 ComfyUI checkpoint 清單中。可用模型：{preview}", []
+
     def _build_write_tool_request(tool_name, spec, args):
         missing = [
             key for key in sorted(spec.get("required") or [])
@@ -745,11 +815,57 @@ def register_ai_agent_routes(app, deps):
 
         body_fields = spec.get("body_fields") or set()
         body = {key: args.get(key) for key in body_fields if key in args}
+        if tool_name == "write_community_create_thread" and "post_type" in body:
+            post_type = str(body.get("post_type") or "").strip().lower()
+            post_type_aliases = {
+                "": "normal",
+                "discussion": "normal",
+                "general": "normal",
+                "post": "normal",
+                "thread": "normal",
+                "討論": "normal",
+                "一般": "normal",
+                "普通": "normal",
+                "guide": "howto",
+                "教學": "howto",
+                "問題": "question",
+                "提問": "question",
+            }
+            body["post_type"] = post_type_aliases.get(post_type, post_type)
         if tool_name == "write_comfyui_generate" and not str(body.get("model") or "").strip():
             fallback_model = str(body.get("checkpoint") or body.get("checkpoint_name") or "").strip()
             if fallback_model:
                 body["model"] = fallback_model
         return path, body, ""
+
+    def _prepare_comfyui_write_body(body):
+        next_body = dict(body or {})
+        requested = str(
+            next_body.get("model")
+            or next_body.get("checkpoint")
+            or next_body.get("checkpoint_name")
+            or ""
+        ).strip()
+        if not requested:
+            return next_body, ""
+        status_code, models_payload = _dispatch_internal_api("GET", "/api/comfyui/models", None)
+        model_options = []
+        if 200 <= int(status_code or 500) < 400 and isinstance(models_payload, dict):
+            model_options = list(models_payload.get("models") or [])
+        if not model_options:
+            msg = ""
+            if isinstance(models_payload, dict):
+                msg = str(models_payload.get("msg") or "").strip()
+            suffix = f"：{msg}" if msg else ""
+            return None, f"目前無法讀取 ComfyUI checkpoint 清單，已取消送出產圖{suffix}"
+        resolved, msg, _matches = _resolve_comfyui_checkpoint_name(requested, model_options)
+        if msg:
+            return None, msg
+        if resolved:
+            next_body["model"] = resolved
+            next_body["checkpoint"] = resolved
+            next_body["checkpoint_name"] = resolved
+        return next_body, ""
 
     def _dispatch_internal_api(method, path, body):
         headers = {}
@@ -764,6 +880,7 @@ def register_ai_agent_routes(app, deps):
                 method=method,
                 json=body if method in {"POST", "PUT", "PATCH"} else None,
                 headers=headers,
+                environ_base={"hackme.internal_dispatch": "ai_agent_write_tool"},
             )
         payload = response.get_json(silent=True)
         if payload is None:
@@ -872,6 +989,11 @@ def register_ai_agent_routes(app, deps):
                 if msg:
                     _audit_agent_event("AI_AGENT_WRITE_TOOL", actor, success=False, detail=f"tool={tool_name},error={msg[:180]}")
                     return json_resp({"ok": False, "msg": msg}), 400
+                if tool_name == "write_comfyui_generate":
+                    body, msg = _prepare_comfyui_write_body(body)
+                    if msg:
+                        _audit_agent_event("AI_AGENT_WRITE_TOOL", actor, success=False, detail=f"tool={tool_name},error={msg[:180]}")
+                        return json_resp({"ok": False, "msg": msg}), 400
                 status_code, payload = _dispatch_internal_api(spec.get("method"), path, body)
         except Exception as exc:
             audit(

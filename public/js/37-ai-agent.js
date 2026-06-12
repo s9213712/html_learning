@@ -14,6 +14,8 @@ const AI_AGENT_STATE = {
   modelIds: [],
   sessionId: "",
   accountScope: "",
+  comfyuiWatchJobs: {},
+  lastComfyuiJob: null,
 };
 
 const AI_AGENT_OPERATION_MODE_LABELS = {
@@ -198,7 +200,7 @@ function aiAgentParseComfyuiGenerateRequest(text) {
     const modelLine = lines.find((line) => aiAgentLooksLikeComfyuiModelLine(line) && aiAgentStripFieldValue(line) !== prompt);
     if (modelLine) args.checkpoint = aiAgentStripFieldValue(modelLine);
   }
-  const cfg = raw.match(/(?:^|\n)\s*(?:cfg(?:[_\s-]?scale)?)\s*[:：]?\s*([0-9]+(?:\.[0-9]+)?)/i);
+  const cfg = raw.match(/(?:^|[\s,，;；])(?:cfg(?:[_\s-]?scale)?)\s*[:：]?\s*([0-9]+(?:\.[0-9]+)?)/i);
   if (cfg) args.cfg_scale = aiAgentClampNumber(cfg[1], 7, { min: 1, max: 20 });
   const steps = raw.match(/(?:^|\n)\s*(?:steps?|步數)\s*[:：]?\s*(\d+)/i);
   if (steps) args.steps = aiAgentClampNumber(steps[1], 20, { min: 1, max: 80, integer: true });
@@ -226,6 +228,9 @@ function aiAgentParseComfyuiGenerateRequest(text) {
 
 function aiAgentWantsComfyuiGeneration(text) {
   const raw = String(text || "");
+  if (/(不要|不必|不用|無需|別|禁止|不要幫我)\s*(?:再)?\s*(?:生圖|產圖|生成圖片|生成一張|產生圖片|產生一張|畫圖|畫一張|做一張|comfyui|txt2img|t2i|sdxl)/i.test(raw)) {
+    return false;
+  }
   if (/(查|看|顯示|確認|status|progress|進度|狀態|queue|running|pending|任務)/i.test(raw)
     && /(產圖|生圖|comfyui|generation|下載|download)/i.test(raw)) {
     return false;
@@ -249,7 +254,7 @@ function aiAgentParseComfyuiOptionOverrides(text) {
     /^\s*(?:models?|模型|checkpoint|ckpt)\s*[:：]\s*(.+)$/i,
   ]);
   if (model) args.checkpoint = model;
-  const cfg = raw.match(/(?:^|\n)\s*(?:cfg(?:[_\s-]?scale)?)\s*[:：]?\s*([0-9]+(?:\.[0-9]+)?)/i);
+  const cfg = raw.match(/(?:^|[\s,，;；])(?:cfg(?:[_\s-]?scale)?)\s*[:：]?\s*([0-9]+(?:\.[0-9]+)?)/i);
   if (cfg) args.cfg_scale = aiAgentClampNumber(cfg[1], 7, { min: 1, max: 20 });
   const steps = raw.match(/(?:^|\n)\s*(?:steps?|步數)\s*[:：]?\s*(\d+)/i);
   if (steps) args.steps = aiAgentClampNumber(steps[1], 20, { min: 1, max: 80, integer: true });
@@ -526,12 +531,16 @@ async function runAiAgentComfyuiGenerate(overrides = null) {
     }
     const job = json.result?.job || json.payload?.job || json.job || {};
     const jobId = job.job_id || json.result?.job_id || "-";
+    const initialStatus = job.status || "queued";
     AI_AGENT_STATE.messages.push({
       role: "assistant",
-      content: `ComfyUI 產圖已送出。\n工具：write_comfyui_generate\nJob ID：${jobId}\n狀態：${job.status || "queued"}`,
+      content: `ComfyUI 產圖已送出，正在確認後端接收狀態。\n工具：write_comfyui_generate\nJob ID：${jobId}\n狀態：${initialStatus}`,
     });
     renderAiAgentThread();
-    setAiAgentMessage("ComfyUI 產圖已送出", "ok");
+    setAiAgentMessage("ComfyUI 產圖已送出，正在確認狀態", "info");
+    if (jobId && jobId !== "-") {
+      aiAgentWatchComfyuiJob(jobId);
+    }
     await loadAiAgentReadOnly({ scope: "all", limit: 20, silent: true, force: true }).catch(() => undefined);
   } catch (err) {
     const msg = `ComfyUI 產圖送出失敗：${err}`;
@@ -542,6 +551,179 @@ async function runAiAgentComfyuiGenerate(overrides = null) {
     AI_AGENT_STATE.sendingTool = false;
     renderAiAgentWriteTools();
   }
+}
+
+function aiAgentComfyuiResultSummary(job = {}) {
+  const result = job.result || {};
+  const images = Array.isArray(result.images) ? result.images : (result.image ? [result.image] : []);
+  const names = images
+    .map((item) => item?.image_ref?.filename || item?.file_ref?.filename || item?.filename || "")
+    .filter(Boolean)
+    .slice(0, 4);
+  const count = images.length || (result.image ? 1 : 0);
+  const lines = [
+    "ComfyUI 產圖完成。",
+    `Job ID：${job.job_id || "-"}`,
+    `輸出：${count || "已產生"} 張`,
+  ];
+  if (names.length) lines.push(`檔案：${names.join("、")}`);
+  lines.push("");
+  lines.push("接下來要我怎麼處理？可以直接回覆：");
+  lines.push("1. 修改參數重跑（例如：CFG 改 8、步數 30、換模型）");
+  lines.push("2. 儲存或加入收藏");
+  lines.push("3. 發文分享並幫你寫標題與內容");
+  return lines.join("\n");
+}
+
+function aiAgentComfyuiRunningSummary(job = {}) {
+  const progress = job.progress || {};
+  const detail = progress.detail || progress.phase || "running";
+  return `ComfyUI 後端已開始處理。\nJob ID：${job.job_id || "-"}\n進度：${Math.round(Number(progress.percent || 0))}%\n狀態：${detail}`;
+}
+
+function aiAgentComfyuiFailureSummary(job = {}) {
+  const progress = job.progress || {};
+  const detail = progress.error_message || progress.detail || job.error || "後端回報失敗，但沒有提供詳細訊息。";
+  return `ComfyUI 產圖失敗。\nJob ID：${job.job_id || "-"}\n狀態：${job.status || "error"}\n錯誤：${detail}\n\n請修正模型、VAE、尺寸或提示詞後再叫我重送。`;
+}
+
+async function aiAgentFetchComfyuiJob(jobId) {
+  const res = await apiFetch(`${API}/comfyui/jobs/${encodeURIComponent(jobId)}`, {
+    method: "GET",
+    credentials: "same-origin",
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok || !json.ok) {
+    throw new Error(json.msg || `HTTP ${res.status}`);
+  }
+  return json.job || {};
+}
+
+function aiAgentWatchComfyuiJob(jobId) {
+  const id = String(jobId || "").trim();
+  if (!id || AI_AGENT_STATE.comfyuiWatchJobs[id]) return;
+  AI_AGENT_STATE.comfyuiWatchJobs[id] = {
+    startedAt: Date.now(),
+    lastPhase: "",
+    runningNotified: false,
+  };
+  aiAgentPollComfyuiJob(id);
+}
+
+async function aiAgentPollComfyuiJob(jobId) {
+  const watch = AI_AGENT_STATE.comfyuiWatchJobs[jobId];
+  if (!watch) return;
+  try {
+    const job = await aiAgentFetchComfyuiJob(jobId);
+    AI_AGENT_STATE.lastComfyuiJob = job;
+    const status = String(job.status || "").toLowerCase();
+    const progress = job.progress || {};
+    const phase = String(progress.phase || "").toLowerCase();
+    if (["error", "failed", "cancelled"].includes(status) || phase === "error") {
+      AI_AGENT_STATE.messages.push({ role: "assistant", content: aiAgentComfyuiFailureSummary(job) });
+      renderAiAgentThread();
+      setAiAgentMessage(`ComfyUI 產圖失敗：${progress.error_message || progress.detail || job.error || "未知錯誤"}`, "err");
+      delete AI_AGENT_STATE.comfyuiWatchJobs[jobId];
+      return;
+    }
+    if (status === "completed") {
+      AI_AGENT_STATE.messages.push({ role: "assistant", content: aiAgentComfyuiResultSummary(job) });
+      renderAiAgentThread();
+      setAiAgentMessage("ComfyUI 產圖完成", "ok");
+      delete AI_AGENT_STATE.comfyuiWatchJobs[jobId];
+      await loadAiAgentReadOnly({ scope: "all", limit: 20, silent: true, force: true }).catch(() => undefined);
+      return;
+    }
+    if (status === "running" && !watch.runningNotified) {
+      watch.runningNotified = true;
+      AI_AGENT_STATE.messages.push({ role: "assistant", content: aiAgentComfyuiRunningSummary(job) });
+      renderAiAgentThread();
+      setAiAgentMessage("ComfyUI 後端已開始處理", "ok");
+    }
+    const elapsed = Date.now() - watch.startedAt;
+    if (elapsed >= 30 * 60 * 1000) {
+      AI_AGENT_STATE.messages.push({
+        role: "assistant",
+        content: `ComfyUI 任務仍未完成。\nJob ID：${jobId}\n狀態：${job.status || "queued"}\n我先停止自動追蹤，之後你可以叫我查產圖進度。`,
+      });
+      renderAiAgentThread();
+      setAiAgentMessage("ComfyUI 任務追蹤已超過 30 分鐘", "info");
+      delete AI_AGENT_STATE.comfyuiWatchJobs[jobId];
+      return;
+    }
+    const delay = elapsed < 15000 ? 2000 : 5000;
+    setTimeout(() => aiAgentPollComfyuiJob(jobId), delay);
+  } catch (err) {
+    AI_AGENT_STATE.messages.push({
+      role: "assistant",
+      content: `ComfyUI 任務狀態確認失敗。\nJob ID：${jobId}\n錯誤：${err?.message || err}`,
+    });
+    renderAiAgentThread();
+    setAiAgentMessage(`ComfyUI 任務狀態確認失敗：${err?.message || err}`, "err");
+    delete AI_AGENT_STATE.comfyuiWatchJobs[jobId];
+  }
+}
+
+async function aiAgentConfirmComfyuiJob(jobId) {
+  const delays = [800, 1200, 1800, 2500, 3500];
+  let lastJob = null;
+  for (const delay of delays) {
+    await new Promise((resolve) => setTimeout(resolve, delay));
+    const res = await apiFetch(`${API}/comfyui/jobs/${encodeURIComponent(jobId)}`, {
+      method: "GET",
+      credentials: "same-origin",
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok || !json.ok) {
+      const msg = json.msg || `HTTP ${res.status}`;
+      AI_AGENT_STATE.messages.push({
+        role: "assistant",
+        content: `ComfyUI 任務狀態確認失敗。\nJob ID：${jobId}\n錯誤：${msg}`,
+      });
+      renderAiAgentThread();
+      setAiAgentMessage(`ComfyUI 任務狀態確認失敗：${msg}`, "err");
+      return;
+    }
+    lastJob = json.job || {};
+    lastJob.job_id = lastJob.job_id || jobId;
+    const status = String(lastJob.status || "").toLowerCase();
+    const progress = lastJob.progress || {};
+    const detail = progress.error_message || progress.detail || lastJob.error || "";
+    if (["error", "failed", "cancelled"].includes(status) || String(progress.phase || "").toLowerCase() === "error") {
+      AI_AGENT_STATE.messages.push({
+        role: "assistant",
+        content: aiAgentComfyuiFailureSummary(lastJob),
+      });
+      renderAiAgentThread();
+      setAiAgentMessage(`ComfyUI 產圖失敗：${detail || lastJob.error || "未知錯誤"}`, "err");
+      return;
+    }
+    if (status === "completed") {
+      AI_AGENT_STATE.messages.push({
+        role: "assistant",
+        content: aiAgentComfyuiResultSummary(lastJob),
+      });
+      renderAiAgentThread();
+      setAiAgentMessage("ComfyUI 產圖完成", "ok");
+      return;
+    }
+    if (status === "running") {
+      AI_AGENT_STATE.messages.push({
+        role: "assistant",
+        content: aiAgentComfyuiRunningSummary(lastJob),
+      });
+      renderAiAgentThread();
+      setAiAgentMessage("ComfyUI 後端已開始處理", "ok");
+      return;
+    }
+  }
+  const progress = lastJob?.progress || {};
+  AI_AGENT_STATE.messages.push({
+    role: "assistant",
+    content: `ComfyUI 任務仍在等待後端確認。\nJob ID：${jobId}\n狀態：${lastJob?.status || "queued"}\n提示：若 ComfyUI 後台沒有看到任務，請稍後查詢進度；若後端驗證失敗，系統會在任務狀態中顯示錯誤。`,
+  });
+  renderAiAgentThread();
+  setAiAgentMessage("ComfyUI 任務仍在等待後端確認", "info");
 }
 
 
