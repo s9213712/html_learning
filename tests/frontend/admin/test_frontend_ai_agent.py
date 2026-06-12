@@ -123,7 +123,10 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert "await aiAgentAnalyzeTextForComfyui(userText)" in ai_agent_js
     assert "await runAiAgentComfyuiGenerate(analyzed.args)" in ai_agent_js
     assert "aiAgentConversationStorageKey" in ai_agent_js
-    assert "localStorage.setItem" in ai_agent_js
+    assert 'API + "/ai-agent/conversation"' in ai_agent_js
+    assert "localStorage.setItem" not in ai_agent_js
+    assert "ALLOW_WRITE_ONCE" in ai_agent_js
+    assert "elevate_once" in ai_agent_js
     assert 'official_workflow_id = "origin_sdxl_txt2img"' in ai_agent_js
     assert 'ai-agent-write-tools-panel' in ai_agent_js
     assert 'panel.hidden = true;' in ai_agent_js

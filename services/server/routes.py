@@ -186,6 +186,7 @@ OPERATION_ROUTE_KEYS = (
     "audit",
     "check_user_rate_limit",
     "detect_chat_violation",
+    "fernet",
     "get_client_ip",
     "get_current_user_ctx",
     "get_audit_db",

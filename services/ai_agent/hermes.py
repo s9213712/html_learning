@@ -16,7 +16,7 @@ DEFAULT_AI_AGENT_API_BASE_URL = os.environ.get("HACKME_AI_AGENT_API_BASE_URL", "
 DEFAULT_AI_AGENT_MODEL = os.environ.get("HACKME_AI_AGENT_MODEL", "hermes-agent")
 DEFAULT_AI_AGENT_PROVIDER = "hermes"
 DEFAULT_AI_AGENT_PERSONA = "concise_helper"
-DEFAULT_AI_AGENT_OPERATION_MODE = "assist"
+DEFAULT_AI_AGENT_OPERATION_MODE = "readonly"
 MAX_AI_AGENT_IMAGE_DATA_URL_CHARS = 3 * 1024 * 1024
 AI_AGENT_AUDIT_INTERVAL_MINUTES_DEFAULT = 5
 AI_AGENT_AUDIT_INTERVAL_MINUTES_MAX = 60
@@ -766,7 +766,6 @@ def _contains_audit_mode_prohibited_action(text):
         "改變",
         "更新",
         "上傳",
-        "下載",
         "刪掉",
         "封鎖",
         "封鎖",

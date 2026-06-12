@@ -17,6 +17,8 @@ const AI_AGENT_STATE = {
   comfyuiWatchJobs: {},
   lastComfyuiJob: null,
   comfyuiPreviewLoads: {},
+  persistTimer: null,
+  loadingConversation: false,
 };
 
 const AI_AGENT_OPERATION_MODE_LABELS = {
@@ -37,39 +39,75 @@ function aiAgentConversationStorageKey(scope = AI_AGENT_STATE.accountScope || ai
 }
 
 function aiAgentPersistConversation(scope = AI_AGENT_STATE.accountScope) {
-  if (!scope || typeof localStorage === "undefined") return;
-  try {
-    localStorage.setItem(aiAgentConversationStorageKey(scope), JSON.stringify({
-      sessionId: AI_AGENT_STATE.sessionId || "",
-      messages: AI_AGENT_STATE.messages.slice(-80).map((message) => ({
-        role: message.role,
-        content: String(message.content || "").slice(0, 20000),
-        images: Array.isArray(message.images)
-          ? message.images.slice(0, 4).map((image) => ({
-            image_ref: image?.image_ref || null,
-            prompt_id: String(image?.prompt_id || "").slice(0, 160),
-            filename: String(image?.filename || "").slice(0, 260),
-            mime_type: String(image?.mime_type || "").slice(0, 80),
-          })).filter((image) => image.image_ref && image.filename)
-          : [],
-      })),
-      updatedAt: Date.now(),
-    }));
-  } catch (err) {
-    // localStorage can be disabled or full; chat still works without persistence.
-  }
+  if (!scope || AI_AGENT_STATE.loadingConversation) return;
+  if (!AI_AGENT_STATE.sessionId && !AI_AGENT_STATE.messages.length) return;
+  const conversationId = aiAgentEnsureSessionId();
+  const payload = {
+    sessionId: conversationId,
+    messages: AI_AGENT_STATE.messages.slice(-80).map((message) => ({
+      role: message.role,
+      content: String(message.content || "").slice(0, 20000),
+      images: Array.isArray(message.images)
+        ? message.images.slice(0, 4).map((image) => ({
+          image_ref: image?.image_ref || null,
+          prompt_id: String(image?.prompt_id || "").slice(0, 160),
+          filename: String(image?.filename || "").slice(0, 260),
+          mime_type: String(image?.mime_type || "").slice(0, 80),
+        })).filter((image) => image.image_ref && image.filename)
+        : [],
+    })),
+    habits: {},
+  };
+  apiFetch(API + "/ai-agent/conversation", {
+    method: "PUT",
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ conversation_id: conversationId, payload }),
+  }).catch(() => undefined);
+}
+
+function aiAgentSchedulePersistConversation() {
+  if (AI_AGENT_STATE.persistTimer) clearTimeout(AI_AGENT_STATE.persistTimer);
+  AI_AGENT_STATE.persistTimer = setTimeout(() => {
+    AI_AGENT_STATE.persistTimer = null;
+    aiAgentPersistConversation();
+  }, 350);
 }
 
 function aiAgentLoadConversation(scope) {
   AI_AGENT_STATE.messages = [];
   AI_AGENT_STATE.sessionId = "";
   AI_AGENT_STATE.imageDataUrl = "";
-  if (!scope || typeof localStorage === "undefined") return;
+  if (!scope) return;
+  if (scope === "anonymous") {
+    renderAiAgentThread({ skipPersist: true });
+    return;
+  }
+  let storedSessionId = "";
   try {
     const raw = localStorage.getItem(aiAgentConversationStorageKey(scope));
-    if (!raw) return;
-    const parsed = JSON.parse(raw);
-    const messages = Array.isArray(parsed?.messages) ? parsed.messages : [];
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      storedSessionId = String(parsed?.sessionId || "").slice(0, 120);
+    }
+  } catch (err) {
+    storedSessionId = "";
+  }
+  if (storedSessionId) AI_AGENT_STATE.sessionId = storedSessionId;
+  aiAgentLoadEncryptedConversation(storedSessionId || "default").catch(() => undefined);
+}
+
+async function aiAgentLoadEncryptedConversation(conversationId = "default") {
+  if (AI_AGENT_STATE.loadingConversation) return;
+  AI_AGENT_STATE.loadingConversation = true;
+  try {
+    const res = await apiFetch(`${API}/ai-agent/conversation?conversation_id=${encodeURIComponent(conversationId || "default")}`, {
+      credentials: "same-origin",
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok || !json.ok) return;
+    const payload = json.payload || {};
+    const messages = Array.isArray(payload.messages) ? payload.messages : [];
     AI_AGENT_STATE.messages = messages
       .filter((message) => message && ["user", "assistant"].includes(message.role))
       .slice(-80)
@@ -85,10 +123,11 @@ function aiAgentLoadConversation(scope) {
           })).filter((image) => image.image_ref && image.filename)
           : [],
       }));
-    AI_AGENT_STATE.sessionId = String(parsed?.sessionId || "").slice(0, 120);
-  } catch (err) {
-    AI_AGENT_STATE.messages = [];
-    AI_AGENT_STATE.sessionId = "";
+    AI_AGENT_STATE.sessionId = String(payload.sessionId || json.conversation_id || conversationId || "").slice(0, 120);
+    renderAiAgentThread({ skipPersist: true });
+    aiAgentHydratePersistedComfyuiImages();
+  } finally {
+    AI_AGENT_STATE.loadingConversation = false;
   }
 }
 
@@ -108,7 +147,7 @@ function aiAgentResetScopeState() {
 
 function aiAgentEnsureSessionId() {
   if (AI_AGENT_STATE.sessionId) return AI_AGENT_STATE.sessionId;
-  AI_AGENT_STATE.sessionId = `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+  AI_AGENT_STATE.sessionId = "default";
   return AI_AGENT_STATE.sessionId;
 }
 
@@ -158,8 +197,15 @@ function aiAgentStripFieldValue(value) {
     .trim();
 }
 
+function aiAgentNormalizeUserText(value) {
+  return String(value || "")
+    .replace(/\\r\\n/g, "\n")
+    .replace(/\\n/g, "\n")
+    .replace(/\\r/g, "\n");
+}
+
 function aiAgentLineValue(text, patterns) {
-  const lines = String(text || "").split(/\r?\n/);
+  const lines = aiAgentNormalizeUserText(text).split(/\r?\n/);
   for (const line of lines) {
     for (const pattern of patterns) {
       const match = line.match(pattern);
@@ -188,7 +234,7 @@ function aiAgentLooksLikeComfyuiModelLine(line) {
 }
 
 function aiAgentParseComfyuiGenerateRequest(text) {
-  const raw = String(text || "").trim();
+  const raw = aiAgentNormalizeUserText(text).trim();
   if (!raw) return null;
   const lower = raw.toLowerCase();
   const wantsImage = /生圖|產圖|生成圖片|畫圖|畫一張|做一張|comfyui|txt2img|t2i|sdxl|text\s*to\s*image/.test(lower);
@@ -248,7 +294,7 @@ function aiAgentParseComfyuiGenerateRequest(text) {
 }
 
 function aiAgentWantsComfyuiGeneration(text) {
-  const raw = String(text || "");
+  const raw = aiAgentNormalizeUserText(text);
   if (/(不要|不必|不用|無需|別|禁止|不要幫我)\s*(?:再)?\s*(?:生圖|產圖|生成圖片|生成一張|產生圖片|產生一張|畫圖|畫一張|做一張|comfyui|txt2img|t2i|sdxl)/i.test(raw)) {
     return false;
   }
@@ -264,7 +310,7 @@ function aiAgentWantsComfyuiGeneration(text) {
 }
 
 function aiAgentParseComfyuiOptionOverrides(text) {
-  const raw = String(text || "");
+  const raw = aiAgentNormalizeUserText(text);
   const args = {};
   const size = raw.match(/(?:size|尺寸|解析度)?\s*[:：]?\s*(\d{3,4})\s*[xX*×＊]\s*(\d{3,4})/i);
   if (size) {
@@ -287,6 +333,41 @@ function aiAgentParseComfyuiOptionOverrides(text) {
     args.official_workflow_id = "origin_sdxl_txt2img";
   }
   return args;
+}
+
+function aiAgentWriteIntent(text) {
+  const raw = aiAgentNormalizeUserText(text).trim();
+  if (!raw) return null;
+  if (/(公告|announcement|notice)/i.test(raw) && /(發|發布|發佈|貼|新增|建立|create|post)/i.test(raw)) {
+    return {
+      tool: "write_community_create_thread",
+      label: "發布公告",
+      required: ["公告標題", "公告內容", "發布分類或版面"],
+    };
+  }
+  if (/(發文|貼文|文章|thread|post)/i.test(raw) && /(發|發布|發佈|貼|新增|建立|create|post)/i.test(raw)) {
+    return {
+      tool: "write_community_create_thread",
+      label: "發布貼文",
+      required: ["標題", "內容", "發布分類或版面"],
+    };
+  }
+  return null;
+}
+
+function aiAgentWriteIntentFollowup(intent) {
+  const canElevate = aiAgentCanRequestWriteElevation(intent.tool);
+  const mode = AI_AGENT_OPERATION_MODE_LABELS[AI_AGENT_STATE.settings?.operation_mode] || AI_AGENT_STATE.settings?.operation_mode || "目前模式";
+  const lines = [
+    `${intent.label}需要補齊必要資料後才能執行。`,
+    `請提供：${intent.required.join("、")}。`,
+  ];
+  if (canElevate) {
+    lines.push(`目前是 ${mode}；資料補齊後，我會在真正送出前請 root 確認本次提權。`);
+  } else {
+    lines.push(`目前不可直接執行 ${intent.tool}，我可以先幫你整理草稿與檢查內容。`);
+  }
+  return lines.join("\n");
 }
 
 function aiAgentExtractJsonObject(text) {
@@ -447,6 +528,12 @@ function aiAgentCanRunWriteTool(toolName) {
     && aiAgentHasEffectiveTool(toolName);
 }
 
+function aiAgentCanRequestWriteElevation(toolName) {
+  return AI_AGENT_STATE.actor?.role === "super_admin"
+    && AI_AGENT_STATE.settings?.operation_mode !== "write"
+    && aiAgentHasEffectiveTool(toolName);
+}
+
 function renderAiAgentWriteTools() {
   const panel = $("ai-agent-write-tools-panel");
   const state = $("ai-agent-write-tools-state");
@@ -462,12 +549,15 @@ function renderAiAgentWriteTools() {
       state.textContent = "僅 root 可使用 write-tool。";
     } else if (canRunComfyui) {
       state.textContent = "已啟用 write_comfyui_generate；對話解析後會直接送出，並自動附帶 confirm=EXECUTE。";
+    } else if (aiAgentCanRequestWriteElevation("write_comfyui_generate")) {
+      state.textContent = "目前為唯讀/協助模式；需要生圖等寫入時會先詢問 root 是否允許本次提權。";
     } else {
-      state.textContent = "需切換為 write 模式，且工具白名單需允許 write_comfyui_generate。";
+      state.textContent = "工具白名單未允許 write_comfyui_generate，無法執行生圖寫入。";
     }
   }
-  if (form) form.classList.toggle("disabled", !canRunComfyui);
-  if (button) button.disabled = !canRunComfyui || AI_AGENT_STATE.sendingTool;
+  const canAttemptComfyui = canRunComfyui || aiAgentCanRequestWriteElevation("write_comfyui_generate");
+  if (form) form.classList.toggle("disabled", !canAttemptComfyui);
+  if (button) button.disabled = !canAttemptComfyui || AI_AGENT_STATE.sendingTool;
 }
 
 function aiAgentComfyuiToolArguments(overrides = null) {
@@ -535,12 +625,33 @@ function aiAgentFindComfyuiJobPayload(value, seen = new Set()) {
 
 async function runAiAgentComfyuiGenerate(overrides = null) {
   if (AI_AGENT_STATE.sendingTool) return;
-  if (!aiAgentCanRunWriteTool("write_comfyui_generate")) {
-    const msg = "目前不可執行 ComfyUI write-tool，請確認 root / write 模式 / 工具白名單。";
-    AI_AGENT_STATE.messages.push({ role: "assistant", content: `ComfyUI 產圖未送出：${msg}` });
-    renderAiAgentThread();
-    setAiAgentMessage(msg, "err");
-    return;
+  const canRunDirectly = aiAgentCanRunWriteTool("write_comfyui_generate");
+  let elevateOnce = false;
+  if (!canRunDirectly) {
+    if (aiAgentCanRequestWriteElevation("write_comfyui_generate")) {
+      const ok = window.confirm(
+        "AI Agent 目前是唯讀/協助模式。\n\n這個請求需要本次提權執行 ComfyUI 生圖 write-tool。\n是否只允許這一次寫入？"
+      );
+      if (!ok) {
+        const msg = "已取消本次提權，ComfyUI 產圖未送出。";
+        AI_AGENT_STATE.messages.push({ role: "assistant", content: msg });
+        renderAiAgentThread();
+        setAiAgentMessage(msg, "info");
+        return;
+      }
+      elevateOnce = true;
+      AI_AGENT_STATE.messages.push({
+        role: "assistant",
+        content: "已取得 root 本次提權確認，將只對這次 ComfyUI 生圖請求附加一次性寫入授權。",
+      });
+      renderAiAgentThread();
+    } else {
+      const msg = "目前不可執行 ComfyUI write-tool，請確認 root 權限與工具白名單。";
+      AI_AGENT_STATE.messages.push({ role: "assistant", content: `ComfyUI 產圖未送出：${msg}` });
+      renderAiAgentThread();
+      setAiAgentMessage(msg, "err");
+      return;
+    }
   }
   let args = {};
   try {
@@ -565,6 +676,7 @@ async function runAiAgentComfyuiGenerate(overrides = null) {
         tool: "write_comfyui_generate",
         arguments: args,
         confirm: "EXECUTE",
+        elevate_once: elevateOnce ? "ALLOW_WRITE_ONCE" : "",
       }),
     });
     const json = await res.json().catch(() => ({}));
@@ -920,11 +1032,10 @@ async function aiAgentConfirmComfyuiJob(jobId) {
   setAiAgentMessage("ComfyUI 任務仍在等待後端確認", "info");
 }
 
-
-function renderAiAgentThread() {
+function renderAiAgentThread(options = {}) {
   const host = $("ai-agent-thread");
   if (!host) return;
-  aiAgentPersistConversation();
+  if (!options.skipPersist) aiAgentSchedulePersistConversation();
   if (!AI_AGENT_STATE.messages.length) {
     host.innerHTML = '<div class="drive-empty">目前沒有訊息</div>';
     return;
@@ -1361,6 +1472,13 @@ async function loadAiAgentReadOnly(options = {}) {
 
 function clearAiAgentConversation() {
   const scope = AI_AGENT_STATE.accountScope || aiAgentCurrentAccountScope();
+  const conversationId = AI_AGENT_STATE.sessionId || "default";
+  apiFetch(API + "/ai-agent/conversation", {
+    method: "DELETE",
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ conversation_id: conversationId }),
+  }).catch(() => undefined);
   AI_AGENT_STATE.messages = [];
   AI_AGENT_STATE.imageDataUrl = "";
   AI_AGENT_STATE.sessionId = "";
@@ -1536,6 +1654,19 @@ async function sendAiAgentMessage() {
       AI_AGENT_STATE.sending = false;
       if (sendBtn) sendBtn.disabled = false;
     }
+    return;
+  }
+  const writeIntent = mode === "text" ? aiAgentWriteIntent(prompt) : null;
+  if (writeIntent) {
+    if (!AI_AGENT_STATE.loaded && typeof loadAiAgentStatus === "function") {
+      await loadAiAgentStatus({ force: true }).catch(() => undefined);
+    }
+    const userText = prompt;
+    AI_AGENT_STATE.messages.push({ role: "user", content: userText });
+    AI_AGENT_STATE.messages.push({ role: "assistant", content: aiAgentWriteIntentFollowup(writeIntent) });
+    renderAiAgentThread();
+    if (input) input.value = "";
+    setAiAgentMessage("需要補充資料後才能執行寫入", "info");
     return;
   }
   AI_AGENT_STATE.sending = true;

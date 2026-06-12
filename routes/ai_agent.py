@@ -172,6 +172,7 @@ def register_ai_agent_routes(app, deps):
     get_client_ip = deps.get("get_client_ip", lambda: "")
     get_ua = deps.get("get_ua", lambda: "")
     get_db = deps["get_db"]
+    fernet = deps.get("fernet")
     audit = deps.get("audit", lambda *args, **kwargs: None)
     json_resp = deps["json_resp"]
     require_csrf_safe = deps["require_csrf_safe"]
@@ -685,6 +686,89 @@ def register_ai_agent_routes(app, deps):
             return None, (json_resp({"ok": False, "msg": "請求內容格式錯誤"}), 400)
         return data, None
 
+    def _ensure_ai_agent_conversation_schema(conn):
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ai_agent_conversations (
+                owner_user_id INTEGER NOT NULL,
+                session_binding TEXT NOT NULL,
+                conversation_id TEXT NOT NULL,
+                payload_encrypted TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (owner_user_id, session_binding, conversation_id)
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ai_agent_conversations_owner_updated "
+            "ON ai_agent_conversations(owner_user_id, updated_at)"
+        )
+
+    def _conversation_binding():
+        return _actor_session_binding() or "sessionless"
+
+    def _conversation_id(raw):
+        value = str(raw or "default").strip()[:120] or "default"
+        value = re.sub(r"[^0-9A-Za-z_.:-]", "_", value)
+        return value[:120] or "default"
+
+    def _sanitize_conversation_payload(data):
+        if not isinstance(data, dict):
+            data = {}
+        messages = data.get("messages")
+        if not isinstance(messages, list):
+            messages = []
+        cleaned = []
+        for message in messages[-80:]:
+            if not isinstance(message, dict):
+                continue
+            role = str(message.get("role") or "").strip()
+            if role not in {"user", "assistant"}:
+                continue
+            images = []
+            raw_images = message.get("images") if isinstance(message.get("images"), list) else []
+            for image in raw_images[:4]:
+                if not isinstance(image, dict):
+                    continue
+                image_ref = image.get("image_ref")
+                if not isinstance(image_ref, dict):
+                    continue
+                images.append({
+                    "image_ref": image_ref,
+                    "prompt_id": str(image.get("prompt_id") or "")[:160],
+                    "filename": str(image.get("filename") or "")[:260],
+                    "mime_type": str(image.get("mime_type") or "")[:80],
+                })
+            cleaned.append({
+                "role": role,
+                "content": str(message.get("content") or "")[:20000],
+                "images": images,
+            })
+        habits = data.get("habits") if isinstance(data.get("habits"), dict) else {}
+        safe_habits = {
+            str(key)[:80]: str(value)[:1000]
+            for key, value in list(habits.items())[:40]
+        }
+        return {
+            "sessionId": str(data.get("sessionId") or data.get("session_id") or "")[:120],
+            "messages": cleaned,
+            "habits": safe_habits,
+        }
+
+    def _encrypt_conversation_payload(payload):
+        if not fernet:
+            raise ValueError("AI Agent encrypted memory key is unavailable")
+        raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
+        return fernet.encrypt(raw.encode("utf-8")).decode("utf-8")
+
+    def _decrypt_conversation_payload(value):
+        if not fernet:
+            raise ValueError("AI Agent encrypted memory key is unavailable")
+        raw = fernet.decrypt(str(value or "").encode("utf-8")).decode("utf-8")
+        parsed = json.loads(raw)
+        return _sanitize_conversation_payload(parsed if isinstance(parsed, dict) else {})
+
     def _is_missing_arg(value):
         return value is None or (isinstance(value, str) and not value.strip())
 
@@ -719,17 +803,17 @@ def register_ai_agent_routes(app, deps):
     def _comfyui_model_match_key(value):
         text = str(value or "").strip().lower().replace("\\", "/")
         text = text.rsplit("/", 1)[-1]
-        text = re.sub(r"\.(?:safetensors|ckpt|pt|pth|bin|gguf)$", "", text)
+        text = re.sub(r"\.(?:safetensors?|ckpt|pt|pth|bin|gguf)$", "", text)
         return re.sub(r"[^0-9a-z]+", "", text)
 
     def _comfyui_model_query_tokens(value):
         text = str(value or "").strip().lower().replace("\\", "/")
         text = text.rsplit("/", 1)[-1]
-        text = re.sub(r"\.(?:safetensors|ckpt|pt|pth|bin|gguf)$", "", text)
+        text = re.sub(r"\.(?:safetensors?|ckpt|pt|pth|bin|gguf)$", "", text)
         return [
             token
             for token in re.split(r"[^0-9a-z]+", text)
-            if token and token not in {"model", "checkpoint", "ckpt", "safetensors"}
+            if token and token not in {"model", "checkpoint", "ckpt", "safetensor", "safetensors"}
         ]
 
     def _resolve_comfyui_checkpoint_name(raw_name, model_options):
@@ -959,12 +1043,14 @@ def register_ai_agent_routes(app, deps):
 
         public = public_ai_agent_settings(settings, actor=actor)
         write_enabled = bool((public.get("operation_mode_policy") or {}).get("write_enabled"))
-        if spec.get("write") and not write_enabled:
+        elevate_once = data.get("elevate_once") in {True, "ALLOW_WRITE_ONCE", "allow_write_once"}
+        if spec.get("write") and not write_enabled and not (_actor_is_super_admin(actor) and elevate_once):
             _audit_agent_event("AI_AGENT_WRITE_TOOL", actor, success=False, detail=f"tool={tool_name},error=operation_mode_not_write,mode={public.get('operation_mode')}")
             return json_resp({
                 "ok": False,
-                "msg": "寫入型工具必須先將 AI Agent operation mode 切換為 write",
+                "msg": "寫入型工具需要 root 允許本次提權，或先將 AI Agent operation mode 切換為 write",
                 "operation_mode": public.get("operation_mode"),
+                "requires_elevation": _actor_is_super_admin(actor),
             }), 409
         if spec.get("write") and data.get("confirm") not in {True, "EXECUTE", "execute"}:
             _audit_agent_event("AI_AGENT_WRITE_TOOL", actor, success=False, detail=f"tool={tool_name},error=missing_confirm")
@@ -1019,6 +1105,7 @@ def register_ai_agent_routes(app, deps):
             "ok": ok,
             "tool": tool_name,
             "status": status_code,
+            "elevated_once": bool(spec.get("write") and elevate_once and not write_enabled),
             "result": _safe_tool_payload(payload),
         }), (200 if ok else int(status_code or 500))
 
@@ -1064,6 +1151,93 @@ def register_ai_agent_routes(app, deps):
             detail=f"scope={scope},limit={limit},role={actor_level['role']}",
         )
         return json_resp(payload)
+
+    @app.route("/api/ai-agent/conversation", methods=["GET", "PUT", "DELETE"])
+    @require_csrf
+    def ai_agent_conversation_route():
+        actor, denied = _actor_or_401()
+        if denied:
+            return denied
+        if not fernet:
+            return json_resp({"ok": False, "msg": "AI Agent encrypted memory key is unavailable"}), 503
+        user_id = int(_actor_value(actor, "id") or 0)
+        binding = _conversation_binding()
+        data = {}
+        if request.method == "GET":
+            conversation_id = _conversation_id(request.args.get("conversation_id") or request.args.get("session_id"))
+        else:
+            data, bad_request = _request_json_dict()
+            if bad_request:
+                return bad_request
+            conversation_id = _conversation_id(data.get("conversation_id") or data.get("session_id"))
+        conn = get_db()
+        try:
+            _ensure_ai_agent_conversation_schema(conn)
+            if request.method == "GET":
+                row = conn.execute(
+                    """
+                    SELECT payload_encrypted, updated_at
+                    FROM ai_agent_conversations
+                    WHERE owner_user_id=? AND session_binding=? AND conversation_id=?
+                    """,
+                    (user_id, binding, conversation_id),
+                ).fetchone()
+                if not row:
+                    _audit_agent_event("AI_AGENT_CONVERSATION_LOAD", actor, success=True, detail="empty")
+                    return json_resp({
+                        "ok": True,
+                        "conversation_id": conversation_id,
+                        "encrypted": True,
+                        "payload": {"sessionId": conversation_id, "messages": [], "habits": {}},
+                    })
+                payload = _decrypt_conversation_payload(_row_value(row, "payload_encrypted"))
+                _audit_agent_event("AI_AGENT_CONVERSATION_LOAD", actor, success=True, detail=f"messages={len(payload.get('messages') or [])}")
+                return json_resp({
+                    "ok": True,
+                    "conversation_id": conversation_id,
+                    "updated_at": _row_value(row, "updated_at"),
+                    "encrypted": True,
+                    "payload": payload,
+                })
+            if request.method == "DELETE":
+                conn.execute(
+                    "DELETE FROM ai_agent_conversations WHERE owner_user_id=? AND session_binding=? AND conversation_id=?",
+                    (user_id, binding, conversation_id),
+                )
+                conn.commit()
+                _audit_agent_event("AI_AGENT_CONVERSATION_CLEAR", actor, success=True, detail=conversation_id)
+                return json_resp({"ok": True, "conversation_id": conversation_id})
+
+            payload = _sanitize_conversation_payload(data.get("payload") if isinstance(data.get("payload"), dict) else data)
+            if not payload.get("sessionId"):
+                payload["sessionId"] = conversation_id
+            encrypted = _encrypt_conversation_payload(payload)
+            now = datetime.now().isoformat(timespec="seconds")
+            conn.execute(
+                """
+                INSERT INTO ai_agent_conversations
+                    (owner_user_id, session_binding, conversation_id, payload_encrypted, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(owner_user_id, session_binding, conversation_id)
+                DO UPDATE SET payload_encrypted=excluded.payload_encrypted, updated_at=excluded.updated_at
+                """,
+                (user_id, binding, conversation_id, encrypted, now, now),
+            )
+            conn.commit()
+            _audit_agent_event("AI_AGENT_CONVERSATION_SAVE", actor, success=True, detail=f"messages={len(payload.get('messages') or [])}")
+            return json_resp({"ok": True, "conversation_id": conversation_id, "encrypted": True, "updated_at": now})
+        except Exception as exc:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            _audit_agent_event("AI_AGENT_CONVERSATION_ERROR", actor, success=False, detail=str(exc)[:180])
+            return json_resp({"ok": False, "msg": str(exc)}), 500
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
     @app.route("/api/ai-agent/status", methods=["GET"])
     @require_csrf_safe

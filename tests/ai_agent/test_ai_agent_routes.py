@@ -4,6 +4,7 @@ import sqlite3
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 
+from cryptography.fernet import Fernet
 from flask import Flask, jsonify, make_response, request
 from services.ai_agent.hermes import AiAgentError, clear_ai_agent_audit_scan_state
 
@@ -157,6 +158,7 @@ def _build_app(db_path, actor, *, settings=None, audit_events=None):
             "require_csrf": lambda x: x,
             "require_csrf_safe": lambda x: x,
             "get_db": get_db,
+            "fernet": Fernet(Fernet.generate_key()),
             "role_rank": lambda role: {"user": 0, "manager": 1, "admin": 1, "super_admin": 2}.get(role or "user", 0),
         }
     )
@@ -192,7 +194,7 @@ def test_ai_agent_status_includes_role_scope_and_settings(monkeypatch, tmp_path)
     assert payload["actor"]["role"] == "user"
     assert payload["settings"]["role"] == "user"
     assert payload["settings"]["scope"]["label"] == "個別用戶助手"
-    assert payload["settings"]["operation_mode_policy"]["mode"] == "assist"
+    assert payload["settings"]["operation_mode_policy"]["mode"] == "readonly"
     assert payload["settings"]["safety_boundaries"]
     assert "scan" not in payload["audit"]
 
@@ -244,6 +246,81 @@ def test_ai_agent_write_tool_execute_requires_write_mode_for_mutation(tmp_path):
     assert response.status_code == 409
     assert payload["ok"] is False
     assert "operation mode" in payload["msg"]
+
+
+def test_ai_agent_write_tool_execute_allows_root_elevate_once(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "readonly",
+            "ai_agent_allowed_tools": "write_community_create_thread",
+        },
+    )
+    captured = {}
+
+    @app.route("/api/community/boards/<int:board_id>/threads", methods=["POST"])
+    def fake_thread_create(board_id):
+        captured["board_id"] = board_id
+        captured.update(request.get_json(silent=True) or {})
+        return _json_resp({"ok": True, "thread_id": 456})
+
+    blocked = app.test_client().post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_community_create_thread",
+        "confirm": "EXECUTE",
+        "arguments": {"board_id": 1, "title": "hello", "content": "world"},
+    })
+    allowed = app.test_client().post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_community_create_thread",
+        "confirm": "EXECUTE",
+        "elevate_once": "ALLOW_WRITE_ONCE",
+        "arguments": {"board_id": 1, "title": "hello", "content": "world"},
+    })
+    payload = allowed.get_json()
+
+    assert blocked.status_code == 409
+    assert allowed.status_code == 200
+    assert payload["ok"] is True
+    assert payload["elevated_once"] is True
+    assert captured["board_id"] == 1
+
+
+def test_ai_agent_conversation_memory_is_encrypted_and_user_isolated(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    root_app = _build_app(db_path, {"id": 1, "username": "root", "role": "user"})
+    user_app = _build_app(db_path, {"id": 2, "username": "userA", "role": "user"})
+
+    payload = {
+        "sessionId": "default",
+        "messages": [{"role": "user", "content": "secret habit: use ogipote style"}],
+        "habits": {"style": "ogipote"},
+    }
+    saved = root_app.test_client().put("/api/ai-agent/conversation", json={
+        "conversation_id": "default",
+        "payload": payload,
+    })
+    root_loaded = root_app.test_client().get("/api/ai-agent/conversation?conversation_id=default")
+    user_loaded = user_app.test_client().get("/api/ai-agent/conversation?conversation_id=default")
+
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute("SELECT payload_encrypted FROM ai_agent_conversations WHERE owner_user_id=1").fetchone()
+    finally:
+        conn.close()
+
+    assert saved.status_code == 200
+    assert saved.get_json()["encrypted"] is True
+    assert row is not None
+    raw_encrypted = row[0]
+    assert "secret habit" not in raw_encrypted
+    assert "ogipote" not in raw_encrypted
+    assert root_loaded.status_code == 200
+    assert root_loaded.get_json()["payload"]["messages"][0]["content"] == "secret habit: use ogipote style"
+    assert user_loaded.status_code == 200
+    assert user_loaded.get_json()["payload"]["messages"] == []
 
 
 def test_ai_agent_write_tool_execute_dispatches_allowlisted_read_tool(tmp_path):
@@ -342,7 +419,7 @@ def test_ai_agent_comfyui_write_tool_maps_checkpoint_to_model(tmp_path):
         "confirm": "EXECUTE",
         "arguments": {
             "prompt": "by ogipote, 2girls, bikini",
-            "checkpoint": "JANKU-V777.safetensors",
+            "checkpoint": "JANKU-V777.safetensor",
             "width": 1024,
             "height": 1024,
             "confirm_billing": True,
