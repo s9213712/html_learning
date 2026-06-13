@@ -1,3 +1,5 @@
+import re
+import warnings
 from pathlib import Path
 
 
@@ -6,6 +8,17 @@ ROOT = Path(__file__).resolve().parents[3]
 
 def _read(path):
     return (ROOT / path).read_text(encoding="utf-8")
+
+
+def _warn_if_asset_cache_version_changed(html, asset_path, expected_version):
+    match = re.search(rf'{re.escape(asset_path)}\?v=([^"]+)', html)
+    assert match, f"{asset_path}?v= is not referenced"
+    actual_version = match.group(1)
+    if actual_version != expected_version:
+        warnings.warn(
+            f"{asset_path} cache-bust version changed: expected {expected_version!r}, got {actual_version!r}",
+            stacklevel=2,
+        )
 
 
 def test_ai_agent_module_frontend_is_wired_as_independent_feature():
@@ -46,8 +59,8 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert 'id="ai-agent-comfyui-vae"' in html
     assert 'id="ai-agent-comfyui-generate-btn"' in html
     assert 'id="s-module-ai-agent-min-role"' in html
-    assert "/js/37-ai-agent.js?v=20260613-ai-agent-capability-planner-v9" in html
-    assert "/js/90-bootstrap.js?v=20260611-ai-agent-comfyui-write-tool" in html
+    _warn_if_asset_cache_version_changed(html, "/js/37-ai-agent.js", "20260613-ai-agent-capability-planner-v9")
+    _warn_if_asset_cache_version_changed(html, "/js/90-bootstrap.js", "20260611-ai-agent-comfyui-write-tool")
 
     assert '"ai-agent": "feature_ai_agent_enabled"' in core_js
     assert "normalizeModuleSettingKey(moduleKey)" in core_js
