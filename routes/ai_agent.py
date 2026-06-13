@@ -178,6 +178,7 @@ def register_ai_agent_routes(app, deps):
     require_csrf_safe = deps["require_csrf_safe"]
     require_csrf = deps.get("require_csrf", require_csrf_safe)
     role_rank = deps.get("role_rank", lambda role: {"user": 0, "manager": 1, "super_admin": 2}.get(role or "user", 0))
+    server_mode_service = deps.get("server_mode_service")
 
     def _clamp_float(value, minimum=0.0, maximum=100.0):
         try:
@@ -303,6 +304,23 @@ def register_ai_agent_routes(app, deps):
             "can_manage_members": rank >= role_rank("manager"),
             "can_manage_servers": rank >= role_rank("super_admin"),
         }
+
+    def _server_mode_payload(actor):
+        actor_level = _actor_scope_payload(actor)
+        if not actor_level["can_manage_servers"]:
+            return {"ok": False, "msg": "需要 root 權限才能讀取伺服器模式。"}
+        if not server_mode_service:
+            return {"ok": False, "msg": "Server Mode 服務目前無法使用。"}
+        payload = {
+            "ok": True,
+            "mode": server_mode_service.get_current_mode(),
+            "profiles": server_mode_service.list_profiles(),
+        }
+        if hasattr(server_mode_service, "production_requirements"):
+            payload["production_requirements"] = server_mode_service.production_requirements()
+        if hasattr(server_mode_service, "incident_status"):
+            payload["incident"] = server_mode_service.incident_status().get("incident")
+        return payload
 
     def _table_exists(conn, table_name):
         try:
@@ -1199,7 +1217,7 @@ def register_ai_agent_routes(app, deps):
         if denied:
             return denied
         scope = str(request.args.get("scope") or "all").strip().lower()
-        if scope not in {"all", "resources", "comfyui", "remote_download", "jobs", "files", "storage", "member_mgmt", "attack_diag"}:
+        if scope not in {"all", "resources", "server_mode", "comfyui", "remote_download", "jobs", "files", "storage", "member_mgmt", "attack_diag"}:
             return json_resp({"ok": False, "msg": "不支援的 scope"}, 400)
         limit = _coerce_limit(request.args.get("limit", "20"))
         actor_level = _actor_scope_payload(actor)
@@ -1217,6 +1235,8 @@ def register_ai_agent_routes(app, deps):
         }
         if scope in {"all", "resources"}:
             payload["resources"] = _resource_snapshot()
+        if scope in {"all", "server_mode"}:
+            payload["server_mode"] = _server_mode_payload(actor)
         if scope in {"all", "jobs", "comfyui"}:
             payload["comfyui_jobs"] = _agent_list_comfyui_jobs(actor, limit=limit)
         if scope in {"all", "jobs", "remote_download"}:

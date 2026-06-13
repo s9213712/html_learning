@@ -541,6 +541,32 @@ function aiAgentPlannerContext(options = {}) {
     },
     operation_mode: AI_AGENT_STATE.settings?.operation_mode || "assist",
     operation_mode_policy: AI_AGENT_STATE.settings?.operation_mode_policy || {},
+    readonly_tools: [
+      {
+        scope: "resources",
+        purpose: "回答目前系統環境、CPU、RAM、disk、GPU/資源負載類問題。",
+      },
+      {
+        scope: "server_mode",
+        purpose: "回答目前伺服器模式、安全 profile、上線需求 gate 與 incident 狀態。",
+      },
+      {
+        scope: "comfyui",
+        purpose: "回答目前能否生圖、ComfyUI 連線、模型/模式清單、生圖任務進度與結果。",
+      },
+      {
+        scope: "remote_download",
+        purpose: "回答下載任務、遠端下載、佇列與完成狀態。",
+      },
+      {
+        scope: "attack_diag",
+        purpose: "回答安全審計、攻擊診斷、異常流量、IP、log、近期失敗任務與事件。",
+      },
+      {
+        scope: "all",
+        purpose: "只在使用者明確要求全站總覽、整體狀態或跨多模組摘要時使用。",
+      },
+    ],
     effective_tools: effectiveTools,
     writable_tools: effectiveTools.filter((tool) => tool.write && (tool.can_execute_now || tool.can_request_elevation)).map((tool) => tool.name),
     last_comfyui_args: aiAgentCurrentComfyuiArgs() || null,
@@ -577,11 +603,12 @@ async function aiAgentPlanToolAction(userText, options = {}) {
   const context = aiAgentPlannerContext(options);
   const planningPrompt = [
     "你是網站 AI Agent 的工具路由器。你的任務是理解使用者意圖、檢查可用工具與權限，然後只輸出 JSON 決策。",
-    "不要用關鍵字索引決策；請根據完整上下文、使用者目的、input_mode、has_image、effective_tools、operation_mode_policy 判斷。",
+    "不要用關鍵字索引決策；請根據完整上下文、使用者目的、input_mode、has_image、readonly_tools、effective_tools、operation_mode_policy 判斷。",
     "可用 action：chat、clarify、readonly、comfyui_status、comfyui_generate、comfyui_rerun、community_post_draft。",
     "JSON 欄位：action, confidence, reason, question, readonly_scope, merge_strategy, args。",
+    "readonly_scope 必須從 context.readonly_tools 的 scope 中選最貼近使用者目的的一項；除非使用者明確要求全站總覽，否則不可使用 all。",
     "args 可含：prompt, negative_prompt, width, height, steps, cfg_scale, batch_size, seed, checkpoint, vae, sampler, scheduler, official_workflow_id。",
-    "工具語意：readonly=讀取資源/下載/任務/審計/會員等唯讀資料；comfyui_status=讀取 ComfyUI 生圖進度；comfyui_generate=建立新的 ComfyUI 生圖任務；comfyui_rerun=沿用上一筆生圖參數並套用使用者修改；community_post_draft=只產生發文草稿，不直接發布。",
+    "工具語意：readonly=讀取指定 readonly_scope 的站內唯讀資料；comfyui_status=讀取 ComfyUI 目前可用性與生圖進度；comfyui_generate=建立新的 ComfyUI 生圖任務；comfyui_rerun=沿用上一筆生圖參數並套用使用者修改；community_post_draft=只產生發文草稿，不直接發布。",
     "若使用者目的需要工具，但 effective_tools 或權限不足，仍可輸出該 action；前端會處理提權、拒絕或反問。",
     "若使用者目的不明或缺少必要資料，action=clarify 並用 question 提出一個具體反問。",
     "若使用者以短句詢問某件事是否開始、完成、跑出結果或目前進度，請先依 recent_messages 與 submitted_comfyui_jobs 判斷目標；若仍不確定，action=readonly 並 readonly_scope=all，讓前端回報真實可見任務狀態。",
@@ -669,14 +696,17 @@ async function aiAgentRunReadonlyQuery(intent, userText, input) {
   AI_AGENT_STATE.messages.push({ role: "user", content: userText });
   renderAiAgentThread();
   if (input) input.value = "";
-  const normalizedScope = aiAgentNormalizeReadonlyScope(intent.scope || "all", userText);
+  const normalizedScope = aiAgentNormalizeReadonlyScope(intent.scope || "all");
+  const requestScope = normalizedScope;
   setAiAgentMessage(`${intent.label || "唯讀查詢"}讀取中...`, "info");
   try {
-    const res = await apiFetch(`${API}/ai-agent/readonly?scope=${encodeURIComponent(normalizedScope)}&limit=20`, {
+    const res = await apiFetch(`${API}/ai-agent/readonly?scope=${encodeURIComponent(requestScope)}&limit=20`, {
       credentials: "same-origin",
     });
     const json = await res.json().catch(() => ({}));
     if (!res.ok || !json.ok) throw new Error(json.msg || `唯讀查詢失敗（HTTP ${res.status}）`);
+    json.scope = normalizedScope;
+    await aiAgentAttachComfyuiHealth(json, normalizedScope);
     renderAiAgentReadOnly(json);
     aiAgentResumeComfyuiWatchJobs(json);
     AI_AGENT_STATE.messages.push({ role: "assistant", content: aiAgentReadonlySummary(json, intent) });
@@ -1802,64 +1832,106 @@ function aiAgentComfyuiRecallSummary() {
   return lines.join("\n");
 }
 
-function aiAgentReadonlyIntent(prompt) {
-  const text = String(prompt || "").toLowerCase();
-  if (!text) return null;
-  if (aiAgentLooksLikeComfyuiRecall(prompt)) return null;
-  const asksStatus = /(查|看|顯示|確認|狀態|status|progress|進度|摘要|目前)/i.test(text);
-  const asksLatestRun = /(開始了嗎|有開始嗎|跑了嗎|跑出來了嗎|好了嗎|完成了嗎|產完了嗎|生完了嗎|有結果了嗎|結果呢|圖呢|出圖了嗎|done yet|started yet|finished yet)/i.test(text);
-  if (!asksStatus && !asksLatestRun) return null;
-  if (asksLatestRun) {
-    return { scope: "comfyui", label: "ComfyUI 產圖進度" };
-  }
-  const categories = [];
-  if (/(產圖|生圖|comfyui|generation|queue|任務)/i.test(text)) categories.push("comfyui");
-  if (/(下載|download|remote download)/i.test(text)) categories.push("remote_download");
-  if (/(資源|cpu|gpu|ram|memory|記憶體|硬碟|disk|load|負載)/i.test(text)) categories.push("resources");
-  if (/(審計|audit|logs?|log|ip|流量|攻擊|異常|安全事件|attack|會員|所有人|檔案)/i.test(text)) categories.push("attack_diag");
-  const uniqueCategories = [...new Set(categories)];
-  if (uniqueCategories.length > 1) {
-    return { scope: "all", label: "唯讀狀態總覽" };
-  }
-  const hasTrackedComfyuiJob = AI_AGENT_STATE.lastComfyuiJob || Object.keys(AI_AGENT_STATE.comfyuiSubmittedJobs || {}).length > 0;
-  if (hasTrackedComfyuiJob && /(再等|等一下|稍等|更新|refresh|update|追蹤|看看|現在)/i.test(text)) {
-    return { scope: "comfyui", label: "ComfyUI 產圖進度" };
-  }
-  if (uniqueCategories[0] === "comfyui" && /(進度|狀態|queue|排隊|running|pending|完成|失敗)/i.test(text)) {
-    return { scope: "comfyui", label: "ComfyUI 產圖進度" };
-  }
-  if (uniqueCategories[0] === "remote_download") {
-    return { scope: "remote_download", label: "下載進度" };
-  }
-  if (uniqueCategories[0] === "resources") {
-    return { scope: "resources", label: "伺服器資源" };
-  }
-  if (uniqueCategories[0] === "attack_diag") {
-    return { scope: "attack_diag", label: "安全審計" };
-  }
-  return null;
+function aiAgentNormalizeReadonlyScope(scope) {
+  const raw = String(scope || "").trim().toLowerCase();
+  if (["resources", "comfyui", "remote_download", "attack_diag", "server_mode", "all"].includes(raw)) return raw;
+  return "all";
 }
 
-function aiAgentNormalizeReadonlyScope(scope, prompt = "") {
-  const raw = String(scope || "").trim().toLowerCase();
-  if (["all", "resources", "comfyui", "remote_download", "attack_diag"].includes(raw)) return raw;
-  const text = `${raw} ${prompt || ""}`;
-  const categoryHits = [
-    /(comfy|產圖|生圖|generation|queue)/i.test(text),
-    /(download|下載|remote)/i.test(text),
-    /(audit|審計|security|安全|attack|攻擊|ip|log|logs|流量|異常|會員|所有人|檔案)/i.test(text),
-    /(cpu|gpu|ram|memory|資源|負載|disk|硬碟)/i.test(text),
-  ].filter(Boolean).length;
-  if (categoryHits > 1) return "all";
-  if (/(comfy|產圖|生圖|generation|queue)/i.test(text)) return "comfyui";
-  if (/(download|下載|remote)/i.test(text)) return "remote_download";
-  if (/(audit|審計|security|安全|attack|攻擊|ip|log|logs|流量|異常|會員|所有人|檔案)/i.test(text)) return "attack_diag";
-  if (/(cpu|gpu|ram|memory|資源|負載|disk|硬碟)/i.test(text)) return "resources";
-  return "all";
+async function aiAgentFetchOptionalJson(path) {
+  const res = await apiFetch(path, { credentials: "same-origin" });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok || !json.ok) throw new Error(json.msg || `HTTP ${res.status}`);
+  return json;
+}
+
+function aiAgentComfyuiModelsSummary(models = {}) {
+  const diffusionModels = Array.isArray(models.diffusion_models) ? models.diffusion_models : [];
+  const checkpoints = Array.isArray(models.checkpoints) ? models.checkpoints : [];
+  const generationModes = Array.isArray(models.generation_modes) ? models.generation_modes : [];
+  return {
+    ok: !!models.ok || diffusionModels.length > 0 || checkpoints.length > 0 || generationModes.length > 0,
+    connection_mode: models.connection_mode || "",
+    comfyui_url: models.comfyui_url || "",
+    diffusion_model_count: diffusionModels.length,
+    checkpoint_count: checkpoints.length,
+    generation_mode_count: generationModes.filter((mode) => mode?.available !== false).length,
+    available_generation_modes: generationModes
+      .filter((mode) => mode?.available !== false)
+      .slice(0, 6)
+      .map((mode) => mode.label || mode.key || "")
+      .filter(Boolean),
+    default_width: models.default_width,
+    default_height: models.default_height,
+  };
+}
+
+async function aiAgentAttachComfyuiHealth(payload = {}, scope = "") {
+  if (!["all", "comfyui"].includes(scope)) return payload;
+  const [statusResult, resourcesResult, modelsResult] = await Promise.allSettled([
+    aiAgentFetchOptionalJson(`${API}/comfyui/status`),
+    aiAgentFetchOptionalJson(`${API}/comfyui/resources`),
+    aiAgentFetchOptionalJson(`${API}/comfyui/models`),
+  ]);
+  if (statusResult.status === "fulfilled") {
+    payload.comfyui_status = statusResult.value;
+  } else {
+    payload.comfyui_status = { ok: false, available: false, msg: statusResult.reason?.message || "ComfyUI 狀態讀取失敗" };
+  }
+  if (resourcesResult.status === "fulfilled") {
+    payload.comfyui_resources = resourcesResult.value.resource_usage || {};
+  }
+  if (modelsResult.status === "fulfilled") {
+    payload.comfyui_models_summary = aiAgentComfyuiModelsSummary(modelsResult.value);
+  } else {
+    payload.comfyui_models_summary = { ok: false, error: modelsResult.reason?.message || "ComfyUI 模型清單讀取失敗" };
+  }
+  return payload;
 }
 
 function aiAgentReadonlySummary(payload = {}, intent = {}) {
   const lines = [`${intent.label || "唯讀查詢"}：已直接讀取站內唯讀資料。`];
+  const serverMode = payload.server_mode || payload.server_mode_status || null;
+  if (serverMode) {
+    const mode = serverMode.mode || {};
+    const requirements = serverMode.production_requirements || {};
+    const missingCount = Array.isArray(requirements.missing) ? requirements.missing.length : 0;
+    const failedCount = Array.isArray(requirements.failed) ? requirements.failed.length : 0;
+    const incident = serverMode.incident || null;
+    lines.push(
+      serverMode.ok
+        ? `伺服器模式：${mode.current_mode || "-"}；前次：${mode.previous_mode || "-"}；原因：${mode.reason || "-"}；備註：${mode.notes || "-"}`
+        : `伺服器模式讀取失敗：${serverMode.msg || "未知錯誤"}`
+    );
+    if (serverMode.ok && requirements.ok !== undefined) {
+      lines.push(`上線需求：${requirements.ok ? "通過" : "未通過"}；缺少 ${missingCount}；失敗 ${failedCount}`);
+    }
+    if (incident) lines.push(`事件狀態：${incident.status || incident.state || "active"} ${incident.reason || ""}`.trim());
+  }
+  const comfyuiStatus = payload.comfyui_status || null;
+  if (comfyuiStatus) {
+    const available = comfyuiStatus.ok !== false && comfyuiStatus.available === true;
+    const mode = comfyuiStatus.connection_mode || payload.comfyui_models_summary?.connection_mode || "-";
+    const url = comfyuiStatus.comfyui_url || payload.comfyui_models_summary?.comfyui_url || "-";
+    const modelSummary = payload.comfyui_models_summary || {};
+    const resource = payload.comfyui_resources || {};
+    const gpu = resource.gpu || {};
+    const vram = resource.vram || {};
+    const modelBits = [];
+    if (modelSummary.diffusion_model_count !== undefined) modelBits.push(`模型 ${modelSummary.diffusion_model_count}`);
+    if (modelSummary.generation_mode_count !== undefined) modelBits.push(`模式 ${modelSummary.generation_mode_count}`);
+    const resourceBits = [];
+    if (gpu.available) resourceBits.push(`GPU ${gpu.percent !== undefined && gpu.percent !== null ? `${Number(gpu.percent).toFixed(1)}%` : "可用"}`);
+    if (vram.available) resourceBits.push(`VRAM ${vram.percent !== undefined && vram.percent !== null ? `${Number(vram.percent).toFixed(1)}%` : "可用"}`);
+    lines.push(
+      `目前${available ? "可以" : "暫時不能"}生圖：ComfyUI ${available ? "已連線" : "未就緒"}，模式 ${mode}，端點 ${url}`
+      + (modelBits.length ? `，${modelBits.join(" / ")}` : "")
+      + (resourceBits.length ? `，${resourceBits.join(" / ")}` : "")
+      + (!available && comfyuiStatus.msg ? `。原因：${comfyuiStatus.msg}` : "")
+    );
+    const warnings = Array.isArray(comfyuiStatus.storage_warnings) ? comfyuiStatus.storage_warnings : [];
+    if (warnings.length) lines.push(`提醒：${warnings[0].message || warnings[0].code || "ComfyUI 儲存路徑有警告"}`);
+  }
   const resources = payload.resources || {};
   if (resources.cpu || resources.ram || resources.disk) {
     const cpu = resources.cpu?.percent;
@@ -1875,7 +1947,15 @@ function aiAgentReadonlySummary(payload = {}, intent = {}) {
       const detail = job.error || job.progress?.detail || job.progress?.phase || "";
       return `#${shortId} ${job.status || "-"} ${Number.isFinite(percent) ? `${Math.round(percent)}%` : ""}${detail ? ` ${detail}` : ""}`.trim();
     });
-    lines.push(`ComfyUI 任務：${payload.comfyui_jobs.length ? jobs.join("；") : "目前沒有可見任務"}`);
+    const hasActive = payload.comfyui_jobs.some((job) => ["queued", "running", "processing", "submitted"].includes(String(job.status || "").toLowerCase()));
+    const hasOnlyFailures = payload.comfyui_jobs.length > 0 && payload.comfyui_jobs.every((job) => ["error", "failed", "cancelled"].includes(String(job.status || "").toLowerCase()));
+    if (hasActive || !comfyuiStatus) {
+      lines.push(`ComfyUI 任務：${payload.comfyui_jobs.length ? jobs.join("；") : "目前沒有可見任務"}`);
+    } else if (hasOnlyFailures && comfyuiStatus?.available === true) {
+      lines.push(`近期任務：有 ${payload.comfyui_jobs.length} 筆失敗紀錄，但目前服務已連線，這些舊失敗不代表現在不能生圖。`);
+    } else {
+      lines.push(`ComfyUI 任務：${payload.comfyui_jobs.length ? jobs.join("；") : "目前沒有可見任務"}`);
+    }
   }
   if (Array.isArray(payload.remote_download_jobs)) {
     const jobs = payload.remote_download_jobs.slice(0, 5).map((job) => `${job.status || "-"} ${job.filename || job.title || job.id || ""}`.trim());
@@ -2211,11 +2291,6 @@ async function sendAiAgentMessage() {
         if (sendBtn) sendBtn.disabled = false;
       }
     }
-  }
-  const fallbackReadonly = mode === "text" ? aiAgentReadonlyIntent(prompt) : null;
-  if (fallbackReadonly) {
-    await aiAgentRunReadonlyQuery(fallbackReadonly, prompt, input);
-    return;
   }
   AI_AGENT_STATE.sending = true;
   const sendBtn = $("ai-agent-send-btn");
