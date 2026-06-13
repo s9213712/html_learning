@@ -15,6 +15,7 @@ from flask import request
 
 from services.server.backpressure import backpressure_status
 from services.server.domain_databases import DOMAIN_DATABASES
+from services.system.gpu_probe import find_nvidia_smi
 from services.system.ci_status import playwright_ci_status
 
 
@@ -312,7 +313,7 @@ def _related_processes_snapshot(base_dir=None, limit=32):
 
 
 def _gpu_usage_snapshot():
-    nvidia_smi = shutil.which("nvidia-smi")
+    nvidia_smi = find_nvidia_smi()
     empty = {
         "gpu": {"label": "GPU", "available": False, "percent": None, "gpus": [], "error": ""},
         "vram": {"label": "VRAM", "available": False, "percent": None, "used_bytes": None, "total_bytes": None},

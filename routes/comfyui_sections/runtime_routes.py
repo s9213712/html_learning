@@ -284,15 +284,17 @@ def register_comfyui_runtime_routes(app, ctx):
         }
 
     def _nvidia_smi_resource_snapshot():
-        import shutil
         import subprocess
 
-        if not shutil.which("nvidia-smi"):
+        from services.system.gpu_probe import find_nvidia_smi
+
+        nvidia_smi = find_nvidia_smi()
+        if not nvidia_smi:
             return {"available": False, "gpus": [], "error": "nvidia-smi not found"}
         try:
             proc = subprocess.run(
                 [
-                    "nvidia-smi",
+                    nvidia_smi,
                     "--query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu",
                     "--format=csv,noheader,nounits",
                 ],
