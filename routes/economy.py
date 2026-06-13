@@ -2482,7 +2482,8 @@ def register_economy_routes(app, deps):
         actor, err = root_or_403()
         if err:
             return err
-        return management_snapshot_response(snapshot_key)
+        missing_status = 200 if str(request.args.get("missing_ok") or "").strip() == "1" else 404
+        return management_snapshot_response(snapshot_key, missing_status=missing_status)
 
     def start_root_points_financial_invariants_job(actor):
         actor_snapshot = management_actor(actor)

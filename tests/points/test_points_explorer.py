@@ -132,6 +132,25 @@ def test_points_explorer_get_routes_are_public_safe_gets(tmp_path):
     assert fee_res.status_code == 200
 
 
+def test_root_management_snapshot_missing_ok_keeps_console_clean_without_changing_default_404(tmp_path):
+    app, _points, _ledger, _manual_ledger, current = _build_app(tmp_path)
+    current.update({"id": 1, "username": "root", "role": "super_admin"})
+    client = app.test_client()
+
+    default_res = client.get("/api/root/management/snapshots/points_root_report")
+    assert default_res.status_code == 404
+    default_body = default_res.get_json()
+    assert default_body["ok"] is False
+    assert default_body["snapshot"]["missing"] is True
+
+    missing_ok_res = client.get("/api/root/management/snapshots/points_root_report?missing_ok=1")
+    assert missing_ok_res.status_code == 200
+    missing_ok_body = missing_ok_res.get_json()
+    assert missing_ok_body["ok"] is False
+    assert missing_ok_body["snapshot"]["missing"] is True
+    assert missing_ok_body["client_should_enqueue"] is True
+
+
 def test_points_explorer_bridge_route_links_pc1_and_pc0_layers(tmp_path):
     app, points, _ledger, _manual_ledger, _current = _build_app(tmp_path)
     client = app.test_client()

@@ -44,6 +44,14 @@ def test_public_registration_only_requires_account_password_and_nickname():
     assert "id_number: idNo" not in auth_js
 
 
+def test_economy_missing_management_snapshot_uses_opt_in_200_response():
+    economy_js = (ROOT / "public" / "js" / "55-economy.js").read_text(encoding="utf-8")
+
+    assert 'requestUrl.includes("/root/management/snapshots/")' in economy_js
+    assert 'missing_ok=1' in economy_js
+    assert 'fetchEconomyJson(json.latest_snapshot_url, { allowMissingSnapshot: true })' in economy_js
+
+
 def test_root_points_page_is_chain_operations_console():
     index_html = (ROOT / "public" / "index.html").read_text(encoding="utf-8")
     admin_js = (

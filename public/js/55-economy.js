@@ -3510,7 +3510,10 @@ async function fetchEconomyJson(url, options = {}) {
   const headers = { ...(requestOptions.headers || {}), "X-CSRF-Token": getCsrfToken() || "" };
   if (requestOptions.body && !headers["Content-Type"]) headers["Content-Type"] = "application/json";
   const path = String(url || "");
-  const requestUrl = path.startsWith("/api/") ? path : API + path;
+  let requestUrl = path.startsWith("/api/") ? path : API + path;
+  if (allowMissingSnapshot && requestUrl.includes("/root/management/snapshots/") && !requestUrl.includes("missing_ok=")) {
+    requestUrl += requestUrl.includes("?") ? "&missing_ok=1" : "?missing_ok=1";
+  }
   const res = await apiFetch(requestUrl, { credentials: "same-origin", ...requestOptions, headers });
   const json = await res.json().catch(() => ({}));
   if (allowMissingSnapshot && json?.snapshot?.missing) return json;
@@ -3606,7 +3609,7 @@ async function loadEconomyRootReport() {
       setEconomyChainStatus(`PointsChain 報表正在背景更新${json.job_id ? `：${json.job_id}` : ""}`);
       if (json.latest_snapshot_url) {
         try {
-          const latest = await fetchEconomyJson(json.latest_snapshot_url);
+          const latest = await fetchEconomyJson(json.latest_snapshot_url, { allowMissingSnapshot: true });
           renderEconomyRootReport(latest.report || {});
         } catch (_snapshotErr) {
           renderEconomyRootReport({});
