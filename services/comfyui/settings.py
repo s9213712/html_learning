@@ -17,7 +17,17 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 DEFAULT_COMFYUI_REMOTE_API_URL = os.environ.get("COMFYUI_API_URL", "http://127.0.0.1:8188").rstrip("/")
-DEFAULT_COMFYUI_PORT = 8192
+
+
+def _env_port(name, default):
+    try:
+        value = int(os.environ.get(name, default))
+    except Exception:
+        return default
+    return value if 1 <= value <= 65535 else default
+
+
+DEFAULT_COMFYUI_PORT = _env_port("COMFYUI_API_PORT", 8192)
 DEFAULT_COMFYUI_MAX_BATCH_SIZE = 1
 DEFAULT_COMFYUI_WIDTH = 1024
 DEFAULT_COMFYUI_HEIGHT = 1024
@@ -341,6 +351,37 @@ def validate_comfyui_api_url(value, *, allow_blank=False):
     return raw
 
 
+def _trusted_comfyui_start_script_roots():
+    roots = [Path.home() / ".comfyui"]
+    raw = str(os.environ.get("COMFYUI_TRUSTED_START_SCRIPT_DIRS") or "").strip()
+    for part in raw.split(os.pathsep):
+        part = part.strip()
+        if part:
+            roots.append(Path(part).expanduser())
+    resolved = []
+    for root in roots:
+        try:
+            resolved.append(root.resolve())
+        except Exception:
+            continue
+    return resolved
+
+
+def _validate_trusted_comfyui_start_script(path):
+    try:
+        target = Path(path).expanduser().resolve()
+        if not any(target.is_relative_to(root) for root in _trusted_comfyui_start_script_roots()):
+            return None
+        stat_result = target.stat()
+    except Exception:
+        return None
+    if not target.is_file():
+        return None
+    if stat_result.st_mode & 0o022:
+        return None
+    return str(target)
+
+
 def validate_comfyui_relative_script(value, *, base_dir=None):
     raw = str(value or "").strip()
     if not raw:
@@ -349,15 +390,18 @@ def validate_comfyui_relative_script(value, *, base_dir=None):
         return None
     try:
         if raw.startswith("/") or raw.startswith("\\"):
-            if not base_dir:
-                return None
-            base = Path(str(base_dir)).expanduser().resolve()
             target = Path(raw).expanduser().resolve()
-            rel = target.relative_to(base)
-            parts = rel.as_posix().split("/")
-            if not parts or any(part in {"", ".", ".."} for part in parts):
-                return None
-            return rel.as_posix()
+            if base_dir:
+                try:
+                    base = Path(str(base_dir)).expanduser().resolve()
+                    rel = target.relative_to(base)
+                    parts = rel.as_posix().split("/")
+                    if not parts or any(part in {"", ".", ".."} for part in parts):
+                        return None
+                    return rel.as_posix()
+                except Exception:
+                    pass
+            return _validate_trusted_comfyui_start_script(target)
         parts = raw.replace("\\", "/").split("/")
         if not parts or any(part in {"", ".", ".."} for part in parts):
             return None

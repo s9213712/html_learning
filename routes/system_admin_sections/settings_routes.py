@@ -513,7 +513,7 @@ def register_system_admin_settings_routes(app, ctx):
                 base_dir=base_dir_for_script,
             )
             if script is None:
-                return json_resp({"ok":False,"msg":"comfyui_local_start_script 必須在 ComfyUI 本地資料夾內，可填相對路徑或同資料夾下的絕對路徑"}), 400
+                return json_resp({"ok":False,"msg":"comfyui_local_start_script 必須在 ComfyUI 本地資料夾內，或位於受信任的本機啟動腳本目錄且權限不可被 group/world 寫入"}), 400
             data["comfyui_local_start_script"] = script
         if "comfyui_api_host" in data:
             host = validate_comfyui_api_host(data.get("comfyui_api_host"))

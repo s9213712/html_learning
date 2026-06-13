@@ -1,5 +1,7 @@
 """Regression for services.comfyui.execution.generate_image()."""
 
+import pytest
+
 from services.comfyui import execution as comfy_execution
 
 
@@ -89,6 +91,47 @@ def test_wait_for_images_treats_transient_history_timeout_as_recoverable(monkeyp
     assert images == [{"filename": "done.png", "subfolder": "", "type": "output"}]
     assert any(event.get("backend_unresponsive") is True for event in progress_events)
     assert any(event.get("phase") == "completed" for event in progress_events)
+
+
+def test_wait_for_outputs_reports_comfyui_execution_error_detail():
+    class ErrorHistoryClient:
+        timeout = 1
+
+        def _json_request(self, path, *, timeout=None):
+            assert path == "/history/prompt-error"
+            return {
+                "prompt-error": {
+                    "status": {
+                        "completed": False,
+                        "status_str": "error",
+                        "messages": [
+                            [
+                                "execution_error",
+                                {
+                                    "exception_type": "ValidationError",
+                                    "exception_message": "ckpt_name not in list",
+                                    "node_id": "4",
+                                    "node_type": "CheckpointLoaderSimple",
+                                },
+                            ]
+                        ],
+                    },
+                    "outputs": {},
+                }
+            }
+
+    with pytest.raises(RuntimeError) as exc:
+        comfy_execution.wait_for_outputs(
+            ErrorHistoryClient(),
+            "prompt-error",
+            timeout_seconds=10,
+            poll_interval=0.5,
+            expected_count=1,
+            error_cls=RuntimeError,
+        )
+
+    assert "ValidationError: ckpt_name not in list" in str(exc.value)
+    assert "node 4 CheckpointLoaderSimple" in str(exc.value)
 
 
 def test_wait_for_outputs_keeps_all_completed_workflow_images():

@@ -52,6 +52,30 @@ TRANSIENT_ERROR_MARKERS = (
 )
 
 
+def extract_history_error_message(record):
+    status = record.get("status") if isinstance(record, dict) else {}
+    messages = status.get("messages") if isinstance(status, dict) else []
+    if not isinstance(messages, list):
+        return ""
+    for item in reversed(messages):
+        if not isinstance(item, (list, tuple)) or len(item) < 2:
+            continue
+        event_name, payload = item[0], item[1]
+        if event_name != "execution_error" or not isinstance(payload, dict):
+            continue
+        exc_type = str(payload.get("exception_type") or "").strip()
+        exc_message = str(payload.get("exception_message") or "").strip()
+        node_id = str(payload.get("node_id") or "").strip()
+        node_type = str(payload.get("node_type") or "").strip()
+        parts = []
+        if exc_type or exc_message:
+            parts.append(f"{exc_type}: {exc_message}".strip(": "))
+        if node_id or node_type:
+            parts.append(f"node {node_id or '-'} {node_type or ''}".strip())
+        return "；".join(part for part in parts if part)[:1000]
+    return ""
+
+
 def queue_prompt_with_client_id(client, workflow, *, client_id=None, extra_data=None, error_cls):
     client_id = str(client_id or uuid.uuid4().hex)
     payload = {"prompt": workflow, "client_id": client_id}
@@ -601,7 +625,8 @@ def wait_for_outputs(
                 status = record.get("status") or {}
                 last_status = status
                 if status.get("status_str") == "error" or status.get("completed") is False and status.get("status_str") == "error":
-                    raise error_cls("ComfyUI 產圖失敗")
+                    detail = extract_history_error_message(record) or "ComfyUI 產圖失敗"
+                    raise error_cls(detail)
                 found = collect_output_refs(record, workflow=workflow)
                 image_count = len(found["images"])
                 media_count = len(found["videos"]) + len(found["audio"]) + len(found["other"])

@@ -8,6 +8,7 @@ const AI_AGENT_STATE = {
   readonlyLoading: false,
   messages: [],
   imageDataUrl: "",
+  imageLoading: false,
   settings: {},
   actor: {},
   audit: {},
@@ -82,6 +83,7 @@ function aiAgentLoadConversation(scope) {
   AI_AGENT_STATE.messages = [];
   AI_AGENT_STATE.sessionId = "";
   AI_AGENT_STATE.imageDataUrl = "";
+  AI_AGENT_STATE.imageLoading = false;
   if (!scope) return;
   if (scope === "anonymous") {
     renderAiAgentThread({ skipPersist: true });
@@ -463,6 +465,17 @@ function aiAgentRememberComfyuiAttempt(args = {}, patch = {}) {
   return item;
 }
 
+function aiAgentNormalizeComfyuiAttemptStatus(status = "", error = "") {
+  const raw = String(status || "").trim().toLowerCase();
+  if (error) return "error";
+  if (["error", "failed", "cancelled", "timeout"].includes(raw)) return "error";
+  if (raw === "completed") return "completed";
+  if (raw === "running") return "running";
+  if (raw === "queued") return "queued";
+  if (raw === "sending") return "sending";
+  return raw || "planned";
+}
+
 function aiAgentUpdateComfyuiAttemptFromJob(job = {}) {
   const jobId = String(job?.job_id || "").trim();
   if (!jobId) return;
@@ -470,13 +483,25 @@ function aiAgentUpdateComfyuiAttemptFromJob(job = {}) {
   if (!item) return;
   const progress = job.progress || {};
   const status = String(job.status || item.status || "").trim();
-  item.status = status || item.status;
+  const error = progress.error_message || progress.detail || job.error || "";
+  item.status = aiAgentNormalizeComfyuiAttemptStatus(status || item.status, item.error);
   if (["error", "failed", "cancelled"].includes(status.toLowerCase()) || String(progress.phase || "").toLowerCase() === "error") {
-    item.status = status || "error";
-    item.error = progress.error_message || progress.detail || job.error || "未知錯誤";
+    item.status = "error";
+    item.error = error || "未知錯誤";
   } else if (status === "completed") {
+    item.status = "completed";
     item.error = "";
   }
+  item.updatedAt = Date.now();
+}
+
+function aiAgentMarkComfyuiAttemptError(jobId = "", error = "") {
+  const id = String(jobId || "").trim();
+  if (!id) return;
+  const item = (AI_AGENT_STATE.comfyuiAttemptHistory || []).find((entry) => entry.job_id === id);
+  if (!item) return;
+  item.status = "error";
+  item.error = String(error || "未知錯誤");
   item.updatedAt = Date.now();
 }
 
@@ -1422,6 +1447,8 @@ async function aiAgentPollComfyuiJob(jobId) {
     const delay = elapsed < 15000 ? 2000 : 5000;
     setTimeout(() => aiAgentPollComfyuiJob(jobId), delay);
   } catch (err) {
+    const detail = err?.message || String(err || "未知錯誤");
+    aiAgentMarkComfyuiAttemptError(jobId, detail);
     AI_AGENT_STATE.messages.push({
       role: "assistant",
       content: `ComfyUI 任務狀態確認失敗。\nJob ID：${jobId}\n錯誤：${err?.message || err}`,
@@ -1761,13 +1788,14 @@ function aiAgentComfyuiRecallSummary() {
     const args = item.args || {};
     const size = args.width && args.height ? `${args.width}x${args.height}` : "-";
     const steps = args.steps !== undefined ? args.steps : "-";
+    const status = aiAgentNormalizeComfyuiAttemptStatus(item.status, item.error);
     lines.push(
-      `V${item.version}：${item.status || "-"}`
+      `V${item.version}：${status || "-"}`
       + `\nPrompt：${args.prompt || "-"}`
       + `\nNegative：${args.negative_prompt || "-"}`
       + `\n尺寸/步數：${size} / ${steps}`
       + `\nJob ID：${item.job_id || "-"}`
-      + `\n${item.error ? `失敗原因：${item.error}` : "失敗原因：-"}`
+      + (status === "error" ? `\n失敗原因：${item.error || "未知錯誤"}` : "")
     );
   });
   lines.push("要我沿用其中一版修改重跑時，可以直接說「把 V2 改成...再生圖」。");
@@ -2057,6 +2085,7 @@ function clearAiAgentConversation() {
   }).catch(() => undefined);
   AI_AGENT_STATE.messages = [];
   AI_AGENT_STATE.imageDataUrl = "";
+  AI_AGENT_STATE.imageLoading = false;
   AI_AGENT_STATE.sessionId = "";
   try {
     if (scope && typeof localStorage !== "undefined") localStorage.removeItem(aiAgentConversationStorageKey(scope));
@@ -2075,6 +2104,7 @@ function handleAiAgentAccountContextChanged() {
 function handleAiAgentImagePick(event) {
   const file = event?.target?.files?.[0];
   AI_AGENT_STATE.imageDataUrl = "";
+  AI_AGENT_STATE.imageLoading = false;
   if (!file) {
     if ($("ai-agent-image-state")) $("ai-agent-image-state").textContent = "未附加圖片";
     return;
@@ -2089,12 +2119,20 @@ function handleAiAgentImagePick(event) {
     event.target.value = "";
     return;
   }
+  AI_AGENT_STATE.imageLoading = true;
+  if ($("ai-agent-image-state")) $("ai-agent-image-state").textContent = "圖片讀取中...";
   const reader = new FileReader();
   reader.onload = () => {
     AI_AGENT_STATE.imageDataUrl = String(reader.result || "");
+    AI_AGENT_STATE.imageLoading = false;
     if ($("ai-agent-image-state")) $("ai-agent-image-state").textContent = file.name || "已附加圖片";
   };
-  reader.onerror = () => setAiAgentMessage("圖片讀取失敗", "err");
+  reader.onerror = () => {
+    AI_AGENT_STATE.imageLoading = false;
+    AI_AGENT_STATE.imageDataUrl = "";
+    if ($("ai-agent-image-state")) $("ai-agent-image-state").textContent = "圖片讀取失敗";
+    setAiAgentMessage("圖片讀取失敗", "err");
+  };
   reader.readAsDataURL(file);
 }
 
@@ -2119,6 +2157,10 @@ async function sendAiAgentMessage() {
   const mode = $("ai-agent-mode")?.value || "text";
   if (!prompt && !(mode === "image" && AI_AGENT_STATE.imageDataUrl)) {
     setAiAgentMessage("請輸入訊息", "err");
+    return;
+  }
+  if (mode === "image" && AI_AGENT_STATE.imageLoading) {
+    setAiAgentMessage("圖片仍在讀取中，請稍等讀取完成後再送出", "err");
     return;
   }
   if (mode === "image" && !AI_AGENT_STATE.imageDataUrl) {

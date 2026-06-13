@@ -33,6 +33,7 @@ from services.comfyui.settings import (
     validate_comfyui_api_host,
     validate_comfyui_api_port,
     validate_comfyui_api_url,
+    validate_comfyui_relative_script,
 )
 from services.platform.admin_validation import (
     validate_comfyui_api_host as shared_validate_comfyui_api_host,
@@ -292,16 +293,18 @@ def _configured_local_start_script(value=None, *, base_dir=None):
     if not raw:
         return None, None
     base = _configured_comfyui_base_dir(base_dir)
-    if not base:
+    if not base and not (raw.startswith("/") or raw.startswith("\\")):
         return None, "請先設定 ComfyUI 本地資料夾"
+    normalized = validate_comfyui_relative_script(raw, base_dir=base)
+    if normalized is None:
+        return None, "ComfyUI 啟動腳本不在本地資料夾或受信任腳本目錄內，或檔案權限不安全"
     try:
-        if raw.startswith("/") or raw.startswith("\\"):
-            script = Path(raw).expanduser().resolve()
+        if normalized.startswith("/") or normalized.startswith("\\"):
+            script = Path(normalized).expanduser().resolve()
         else:
-            if ".." in raw.replace("\\", "/").split("/"):
-                return None, "ComfyUI 啟動腳本必須在本地資料夾內"
-            script = (base / raw).resolve()
-        script.relative_to(base)
+            if not base:
+                return None, "請先設定 ComfyUI 本地資料夾"
+            script = (base / normalized).resolve()
     except Exception:
         return None, "ComfyUI 啟動腳本超出允許資料夾"
     if not script.exists() or not script.is_file():

@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 from services.platform.admin_validation import (
@@ -97,6 +98,32 @@ def test_validate_comfyui_relative_script_normalizes_absolute_path_within_base(t
     assert validate_comfyui_relative_script("run/start.sh", base_dir=base) == "run/start.sh"
     assert validate_comfyui_relative_script(str(script), base_dir=base) == "run/start.sh"
     assert validate_comfyui_relative_script("../outside.sh", base_dir=base) is None
+
+
+def test_validate_comfyui_relative_script_allows_secure_trusted_external_script(tmp_path, monkeypatch):
+    base = tmp_path / "ComfyUI"
+    base.mkdir()
+    trusted = tmp_path / "ops" / "comfyui"
+    trusted.mkdir(parents=True)
+    script = trusted / "start.sh"
+    script.write_text("#!/bin/bash\n", encoding="utf-8")
+    os.chmod(script, 0o755)
+    monkeypatch.setenv("COMFYUI_TRUSTED_START_SCRIPT_DIRS", str(trusted))
+
+    assert validate_comfyui_relative_script(str(script), base_dir=base) == str(script.resolve())
+
+
+def test_validate_comfyui_relative_script_rejects_writable_trusted_external_script(tmp_path, monkeypatch):
+    base = tmp_path / "ComfyUI"
+    base.mkdir()
+    trusted = tmp_path / "ops" / "comfyui"
+    trusted.mkdir(parents=True)
+    script = trusted / "start.sh"
+    script.write_text("#!/bin/bash\n", encoding="utf-8")
+    os.chmod(script, 0o777)
+    monkeypatch.setenv("COMFYUI_TRUSTED_START_SCRIPT_DIRS", str(trusted))
+
+    assert validate_comfyui_relative_script(str(script), base_dir=base) is None
 
 
 def test_validate_git_branch_name_rejects_invalid_refs():

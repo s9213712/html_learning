@@ -1,4 +1,5 @@
 import json
+import os
 
 from flask import Flask, jsonify, make_response, request
 
@@ -555,6 +556,36 @@ def test_root_can_configure_local_comfyui_script_with_absolute_path(tmp_path):
     assert state["comfyui_connection_mode"] == "local"
     assert state["comfyui_base_dir"] == str(comfy_base)
     assert state["comfyui_local_start_script"] == "run_in_linux.sh"
+    assert state["comfyui_api_port"] == 8188
+
+
+def test_root_can_configure_trusted_external_comfyui_start_script(tmp_path, monkeypatch):
+    app, state = _admin_app()
+    client = app.test_client()
+    comfy_base = tmp_path / "ComfyUI_windows_portable"
+    comfy_base.mkdir()
+    trusted = tmp_path / "ops" / "comfyui"
+    trusted.mkdir(parents=True)
+    script = trusted / "start.sh"
+    script.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+    os.chmod(script, 0o755)
+    monkeypatch.setenv("COMFYUI_TRUSTED_START_SCRIPT_DIRS", str(trusted))
+
+    res = client.put(
+        "/api/admin/settings",
+        json={
+            "comfyui_connection_mode": "local",
+            "comfyui_base_dir": str(comfy_base),
+            "comfyui_local_start_script": str(script),
+            "comfyui_api_host": "localhost",
+            "comfyui_api_port": 8188,
+        },
+    )
+
+    assert res.status_code == 200
+    assert state["comfyui_connection_mode"] == "local"
+    assert state["comfyui_base_dir"] == str(comfy_base)
+    assert state["comfyui_local_start_script"] == str(script.resolve())
     assert state["comfyui_api_port"] == 8188
 
 

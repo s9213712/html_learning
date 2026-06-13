@@ -297,6 +297,8 @@ write_restart_shortcut_script() {
       HACKME_DEV_TRANSMISSION_RPC_AUTHENTICATION_REQUIRED
       HACKME_DEV_COMFYUI_CONNECTION_MODE
       HACKME_DEV_COMFYUI_REMOTE_API_URL
+      HACKME_DEV_COMFYUI_API_HOST
+      HACKME_DEV_COMFYUI_API_PORT
       HACKME_DEV_COMFYUI_BASE_DIR
       HACKME_DEV_COMFYUI_LOCAL_START_SCRIPT
     )
@@ -5335,6 +5337,12 @@ feature_updates.update({
     "comfyui_base_dir": os.environ.get("HACKME_DEV_COMFYUI_BASE_DIR") or "",
     "comfyui_local_start_script": os.environ.get("HACKME_DEV_COMFYUI_LOCAL_START_SCRIPT") or "",
 })
+comfyui_api_host_override = str(os.environ.get("HACKME_DEV_COMFYUI_API_HOST") or "").strip()
+if comfyui_api_host_override:
+    feature_updates["comfyui_api_host"] = comfyui_api_host_override
+comfyui_api_port_override = str(os.environ.get("HACKME_DEV_COMFYUI_API_PORT") or "").strip()
+if comfyui_api_port_override:
+    feature_updates["comfyui_api_port"] = int(comfyui_api_port_override)
 cloud_drive_setting_updates = {}
 cloud_drive_storage_root = str(os.environ.get("HACKME_DEV_CLOUD_DRIVE_STORAGE_ROOT", "") or "").strip()
 if cloud_drive_storage_root:
