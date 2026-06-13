@@ -16,6 +16,7 @@ const AI_AGENT_STATE = {
   accountScope: "",
   comfyuiWatchJobs: {},
   comfyuiSubmittedJobs: {},
+  comfyuiAttemptHistory: [],
   comfyuiAnnouncedJobs: {},
   lastComfyuiJob: null,
   lastComfyuiArgs: null,
@@ -423,6 +424,62 @@ function aiAgentRememberComfyuiSubmit(args = {}, job = {}) {
   }
 }
 
+function aiAgentCleanComfyuiArgs(args = {}) {
+  const cleaned = { ...(args || {}) };
+  const autoLike = /^(auto|automatic|default|none|null|undefined|自動|預設)$/i;
+  ["vae", "checkpoint", "sampler", "scheduler", "official_workflow_id"].forEach((key) => {
+    const value = String(cleaned[key] || "").trim();
+    if (!value || (key === "vae" && autoLike.test(value))) delete cleaned[key];
+    else cleaned[key] = value;
+  });
+  Object.keys(cleaned).forEach((key) => {
+    if (cleaned[key] === "" || cleaned[key] === undefined || cleaned[key] === null) delete cleaned[key];
+  });
+  return cleaned;
+}
+
+function aiAgentRememberComfyuiAttempt(args = {}, patch = {}) {
+  const existingId = patch.attempt_id || "";
+  const cleanedArgs = aiAgentCleanComfyuiArgs(args);
+  let item = existingId ? AI_AGENT_STATE.comfyuiAttemptHistory.find((entry) => entry.attempt_id === existingId) : null;
+  if (!item) {
+    item = {
+      attempt_id: `attempt-${Date.now()}-${AI_AGENT_STATE.comfyuiAttemptHistory.length + 1}`,
+      version: AI_AGENT_STATE.comfyuiAttemptHistory.length + 1,
+      createdAt: Date.now(),
+      args: cleanedArgs,
+      status: "planned",
+      job_id: "",
+      error: "",
+    };
+    AI_AGENT_STATE.comfyuiAttemptHistory.push(item);
+  }
+  item.args = Object.keys(cleanedArgs).length ? cleanedArgs : item.args;
+  if (patch.status) item.status = patch.status;
+  if (patch.job_id) item.job_id = patch.job_id;
+  if (patch.error !== undefined) item.error = String(patch.error || "");
+  item.updatedAt = Date.now();
+  AI_AGENT_STATE.comfyuiAttemptHistory = AI_AGENT_STATE.comfyuiAttemptHistory.slice(-12);
+  return item;
+}
+
+function aiAgentUpdateComfyuiAttemptFromJob(job = {}) {
+  const jobId = String(job?.job_id || "").trim();
+  if (!jobId) return;
+  const item = (AI_AGENT_STATE.comfyuiAttemptHistory || []).find((entry) => entry.job_id === jobId);
+  if (!item) return;
+  const progress = job.progress || {};
+  const status = String(job.status || item.status || "").trim();
+  item.status = status || item.status;
+  if (["error", "failed", "cancelled"].includes(status.toLowerCase()) || String(progress.phase || "").toLowerCase() === "error") {
+    item.status = status || "error";
+    item.error = progress.error_message || progress.detail || job.error || "未知錯誤";
+  } else if (status === "completed") {
+    item.error = "";
+  }
+  item.updatedAt = Date.now();
+}
+
 function aiAgentPlannerContext(options = {}) {
   const submittedJobs = Object.values(AI_AGENT_STATE.comfyuiSubmittedJobs || {})
     .sort((a, b) => Number(b.submittedAt || 0) - Number(a.submittedAt || 0))
@@ -468,6 +525,17 @@ function aiAgentPlannerContext(options = {}) {
       progress: AI_AGENT_STATE.lastComfyuiJob.progress || {},
     } : null,
     submitted_comfyui_jobs: submittedJobs,
+    comfyui_attempt_history: (AI_AGENT_STATE.comfyuiAttemptHistory || []).slice(-6).map((item) => ({
+      version: item.version,
+      status: item.status,
+      job_id: item.job_id || "",
+      error: item.error || "",
+      prompt: item.args?.prompt || "",
+      negative_prompt: item.args?.negative_prompt || "",
+      width: item.args?.width,
+      height: item.args?.height,
+      steps: item.args?.steps,
+    })),
     recent_messages: messages,
   };
 }
@@ -480,9 +548,7 @@ function aiAgentShouldUseToolPlanner(text) {
 
 async function aiAgentPlanToolAction(userText, options = {}) {
   if (!aiAgentShouldUseToolPlanner(userText)) return null;
-  const selectedModel = ($("ai-agent-model")?.value || "").trim() || AI_AGENT_STATE.settings?.model || "";
-  const selectableModels = aiAgentSelectableModels();
-  if (selectableModels.length && selectedModel && !selectableModels.includes(selectedModel)) return null;
+  const selectedModel = aiAgentSelectedTextModel();
   const context = aiAgentPlannerContext(options);
   const planningPrompt = [
     "你是網站 AI Agent 的工具路由器。你的任務是理解使用者意圖、檢查可用工具與權限，然後只輸出 JSON 決策。",
@@ -578,9 +644,10 @@ async function aiAgentRunReadonlyQuery(intent, userText, input) {
   AI_AGENT_STATE.messages.push({ role: "user", content: userText });
   renderAiAgentThread();
   if (input) input.value = "";
+  const normalizedScope = aiAgentNormalizeReadonlyScope(intent.scope || "all", userText);
   setAiAgentMessage(`${intent.label || "唯讀查詢"}讀取中...`, "info");
   try {
-    const res = await apiFetch(`${API}/ai-agent/readonly?scope=${encodeURIComponent(intent.scope || "all")}&limit=20`, {
+    const res = await apiFetch(`${API}/ai-agent/readonly?scope=${encodeURIComponent(normalizedScope)}&limit=20`, {
       credentials: "same-origin",
     });
     const json = await res.json().catch(() => ({}));
@@ -752,12 +819,15 @@ function aiAgentNormalizeAnalysisArgs(parsed, userText) {
   Object.keys(args).forEach((key) => {
     if (args[key] === "" || args[key] === undefined || args[key] === null) delete args[key];
   });
-  return args;
+  return aiAgentCleanComfyuiArgs(args);
 }
 
 async function aiAgentAnalyzeImageForComfyui(userText) {
   const selectedModel = aiAgentVisionModel();
   const selectableModels = aiAgentSelectableModels();
+  if (!selectedModel) {
+    throw new Error("目前沒有可用的圖片理解模型。請在 AI Agent 模型允許清單加入 vision 模型（例如 qwen3-vl）後再試。");
+  }
   if (selectableModels.length && !selectableModels.includes(selectedModel)) {
     throw new Error("請從模型選單選擇可用模型後再做圖片分析。");
   }
@@ -797,9 +867,9 @@ async function aiAgentAnalyzeImageForComfyui(userText) {
 }
 
 async function aiAgentAnalyzeTextForComfyui(userText) {
-  const selectedModel = ($("ai-agent-model")?.value || "").trim() || AI_AGENT_STATE.settings?.model || "";
+  const selectedModel = aiAgentSelectedTextModel();
   const selectableModels = aiAgentSelectableModels();
-  if (selectableModels.length && selectedModel && !selectableModels.includes(selectedModel)) {
+  if (selectableModels.length && (!selectedModel || !selectableModels.includes(selectedModel))) {
     throw new Error("請從模型選單選擇可用模型後再做生圖解析。");
   }
   const analysisPrompt = [
@@ -915,7 +985,7 @@ function renderAiAgentWriteTools() {
 
 function aiAgentComfyuiToolArguments(overrides = null) {
   if (overrides && typeof overrides === "object") {
-    return {
+    return aiAgentCleanComfyuiArgs({
       ...overrides,
       prompt: String(overrides.prompt || "").trim(),
       negative_prompt: String(overrides.negative_prompt || "").trim(),
@@ -925,7 +995,7 @@ function aiAgentComfyuiToolArguments(overrides = null) {
       cfg_scale: aiAgentClampNumber(overrides.cfg_scale, 7, { min: 1, max: 20 }),
       batch_size: aiAgentClampNumber(overrides.batch_size, 1, { min: 1, max: 8, integer: true }),
       confirm_billing: true,
-    };
+    });
   }
   const prompt = ($("ai-agent-comfyui-prompt")?.value || "").trim();
   if (!prompt) throw new Error("請先輸入提示詞");
@@ -945,7 +1015,7 @@ function aiAgentComfyuiToolArguments(overrides = null) {
   if (checkpoint) args.checkpoint = checkpoint;
   const vae = ($("ai-agent-comfyui-vae")?.value || "").trim();
   if (vae) args.vae = vae;
-  return args;
+  return aiAgentCleanComfyuiArgs(args);
 }
 
 function aiAgentFindComfyuiJobPayload(value, seen = new Set()) {
@@ -1026,9 +1096,11 @@ async function runAiAgentComfyuiGenerate(overrides = null) {
     }
   }
   let args = {};
+  let attempt = null;
   try {
     args = aiAgentComfyuiToolArguments(overrides);
     if (!args.prompt) throw new Error("請先輸入提示詞");
+    attempt = aiAgentRememberComfyuiAttempt(args, { status: "sending" });
   } catch (err) {
     const msg = err?.message || "產圖參數不完整";
     AI_AGENT_STATE.messages.push({ role: "assistant", content: `ComfyUI 產圖未送出：${msg}` });
@@ -1054,6 +1126,7 @@ async function runAiAgentComfyuiGenerate(overrides = null) {
     const json = await res.json().catch(() => ({}));
     if (!res.ok || !json.ok) {
       const msg = aiAgentWriteToolErrorMessage(json, res.status);
+      if (attempt) aiAgentRememberComfyuiAttempt(args, { attempt_id: attempt.attempt_id, status: "error", error: msg });
       AI_AGENT_STATE.messages.push({
         role: "assistant",
         content: `ComfyUI 產圖送出失敗（HTTP ${res.status}）：${msg}`,
@@ -1068,6 +1141,7 @@ async function runAiAgentComfyuiGenerate(overrides = null) {
     if (jobId && jobId !== "-") {
       job.job_id = jobId;
       job.status = initialStatus;
+      if (attempt) aiAgentRememberComfyuiAttempt(args, { attempt_id: attempt.attempt_id, status: initialStatus, job_id: jobId, error: "" });
       aiAgentRememberComfyuiSubmit(args, job);
     }
     AI_AGENT_STATE.messages.push({
@@ -1089,6 +1163,7 @@ async function runAiAgentComfyuiGenerate(overrides = null) {
     await loadAiAgentReadOnly({ scope: "all", limit: 20, silent: true, force: true }).catch(() => undefined);
   } catch (err) {
     const msg = `ComfyUI 產圖送出失敗：${err}`;
+    if (attempt) aiAgentRememberComfyuiAttempt(args, { attempt_id: attempt.attempt_id, status: "error", error: String(err?.message || err) });
     AI_AGENT_STATE.messages.push({ role: "assistant", content: msg });
     renderAiAgentThread();
     setAiAgentMessage(msg, "err");
@@ -1284,6 +1359,7 @@ async function aiAgentPollComfyuiJob(jobId) {
       AI_AGENT_STATE.comfyuiSubmittedJobs[jobId].status = job.status || AI_AGENT_STATE.comfyuiSubmittedJobs[jobId].status;
       AI_AGENT_STATE.comfyuiSubmittedJobs[jobId].updatedAt = Date.now();
     }
+    aiAgentUpdateComfyuiAttemptFromJob(job);
     const status = String(job.status || "").toLowerCase();
     const progress = job.progress || {};
     const phase = String(progress.phase || "").toLowerCase();
@@ -1378,6 +1454,7 @@ async function aiAgentConfirmComfyuiJob(jobId) {
     }
     lastJob = json.job || {};
     lastJob.job_id = lastJob.job_id || jobId;
+    aiAgentUpdateComfyuiAttemptFromJob(lastJob);
     const status = String(lastJob.status || "").toLowerCase();
     const progress = lastJob.progress || {};
     const detail = progress.error_message || progress.detail || lastJob.error || "";
@@ -1623,11 +1700,32 @@ function aiAgentSelectableModels() {
   return modelIds.filter((id) => !allowedModels.length || allowedModels.includes(id));
 }
 
+function aiAgentSelectedTextModel() {
+  const select = $("ai-agent-model");
+  const options = aiAgentSelectableModels();
+  const selected = (select?.value || "").trim();
+  const configured = AI_AGENT_STATE.settings?.model || "";
+  let chosen = selected;
+  if (options.length) {
+    if (!chosen || !options.includes(chosen)) {
+      chosen = options.includes(configured) ? configured : options[0];
+    }
+    if (select && chosen && select.value !== chosen) select.value = chosen;
+    return chosen;
+  }
+  return chosen || configured || "";
+}
+
 function aiAgentVisionModel() {
   const options = aiAgentSelectableModels();
   const selected = ($("ai-agent-model")?.value || "").trim();
   const vision = options.find((id) => /(?:^|[-_:])vl(?:[-_:]|$)|vision|qwen3-vl/i.test(id));
-  return vision || selected || options[0] || AI_AGENT_STATE.settings?.model || "";
+  if (vision) {
+    const select = $("ai-agent-model");
+    if (select && select.value !== vision) select.value = vision;
+    return vision;
+  }
+  return "";
 }
 
 function aiAgentImageAnalysisError(json = {}, status = 0) {
@@ -1647,28 +1745,89 @@ function aiAgentImageTransportError(err) {
   return `圖片分析請求傳輸失敗：${raw}。請重試或改用較小圖片；若仍失敗，代表目前 Hermes/Ollama vision 後端不可用。`;
 }
 
+function aiAgentLooksLikeComfyuiRecall(prompt) {
+  const text = String(prompt || "");
+  if (!/(回顧|回看|整理|列出|總結|比較|差在哪|前幾個版本|前幾版|哪些版本|job id|失敗原因|結果如何|結果怎樣)/i.test(text)) return false;
+  return /(產圖|生圖|comfyui|prompt|提示詞|負面詞|job id|版本|第一版|第二版|v\d)/i.test(text);
+}
+
+function aiAgentComfyuiRecallSummary() {
+  const attempts = (AI_AGENT_STATE.comfyuiAttemptHistory || []).slice(-8);
+  if (!attempts.length) {
+    return "目前這個對話頁面沒有可回顧的 ComfyUI 生圖嘗試紀錄。若你剛重新整理頁面，我可以依目前對話文字協助整理，但無法保證有完整 Job ID。";
+  }
+  const lines = ["剛剛幾版 ComfyUI 生圖紀錄："];
+  attempts.forEach((item) => {
+    const args = item.args || {};
+    const size = args.width && args.height ? `${args.width}x${args.height}` : "-";
+    const steps = args.steps !== undefined ? args.steps : "-";
+    lines.push(
+      `V${item.version}：${item.status || "-"}`
+      + `\nPrompt：${args.prompt || "-"}`
+      + `\nNegative：${args.negative_prompt || "-"}`
+      + `\n尺寸/步數：${size} / ${steps}`
+      + `\nJob ID：${item.job_id || "-"}`
+      + `\n${item.error ? `失敗原因：${item.error}` : "失敗原因：-"}`
+    );
+  });
+  lines.push("要我沿用其中一版修改重跑時，可以直接說「把 V2 改成...再生圖」。");
+  return lines.join("\n");
+}
+
 function aiAgentReadonlyIntent(prompt) {
   const text = String(prompt || "").toLowerCase();
   if (!text) return null;
+  if (aiAgentLooksLikeComfyuiRecall(prompt)) return null;
   const asksStatus = /(查|看|顯示|確認|狀態|status|progress|進度|摘要|目前)/i.test(text);
   const asksLatestRun = /(開始了嗎|有開始嗎|跑了嗎|跑出來了嗎|好了嗎|完成了嗎|產完了嗎|生完了嗎|有結果了嗎|結果呢|圖呢|出圖了嗎|done yet|started yet|finished yet)/i.test(text);
   if (!asksStatus && !asksLatestRun) return null;
   if (asksLatestRun) {
     return { scope: "comfyui", label: "ComfyUI 產圖進度" };
   }
-  if (/(產圖|生圖|comfyui|generation|queue|任務)/i.test(text) && /(進度|狀態|queue|排隊|running|pending|完成|失敗)/i.test(text)) {
+  const categories = [];
+  if (/(產圖|生圖|comfyui|generation|queue|任務)/i.test(text)) categories.push("comfyui");
+  if (/(下載|download|remote download)/i.test(text)) categories.push("remote_download");
+  if (/(資源|cpu|gpu|ram|memory|記憶體|硬碟|disk|load|負載)/i.test(text)) categories.push("resources");
+  if (/(審計|audit|logs?|log|ip|流量|攻擊|異常|安全事件|attack|會員|所有人|檔案)/i.test(text)) categories.push("attack_diag");
+  const uniqueCategories = [...new Set(categories)];
+  if (uniqueCategories.length > 1) {
+    return { scope: "all", label: "唯讀狀態總覽" };
+  }
+  const hasTrackedComfyuiJob = AI_AGENT_STATE.lastComfyuiJob || Object.keys(AI_AGENT_STATE.comfyuiSubmittedJobs || {}).length > 0;
+  if (hasTrackedComfyuiJob && /(再等|等一下|稍等|更新|refresh|update|追蹤|看看|現在)/i.test(text)) {
     return { scope: "comfyui", label: "ComfyUI 產圖進度" };
   }
-  if (/(下載|download|remote download)/i.test(text)) {
+  if (uniqueCategories[0] === "comfyui" && /(進度|狀態|queue|排隊|running|pending|完成|失敗)/i.test(text)) {
+    return { scope: "comfyui", label: "ComfyUI 產圖進度" };
+  }
+  if (uniqueCategories[0] === "remote_download") {
     return { scope: "remote_download", label: "下載進度" };
   }
-  if (/(資源|cpu|gpu|ram|memory|記憶體|硬碟|disk|load|負載)/i.test(text)) {
+  if (uniqueCategories[0] === "resources") {
     return { scope: "resources", label: "伺服器資源" };
   }
-  if (/(審計|audit|logs?|log|ip|流量|攻擊|異常|安全事件|attack)/i.test(text)) {
+  if (uniqueCategories[0] === "attack_diag") {
     return { scope: "attack_diag", label: "安全審計" };
   }
   return null;
+}
+
+function aiAgentNormalizeReadonlyScope(scope, prompt = "") {
+  const raw = String(scope || "").trim().toLowerCase();
+  if (["all", "resources", "comfyui", "remote_download", "attack_diag"].includes(raw)) return raw;
+  const text = `${raw} ${prompt || ""}`;
+  const categoryHits = [
+    /(comfy|產圖|生圖|generation|queue)/i.test(text),
+    /(download|下載|remote)/i.test(text),
+    /(audit|審計|security|安全|attack|攻擊|ip|log|logs|流量|異常|會員|所有人|檔案)/i.test(text),
+    /(cpu|gpu|ram|memory|資源|負載|disk|硬碟)/i.test(text),
+  ].filter(Boolean).length;
+  if (categoryHits > 1) return "all";
+  if (/(comfy|產圖|生圖|generation|queue)/i.test(text)) return "comfyui";
+  if (/(download|下載|remote)/i.test(text)) return "remote_download";
+  if (/(audit|審計|security|安全|attack|攻擊|ip|log|logs|流量|異常|會員|所有人|檔案)/i.test(text)) return "attack_diag";
+  if (/(cpu|gpu|ram|memory|資源|負載|disk|硬碟)/i.test(text)) return "resources";
+  return "all";
 }
 
 function aiAgentReadonlySummary(payload = {}, intent = {}) {
@@ -1966,6 +2125,14 @@ async function sendAiAgentMessage() {
     setAiAgentMessage("請選擇圖片", "err");
     return;
   }
+  if (mode === "text" && aiAgentLooksLikeComfyuiRecall(prompt)) {
+    AI_AGENT_STATE.messages.push({ role: "user", content: prompt });
+    AI_AGENT_STATE.messages.push({ role: "assistant", content: aiAgentComfyuiRecallSummary() });
+    renderAiAgentThread();
+    if (input) input.value = "";
+    setAiAgentMessage("已回顧本頁生圖版本紀錄", "info");
+    return;
+  }
   const plannerText = prompt || (mode === "image" ? "請分析這張圖片" : "");
   if (aiAgentShouldUseToolPlanner(plannerText)) {
     if (!AI_AGENT_STATE.loaded && typeof loadAiAgentStatus === "function") {
@@ -1984,23 +2151,43 @@ async function sendAiAgentMessage() {
     } catch (err) {
       plan = null;
     } finally {
-      AI_AGENT_STATE.sending = false;
-      if (sendBtn) sendBtn.disabled = false;
+      if (!plan) {
+        AI_AGENT_STATE.sending = false;
+        if (sendBtn) sendBtn.disabled = false;
+      }
     }
-    if (plan && await aiAgentExecuteToolPlan(plan, plannerText, input, {
-      mode,
-      hasImage: mode === "image" && !!AI_AGENT_STATE.imageDataUrl,
-    })) {
-      return;
+    if (plan) {
+      try {
+        if (await aiAgentExecuteToolPlan(plan, plannerText, input, {
+          mode,
+          hasImage: mode === "image" && !!AI_AGENT_STATE.imageDataUrl,
+        })) {
+          return;
+        }
+      } finally {
+        AI_AGENT_STATE.sending = false;
+        if (sendBtn) sendBtn.disabled = false;
+      }
     }
+  }
+  const fallbackReadonly = mode === "text" ? aiAgentReadonlyIntent(prompt) : null;
+  if (fallbackReadonly) {
+    await aiAgentRunReadonlyQuery(fallbackReadonly, prompt, input);
+    return;
   }
   AI_AGENT_STATE.sending = true;
   const sendBtn = $("ai-agent-send-btn");
   if (sendBtn) sendBtn.disabled = true;
   setAiAgentMessage("送出中...", "info");
-  const selectedModel = ($("ai-agent-model")?.value || "").trim();
+  const selectedModel = mode === "image" ? aiAgentVisionModel() : aiAgentSelectedTextModel();
   const selectableModels = aiAgentSelectableModels();
-  if (selectableModels.length && !selectableModels.includes(selectedModel)) {
+  if (mode === "image" && !selectedModel) {
+    AI_AGENT_STATE.sending = false;
+    if (sendBtn) sendBtn.disabled = false;
+    setAiAgentMessage("目前沒有可用的圖片理解模型。請在 AI Agent 模型允許清單加入 vision 模型（例如 qwen3-vl）後再試。", "err");
+    return;
+  }
+  if (selectableModels.length && (!selectedModel || !selectableModels.includes(selectedModel))) {
     AI_AGENT_STATE.sending = false;
     if (sendBtn) sendBtn.disabled = false;
     setAiAgentMessage("請從模型選單選擇可用模型。", "err");
@@ -2015,7 +2202,7 @@ async function sendAiAgentMessage() {
       model: selectedModel,
       mode,
       messages: aiAgentBuildMessages(userText, mode),
-      image_data_url: "",
+      image_data_url: mode === "image" ? AI_AGENT_STATE.imageDataUrl : "",
     };
     const raw = await apiFetch(API + "/ai-agent/chat", {
       method: "POST",

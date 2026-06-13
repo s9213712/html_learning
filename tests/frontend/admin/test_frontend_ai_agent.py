@@ -46,7 +46,7 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert 'id="ai-agent-comfyui-vae"' in html
     assert 'id="ai-agent-comfyui-generate-btn"' in html
     assert 'id="s-module-ai-agent-min-role"' in html
-    assert "/js/37-ai-agent.js?v=20260613-ai-agent-capability-planner-v2" in html
+    assert "/js/37-ai-agent.js?v=20260613-ai-agent-capability-planner-v9" in html
     assert "/js/90-bootstrap.js?v=20260611-ai-agent-comfyui-write-tool" in html
 
     assert '"ai-agent": "feature_ai_agent_enabled"' in core_js
@@ -113,6 +113,22 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert "function aiAgentRememberComfyuiSubmit" in ai_agent_js
     assert "function aiAgentPlanToolAction" in ai_agent_js
     assert "function aiAgentExecuteToolPlan" in ai_agent_js
+    assert "function aiAgentSelectedTextModel" in ai_agent_js
+    assert "function aiAgentNormalizeReadonlyScope" in ai_agent_js
+    assert "function aiAgentCleanComfyuiArgs" in ai_agent_js
+    assert "function aiAgentRememberComfyuiAttempt" in ai_agent_js
+    assert "function aiAgentUpdateComfyuiAttemptFromJob" in ai_agent_js
+    assert "function aiAgentLooksLikeComfyuiRecall" in ai_agent_js
+    assert "function aiAgentComfyuiRecallSummary" in ai_agent_js
+    assert "前幾個版本" in ai_agent_js
+    assert "vae\" && autoLike.test(value)" in ai_agent_js
+    assert "comfyuiAttemptHistory" in ai_agent_js
+    assert 'throw new Error("目前沒有可用的圖片理解模型。請在 AI Agent 模型允許清單加入 vision 模型（例如 qwen3-vl）後再試。")' in ai_agent_js
+    assert 'const selectedModel = mode === "image" ? aiAgentVisionModel() : aiAgentSelectedTextModel();' in ai_agent_js
+    assert 'return "";' in ai_agent_js
+    assert "const fallbackReadonly = mode === \"text\" ? aiAgentReadonlyIntent(prompt) : null" in ai_agent_js
+    assert 'image_data_url: mode === "image" ? AI_AGENT_STATE.imageDataUrl : ""' in ai_agent_js
+    assert 'return { scope: "all", label: "唯讀狀態總覽" }' in ai_agent_js
     assert "effective_tools" in ai_agent_js
     assert "writable_tools" in ai_agent_js
     assert "不要用關鍵字索引決策" in ai_agent_js
@@ -141,6 +157,8 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert "發文分享" in ai_agent_js
     assert "await aiAgentAnalyzeImageForComfyui(userText)" in ai_agent_js
     assert "await runAiAgentComfyuiGenerate(args)" in ai_agent_js
+    assert "if (!plan) {" in ai_agent_js
+    assert "await aiAgentExecuteToolPlan(plan, plannerText, input" in ai_agent_js
     assert "aiAgentConversationStorageKey" in ai_agent_js
     assert 'API + "/ai-agent/conversation"' in ai_agent_js
     assert "localStorage.setItem" not in ai_agent_js
