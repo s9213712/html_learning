@@ -241,6 +241,40 @@ def test_user_can_select_existing_cloud_image_as_avatar(tmp_path):
     assert ref["context_type"] == "avatar"
 
 
+def test_avatar_crop_metadata_keeps_rotation_and_get_applies_it(tmp_path):
+    pytest.importorskip("PIL")
+    from PIL import Image
+
+    db_path = tmp_path / "avatar.db"
+    storage_root = tmp_path / "storage"
+    storage_root.mkdir()
+    _seed_db(db_path)
+    actor_box = {"actor": {"id": 1, "username": "alice", "role": "user", "member_level": "trusted", "effective_level": "trusted"}}
+    client = _build_app(db_path, storage_root, actor_box).test_client()
+
+    source = Image.new("RGB", (30, 10), color=(20, 80, 160))
+    buf = io.BytesIO()
+    source.save(buf, format="JPEG")
+    buf.seek(0)
+
+    res = client.post(
+        "/api/admin/users/1/avatar",
+        data={
+            "file": (buf, "avatar.jpg", "image/jpeg"),
+            "crop_json": '{"x":0,"y":0,"width":10,"height":10,"rotation":90}',
+        },
+        content_type="multipart/form-data",
+    )
+    assert res.status_code == 200
+    payload = res.get_json()
+    assert payload["avatar_crop"] == {"x": 0, "y": 0, "width": 10, "height": 10, "rotation": 90}
+
+    avatar_res = client.get("/api/admin/users/1/avatar")
+    assert avatar_res.status_code == 200
+    cropped = Image.open(io.BytesIO(avatar_res.data))
+    assert cropped.size == (512, 512)
+
+
 def test_user_can_select_server_encrypted_cloud_image_as_avatar(tmp_path):
     pytest.importorskip("PIL")
     from PIL import Image

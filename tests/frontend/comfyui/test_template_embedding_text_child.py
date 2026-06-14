@@ -22,6 +22,7 @@ def test_selected_template_renders_embedding_shortcuts_under_text_panel():
     assert "data-comfyui-template-embedding" in workflow_js
     assert "data-comfyui-template-embedding-targets" in workflow_js
     assert "insertComfyuiTemplateEmbeddingToken" in workflow_js
+    assert "buildComfyuiPromptTokenInsertion(raw, start, end, embeddingTag)" in workflow_js
     assert "removeComfyuiEmbeddingTokenFromInput" in workflow_js
     assert "comfyuiTemplateLastFocusedTextFieldId" in workflow_js
     assert "function comfyuiTemplateEmbeddingInsertionTarget" in workflow_js
@@ -43,6 +44,8 @@ def test_import_preview_modal_renders_embedding_shortcuts_for_text_fields():
     assert "data-comfyui-template-importer-embedding" in comfyui_js
     assert "function insertTemplateModalEmbeddingToken(name)" in comfyui_js
     assert "function removeComfyuiEmbeddingTokenFromInput(input, name)" in comfyui_js
+    assert "function buildComfyuiPromptTokenInsertion(raw = \"\", start = 0, end = 0, token = \"\")" in comfyui_js
+    assert "buildComfyuiPromptTokenInsertion(raw, start, end, embeddingTag)" in comfyui_js
     assert "function comfyuiEmbeddingTokenVariants(name)" in comfyui_js
     assert "插入 / 移除" in comfyui_js
     assert 'el.dataset.category === "TEXT"' in comfyui_js

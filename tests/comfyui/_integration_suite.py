@@ -6317,8 +6317,8 @@ def test_comfyui_frontend_is_wired():
     assert "if (modelsTab) modelsTab.hidden = false;" in comfyui_js
     assert 'if (accessNote) accessNote.style.display = showLocalModels ? "none" : "";' in comfyui_js
     assert '目前是雲端 / 遠端模式；Civitai 匯入區仍可使用' in comfyui_js
-    assert "/js/36-comfyui.js?v=20260607-image-favorites-history-favorite-dashboard" in index_html
-    assert "/styles.css?v=20260607-image-favorites-history-favorite" in index_html
+    assert "/js/36-comfyui.js?v=20260614-comfyui-progress-temp-embedding-commas" in index_html
+    assert "/styles.css?v=20260612-ai-agent-image-thumbs" in index_html
     assert "width: min(420px, 100%);" in css
     assert "max-height: 320px;" in css
     assert ".comfyui-root-details" in css
@@ -6474,6 +6474,9 @@ def test_comfyui_frontend_is_wired():
     assert "function renderComfyuiEmbeddingShortcuts(values = [])" in comfyui_js
     assert "function insertComfyuiEmbeddingToken(name)" in comfyui_js
     assert "function removeComfyuiEmbeddingTokenFromInput(input, name)" in comfyui_js
+    assert "function buildComfyuiPromptTokenInsertion(raw = \"\", start = 0, end = 0, token = \"\")" in comfyui_js
+    assert 'const suffix = after ? (after.startsWith(",") ? "" : ", ") : ", ";' in comfyui_js
+    assert "buildComfyuiPromptTokenInsertion(raw, start, end, embeddingTag)" in comfyui_js
     assert "function comfyuiEmbeddingTokenVariants(name)" in comfyui_js
     assert "插入 / 移除" in comfyui_js
     assert "function removeComfyuiPromptTerms(terms = [], { promptType = \"prompt\" } = {})" in comfyui_js
@@ -6570,7 +6573,9 @@ def test_comfyui_frontend_is_wired():
     assert "bindComfyuiDraftPersistence" in comfyui_js
     assert "restoreComfyuiDraft()" in comfyui_js
     assert 'album_id: selectedComfyuiAlbumId()' in comfyui_js
-    assert "startComfyuiProgress(COMFYUI_GENERATION_TIMEOUT_SECONDS * runCount)" in comfyui_js
+    assert "function aggregateComfyuiJobProgress(progress = {}, { requestIndex = 0, totalRequests = 1 } = {})" in comfyui_js
+    assert "startComfyuiProgress(COMFYUI_GENERATION_TIMEOUT_SECONDS * totalRequests)" in comfyui_js
+    assert "progressTransform: (progress) => aggregateComfyuiJobProgress(progress, { requestIndex, totalRequests })" in comfyui_js
     assert "stopComfyuiProgress({ complete: true })" in comfyui_js
     assert "comfyuiGenerateAbortController.abort()" in comfyui_js
     assert "comfyuiShareGenerationPayload" in comfyui_js

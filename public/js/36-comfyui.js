@@ -2486,10 +2486,10 @@ function comfyuiResourceDetailBytes(used, total) {
   return "";
 }
 
-function comfyuiResourceMetricMarkup({ label, percent, detail = "", available = true }) {
+function comfyuiResourceMetricMarkup({ label, percent, detail = "", available = true, displayValue = "" }) {
   const safePercent = comfyuiResourcePercent(percent);
   const unavailable = available === false || safePercent === null;
-  const display = unavailable ? "--" : `${Math.round(safePercent)}%`;
+  const display = unavailable ? "--" : (displayValue || `${Math.round(safePercent)}%`);
   const level = unavailable ? "muted" : (safePercent >= 90 ? "danger" : (safePercent >= 75 ? "warn" : "ok"));
   return `
     <div class="comfyui-resource-metric ${level}">
@@ -2543,7 +2543,8 @@ function renderComfyuiResourceDashboard(resource = {}, { error = "" } = {}) {
       label: "GPU Temp",
       percent: maxTemp === null ? null : Math.min(100, maxTemp),
       available: maxTemp !== null,
-      detail: maxTemp === null ? "未偵測溫度" : `${Math.round(maxTemp)} C`,
+      displayValue: maxTemp === null ? "" : `${Math.round(maxTemp)}°C`,
+      detail: maxTemp === null ? "未偵測溫度" : "GPU 溫度",
     }),
   ].join("");
 }
@@ -2761,6 +2762,24 @@ function applyComfyuiJobProgress(progress = {}, timeoutSeconds = COMFYUI_GENERAT
   });
 }
 
+function aggregateComfyuiJobProgress(progress = {}, { requestIndex = 0, totalRequests = 1 } = {}) {
+  const total = Math.max(1, Math.floor(Number(totalRequests || 1)));
+  const index = Math.max(0, Math.min(total - 1, Math.floor(Number(requestIndex || 0))));
+  if (total <= 1) return progress || {};
+  const rawPercent = Math.max(0, Math.min(100, Number((progress || {}).percent) || 0));
+  const aggregatePercent = Math.max(0, Math.min(100, ((index + rawPercent / 100) / total) * 100));
+  const prefix = `第 ${index + 1} / ${total} 張`;
+  const detail = String((progress || {}).detail || "").trim();
+  return {
+    ...(progress || {}),
+    percent: aggregatePercent,
+    item_percent: rawPercent,
+    item_index: index + 1,
+    item_total: total,
+    detail: detail && !detail.startsWith(prefix) ? `${prefix}：${detail}` : (detail || prefix),
+  };
+}
+
 function isComfyuiJobQueued(job = {}) {
   const phase = String(job?.progress?.phase || "").toLowerCase();
   return phase === "queued" || String(job?.status || "").toLowerCase() === "queued";
@@ -2820,7 +2839,10 @@ async function pollComfyuiJobUntilDone(jobId, controller, timeoutSeconds, option
         Math.max(timeoutSeconds, Math.floor((deadline - startedAt - 15000) / 1000))
       );
     }
-    applyComfyuiJobProgress(job.progress || {}, displayTimeoutSeconds);
+    const displayProgress = typeof options.progressTransform === "function"
+      ? options.progressTransform(job.progress || {}, job)
+      : (job.progress || {});
+    applyComfyuiJobProgress(displayProgress, displayTimeoutSeconds);
     if (job.status !== "completed" && job.result && typeof options.onPartialResult === "function") {
       try {
         await options.onPartialResult(job.result, job);
@@ -3365,6 +3387,19 @@ function removeComfyuiEmbeddingTokenFromPrompt(name, { promptType = "prompt" } =
   return removed;
 }
 
+function buildComfyuiPromptTokenInsertion(raw = "", start = 0, end = 0, token = "") {
+  const text = String(raw || "");
+  const before = text.slice(0, start).replace(/\s+$/g, "");
+  const after = text.slice(end).replace(/^\s+/g, "");
+  const prefix = before ? (before.endsWith(",") ? " " : ", ") : "";
+  const suffix = after ? (after.startsWith(",") ? "" : ", ") : ", ";
+  const value = `${before}${prefix}${token}${suffix}${after}`;
+  return {
+    value,
+    cursor: before.length + prefix.length + String(token || "").length + suffix.length,
+  };
+}
+
 function insertComfyuiEmbeddingToken(name) {
   const cleanName = String(name || "").trim();
   const promptType = currentComfyuiPromptTypeForInsertion();
@@ -3380,12 +3415,10 @@ function insertComfyuiEmbeddingToken(name) {
   const raw = prompt.value || "";
   const start = Number.isInteger(prompt.selectionStart) ? prompt.selectionStart : raw.length;
   const end = Number.isInteger(prompt.selectionEnd) ? prompt.selectionEnd : raw.length;
-  const prefix = start > 0 && !/[\s,\n]$/.test(raw.slice(0, start)) ? ", " : "";
-  const suffix = end < raw.length && !/^[\s,]/.test(raw.slice(end)) ? " " : "";
-  prompt.value = `${raw.slice(0, start)}${prefix}${embeddingTag}${suffix}${raw.slice(end)}`;
-  const cursor = start + prefix.length + embeddingTag.length + suffix.length;
+  const insertion = buildComfyuiPromptTokenInsertion(raw, start, end, embeddingTag);
+  prompt.value = insertion.value;
   prompt.focus();
-  if (typeof prompt.setSelectionRange === "function") prompt.setSelectionRange(cursor, cursor);
+  if (typeof prompt.setSelectionRange === "function") prompt.setSelectionRange(insertion.cursor, insertion.cursor);
   writeComfyuiDraft();
   setComfyuiMessage(`已把 ${cleanName} 插入${comfyuiPromptTypeLabel(promptType)}提示詞。`, true);
 }
@@ -5471,12 +5504,12 @@ async function generateComfyuiImage() {
       comfyuiBillingQuote = { ...(comfyuiBillingQuote || {}), ...preflightBilling };
     }
     const generateRequest = comfyuiBuildGenerateRequest(payload);
-    startComfyuiProgress(COMFYUI_GENERATION_TIMEOUT_SECONDS * runCount);
     let totalCharged = 0;
     const generated = [];
     const generatedMedia = [];
     const requestedBatchSize = Math.max(1, Math.min(comfyuiMaxBatchSize, Number(payload.batch_size || 1)));
     const totalRequests = runCount * requestedBatchSize;
+    startComfyuiProgress(COMFYUI_GENERATION_TIMEOUT_SECONDS * totalRequests);
     for (let requestIndex = 0; requestIndex < totalRequests; requestIndex += 1) {
       if (controller.signal.aborted) throw new DOMException("Aborted", "AbortError");
       const runIndex = Math.floor(requestIndex / requestedBatchSize);
@@ -5517,7 +5550,9 @@ async function generateComfyuiImage() {
       if (!startRes.ok || !startJson.ok) throw new Error(startJson.msg || `第 ${requestIndex + 1} 張產圖失敗（HTTP ${startRes.status}）`);
       const jobId = startJson.job?.job_id;
       if (!jobId) throw new Error("ComfyUI 未回傳工作編號");
-      const json = await pollComfyuiJobUntilDone(jobId, controller, COMFYUI_GENERATION_TIMEOUT_SECONDS);
+      const json = await pollComfyuiJobUntilDone(jobId, controller, COMFYUI_GENERATION_TIMEOUT_SECONDS, {
+        progressTransform: (progress) => aggregateComfyuiJobProgress(progress, { requestIndex, totalRequests }),
+      });
       const rawRunImages = Array.isArray(json.images) && json.images.length ? json.images : [json.image].filter(Boolean);
       const runImages = await hydrateComfyuiGeneratedImages(rawRunImages);
       const runMedia = await hydrateComfyuiGeneratedMedia(Array.isArray(json.media) ? json.media : [], jobId);
@@ -7299,13 +7334,13 @@ const ComfyUITemplateImporter = (() => {
     const raw = target.value || "";
     const start = Number.isInteger(target.selectionStart) ? target.selectionStart : raw.length;
     const end = Number.isInteger(target.selectionEnd) ? target.selectionEnd : raw.length;
-    const prefix = start > 0 && !/[\s,\n]$/.test(raw.slice(0, start)) ? ", " : "";
-    const suffix = end < raw.length && !/^[\s,]/.test(raw.slice(end)) ? " " : "";
-    target.value = `${raw.slice(0, start)}${prefix}${embeddingTag}${suffix}${raw.slice(end)}`;
-    const cursor = start + prefix.length + embeddingTag.length + suffix.length;
+    const insertion = typeof buildComfyuiPromptTokenInsertion === "function"
+      ? buildComfyuiPromptTokenInsertion(raw, start, end, embeddingTag)
+      : { value: `${raw.slice(0, start)}${embeddingTag}, ${raw.slice(end)}`, cursor: start + embeddingTag.length + 2 };
+    target.value = insertion.value;
     lastFocusedImporterTextInput = target;
     target.focus();
-    if (typeof target.setSelectionRange === "function") target.setSelectionRange(cursor, cursor);
+    if (typeof target.setSelectionRange === "function") target.setSelectionRange(insertion.cursor, insertion.cursor);
   }
 
   function renderTemplatePanels(uiSchema, capability) {

@@ -129,6 +129,7 @@ def test_comfyui_preview_resource_dashboard_is_wired():
     assert 'if (currentUser && (activeView === "generate" || activeView === "hf"))' in js
     assert 'comfyuiResourceMetricMarkup({ label: "RAM", percent: null, available: false, detail: error })' in js
     assert 'comfyuiResourceMetricMarkup({ label: "GPU Load", percent: null, available: false, detail: "等待資源資料" })' in js
+    assert 'displayValue: maxTemp === null ? "" : `${Math.round(maxTemp)}°C`' in js
     assert 'typeof startComfyuiResourceDashboardPolling === "function"' in core_js
     assert 'setTimeout(() => refreshComfyuiResourceDashboard(), 250);' in core_js
     assert ".comfyui-resource-dashboard" in styles

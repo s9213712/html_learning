@@ -2384,12 +2384,12 @@ function insertComfyuiTemplateEmbeddingToken(name, targetFieldIds = []) {
   const raw = target.value || "";
   const start = Number.isInteger(target.selectionStart) ? target.selectionStart : raw.length;
   const end = Number.isInteger(target.selectionEnd) ? target.selectionEnd : raw.length;
-  const prefix = start > 0 && !/[\s,\n]$/.test(raw.slice(0, start)) ? ", " : "";
-  const suffix = end < raw.length && !/^[\s,]/.test(raw.slice(end)) ? " " : "";
-  target.value = `${raw.slice(0, start)}${prefix}${embeddingTag}${suffix}${raw.slice(end)}`;
-  const cursor = start + prefix.length + embeddingTag.length + suffix.length;
+  const insertion = typeof buildComfyuiPromptTokenInsertion === "function"
+    ? buildComfyuiPromptTokenInsertion(raw, start, end, embeddingTag)
+    : { value: `${raw.slice(0, start)}${embeddingTag}, ${raw.slice(end)}`, cursor: start + embeddingTag.length + 2 };
+  target.value = insertion.value;
   target.focus();
-  if (typeof target.setSelectionRange === "function") target.setSelectionRange(cursor, cursor);
+  if (typeof target.setSelectionRange === "function") target.setSelectionRange(insertion.cursor, insertion.cursor);
   comfyuiTemplateLastFocusedTextFieldId = String(target.id || "");
   target.dispatchEvent(new Event("input", { bubbles: true }));
   target.dispatchEvent(new Event("change", { bubbles: true }));

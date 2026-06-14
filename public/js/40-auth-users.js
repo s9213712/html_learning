@@ -317,6 +317,7 @@ const USER_APPEARANCE_THEME_PALETTES = {
 let editingUserOriginalAppearance = {};
 let userAppearanceResetPending = false;
 const AVATAR_CROPPER_DEFAULT_ZOOM = 1;
+const AVATAR_CROPPER_ROTATION_STEP = 90;
 const avatarCropState = {
   bound: false,
   objectUrl: "",
@@ -325,6 +326,7 @@ const avatarCropState = {
   naturalHeight: 0,
   baseScale: 1,
   zoom: 1,
+  rotation: 0,
   offsetX: 0,
   offsetY: 0,
   dragging: false,
@@ -342,6 +344,9 @@ function avatarCropperElements() {
     image: $("edit-avatar-crop-image"),
     box: $("edit-avatar-crop-box"),
     zoom: $("edit-avatar-crop-zoom"),
+    rotation: $("edit-avatar-crop-rotation"),
+    rotationValue: $("edit-avatar-crop-rotation-value"),
+    rotationSteps: Array.from(document.querySelectorAll("[data-edit-avatar-rotate-step]")),
     center: $("edit-avatar-crop-center"),
   };
 }
@@ -355,6 +360,34 @@ function normalizeAvatarCropZoom(value) {
   return Number.isFinite(numeric) && numeric > 0 ? numeric : AVATAR_CROPPER_DEFAULT_ZOOM;
 }
 
+function normalizeAvatarRotation(value) {
+  const numeric = Number.parseInt(String(value ?? ""), 10);
+  const safe = Number.isFinite(numeric) ? numeric : 0;
+  return ((Math.round(safe / AVATAR_CROPPER_ROTATION_STEP) * AVATAR_CROPPER_ROTATION_STEP) % 360 + 360) % 360;
+}
+
+function avatarRotationLabel(value) {
+  return `${normalizeAvatarRotation(value)}°`;
+}
+
+function syncAvatarRotationControl(value = avatarCropState.rotation) {
+  const rotation = normalizeAvatarRotation(value);
+  const els = avatarCropperElements();
+  avatarCropState.rotation = rotation;
+  if (els.rotation) els.rotation.value = String(rotation);
+  if (els.rotationValue) els.rotationValue.textContent = avatarRotationLabel(rotation);
+  return rotation;
+}
+
+function avatarDisplayNaturalSize() {
+  const rotation = normalizeAvatarRotation(avatarCropState.rotation);
+  const swapped = rotation === 90 || rotation === 270;
+  return {
+    width: swapped ? avatarCropState.naturalHeight : avatarCropState.naturalWidth,
+    height: swapped ? avatarCropState.naturalWidth : avatarCropState.naturalHeight,
+  };
+}
+
 function avatarCroppedUploadFilename(sourceName = "") {
   const base = String(sourceName || "avatar")
     .replace(/\.[^.]+$/, "")
@@ -364,17 +397,39 @@ function avatarCroppedUploadFilename(sourceName = "") {
   return `${base}_cropped.png`;
 }
 
-function normalizedAvatarCropForImage(image, crop = {}) {
+function normalizedAvatarCropForImage(image, crop = {}, { rotation = 0 } = {}) {
   const naturalWidth = Number(image?.naturalWidth || 0);
   const naturalHeight = Number(image?.naturalHeight || 0);
   if (!naturalWidth || !naturalHeight) return null;
-  const sideLimit = Math.min(naturalWidth, naturalHeight);
+  const normalizedRotation = normalizeAvatarRotation(rotation);
+  const rotated = normalizedRotation === 90 || normalizedRotation === 270;
+  const sourceWidth = rotated ? naturalHeight : naturalWidth;
+  const sourceHeight = rotated ? naturalWidth : naturalHeight;
+  const sideLimit = Math.min(sourceWidth, sourceHeight);
   const rawWidth = Number(crop.width || 0);
   const rawHeight = Number(crop.height || 0);
   const side = clampAvatarValue(Math.floor(Math.min(rawWidth || sideLimit, rawHeight || sideLimit)), 1, sideLimit);
-  const x = clampAvatarValue(Math.floor(Number(crop.x || 0)), 0, Math.max(0, naturalWidth - side));
-  const y = clampAvatarValue(Math.floor(Number(crop.y || 0)), 0, Math.max(0, naturalHeight - side));
+  const x = clampAvatarValue(Math.floor(Number(crop.x || 0)), 0, Math.max(0, sourceWidth - side));
+  const y = clampAvatarValue(Math.floor(Number(crop.y || 0)), 0, Math.max(0, sourceHeight - side));
   return { x, y, width: side, height: side };
+}
+
+function avatarCanvasSourceFromImage(image, rotation = 0) {
+  const normalizedRotation = normalizeAvatarRotation(rotation);
+  if (!normalizedRotation) return image;
+  const naturalWidth = Number(image?.naturalWidth || 0);
+  const naturalHeight = Number(image?.naturalHeight || 0);
+  if (!naturalWidth || !naturalHeight) return image;
+  const rotated = normalizedRotation === 90 || normalizedRotation === 270;
+  const source = document.createElement("canvas");
+  source.width = rotated ? naturalHeight : naturalWidth;
+  source.height = rotated ? naturalWidth : naturalHeight;
+  const ctx = source.getContext("2d", { alpha: true });
+  if (!ctx) throw new Error("此瀏覽器不支援頭像旋轉輸出");
+  ctx.translate(source.width / 2, source.height / 2);
+  ctx.rotate(normalizedRotation * Math.PI / 180);
+  ctx.drawImage(image, -naturalWidth / 2, -naturalHeight / 2);
+  return source;
 }
 
 function avatarCanvasToBlob(canvas, type = "image/png", quality = 0.92) {
@@ -390,10 +445,12 @@ function avatarCanvasToBlob(canvas, type = "image/png", quality = 0.92) {
   });
 }
 
-async function buildCroppedAvatarUpload(image, crop = {}, { sourceName = "" } = {}) {
+async function buildCroppedAvatarUpload(image, crop = {}, { sourceName = "", rotation = 0 } = {}) {
   if (!image || !image.complete) return null;
-  const normalizedCrop = normalizedAvatarCropForImage(image, crop);
+  const normalizedRotation = normalizeAvatarRotation(rotation ?? crop.rotation);
+  const normalizedCrop = normalizedAvatarCropForImage(image, crop, { rotation: normalizedRotation });
   if (!normalizedCrop) return null;
+  const source = avatarCanvasSourceFromImage(image, normalizedRotation);
   const canvas = document.createElement("canvas");
   canvas.width = 512;
   canvas.height = 512;
@@ -401,7 +458,7 @@ async function buildCroppedAvatarUpload(image, crop = {}, { sourceName = "" } = 
   if (!ctx) throw new Error("此瀏覽器不支援頭像裁切輸出");
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.drawImage(
-    image,
+    source,
     normalizedCrop.x,
     normalizedCrop.y,
     normalizedCrop.width,
@@ -426,6 +483,7 @@ function setAvatarCropHidden(crop = {}) {
   setUserEditField("edit-avatar-crop-y", crop.y || 0);
   setUserEditField("edit-avatar-crop-width", crop.width || 0);
   setUserEditField("edit-avatar-crop-height", crop.height || 0);
+  setUserEditField("edit-avatar-crop-rotation", normalizeAvatarRotation(crop.rotation ?? avatarCropState.rotation));
 }
 
 function resetAvatarCropper() {
@@ -439,6 +497,7 @@ function resetAvatarCropper() {
   avatarCropState.naturalHeight = 0;
   avatarCropState.baseScale = 1;
   avatarCropState.zoom = 1;
+  avatarCropState.rotation = 0;
   avatarCropState.offsetX = 0;
   avatarCropState.offsetY = 0;
   avatarCropState.dragging = false;
@@ -454,6 +513,7 @@ function resetAvatarCropper() {
   }
   if (els.stage) els.stage.classList.remove("is-dragging");
   if (els.zoom) els.zoom.value = "1";
+  syncAvatarRotationControl(0);
   setAvatarCropHidden();
 }
 
@@ -481,8 +541,9 @@ function avatarCropStageMetrics() {
 function clampAvatarCropOffsets(metrics = avatarCropStageMetrics()) {
   if (!metrics || !avatarCropState.hasImage) return;
   const scale = avatarCropState.baseScale * normalizeAvatarCropZoom(avatarCropState.zoom);
-  const imageWidth = avatarCropState.naturalWidth * scale;
-  const imageHeight = avatarCropState.naturalHeight * scale;
+  const displaySize = avatarDisplayNaturalSize();
+  const imageWidth = displaySize.width * scale;
+  const imageHeight = displaySize.height * scale;
   const maxX = Math.max(0, (imageWidth - metrics.cropSize) / 2);
   const maxY = Math.max(0, (imageHeight - metrics.cropSize) / 2);
   avatarCropState.offsetX = clampAvatarValue(avatarCropState.offsetX, -maxX, maxX);
@@ -495,17 +556,19 @@ function syncAvatarCropPayloadFromVisual() {
     return currentAvatarCropPayloadFromFields();
   }
   const scale = avatarCropState.baseScale * normalizeAvatarCropZoom(avatarCropState.zoom);
-  const imageWidth = avatarCropState.naturalWidth * scale;
-  const imageHeight = avatarCropState.naturalHeight * scale;
+  const rotation = syncAvatarRotationControl(avatarCropState.rotation);
+  const displaySize = avatarDisplayNaturalSize();
+  const imageWidth = displaySize.width * scale;
+  const imageHeight = displaySize.height * scale;
   const imageLeft = (metrics.width / 2 + avatarCropState.offsetX) - imageWidth / 2;
   const imageTop = (metrics.height / 2 + avatarCropState.offsetY) - imageHeight / 2;
   let cropX = Math.round((metrics.cropLeft - imageLeft) / scale);
   let cropY = Math.round((metrics.cropTop - imageTop) / scale);
   let cropSide = Math.round(metrics.cropSize / scale);
-  cropSide = clampAvatarValue(cropSide, 1, Math.min(avatarCropState.naturalWidth, avatarCropState.naturalHeight));
-  cropX = clampAvatarValue(cropX, 0, Math.max(0, avatarCropState.naturalWidth - cropSide));
-  cropY = clampAvatarValue(cropY, 0, Math.max(0, avatarCropState.naturalHeight - cropSide));
-  const crop = { x: cropX, y: cropY, width: cropSide, height: cropSide };
+  cropSide = clampAvatarValue(cropSide, 1, Math.min(displaySize.width, displaySize.height));
+  cropX = clampAvatarValue(cropX, 0, Math.max(0, displaySize.width - cropSide));
+  cropY = clampAvatarValue(cropY, 0, Math.max(0, displaySize.height - cropSide));
+  const crop = { x: cropX, y: cropY, width: cropSide, height: cropSide, rotation };
   setAvatarCropHidden(crop);
   return crop;
 }
@@ -514,21 +577,23 @@ function renderAvatarCropper() {
   const els = avatarCropperElements();
   const metrics = avatarCropStageMetrics();
   if (!els.image || !els.box || !metrics || !avatarCropState.hasImage) return;
+  const rotation = syncAvatarRotationControl(avatarCropState.rotation);
+  const displaySize = avatarDisplayNaturalSize();
   avatarCropState.baseScale = Math.max(
-    metrics.width / avatarCropState.naturalWidth,
-    metrics.height / avatarCropState.naturalHeight
+    metrics.width / displaySize.width,
+    metrics.height / displaySize.height
   );
   avatarCropState.zoom = normalizeAvatarCropZoom(avatarCropState.zoom);
   if (els.zoom) els.zoom.value = String(avatarCropState.zoom);
   clampAvatarCropOffsets(metrics);
   const scale = avatarCropState.baseScale * normalizeAvatarCropZoom(avatarCropState.zoom);
-  const imageWidth = avatarCropState.naturalWidth * scale;
-  const imageHeight = avatarCropState.naturalHeight * scale;
-  els.image.style.width = `${imageWidth}px`;
-  els.image.style.height = `${imageHeight}px`;
-  els.image.style.left = `${(metrics.width / 2 + avatarCropState.offsetX) - imageWidth / 2}px`;
-  els.image.style.top = `${(metrics.height / 2 + avatarCropState.offsetY) - imageHeight / 2}px`;
-  els.image.style.transform = "none";
+  const rawWidth = avatarCropState.naturalWidth * scale;
+  const rawHeight = avatarCropState.naturalHeight * scale;
+  els.image.style.width = `${rawWidth}px`;
+  els.image.style.height = `${rawHeight}px`;
+  els.image.style.left = `${(metrics.width / 2 + avatarCropState.offsetX) - rawWidth / 2}px`;
+  els.image.style.top = `${(metrics.height / 2 + avatarCropState.offsetY) - rawHeight / 2}px`;
+  els.image.style.transform = rotation ? `rotate(${rotation}deg)` : "none";
   els.box.style.width = `${metrics.cropSize}px`;
   els.box.style.height = `${metrics.cropSize}px`;
   els.box.style.left = `${metrics.cropLeft}px`;
@@ -556,6 +621,7 @@ function loadAvatarCropperFromFile(file) {
     avatarCropState.naturalWidth = els.image.naturalWidth || 1;
     avatarCropState.naturalHeight = els.image.naturalHeight || 1;
     avatarCropState.zoom = 1;
+    avatarCropState.rotation = 0;
     avatarCropState.offsetX = 0;
     avatarCropState.offsetY = 0;
     avatarCropState.hasImage = true;
@@ -565,7 +631,8 @@ function loadAvatarCropperFromFile(file) {
   };
   els.image.onerror = () => {
     resetAvatarCropper();
-    setUserEditMsg("無法讀取頭像預覽，請換一張圖片", false);
+    const name = file?.name || "這張圖片";
+    setUserEditMsg(`無法讀取頭像預覽：${name}。請確認檔案未損壞，或改用 JPEG / PNG。`, false);
   };
   els.image.src = nextUrl;
 }
@@ -622,6 +689,16 @@ function bindAvatarCropperUi() {
       renderAvatarCropper();
     });
   }
+  els.rotationSteps.forEach((button) => {
+    button.addEventListener("click", () => {
+      const delta = Number.parseInt(button.dataset.editAvatarRotateStep || "0", 10);
+      if (!Number.isFinite(delta) || delta === 0) return;
+      syncAvatarRotationControl(avatarCropState.rotation + delta);
+      avatarCropState.offsetX = 0;
+      avatarCropState.offsetY = 0;
+      renderAvatarCropper();
+    });
+  });
   if (els.center) {
     els.center.addEventListener("click", () => {
       avatarCropState.zoom = 1;
@@ -1447,6 +1524,7 @@ function currentAvatarCropPayloadFromFields() {
     y: parseInt($("edit-avatar-crop-y")?.value || "0", 10) || 0,
     width: parseInt($("edit-avatar-crop-width")?.value || "0", 10) || 0,
     height: parseInt($("edit-avatar-crop-height")?.value || "0", 10) || 0,
+    rotation: normalizeAvatarRotation($("edit-avatar-crop-rotation")?.value || "0"),
   };
 }
 
@@ -1469,7 +1547,7 @@ async function submitUserAvatarUpload({ reloadUsers = true } = {}) {
     return { ok: false, msg: "請等待頭像裁切預覽載入完成後再上傳" };
   }
   const cropped = avatarCropState.hasImage
-    ? await buildCroppedAvatarUpload(image, crop, { sourceName: file.name || "avatar.png" })
+    ? await buildCroppedAvatarUpload(image, crop, { sourceName: file.name || "avatar.png", rotation: avatarCropState.rotation })
     : null;
   if (avatarCropState.hasImage && !cropped) {
     setUserEditMsg("無法產生裁切後頭像，請重新選擇圖片", false);

@@ -7603,12 +7603,21 @@
           <button type="button" class="btn btn-sm avatar-cropper-zoom-step" data-profile-avatar-zoom-step="0.05" aria-label="放大頭像裁切">+</button>
           <button type="button" id="profile-avatar-crop-center" class="btn btn-sm">置中</button>
         </div>
+        <div class="avatar-cropper-rotation-label">
+          <label for="profile-avatar-crop-rotation">旋轉</label>
+          <output id="profile-avatar-crop-rotation-value" for="profile-avatar-crop-rotation" class="avatar-cropper-rotation-value">0°</output>
+        </div>
+        <div class="avatar-cropper-rotation-row">
+          <button type="button" class="btn btn-sm avatar-cropper-rotate-step" data-profile-avatar-rotate-step="-90" aria-label="向左旋轉頭像">↺</button>
+          <button type="button" class="btn btn-sm avatar-cropper-rotate-step" data-profile-avatar-rotate-step="90" aria-label="向右旋轉頭像">↻</button>
+        </div>
       </div>
-      <div class="avatar-cropper-hint">不用輸入座標；拖曳圖片、調整縮放後直接上傳。</div>
+      <div class="avatar-cropper-hint">不用輸入座標；拖曳圖片、調整縮放或旋轉後直接上傳。</div>
       <input type="hidden" id="profile-avatar-crop-x" value="0" />
       <input type="hidden" id="profile-avatar-crop-y" value="0" />
       <input type="hidden" id="profile-avatar-crop-width" value="0" />
       <input type="hidden" id="profile-avatar-crop-height" value="0" />
+      <input type="hidden" id="profile-avatar-crop-rotation" value="0" />
     </div>
     <div id="profile-avatar-msg" class="msg" aria-live="polite"></div>
     <div class="edit-user-actions">
@@ -7766,8 +7775,8 @@
 <script src="/js/35-drive.js?v=20260604-storage-bulk-clarity" defer></script>
   <script src="/js/35-drive-preview-share.js?v=20260507-drive-preview-share-split" defer></script>
 <!-- cache marker retained for template-import regression: /js/36-comfyui.js?v=20260509-comfyui-template-embeddings -->
-<script src="/js/36-comfyui.js?v=20260607-image-favorites-history-favorite-dashboard" defer></script>
-<script src="/js/36-comfyui-workflows.js?v=20260607-template-filter-reset" defer></script>
+<script src="/js/36-comfyui.js?v=20260614-comfyui-progress-temp-embedding-commas" defer></script>
+<script src="/js/36-comfyui-workflows.js?v=20260614-comfyui-embedding-commas" defer></script>
 <script src="/js/37-ai-agent.js?v=20260614-ai-agent-scroll-bottom-v12" defer></script>
 <script src="/js/37-bug-report.js?v=20260502-device-feature" defer></script>
 <script src="/js/41-game-modules.js?v=20260601-rubiks-visible" defer></script>

@@ -8680,7 +8680,8 @@
       font-size: .82rem;
     }
 
-    .avatar-cropper-zoom-label {
+    .avatar-cropper-zoom-label,
+    .avatar-cropper-rotation-label {
       display: flex;
       align-items: center;
       justify-content: space-between;
@@ -8688,7 +8689,8 @@
       min-width: 0;
     }
 
-    .avatar-cropper-zoom-value {
+    .avatar-cropper-zoom-value,
+    .avatar-cropper-rotation-value {
       min-width: 4.4rem;
       color: var(--text);
       font-size: .86rem;
@@ -8697,15 +8699,24 @@
       white-space: nowrap;
     }
 
-    .avatar-cropper-zoom-row {
+    .avatar-cropper-zoom-row,
+    .avatar-cropper-rotation-row {
       display: grid;
-      grid-template-columns: 44px minmax(0, 1fr) 44px auto;
       gap: .45rem;
       align-items: center;
       min-width: 0;
     }
 
-    .avatar-cropper-zoom-step {
+    .avatar-cropper-zoom-row {
+      grid-template-columns: 44px minmax(0, 1fr) 44px auto;
+    }
+
+    .avatar-cropper-rotation-row {
+      grid-template-columns: 44px 44px minmax(0, 1fr);
+    }
+
+    .avatar-cropper-zoom-step,
+    .avatar-cropper-rotate-step {
       display: inline-flex;
       align-items: center;
       justify-content: center;
@@ -8738,6 +8749,10 @@
 
       .avatar-cropper-zoom-row {
         grid-template-columns: 44px minmax(0, 1fr) 44px;
+      }
+
+      .avatar-cropper-rotation-row {
+        grid-template-columns: 44px 44px;
       }
 
       .avatar-cropper-zoom-row #profile-avatar-crop-center {

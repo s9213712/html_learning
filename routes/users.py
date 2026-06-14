@@ -1591,6 +1591,13 @@ def register_user_routes(app, deps):
             return {}
         if crop.get("width", 0) <= 0 or crop.get("height", 0) <= 0:
             return {}
+        try:
+            rotation = int(raw.get("rotation", 0) or 0)
+        except Exception:
+            rotation = 0
+        rotation = ((round(rotation / 90) * 90) % 360 + 360) % 360
+        if rotation:
+            crop["rotation"] = rotation
         return crop
 
     def _avatar_crop_response(path, crop, mimetype):
@@ -1605,6 +1612,9 @@ def register_user_routes(app, deps):
                 if getattr(img, "is_animated", False) or getattr(img, "n_frames", 1) > 1:
                     return None
                 clean = ImageOps.exif_transpose(img)
+                rotation = int(crop.get("rotation", 0) or 0) if crop else 0
+                if rotation:
+                    clean = clean.rotate(-rotation, expand=True)
                 image_width, image_height = clean.size
                 if image_width <= 0 or image_height <= 0:
                     return None

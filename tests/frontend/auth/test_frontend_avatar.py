@@ -21,6 +21,10 @@ def test_avatar_upload_ui_is_wired():
     assert 'id="profile-avatar-crop-zoom" min="0.1" max="10" step="0.01" value="1"' in index_html
     assert 'data-profile-avatar-zoom-step="-0.05"' in index_html
     assert 'data-profile-avatar-zoom-step="0.05"' in index_html
+    assert 'id="profile-avatar-crop-rotation-value" for="profile-avatar-crop-rotation"' in index_html
+    assert 'id="profile-avatar-crop-rotation" value="0"' in index_html
+    assert 'data-profile-avatar-rotate-step="-90"' in index_html
+    assert 'data-profile-avatar-rotate-step="90"' in index_html
     zoom_pos = index_html.index('id="profile-avatar-crop-zoom"')
     assert 'max="6"' not in index_html[zoom_pos - 80:zoom_pos + 160]
     assert 'type="number" id="profile-avatar-crop-zoom"' not in index_html
@@ -28,6 +32,8 @@ def test_avatar_upload_ui_is_wired():
     assert "async function uploadUserAvatar()" in auth_js
     assert "function selectedUserAvatarFile()" in auth_js
     assert "async function buildCroppedAvatarUpload" in auth_js
+    assert "function normalizeAvatarRotation(value)" in auth_js
+    assert "avatarCanvasSourceFromImage(image, normalizedRotation)" in auth_js
     assert "ctx.drawImage(" in auth_js
     assert "canvas.width = 512" in auth_js
     assert 'form.append("avatar_client_cropped", "1")' in auth_js
@@ -41,6 +47,8 @@ def test_avatar_upload_ui_is_wired():
     assert "bindProfileAvatarUploaderControls();" in profile_js
     assert "function profileAvatarZoomLabel(value)" in profile_js
     assert "function syncProfileAvatarZoomControl(value = profileAvatarCropState.zoom)" in profile_js
+    assert "function profileAvatarRotationLabel(value)" in profile_js
+    assert "rotation: profileAvatarCropState.rotation" in profile_js
     assert "function avatarUrlForUser(userId, avatarFileId = \"\")" in core_js
     assert "function userAvatarMarkup(userId, username, extraClass = \"\", avatarFileId = \"\")" in core_js
     assert "currentUserAvatarFileId = json.avatar_file_id || \"\";" in core_js

@@ -12,6 +12,7 @@ const targetOptionCache = new Map();
 const PROFILE_AVATAR_DEFAULT_ZOOM = 1;
 const PROFILE_AVATAR_MIN_ZOOM = 0.1;
 const PROFILE_AVATAR_MAX_ZOOM = 10;
+const PROFILE_AVATAR_ROTATION_STEP = 90;
 const PROFILE_AVATAR_MAX_DISPLAY_SIZE = 600;
 const PROFILE_AVATAR_MIN_DISPLAY_SIZE = 100;
 const PROFILE_TEMPLATE_KEYS = ["classic", "creator", "compact", "showcase", "gallery", "neon"];
@@ -80,6 +81,7 @@ const profileAvatarCropState = {
   naturalHeight: 0,
   baseScale: 1,
   zoom: 1,
+  rotation: 0,
   offsetX: 0,
   offsetY: 0,
   dragging: false,
@@ -147,6 +149,9 @@ function profileAvatarCropperElements() {
     zoom: $("profile-avatar-crop-zoom"),
     zoomValue: $("profile-avatar-crop-zoom-value"),
     zoomSteps: Array.from(document.querySelectorAll("[data-profile-avatar-zoom-step]")),
+    rotation: $("profile-avatar-crop-rotation"),
+    rotationValue: $("profile-avatar-crop-rotation-value"),
+    rotationSteps: Array.from(document.querySelectorAll("[data-profile-avatar-rotate-step]")),
     center: $("profile-avatar-crop-center"),
     file: $("profile-avatar-file"),
     cloudSelect: $("profile-avatar-cloud-file"),
@@ -170,6 +175,16 @@ function profileAvatarZoomLabel(value) {
   return `${normalizeProfileAvatarZoom(value).toFixed(2)}x`;
 }
 
+function normalizeProfileAvatarRotation(value) {
+  const numeric = Number.parseInt(String(value ?? ""), 10);
+  const safe = Number.isFinite(numeric) ? numeric : 0;
+  return ((Math.round(safe / PROFILE_AVATAR_ROTATION_STEP) * PROFILE_AVATAR_ROTATION_STEP) % 360 + 360) % 360;
+}
+
+function profileAvatarRotationLabel(value) {
+  return `${normalizeProfileAvatarRotation(value)}°`;
+}
+
 function syncProfileAvatarZoomControl(value = profileAvatarCropState.zoom) {
   const els = profileAvatarCropperElements();
   const zoom = normalizeProfileAvatarZoom(value);
@@ -177,6 +192,24 @@ function syncProfileAvatarZoomControl(value = profileAvatarCropState.zoom) {
   if (els.zoom) els.zoom.value = String(zoom);
   if (els.zoomValue) els.zoomValue.textContent = profileAvatarZoomLabel(zoom);
   return zoom;
+}
+
+function syncProfileAvatarRotationControl(value = profileAvatarCropState.rotation) {
+  const els = profileAvatarCropperElements();
+  const rotation = normalizeProfileAvatarRotation(value);
+  profileAvatarCropState.rotation = rotation;
+  if (els.rotation) els.rotation.value = String(rotation);
+  if (els.rotationValue) els.rotationValue.textContent = profileAvatarRotationLabel(rotation);
+  return rotation;
+}
+
+function profileAvatarDisplayNaturalSize() {
+  const rotation = normalizeProfileAvatarRotation(profileAvatarCropState.rotation);
+  const swapped = rotation === 90 || rotation === 270;
+  return {
+    width: swapped ? profileAvatarCropState.naturalHeight : profileAvatarCropState.naturalWidth,
+    height: swapped ? profileAvatarCropState.naturalWidth : profileAvatarCropState.naturalHeight,
+  };
 }
 
 function currentProfileAvatarShape() {
@@ -212,6 +245,7 @@ function setProfileAvatarCropHidden(crop = {}) {
     "profile-avatar-crop-y": crop.y || 0,
     "profile-avatar-crop-width": crop.width || 0,
     "profile-avatar-crop-height": crop.height || 0,
+    "profile-avatar-crop-rotation": normalizeProfileAvatarRotation(crop.rotation ?? profileAvatarCropState.rotation),
   };
   Object.entries(fields).forEach(([id, value]) => {
     const el = $(id);
@@ -230,6 +264,7 @@ function resetProfileAvatarCropper({ keepFile = false } = {}) {
   profileAvatarCropState.naturalHeight = 0;
   profileAvatarCropState.baseScale = 1;
   profileAvatarCropState.zoom = 1;
+  profileAvatarCropState.rotation = 0;
   profileAvatarCropState.offsetX = 0;
   profileAvatarCropState.offsetY = 0;
   profileAvatarCropState.dragging = false;
@@ -242,9 +277,11 @@ function resetProfileAvatarCropper({ keepFile = false } = {}) {
     els.image.style.top = "";
     els.image.style.width = "";
     els.image.style.height = "";
+    els.image.style.transform = "";
   }
   if (els.stage) els.stage.classList.remove("is-dragging");
   syncProfileAvatarZoomControl(PROFILE_AVATAR_DEFAULT_ZOOM);
+  syncProfileAvatarRotationControl(0);
   syncProfileAvatarShapeControls(currentProfileAvatarShape(), { preview: false });
   setProfileAvatarCropHidden();
 }
@@ -273,8 +310,9 @@ function profileAvatarStageMetrics() {
 function clampProfileAvatarOffsets(metrics = profileAvatarStageMetrics()) {
   if (!metrics || !profileAvatarCropState.hasImage) return;
   const scale = profileAvatarCropState.baseScale * normalizeProfileAvatarZoom(profileAvatarCropState.zoom);
-  const imageWidth = profileAvatarCropState.naturalWidth * scale;
-  const imageHeight = profileAvatarCropState.naturalHeight * scale;
+  const displaySize = profileAvatarDisplayNaturalSize();
+  const imageWidth = displaySize.width * scale;
+  const imageHeight = displaySize.height * scale;
   const maxX = Math.max(0, (imageWidth - metrics.cropSize) / 2);
   const maxY = Math.max(0, (imageHeight - metrics.cropSize) / 2);
   profileAvatarCropState.offsetX = profileAvatarClamp(profileAvatarCropState.offsetX, -maxX, maxX);
@@ -291,18 +329,20 @@ function currentProfileAvatarCropPayload() {
       height: parseInt($("profile-avatar-crop-height")?.value || "0", 10) || 0,
     };
   }
+  const rotation = syncProfileAvatarRotationControl(profileAvatarCropState.rotation);
+  const displaySize = profileAvatarDisplayNaturalSize();
   const scale = profileAvatarCropState.baseScale * normalizeProfileAvatarZoom(profileAvatarCropState.zoom);
-  const imageWidth = profileAvatarCropState.naturalWidth * scale;
-  const imageHeight = profileAvatarCropState.naturalHeight * scale;
+  const imageWidth = displaySize.width * scale;
+  const imageHeight = displaySize.height * scale;
   const imageLeft = (metrics.width / 2 + profileAvatarCropState.offsetX) - imageWidth / 2;
   const imageTop = (metrics.height / 2 + profileAvatarCropState.offsetY) - imageHeight / 2;
   let cropX = Math.round((metrics.cropLeft - imageLeft) / scale);
   let cropY = Math.round((metrics.cropTop - imageTop) / scale);
   let cropSide = Math.round(metrics.cropSize / scale);
-  cropSide = profileAvatarClamp(cropSide, 1, Math.min(profileAvatarCropState.naturalWidth, profileAvatarCropState.naturalHeight));
-  cropX = profileAvatarClamp(cropX, 0, Math.max(0, profileAvatarCropState.naturalWidth - cropSide));
-  cropY = profileAvatarClamp(cropY, 0, Math.max(0, profileAvatarCropState.naturalHeight - cropSide));
-  const crop = { x: cropX, y: cropY, width: cropSide, height: cropSide };
+  cropSide = profileAvatarClamp(cropSide, 1, Math.min(displaySize.width, displaySize.height));
+  cropX = profileAvatarClamp(cropX, 0, Math.max(0, displaySize.width - cropSide));
+  cropY = profileAvatarClamp(cropY, 0, Math.max(0, displaySize.height - cropSide));
+  const crop = { x: cropX, y: cropY, width: cropSide, height: cropSide, rotation };
   setProfileAvatarCropHidden(crop);
   return crop;
 }
@@ -310,20 +350,23 @@ function currentProfileAvatarCropPayload() {
 function renderProfileAvatarCropper() {
   const els = profileAvatarCropperElements();
   const zoom = syncProfileAvatarZoomControl(profileAvatarCropState.zoom);
+  const rotation = syncProfileAvatarRotationControl(profileAvatarCropState.rotation);
   const metrics = profileAvatarStageMetrics();
   if (!els.image || !els.box || !metrics || !profileAvatarCropState.hasImage) return;
+  const displaySize = profileAvatarDisplayNaturalSize();
   profileAvatarCropState.baseScale = Math.max(
-    metrics.width / profileAvatarCropState.naturalWidth,
-    metrics.height / profileAvatarCropState.naturalHeight
+    metrics.width / displaySize.width,
+    metrics.height / displaySize.height
   );
   clampProfileAvatarOffsets(metrics);
   const scale = profileAvatarCropState.baseScale * zoom;
-  const imageWidth = profileAvatarCropState.naturalWidth * scale;
-  const imageHeight = profileAvatarCropState.naturalHeight * scale;
-  els.image.style.width = `${imageWidth}px`;
-  els.image.style.height = `${imageHeight}px`;
-  els.image.style.left = `${(metrics.width / 2 + profileAvatarCropState.offsetX) - imageWidth / 2}px`;
-  els.image.style.top = `${(metrics.height / 2 + profileAvatarCropState.offsetY) - imageHeight / 2}px`;
+  const rawWidth = profileAvatarCropState.naturalWidth * scale;
+  const rawHeight = profileAvatarCropState.naturalHeight * scale;
+  els.image.style.width = `${rawWidth}px`;
+  els.image.style.height = `${rawHeight}px`;
+  els.image.style.left = `${(metrics.width / 2 + profileAvatarCropState.offsetX) - rawWidth / 2}px`;
+  els.image.style.top = `${(metrics.height / 2 + profileAvatarCropState.offsetY) - rawHeight / 2}px`;
+  els.image.style.transform = rotation ? `rotate(${rotation}deg)` : "none";
   els.box.style.width = `${metrics.cropSize}px`;
   els.box.style.height = `${metrics.cropSize}px`;
   els.box.style.left = `${metrics.cropLeft}px`;
@@ -362,6 +405,7 @@ function loadProfileAvatarObjectUrl(nextUrl, cloudFile = null) {
     profileAvatarCropState.naturalWidth = els.image.naturalWidth || 1;
     profileAvatarCropState.naturalHeight = els.image.naturalHeight || 1;
     profileAvatarCropState.zoom = 1;
+    profileAvatarCropState.rotation = 0;
     profileAvatarCropState.offsetX = 0;
     profileAvatarCropState.offsetY = 0;
     profileAvatarCropState.hasImage = true;
@@ -371,7 +415,8 @@ function loadProfileAvatarObjectUrl(nextUrl, cloudFile = null) {
   };
   els.image.onerror = () => {
     resetProfileAvatarCropper();
-    profileAvatarSetMsg("無法讀取頭像預覽，請換一張圖片", true);
+    const name = cloudFile ? profileAvatarCloudFileName(cloudFile) : ($("profile-avatar-file")?.files?.[0]?.name || "這張圖片");
+    profileAvatarSetMsg(`無法讀取頭像預覽：${name}。請確認檔案未損壞，或改用 JPEG / PNG。`, true);
   };
   els.image.src = nextUrl;
 }
@@ -632,7 +677,10 @@ async function uploadProfileAvatar() {
     const form = new FormData();
     const image = profileAvatarCropperElements().image;
     const cropped = profileAvatarCropState.hasImage && typeof buildCroppedAvatarUpload === "function"
-      ? await buildCroppedAvatarUpload(image, crop, { sourceName: file?.name || profileAvatarCropState.cloudFileName || "avatar.png" })
+      ? await buildCroppedAvatarUpload(image, crop, {
+          sourceName: file?.name || profileAvatarCropState.cloudFileName || "avatar.png",
+          rotation: profileAvatarCropState.rotation,
+        })
       : null;
     if (!cropped) {
       throw new Error("無法產生裁切後頭像，請重新選擇圖片");
@@ -1689,6 +1737,16 @@ function bindProfileAvatarUploaderControls() {
       renderProfileAvatarCropper();
     });
   }
+  els.rotationSteps.forEach((button) => {
+    button.addEventListener("click", () => {
+      const delta = Number.parseInt(button.dataset.profileAvatarRotateStep || "0", 10);
+      if (!Number.isFinite(delta) || delta === 0) return;
+      syncProfileAvatarRotationControl(profileAvatarCropState.rotation + delta);
+      profileAvatarCropState.offsetX = 0;
+      profileAvatarCropState.offsetY = 0;
+      renderProfileAvatarCropper();
+    });
+  });
   const upload = $("profile-avatar-upload-btn");
   if (upload) upload.addEventListener("click", uploadProfileAvatar);
   const cancel = $("profile-avatar-cancel-btn");

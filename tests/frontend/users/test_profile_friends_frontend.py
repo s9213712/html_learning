@@ -30,6 +30,10 @@ def test_profile_friends_panel_is_wired_as_user_module():
     assert 'type="range" id="profile-avatar-crop-zoom" min="0.1" max="10" step="0.01" value="1"' in index_html
     assert 'data-profile-avatar-zoom-step="-0.05"' in index_html
     assert 'data-profile-avatar-zoom-step="0.05"' in index_html
+    assert 'id="profile-avatar-crop-rotation-value" for="profile-avatar-crop-rotation"' in index_html
+    assert 'id="profile-avatar-crop-rotation" value="0"' in index_html
+    assert 'data-profile-avatar-rotate-step="-90"' in index_html
+    assert 'data-profile-avatar-rotate-step="90"' in index_html
     assert 'type="number" id="profile-avatar-crop-zoom"' not in index_html
     assert 'id="profile-edit-avatar-size" min="100" max="600" step="5" value="140"' in index_html
     assert 'data-profile-avatar-size="220">220</button>' in index_html
@@ -44,7 +48,7 @@ def test_profile_friends_panel_is_wired_as_user_module():
     assert '<option value="star">星形</option>' in index_html
     assert '<option value="custom">自訂遮罩</option>' in index_html
     assert 'id="profile-edit-avatar-mask"' in index_html
-    assert '/styles.css?v=20260607-image-favorites-history-favorite' in index_html
+    assert '/styles.css?v=20260612-ai-agent-image-thumbs' in index_html
     assert 'id="profile-edit-display-timezone"' in index_html
     assert 'id="profile-quick-customize-card"' in index_html
     assert 'id="profile-public-info-editor-list"' in index_html
@@ -135,9 +139,12 @@ def test_profile_friends_panel_is_wired_as_user_module():
     assert "function normalizeProfileAvatarZoom(value)" in profile_js
     assert "function profileAvatarZoomLabel(value)" in profile_js
     assert "function syncProfileAvatarZoomControl(value = profileAvatarCropState.zoom)" in profile_js
+    assert "function profileAvatarRotationLabel(value)" in profile_js
+    assert "function syncProfileAvatarRotationControl(value = profileAvatarCropState.rotation)" in profile_js
     assert "profileAvatarClamp(safe, PROFILE_AVATAR_MIN_ZOOM, PROFILE_AVATAR_MAX_ZOOM)" in profile_js
     assert "function profileAvatarMinimumZoom(metrics)" not in profile_js
     assert "buildCroppedAvatarUpload(image, crop" in profile_js
+    assert "data-profile-avatar-rotate-step" in profile_js
     assert 'form.append("avatar_client_cropped", "1")' in profile_js
     assert "profile-avatar-preview-overlay" in profile_js
     assert '.profile-friend-columns' in css
@@ -158,6 +165,8 @@ def test_profile_friends_panel_is_wired_as_user_module():
     assert ".avatar-crop-box.avatar-crop-shape-custom" in css
     assert ".avatar-cropper-zoom-row" in css
     assert ".avatar-cropper-zoom-value" in css
+    assert ".avatar-cropper-rotation-row" in css
+    assert ".avatar-cropper-rotation-value" in css
     assert "grid-template-columns: minmax(150px, 180px) minmax(0, 1fr);" in css
     assert "--profile-avatar-custom-size: var(--profile-avatar-size, 140px)" in css
     assert "--profile-avatar-mobile-size: min(var(--profile-avatar-size, 140px), 320px)" in css
