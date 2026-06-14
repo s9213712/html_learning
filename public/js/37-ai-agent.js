@@ -1598,7 +1598,21 @@ function renderAiAgentThread(options = {}) {
       </div>
     `;
   }).join("");
-  host.scrollTop = host.scrollHeight;
+  aiAgentScrollThreadToBottom();
+}
+
+function aiAgentScrollThreadToBottom() {
+  const host = $("ai-agent-thread");
+  if (!host) return;
+  const scroll = () => {
+    host.scrollTop = host.scrollHeight;
+  };
+  scroll();
+  if (typeof requestAnimationFrame === "function") {
+    requestAnimationFrame(scroll);
+  } else {
+    setTimeout(scroll, 0);
+  }
 }
 
 function aiAgentRenderMessageImages(message = {}) {
@@ -2396,7 +2410,10 @@ async function sendAiAgentMessage() {
 }
 
 document.addEventListener("hackme:module-changed", (event) => {
-  if (event?.detail?.current === "ai-agent") loadAiAgentStatus();
+  if (event?.detail?.current === "ai-agent") {
+    loadAiAgentStatus();
+    aiAgentScrollThreadToBottom();
+  }
 });
 
 document.addEventListener("hackme:account-context-changed", handleAiAgentAccountContextChanged);
