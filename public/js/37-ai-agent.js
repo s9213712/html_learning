@@ -605,14 +605,16 @@ async function aiAgentPlanToolAction(userText, options = {}) {
     "你是網站 AI Agent 的工具路由器。你的任務是理解使用者意圖、檢查可用工具與權限，然後只輸出 JSON 決策。",
     "不要用關鍵字索引決策；請根據完整上下文、使用者目的、input_mode、has_image、readonly_tools、effective_tools、operation_mode_policy 判斷。",
     "可用 action：chat、clarify、readonly、comfyui_status、comfyui_generate、comfyui_rerun、community_post_draft。",
-    "JSON 欄位：action, confidence, reason, question, readonly_scope, merge_strategy, args。",
+    "JSON 欄位：action, confidence, reason, question, readonly_scope, merge_strategy, execute_write, args。",
     "readonly_scope 必須從 context.readonly_tools 的 scope 中選最貼近使用者目的的一項；除非使用者明確要求全站總覽，否則不可使用 all。",
     "args 可含：prompt, negative_prompt, width, height, steps, cfg_scale, batch_size, seed, checkpoint, vae, sampler, scheduler, official_workflow_id。",
     "工具語意：readonly=讀取指定 readonly_scope 的站內唯讀資料；comfyui_status=讀取 ComfyUI 目前可用性與生圖進度；comfyui_generate=建立新的 ComfyUI 生圖任務；comfyui_rerun=沿用上一筆生圖參數並套用使用者修改；community_post_draft=只產生發文草稿，不直接發布。",
     "若使用者目的需要工具，但 effective_tools 或權限不足，仍可輸出該 action；前端會處理提權、拒絕或反問。",
     "若使用者目的不明或缺少必要資料，action=clarify 並用 question 提出一個具體反問。",
     "若使用者以短句詢問某件事是否開始、完成、跑出結果或目前進度，請先依 recent_messages 與 submitted_comfyui_jobs 判斷目標；若仍不確定，action=readonly 並 readonly_scope=all，讓前端回報真實可見任務狀態。",
-    "若 input_mode=image，請判斷使用者是要圖片問答、圖片分析產 prompt，還是分析後執行生圖；只有後者輸出 comfyui_generate。",
+    "若 input_mode=image，請用語意判斷使用者是要圖片問答、圖片分析產 prompt，還是要求用附圖執行生圖；只有明確要求執行寫入的情況才可輸出 comfyui_generate 並設 execute_write=true。",
+    "若 input_mode=image 且使用者明確要求用附圖執行生圖，即使未提供 prompt、尺寸或步數，也應輸出 comfyui_generate 並設 execute_write=true；前端會先用 vision 模型分析圖片並補齊安全預設參數。",
+    "若 input_mode=image 且使用者意圖依上下文仍不明，請輸出 chat 或 clarify；不得設定 execute_write=true，也不得暗示已送出任何寫入工具。",
     "checkpoint 只能填使用者明確提供的實際 checkpoint 名稱；泛稱模型請省略 checkpoint，必要時用 official_workflow_id。",
     "不要產生教學文字，不要宣稱已送出、正在查詢或正在執行；若 action 需要工具，由前端執行後回報實際結果。",
     `context=${JSON.stringify(context)}`,
@@ -689,6 +691,10 @@ function aiAgentPlannerRerunArgs(plan = {}, userText = "") {
   return merged;
 }
 
+function aiAgentPlanConfirmedWrite(plan = {}) {
+  return plan?.execute_write === true || String(plan?.execute_write || "").toLowerCase() === "true";
+}
+
 async function aiAgentRunReadonlyQuery(intent, userText, input) {
   AI_AGENT_STATE.sending = true;
   const sendBtn = $("ai-agent-send-btn");
@@ -742,6 +748,27 @@ async function aiAgentExecuteToolPlan(plan, userText, input, options = {}) {
     return true;
   }
   if (action === "comfyui_generate" || action === "comfyui_rerun") {
+    if (options.hasImage && action === "comfyui_generate" && !aiAgentPlanConfirmedWrite(plan)) {
+      AI_AGENT_STATE.messages.push({ role: "user", content: `${userText}\n[已附加圖片]` });
+      renderAiAgentThread();
+      if (input) input.value = "";
+      setAiAgentMessage("圖片分析中...", "info");
+      try {
+        const analyzed = await aiAgentAnalyzeImageForComfyui(userText);
+        aiAgentFillComfyuiToolForm(analyzed.args);
+        AI_AGENT_STATE.messages.push({
+          role: "assistant",
+          content: `我先只分析這張圖，沒有送出生圖任務。\n提示詞：${analyzed.args.prompt}\n負面詞：${analyzed.args.negative_prompt || "-"}\n圖片分析耗時：${analyzed.elapsedMs} ms\n\n如果要我直接用這組參數生圖，請明確說「用這張生圖」或「用剛剛的 prompt 生圖」。`,
+        });
+        renderAiAgentThread();
+        setAiAgentMessage("圖片分析完成，未執行寫入", "info");
+      } catch (err) {
+        AI_AGENT_STATE.messages.push({ role: "assistant", content: `圖片分析失敗，未送出生圖：${err?.message || err}` });
+        renderAiAgentThread();
+        setAiAgentMessage(`圖片分析失敗：${err?.message || err}`, "err");
+      }
+      return true;
+    }
     let args = null;
     try {
       if (action === "comfyui_generate" && options.hasImage) {
