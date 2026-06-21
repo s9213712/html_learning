@@ -4606,6 +4606,62 @@ def test_market_order_allows_conservative_fusion_price(tmp_path, monkeypatch):
     assert result["order"]["execution_price_points"] == 100
 
 
+def test_market_order_pauses_conservative_fusion_price_when_root_policy_enabled(tmp_path, monkeypatch):
+    points, trading = _services(tmp_path)
+    points.record_transaction(user_id=1, currency_type="points", direction="credit", amount=1000, action_type="seed")
+    _set_trading_setting(trading, "trading.price_degrade_pause_market_orders", "true")
+
+    def conservative_price(conn, market, *, with_meta=False, high_risk=False):
+        meta = {
+            "price_health": "conservative",
+            "conservative_mode": True,
+            "fallback_reason": "可用 order book 來源不足",
+            "warnings": [{"code": "provider_count_low", "message": "可用 order book 來源不足", "severity": "critical"}],
+            "high_risk_blocked": True,
+            "high_risk_block_reason": "目前可用來源數不足，只能提供 degraded reference price",
+            "risk_grade_provider_count": 1,
+        }
+        return (100.0, "fused_weighted", meta) if with_meta else (100.0, "fused_weighted")
+
+    monkeypatch.setattr(trading, "_current_market_price_points", conservative_price)
+
+    with pytest.raises(ValueError, match="價格降級暫停|price health degraded"):
+        trading.place_order(actor=_actor(), market_symbol="ETH/POINTS", side="buy", order_type="market", quantity="0.01")
+
+
+def test_grid_bot_create_pauses_conservative_fusion_price_when_root_policy_enabled(tmp_path, monkeypatch):
+    points, trading = _services(tmp_path)
+    points.record_transaction(user_id=1, currency_type="points", direction="credit", amount=1000, action_type="seed")
+    _set_trading_setting(trading, "trading.price_degrade_pause_bots", "true")
+
+    def conservative_price(conn, market, *, with_meta=False, high_risk=False):
+        meta = {
+            "price_health": "conservative",
+            "conservative_mode": True,
+            "fallback_reason": "可用 order book 來源不足",
+            "warnings": [{"code": "provider_count_low", "message": "可用 order book 來源不足", "severity": "critical"}],
+            "high_risk_blocked": True,
+            "high_risk_block_reason": "目前可用來源數不足，只能提供 degraded reference price",
+            "risk_grade_provider_count": 1,
+        }
+        return (100.0, "fused_weighted", meta) if with_meta else (100.0, "fused_weighted")
+
+    monkeypatch.setattr(trading, "_current_market_price_points", conservative_price)
+
+    with pytest.raises(ValueError, match="價格降級暫停|price health degraded"):
+        trading.create_grid_bot(
+            actor=_actor(),
+            payload={
+                "name": "paused conservative grid",
+                "market_symbol": "ETH/POINTS",
+                "lower_price_points": 90,
+                "upper_price_points": 110,
+                "grid_count": 3,
+                "order_amount_points": 50,
+            },
+        )
+
+
 def test_margin_open_allows_conservative_fusion_price(tmp_path, monkeypatch):
     points, trading = _services(tmp_path)
     points.record_transaction(user_id=1, currency_type="points", direction="credit", amount=10000, action_type="seed")

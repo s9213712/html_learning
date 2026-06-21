@@ -51,7 +51,11 @@ def test_workflow_custom_files_are_runtime_data_not_committed_templates():
     assert "/runtime/" in gitignore
 
     routes = (ROOT / "routes" / "trading.py").read_text(encoding="utf-8")
-    frontend = (ROOT / "public" / "js" / "56-trading.js").read_text(encoding="utf-8")
+    frontend = (
+        (ROOT / "public" / "js" / "56-trading.js").read_text(encoding="utf-8")
+        + "\n"
+        + (ROOT / "public" / "js" / "56-trading-bots.js").read_text(encoding="utf-8")
+    )
     index = (ROOT / "public" / "index.html").read_text(encoding="utf-8")
     assert 'WORKFLOW_SYSTEM_DIR = WORKFLOW_ROOT / "trading_bot"' in routes
     assert '"/api/trading/workflow-templates"' in routes

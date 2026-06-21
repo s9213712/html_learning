@@ -51,7 +51,11 @@ def test_measure_backtest_capacity_projects_slowest_and_fastest_throughput(monke
 
 
 def test_canonical_workflow_template_benchmark_contract_uses_server_route():
-    frontend = (ROOT / "public" / "js" / "56-trading.js").read_text(encoding="utf-8")
+    frontend = (
+        (ROOT / "public" / "js" / "56-trading.js").read_text(encoding="utf-8")
+        + "\n"
+        + (ROOT / "public" / "js" / "56-trading-bots.js").read_text(encoding="utf-8")
+    )
     routes = (ROOT / "routes" / "trading.py").read_text(encoding="utf-8")
 
     assert "/trading/workflow-template-benchmarks" in frontend

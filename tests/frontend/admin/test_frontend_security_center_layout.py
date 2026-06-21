@@ -327,7 +327,7 @@ def test_launch_check_release_bundle_and_artifact_controls_are_available():
 
 
 def test_launch_check_surfaces_failing_backend_endpoint_names():
-    admin_js = (ROOT / "public" / "js" / "50-admin.js").read_text(encoding="utf-8")
+    admin_js = (ROOT / "public" / "js" / "51-admin-server-mode-launch-check.js").read_text(encoding="utf-8")
     launch_body = admin_js.split("async function loadLaunchCheck()", 1)[1].split("async function loadServerModeLogs()", 1)[0]
 
     assert "const failures = [];" in launch_body

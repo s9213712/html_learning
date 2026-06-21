@@ -5,7 +5,11 @@ ROOT = Path(__file__).resolve().parents[3]
 
 
 def test_trading_background_refresh_failures_are_visible():
-    trading_js = (ROOT / "public" / "js" / "56-trading.js").read_text(encoding="utf-8")
+    trading_js = (
+        (ROOT / "public" / "js" / "56-trading.js").read_text(encoding="utf-8")
+        + "\n"
+        + (ROOT / "public" / "js" / "56-trading-bots.js").read_text(encoding="utf-8")
+    )
 
     for silent_call in [
         "loadTradingLivePrice().catch(() => {})",
@@ -50,10 +54,20 @@ def test_root_points_page_is_chain_operations_console():
         (ROOT / "public" / "js" / "50-admin.js").read_text(encoding="utf-8")
         + "\n"
         + (ROOT / "public" / "js" / "51-admin-server-mode-launch-check.js").read_text(encoding="utf-8")
+        + "\n"
+        + (ROOT / "public" / "js" / "52-admin-trading.js").read_text(encoding="utf-8")
+        + "\n"
+        + (ROOT / "public" / "js" / "53-admin-storage-economy.js").read_text(encoding="utf-8")
     )
-    economy_js = (ROOT / "public" / "js" / "55-economy.js").read_text(encoding="utf-8")
+    quick_settings_js = (ROOT / "public" / "js" / "01-root-quick-settings.js").read_text(encoding="utf-8")
+    economy_js = (
+        (ROOT / "public" / "js" / "55-economy.js").read_text(encoding="utf-8")
+        + "\n"
+        + (ROOT / "public" / "js" / "55-economy-explorer.js").read_text(encoding="utf-8")
+    )
     core_js = (ROOT / "public" / "js" / "00-core.js").read_text(encoding="utf-8")
-    trading_js = (ROOT / "public" / "js" / "56-trading.js").read_text(encoding="utf-8")
+    trading_core_js = (ROOT / "public" / "js" / "56-trading.js").read_text(encoding="utf-8")
+    trading_js = trading_core_js + "\n" + (ROOT / "public" / "js" / "56-trading-bots.js").read_text(encoding="utf-8")
     auth_js = (ROOT / "public" / "js" / "40-auth-users.js").read_text(encoding="utf-8")
     bootstrap_js = (ROOT / "public" / "js" / "90-bootstrap.js").read_text(encoding="utf-8")
     styles = (ROOT / "public" / "styles.css").read_text(encoding="utf-8")
@@ -448,9 +462,8 @@ def test_root_points_page_is_chain_operations_console():
     assert 'const formulaBalanced = gap === 0;' in economy_js
     assert 'formulaBalanced ? "Settlement invariant 正常" : "需查帳"' in economy_js
     assert "economyColdWalletDraft.backupCode" not in economy_js
-    assert "Legacy 帳本身份" in economy_js
     assert "Legacy 帳本 ID" in economy_js
-    assert "舊帳本公開識別碼" in economy_js
+    assert 'id="economy-public-account"' in index_html
     assert '"economy-layer-supply-formula"' in economy_js
     assert "多帳本結算控制平面" in economy_js
     assert "PC1 Canonical Reserve" in economy_js
@@ -656,9 +669,10 @@ def test_root_points_page_is_chain_operations_console():
     assert "這裡是服務計價的實際設定區" in index_html
     assert "本月收入統計請到積分錢包" in index_html
     assert "ROOT_SERVICE_FEE_PRICING_PRESETS" in admin_js
+    assert "window.HACKME_SERVICE_FEE_PRICING_PRESETS" in admin_js
     assert "saveRootServiceFeePricingPreset" in admin_js
-    assert "video_publish_basic" in admin_js
-    assert "marketplace_listing_fee" in admin_js
+    assert "video_publish_basic" in quick_settings_js
+    assert "marketplace_listing_fee" in quick_settings_js
     assert 'id="root-trading-enabled"' in index_html
     assert 'id="root-trading-borrowing-enabled"' in index_html
     assert 'id="root-trading-borrowing-enabled" checked' in index_html
@@ -850,9 +864,12 @@ def test_trading_exchange_is_separate_from_wallet_page():
         (ROOT / "public" / "js" / "50-admin.js").read_text(encoding="utf-8")
         + "\n"
         + (ROOT / "public" / "js" / "51-admin-server-mode-launch-check.js").read_text(encoding="utf-8")
+        + "\n"
+        + (ROOT / "public" / "js" / "52-admin-trading.js").read_text(encoding="utf-8")
     )
     bootstrap_js = (ROOT / "public" / "js" / "90-bootstrap.js").read_text(encoding="utf-8")
-    trading_js = (ROOT / "public" / "js" / "56-trading.js").read_text(encoding="utf-8")
+    trading_core_js = (ROOT / "public" / "js" / "56-trading.js").read_text(encoding="utf-8")
+    trading_js = trading_core_js + "\n" + (ROOT / "public" / "js" / "56-trading-bots.js").read_text(encoding="utf-8")
     economy_js = (ROOT / "public" / "js" / "55-economy.js").read_text(encoding="utf-8")
     workflow_templates = "\n".join(
         path.read_text(encoding="utf-8") for path in sorted((ROOT / "workflows" / "trading_bot").glob("*.json"))
@@ -1090,7 +1107,8 @@ def test_trading_exchange_is_separate_from_wallet_page():
     assert "applyTradingOrderResult(json.order || null)" in trading_js
     assert "交易引擎未回傳訂單" in trading_js
     assert 'currentUser === "root" ? "root 模擬" : ""' in trading_js
-    assert "await loadEconomyDashboard();" not in trading_js.split("async function submitTradingOrder()", 1)[1].split("async function saveTradingBot()", 1)[0]
+    submit_order_body = trading_core_js.split("async function submitTradingOrder()", 1)[1].split("async function openRootTradingContract()", 1)[0]
+    assert "await loadEconomyDashboard();" not in submit_order_body
     assert "margin_positions" in trading_js
     assert "margin_summary" in trading_js
     assert ">確認</button>" not in trading_js
@@ -1506,7 +1524,11 @@ def test_trading_exchange_is_separate_from_wallet_page():
 
 
 def test_trading_reference_polling_does_not_overwrite_live_execution_price():
-    trading_js = (ROOT / "public" / "js" / "56-trading.js").read_text(encoding="utf-8")
+    trading_js = (
+        (ROOT / "public" / "js" / "56-trading.js").read_text(encoding="utf-8")
+        + "\n"
+        + (ROOT / "public" / "js" / "56-trading-bots.js").read_text(encoding="utf-8")
+    )
 
     assert 'Reference-price polling is for the chart only.' in trading_js
     assert 'market.manual_price_points = Number(last.close_points || 0);' not in trading_js
@@ -1515,7 +1537,11 @@ def test_trading_reference_polling_does_not_overwrite_live_execution_price():
 
 def test_frontend_personal_browser_state_is_account_scoped():
     core_js = (ROOT / "public" / "js" / "00-core.js").read_text(encoding="utf-8")
-    trading_js = (ROOT / "public" / "js" / "56-trading.js").read_text(encoding="utf-8")
+    trading_js = (
+        (ROOT / "public" / "js" / "56-trading.js").read_text(encoding="utf-8")
+        + "\n"
+        + (ROOT / "public" / "js" / "56-trading-bots.js").read_text(encoding="utf-8")
+    )
     trading_editor_js = (ROOT / "public" / "js" / "trading-workflow-editor.js").read_text(encoding="utf-8")
     comfyui_js = (ROOT / "public" / "js" / "36-comfyui.js").read_text(encoding="utf-8")
     comfyui_workflows_js = (ROOT / "public" / "js" / "36-comfyui-workflows.js").read_text(encoding="utf-8")
@@ -1616,6 +1642,8 @@ def test_trading_ui_labels_reference_and_risk_grade_price_usage():
         (ROOT / "public" / "js" / "50-admin.js").read_text(encoding="utf-8")
         + "\n"
         + (ROOT / "public" / "js" / "51-admin-server-mode-launch-check.js").read_text(encoding="utf-8")
+        + "\n"
+        + (ROOT / "public" / "js" / "52-admin-trading.js").read_text(encoding="utf-8")
     )
     trading_html = (ROOT / "public" / "index.html").read_text(encoding="utf-8")
 
@@ -1657,7 +1685,11 @@ def test_trading_ui_labels_reference_and_risk_grade_price_usage():
 
 
 def test_trading_frontend_surfaces_bot_and_backtest_errors_with_direct_grid_benchmark_numbers():
-    trading_js = (ROOT / "public" / "js" / "56-trading.js").read_text(encoding="utf-8")
+    trading_js = (
+        (ROOT / "public" / "js" / "56-trading.js").read_text(encoding="utf-8")
+        + "\n"
+        + (ROOT / "public" / "js" / "56-trading-bots.js").read_text(encoding="utf-8")
+    )
     trading_html = (ROOT / "public" / "index.html").read_text(encoding="utf-8")
 
     assert "function tradingFriendlyErrorText" in trading_js

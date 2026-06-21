@@ -33,6 +33,9 @@ def test_avatar_upload_ui_is_wired():
     assert "function selectedUserAvatarFile()" in auth_js
     assert "async function buildCroppedAvatarUpload" in auth_js
     assert "function normalizeAvatarRotation(value)" in auth_js
+    assert "els.rotationSteps.forEach((button) => {" in auth_js
+    assert 'button.dataset.editAvatarRotateStep || "0"' in auth_js
+    assert "syncAvatarRotationControl(avatarCropState.rotation + delta)" in auth_js
     assert "avatarCanvasSourceFromImage(image, normalizedRotation)" in auth_js
     assert "ctx.drawImage(" in auth_js
     assert "canvas.width = 512" in auth_js
@@ -48,6 +51,9 @@ def test_avatar_upload_ui_is_wired():
     assert "function profileAvatarZoomLabel(value)" in profile_js
     assert "function syncProfileAvatarZoomControl(value = profileAvatarCropState.zoom)" in profile_js
     assert "function profileAvatarRotationLabel(value)" in profile_js
+    assert "els.rotationSteps.forEach((button) => {" in profile_js
+    assert 'button.dataset.profileAvatarRotateStep || "0"' in profile_js
+    assert "syncProfileAvatarRotationControl(profileAvatarCropState.rotation + delta)" in profile_js
     assert "rotation: profileAvatarCropState.rotation" in profile_js
     assert "function avatarUrlForUser(userId, avatarFileId = \"\")" in core_js
     assert "function userAvatarMarkup(userId, username, extraClass = \"\", avatarFileId = \"\")" in core_js

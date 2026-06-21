@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>hackme_web — 登入系統</title>
   <!-- Security headers via HTTP (set by server/Talisman) -->
-  <link rel="stylesheet" href="/styles.css?v=20260612-ai-agent-image-thumbs" />
+  <link rel="stylesheet" href="/styles.css?v=20260621-avatar-rotation-controls" />
   <link rel="stylesheet" href="/experiments.css?v=20260517-plane-view-angle" />
   <link rel="stylesheet" href="/i18n-language-switcher.css?v=20260520-deep-audit" />
 </head>
@@ -7312,6 +7312,136 @@
       </div>
       <div class="field-hint" style="grid-column:1 / -1;">功能代碼：community_post、community_comment、chat_dm、chat_send、cloud_upload、video_publish、trading_order、service_spend、wallet_transfer。罰款不會自動扣款，會建立可申覆的積分罰單。</div>
     </div>
+    <details class="drive-collapsible-panel settings-collapse" id="edit-user-appearance-section" style="display:none;">
+      <summary>
+        <div>
+          <div class="drive-card-title">個人外觀</div>
+          <div class="drive-card-sub" id="edit-user-appearance-status"></div>
+        </div>
+      </summary>
+      <div class="drive-collapsible-body">
+        <div class="settings-option-grid settings-appearance-grid">
+          <div class="field">
+            <label>外觀預設</label>
+            <select id="edit-user-appearance-preset">
+              <option value="custom">自訂</option>
+              <option value="midnight">Midnight</option>
+              <option value="daylight">Daylight</option>
+              <option value="sunset">Sunset</option>
+              <option value="forest">Forest</option>
+              <option value="paper">Paper</option>
+              <option value="ocean">Ocean Console</option>
+              <option value="terminal">Terminal</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>快速色系</label>
+            <select id="edit-user-theme-mode">
+              <option value="custom">自訂色盤</option>
+              <option value="dark">夜色</option>
+              <option value="light">淺色</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>背景色</label>
+            <input type="color" id="edit-user-site-bg" />
+          </div>
+          <div class="field">
+            <label>面板色</label>
+            <input type="color" id="edit-user-site-surface" />
+          </div>
+          <div class="field">
+            <label>主色</label>
+            <input type="color" id="edit-user-site-accent" />
+          </div>
+          <div class="field">
+            <label>輔助色</label>
+            <input type="color" id="edit-user-site-accent2" />
+          </div>
+          <div class="field">
+            <label>文字色</label>
+            <input type="color" id="edit-user-site-text" />
+          </div>
+          <div class="field">
+            <label>次要文字色</label>
+            <input type="color" id="edit-user-site-muted" />
+          </div>
+          <div class="field">
+            <label>介面配置</label>
+            <select id="edit-user-site-layout-mode">
+              <option value="centered">置中版面</option>
+              <option value="wide">寬版管理台</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>介面密度</label>
+            <select id="edit-user-site-density">
+              <option value="comfortable">舒適</option>
+              <option value="compact">緊湊</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>卡片圓角</label>
+            <select id="edit-user-site-radius-px">
+              <option value="8">俐落</option>
+              <option value="12">標準</option>
+              <option value="18">柔和</option>
+              <option value="24">圓潤</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>介面字級</label>
+            <select id="edit-user-site-font-scale">
+              <option value="0.95">小一點</option>
+              <option value="1">標準</option>
+              <option value="1.08">大一點</option>
+              <option value="1.15">放大</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>寬版內容上限</label>
+            <select id="edit-user-site-content-width">
+              <option value="1180">1180 px</option>
+              <option value="1380">1380 px</option>
+              <option value="1600">1600 px</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>字體風格</label>
+            <select id="edit-user-site-font-family">
+              <option value="system">系統預設</option>
+              <option value="rounded">圓潤人文</option>
+              <option value="serif">閱讀襯線</option>
+              <option value="mono">終端風格</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>背景風格</label>
+            <select id="edit-user-site-background-style">
+              <option value="flat">純色簡潔</option>
+              <option value="aurora">柔光漸層</option>
+              <option value="grid">科技網格</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>面板風格</label>
+            <select id="edit-user-site-panel-style">
+              <option value="glass">玻璃感</option>
+              <option value="matte">霧面</option>
+              <option value="solid">實心</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>側邊欄寬度</label>
+            <select id="edit-user-site-sidebar-width">
+              <option value="compact">精簡</option>
+              <option value="standard">標準</option>
+              <option value="wide">加寬</option>
+            </select>
+          </div>
+        </div>
+      </div>
+    </details>
     <div class="profile-account-modal-section">
       <div class="drive-card-title">密碼安全</div>
     <div class="field" id="edit-user-current-pw-field" style="display:none;">
@@ -7775,7 +7905,7 @@
 <script src="/js/35-drive.js?v=20260604-storage-bulk-clarity" defer></script>
   <script src="/js/35-drive-preview-share.js?v=20260507-drive-preview-share-split" defer></script>
 <!-- cache marker retained for template-import regression: /js/36-comfyui.js?v=20260509-comfyui-template-embeddings -->
-<script src="/js/36-comfyui.js?v=20260614-comfyui-progress-temp-embedding-commas" defer></script>
+<script src="/js/36-comfyui.js?v=20260621-comfyui-draft-restore" defer></script>
 <script src="/js/36-comfyui-workflows.js?v=20260614-comfyui-embedding-commas" defer></script>
 <script src="/js/37-ai-agent.js?v=20260614-ai-agent-scroll-bottom-v12" defer></script>
 <script src="/js/37-bug-report.js?v=20260502-device-feature" defer></script>
@@ -7785,9 +7915,9 @@
 <script src="/js/38-games.js?v=20260602-rubiks-autosolve" defer></script>
 <script src="/js/42-experiments.js?v=20260528-experiments-bounded-motion" defer></script>
   <script src="/js/39-videos.js?v=20260603-video-audio-native" defer></script>
-<script src="/js/40-auth-users.js?v=20260531-profile-settings-split" defer></script>
+<script src="/js/40-auth-users.js?v=20260621-avatar-rotation-controls" defer></script>
 <script src="/js/50-admin.js?v=20260605-hf-repo-sanitize" defer></script>
-<script src="/js/51-admin-server-mode-launch-check.js?v=20260526-server-mode-prelaunch" defer></script>
+<script src="/js/51-admin-server-mode-launch-check.js?v=20260621-launch-release-actions" defer></script>
 <script src="/js/52-admin-trading.js?v=20260601-admin-trading-module" defer></script>
 <script src="/js/53-admin-storage-economy.js?v=20260602-transmission-test-status" defer></script>
 <script src="/js/55-economy.js?v=20260526-financial-settlement-network-invariant-refresh" defer></script>
@@ -7795,7 +7925,7 @@
 <script src="/js/56-trading.js?v=20260525-usdt-market-labels" defer></script>
 <script src="/js/56-trading-bots.js?v=20260601-trading-bot-module" defer></script>
 <script src="/js/57-platform-centers.js?v=20260524-trading-status-split" defer></script>
-<script src="/js/58-profile-friends.js?v=20260606-avatar-star-mask-600" defer></script>
+<script src="/js/58-profile-friends.js?v=20260621-avatar-rotation-controls" defer></script>
 <script src="/js/90-bootstrap.js?v=20260611-ai-agent-comfyui-write-tool" defer></script>
 </body>
 </html>

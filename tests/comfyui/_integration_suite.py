@@ -6317,8 +6317,8 @@ def test_comfyui_frontend_is_wired():
     assert "if (modelsTab) modelsTab.hidden = false;" in comfyui_js
     assert 'if (accessNote) accessNote.style.display = showLocalModels ? "none" : "";' in comfyui_js
     assert '目前是雲端 / 遠端模式；Civitai 匯入區仍可使用' in comfyui_js
-    assert "/js/36-comfyui.js?v=20260614-comfyui-progress-temp-embedding-commas" in index_html
-    assert "/styles.css?v=20260612-ai-agent-image-thumbs" in index_html
+    assert "/js/36-comfyui.js?v=20260621-comfyui-draft-restore" in index_html
+    assert "/styles.css?v=20260621-avatar-rotation-controls" in index_html
     assert "width: min(420px, 100%);" in css
     assert "max-height: 320px;" in css
     assert ".comfyui-root-details" in css

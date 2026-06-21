@@ -487,8 +487,6 @@ def _assert_price_meta_allows_high_risk_use(self, conn, *, actor=None, market_sy
     meta = price_meta or {}
     if bool(meta.get("synthetic_test_provider")):
         return
-    if not bool(meta.get("high_risk_blocked")):
-        return
     resolved_source = str(meta.get("resolved_source") or "").strip().lower()
     hard_block_reason = str(meta.get("high_risk_block_reason") or meta.get("fallback_reason") or "").strip()
     usage_text = str(usage or "").strip().lower()
@@ -520,7 +518,14 @@ def _assert_price_meta_allows_high_risk_use(self, conn, *, actor=None, market_sy
         """
         SELECT key, value
         FROM trading_settings
-        WHERE key IN (?, ?, ?, ?)
+        WHERE key IN (
+            ?, ?, ?, ?,
+            'trading.warning_language',
+            'trading.price_fusion_trade_min_provider_count',
+            'trading.price_degrade_pause_market_orders',
+            'trading.price_degrade_pause_bots',
+            'trading.price_degrade_pause_borrowing'
+        )
         """,
         (
             "trading.disable_price_confidence_gates",
@@ -530,6 +535,72 @@ def _assert_price_meta_allows_high_risk_use(self, conn, *, actor=None, market_sy
         ),
     ).fetchall()
     settings = {str(row["key"] or ""): str(row["value"] or "") for row in rows}
+    policy_key = ""
+    policy_label = "高風險交易"
+    if "bot" in usage_text:
+        policy_key = "trading.price_degrade_pause_bots"
+        policy_label = "機器人交易"
+    elif "margin" in usage_text or "borrow" in usage_text:
+        policy_key = "trading.price_degrade_pause_borrowing"
+        policy_label = "借貸交易"
+    elif "market order" in usage_text or "limit order match" in usage_text or "contract position" in usage_text:
+        policy_key = "trading.price_degrade_pause_market_orders"
+        policy_label = "市價交易"
+    try:
+        trade_min_provider_count = max(
+            1,
+            int(settings.get("trading.price_fusion_trade_min_provider_count") or DEFAULT_PRICE_FUSION_TRADE_MIN_PROVIDER_COUNT),
+        )
+    except Exception:
+        trade_min_provider_count = DEFAULT_PRICE_FUSION_TRADE_MIN_PROVIDER_COUNT
+    warning_language = _warning_language(settings.get("trading.warning_language"))
+    policy_enabled = str(settings.get(policy_key, "false")).strip().lower() in {"1", "true", "yes", "on"} if policy_key else False
+    provider_count = max(
+        0,
+        int(meta.get("risk_grade_provider_count") or meta.get("provider_count") or 0),
+    )
+    conservative_mode = bool(meta.get("conservative_mode"))
+    stale = bool(meta.get("stale"))
+    fallback = bool(meta.get("fallback"))
+    degraded = bool(meta.get("degraded"))
+    high_risk_blocked = bool(meta.get("high_risk_blocked"))
+    provider_short = conservative_mode and provider_count < trade_min_provider_count
+    policy_should_pause = policy_enabled and (high_risk_blocked or provider_short or stale or fallback or degraded)
+    if policy_should_pause:
+        reason = hard_block_reason or "price source is in conservative mode"
+        self._audit_event(
+            conn,
+            "TRADING_PRICE_HEALTH_BLOCKED",
+            "high-risk trading path blocked by degraded fused price health",
+            actor=actor,
+            market_symbol=market_symbol,
+            severity="critical",
+            metadata={
+                "usage": usage,
+                "reason": reason,
+                "price_health": meta.get("price_health"),
+                "warnings": meta.get("warnings") or [],
+                "excluded_sources": meta.get("excluded_sources") or [],
+                "pause_policy": policy_key,
+            },
+        )
+        provider_note = f"healthy providers={provider_count}" if provider_count else "healthy providers=0"
+        if warning_language == "en":
+            policy_label_en = {
+                "市價交易": "Market-order trading",
+                "機器人交易": "Bot trading",
+                "借貸交易": "Borrowing / margin trading",
+                "高風險交易": "High-risk trading",
+            }.get(policy_label, "Trading")
+            raise ValueError(
+                f"{policy_label_en} paused because price health degraded: {reason} "
+                f"({provider_note}; need at least {trade_min_provider_count} healthy providers to keep trading enabled)"
+            )
+        raise ValueError(
+            f"{policy_label}已因價格降級暫停：{reason}（{provider_note}，需要至少 {trade_min_provider_count} 家才視為可交易）"
+        )
+    if not high_risk_blocked:
+        return
     price_confidence_override = (
         env_allows_price_override
         or str(settings.get("trading.disable_price_confidence_gates") or "").strip().lower() in {"1", "true", "yes", "on"}
@@ -588,86 +659,6 @@ def _assert_price_meta_allows_high_risk_use(self, conn, *, actor=None, market_sy
             },
         )
         raise ValueError(full_msg)
-    # cached fallback + allowed usage: fall through to the policy chain so
-    # trading.price_degrade_pause_* (when enabled) can still pause the trade.
-    policy_key = ""
-    policy_label = "高風險交易"
-    if "bot" in usage_text:
-        policy_key = "trading.price_degrade_pause_bots"
-        policy_label = "機器人交易"
-    elif "margin" in usage_text or "borrow" in usage_text:
-        policy_key = "trading.price_degrade_pause_borrowing"
-        policy_label = "借貸交易"
-    elif "market order" in usage_text or "limit order match" in usage_text or "contract position" in usage_text:
-        policy_key = "trading.price_degrade_pause_market_orders"
-        policy_label = "市價交易"
-    trade_min_provider_count = DEFAULT_PRICE_FUSION_TRADE_MIN_PROVIDER_COUNT
-    settings_rows = conn.execute(
-        """
-        SELECT key, value
-        FROM trading_settings
-        WHERE key IN (
-            'trading.warning_language',
-            'trading.price_fusion_trade_min_provider_count',
-            'trading.price_degrade_pause_market_orders',
-            'trading.price_degrade_pause_bots',
-            'trading.price_degrade_pause_borrowing'
-        )
-        """
-    ).fetchall()
-    settings_map = {str(row["key"] or ""): str(row["value"] or "") for row in settings_rows}
-    try:
-        trade_min_provider_count = max(
-            1,
-            int(settings_map.get("trading.price_fusion_trade_min_provider_count") or DEFAULT_PRICE_FUSION_TRADE_MIN_PROVIDER_COUNT),
-        )
-    except Exception:
-        trade_min_provider_count = DEFAULT_PRICE_FUSION_TRADE_MIN_PROVIDER_COUNT
-    warning_language = _warning_language(settings_map.get("trading.warning_language"))
-    policy_enabled = str(settings_map.get(policy_key, "false")).strip().lower() in {"1", "true", "yes", "on"} if policy_key else False
-    provider_count = max(
-        0,
-        int(meta.get("risk_grade_provider_count") or meta.get("provider_count") or 0),
-    )
-    conservative_mode = bool(meta.get("conservative_mode"))
-    stale = bool(meta.get("stale"))
-    fallback = bool(meta.get("fallback"))
-    degraded = bool(meta.get("degraded"))
-    if conservative_mode and provider_count >= trade_min_provider_count and not stale and not fallback:
-        return
-    if not policy_enabled:
-        return
-    reason = hard_block_reason or "price source is in conservative mode"
-    self._audit_event(
-        conn,
-        "TRADING_PRICE_HEALTH_BLOCKED",
-        "high-risk trading path blocked by degraded fused price health",
-        actor=actor,
-        market_symbol=market_symbol,
-        severity="critical",
-        metadata={
-            "usage": usage,
-            "reason": reason,
-            "price_health": meta.get("price_health"),
-            "warnings": meta.get("warnings") or [],
-            "excluded_sources": meta.get("excluded_sources") or [],
-        },
-    )
-    provider_note = f"healthy providers={provider_count}" if provider_count else "healthy providers=0"
-    if warning_language == "en":
-        policy_label_en = {
-            "市價交易": "Market-order trading",
-            "機器人交易": "Bot trading",
-            "借貸交易": "Borrowing / margin trading",
-            "高風險交易": "High-risk trading",
-        }.get(policy_label, "Trading")
-        raise ValueError(
-            f"{policy_label_en} paused because price health degraded: {reason} "
-            f"({provider_note}; need at least {trade_min_provider_count} healthy providers to keep trading enabled)"
-        )
-    raise ValueError(
-        f"{policy_label}已因價格降級暫停：{reason}（{provider_note}，需要至少 {trade_min_provider_count} 家才視為可交易）"
-    )
 
 def _provider_depth_request_limit(self, source, depth_levels):
     return provider_depth_request_limit(

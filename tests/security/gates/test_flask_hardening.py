@@ -430,7 +430,7 @@ def test_backpressure_auto_uses_gunicorn_threads_from_argv(monkeypatch):
     })
 
     assert state["limits"]["thread_capacity"] == 12
-    assert state["limits"]["normal"] == 12
+    assert state["limits"]["normal"] == 8
     assert state["limits"]["heavy"] == 6
     assert state["limits"]["root"] == 3
     assert state["limits"]["feature"] == 8
@@ -460,7 +460,7 @@ def test_backpressure_caps_configured_capacity_to_live_gunicorn_threads(monkeypa
     })
 
     assert state["limits"]["thread_capacity"] == 4
-    assert state["limits"]["normal"] == 4
+    assert state["limits"]["normal"] == 2
     assert state["limits"]["heavy"] == 1
     assert state["limits"]["feature"] == 2
     assert state["limits"]["fast_lane_reserved"] == 2
@@ -489,11 +489,11 @@ def test_backpressure_auto_keeps_small_gthread_workers_usable(monkeypatch):
     })
 
     assert state["limits"]["thread_capacity"] == 6
-    assert state["limits"]["normal"] == 6
-    assert state["limits"]["heavy"] == 5
+    assert state["limits"]["normal"] == 2
+    assert state["limits"]["heavy"] == 2
     assert state["limits"]["root"] == 2
-    assert state["limits"]["feature"] == 4
-    assert state["limits"]["fast_lane_reserved"] == 2
+    assert state["limits"]["feature"] == 2
+    assert state["limits"]["fast_lane_reserved"] == 4
 
 
 def test_backpressure_auto_does_not_scale_with_large_cpu_count(monkeypatch):
@@ -516,11 +516,11 @@ def test_backpressure_auto_does_not_scale_with_large_cpu_count(monkeypatch):
     })
 
     assert state["limits"]["thread_capacity"] == 8
-    assert state["limits"]["normal"] == 8
+    assert state["limits"]["normal"] == 5
     assert state["limits"]["heavy"] == 4
     assert state["limits"]["root"] == 2
-    assert state["limits"]["feature"] == 6
-    assert state["limits"]["fast_lane_reserved"] == 2
+    assert state["limits"]["feature"] == 5
+    assert state["limits"]["fast_lane_reserved"] == 3
 
 
 def test_backpressure_auto_keeps_heavy_limit_low_on_tiny_memory(monkeypatch):
@@ -547,4 +547,33 @@ def test_backpressure_auto_keeps_heavy_limit_low_on_tiny_memory(monkeypatch):
 
     assert state["limits"]["thread_capacity"] == 8
     assert state["limits"]["heavy"] == 1
-    assert state["limits"]["feature"] == 6
+    assert state["limits"]["feature"] == 5
+
+
+def test_backpressure_auto_reserves_fast_lane_from_normal_capacity(monkeypatch):
+    monkeypatch.delenv("HTML_LEARNING_BACKPRESSURE_THREAD_CAPACITY", raising=False)
+    monkeypatch.delenv("HACKME_DEV_GUNICORN_THREADS", raising=False)
+    monkeypatch.delenv("GUNICORN_THREADS", raising=False)
+    monkeypatch.setattr(backpressure_module, "_total_memory_mb", lambda: 8192)
+    monkeypatch.setattr(
+        backpressure_module.sys,
+        "argv",
+        ["python", "-m", "gunicorn", "server:app", "--worker-class", "gthread", "--threads", "6"],
+    )
+
+    state = backpressure_module._build_backpressure_state({
+        "server_backpressure_enabled": True,
+        "server_backpressure_mode": "auto",
+        "server_backpressure_thread_capacity": 0,
+        "server_backpressure_normal_limit": 0,
+        "server_backpressure_heavy_limit": 0,
+        "server_backpressure_root_limit": 0,
+        "server_backpressure_fast_lane_reserved": 0,
+        "server_backpressure_root_priority_enabled": True,
+    })
+
+    limits = state["limits"]
+    assert limits["thread_capacity"] == 6
+    assert limits["normal"] + limits["fast_lane_reserved"] <= limits["thread_capacity"]
+    assert limits["feature"] + limits["fast_lane_reserved"] <= limits["thread_capacity"]
+    assert limits["fast_lane_reserved"] == 4

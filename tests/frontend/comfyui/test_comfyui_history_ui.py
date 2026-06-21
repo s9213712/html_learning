@@ -73,6 +73,27 @@ def test_history_apply_restores_full_generation_payload():
     assert 'workflow_json, vae_changed = _apply_workflow_vae_override(workflow_json, selected_vae)' in workflow_routes
 
 
+def test_load_last_settings_restores_template_mode_checkbox_and_dynamic_template_state():
+    js = _read("public/js/36-comfyui.js")
+
+    assert '"comfyui-generation-mode",' in js
+    assert '"comfyui-template-select",' in js
+    assert 'if (el.type === "checkbox") {' in js
+    assert "draft[id] = !!el.checked;" in js
+    assert 'el.checked = value === true || value === "true" || value === "1" || value === 1;' in js
+    assert "function serializableComfyuiInputAssets()" in js
+    assert "draft.input_assets = serializableComfyuiInputAssets();" in js
+    assert "draft.template_field_overrides = comfyuiJsonClone(comfyuiTemplateFieldOverrides, {});" in js
+    assert "draft.template_lora_overrides = comfyuiJsonClone(comfyuiTemplateLoraOverrides, {});" in js
+    assert "function restoreComfyuiTemplateDraftState(draft = {})" in js
+    assert "async function restoreComfyuiDraftForManualLoad()" in js
+    assert 'await loadComfyuiWorkflowPresets({ silentTemplateReload: true });' in js
+    assert 'await loadComfyuiSelectedTemplateDetail(templatePresetId, { silent: true, applyDefaults: false });' in js
+    assert "restoreComfyuiTemplateDraftState(draft);" in js
+    assert "await restoreComfyuiDraftInputAssets(draft);" in js
+    assert "await restoreComfyuiDraftForManualLoad();" in js
+
+
 def test_history_rerun_opens_generate_view_for_visible_progress():
     js = _read("public/js/36-comfyui.js")
 

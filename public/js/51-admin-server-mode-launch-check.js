@@ -434,6 +434,81 @@ function launchCheckMsg(text, ok = false) {
   msg.style.color = ok ? "#4caf50" : "#ff4f6d";
 }
 
+function renderLaunchCheckReleaseArtifacts(payload = {}, label = "Release Bundle") {
+  const sub = $("launch-check-release-sub");
+  const summary = $("launch-check-release-summary");
+  const details = $("launch-check-release-details");
+  const panel = $("launch-check-release-panel");
+  const qa = payload.qa_artifacts || payload;
+  const qaSummary = qa.summary || {};
+  const qaRuns = Array.isArray(qa.qa_runs) ? qa.qa_runs : [];
+  const readyText = Object.prototype.hasOwnProperty.call(payload, "ready")
+    ? (payload.ready ? "ready" : "not ready")
+    : (payload.ok === false ? "failed" : "indexed");
+  const bundlePath = payload.bundle_path || payload.latest_bundle_path || "";
+  if (panel) panel.open = true;
+  if (sub) sub.textContent = `${label}：${readyText}${bundlePath ? ` · ${bundlePath}` : ""}`;
+  if (summary) {
+    const rows = [
+      ["狀態", payload.status || readyText],
+      ["Release bundle", bundlePath || "-"],
+      ["QA runs", String(qaSummary.qa_run_count ?? qaSummary.run_count ?? qaRuns.length ?? "-")],
+      ["QA artifacts", String(qaSummary.artifact_count ?? "-")],
+    ];
+    summary.innerHTML = rows.map(([name, value]) => `
+      <div class="health-summary-card">
+        <span>${sanitize(name)}</span>
+        <strong>${sanitize(value)}</strong>
+      </div>
+    `).join("");
+  }
+  if (details) details.textContent = JSON.stringify(payload, null, 2);
+}
+
+async function refreshLaunchCheckQaArtifacts() {
+  if (currentUser !== "root") return;
+  launchCheckMsg("正在刷新 QA Artifacts...", true);
+  try {
+    await fetchCsrfToken({ force: true });
+    const csrf = getCsrfToken();
+    const res = await apiFetch(API + "/root/qa-artifacts/index?limit=500", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "X-CSRF-Token": csrf || "" },
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok || json.ok === false) throw new Error(json.msg || `HTTP ${res.status}`);
+    renderLaunchCheckReleaseArtifacts(json, "QA Artifacts");
+    const count = json.summary?.artifact_count ?? 0;
+    const runs = json.summary?.qa_run_count ?? 0;
+    launchCheckMsg(`QA Artifacts 已刷新：${count} artifacts，${runs} QA runs`, true);
+  } catch (err) {
+    launchCheckMsg(`QA Artifacts 刷新失敗：${err && err.message ? err.message : "未知錯誤"}`, false);
+  }
+}
+
+async function createLaunchCheckReleaseBundle() {
+  if (currentUser !== "root") return;
+  launchCheckMsg("正在產生 Release Bundle...", true);
+  try {
+    await fetchCsrfToken({ force: true });
+    const csrf = getCsrfToken();
+    const res = await apiFetch(API + "/root/production-release/bundle", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf || "" },
+      body: JSON.stringify({ mark_ready: true }),
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok || json.ok === false) throw new Error(json.msg || json.status || `HTTP ${res.status}`);
+    renderLaunchCheckReleaseArtifacts(json, "Release Bundle");
+    launchCheckMsg(`Release Bundle 已產生：${json.bundle_path || json.status || "完成"}`, true);
+    await loadLaunchCheck();
+  } catch (err) {
+    launchCheckMsg(`Release Bundle 產生失敗：${err && err.message ? err.message : "未知錯誤"}`, false);
+  }
+}
+
 function launchCheckCardMarkup(reportType, reportRow, missing, failed, idx) {
   const verificationReasonLabel = (reason) => {
     switch (String(reason || "").trim()) {

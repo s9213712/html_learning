@@ -26,7 +26,7 @@ def test_image_favorites_tab_and_generated_favorite_action_are_wired():
     assert 'id="comfyui-favorite-modal" role="dialog" aria-modal="true" aria-labelledby="comfyui-favorite-modal-title" data-global-modal-close="none"' in html
     assert 'id="comfyui-favorite-civitai-url"' in html
     assert 'id="comfyui-favorite-upload-file"' in html
-    assert "/js/36-comfyui.js?v=20260614-comfyui-progress-temp-embedding-commas" in html
+    assert "/js/36-comfyui.js?v=20260621-comfyui-draft-restore" in html
 
     assert '"favorites"' in js
     assert "let comfyuiImageFavorites = [];" in js

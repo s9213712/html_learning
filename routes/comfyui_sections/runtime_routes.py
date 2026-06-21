@@ -124,6 +124,122 @@ def register_comfyui_runtime_routes(app, ctx):
             return fallback
         return parsed if isinstance(parsed, type(fallback)) else fallback
 
+    def _runtime_meminfo_kb():
+        result = {}
+        try:
+            with open("/proc/meminfo", "r", encoding="utf-8") as file_obj:
+                for line in file_obj:
+                    if ":" not in line:
+                        continue
+                    key, rest = line.split(":", 1)
+                    parts = rest.strip().split()
+                    if not parts:
+                        continue
+                    try:
+                        result[key] = int(parts[0])
+                    except Exception:
+                        continue
+        except Exception:
+            return {}
+        return result
+
+    def _runtime_format_bytes(value):
+        try:
+            size = float(value)
+        except Exception:
+            return "0 B"
+        units = ["B", "KiB", "MiB", "GiB", "TiB"]
+        index = 0
+        while size >= 1024 and index < len(units) - 1:
+            size /= 1024.0
+            index += 1
+        return f"{size:.1f} {units[index]}" if index else f"{int(size)} {units[index]}"
+
+    def _runtime_checkpoint_candidate_paths(name):
+        import os
+        from pathlib import Path
+
+        raw = str(name or "").strip().replace("\\", "/")
+        if not raw:
+            return []
+        candidates = []
+        raw_path = Path(raw)
+        if raw_path.is_absolute():
+            candidates.append(raw_path)
+        roots = []
+        for value in (
+            os.environ.get("COMFYUI_CHECKPOINT_DIR"),
+            os.environ.get("COMFYUI_MODELS_DIR"),
+            os.environ.get("HACKME_COMFYUI_MODELS_DIR"),
+        ):
+            if value:
+                roots.append(Path(value))
+        roots.extend([
+            Path("/mnt/c/share/ComfyUI/models"),
+            Path("/mnt/c/ComfyUI_windows_portable/ComfyUI/models"),
+        ])
+        rel_values = [raw]
+        base = raw.rsplit("/", 1)[-1]
+        if base and base != raw:
+            rel_values.append(base)
+        for root in roots:
+            for rel in rel_values:
+                candidates.append(root / "checkpoints" / rel)
+                candidates.append(root / rel)
+        seen = set()
+        unique = []
+        for path in candidates:
+            key = str(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(path)
+        return unique
+
+    def _runtime_checkpoint_file_info(name):
+        for path in _runtime_checkpoint_candidate_paths(name):
+            try:
+                if path.is_file():
+                    return {"path": str(path), "size_bytes": int(path.stat().st_size)}
+            except Exception:
+                continue
+        return None
+
+    def _local_checkpoint_memory_preflight(binding, params):
+        if str((binding or {}).get("connection_mode") or "").strip().lower() != "local":
+            return None
+        checkpoint = str(
+            (params or {}).get("checkpoint")
+            or (params or {}).get("model")
+            or (params or {}).get("checkpoint_name")
+            or ""
+        ).strip()
+        if not checkpoint:
+            return None
+        file_info = _runtime_checkpoint_file_info(checkpoint)
+        if not file_info:
+            return None
+        meminfo = _runtime_meminfo_kb()
+        available_bytes = int(meminfo.get("MemAvailable", 0) + meminfo.get("SwapFree", 0)) * 1024
+        size_bytes = int(file_info["size_bytes"])
+        required_bytes = int(size_bytes * 1.15)
+        if available_bytes >= required_bytes:
+            return None
+        return {
+            "checkpoint": checkpoint,
+            "checkpoint_path": file_info["path"],
+            "checkpoint_size_bytes": size_bytes,
+            "available_memory_bytes": available_bytes,
+            "required_memory_bytes": required_bytes,
+            "msg": (
+                "ComfyUI 本機記憶體不足，已取消送出產圖："
+                f"checkpoint {checkpoint} 大小約 {_runtime_format_bytes(size_bytes)}，"
+                f"目前 RAM+swap 可用約 {_runtime_format_bytes(available_bytes)}。"
+                "這會在 CheckpointLoaderSimple 載入 safetensors/mmap 時失敗；"
+                "請增加 WSL RAM/swap、改用較小 checkpoint，或先卸載其他占用記憶體的程序。"
+            ),
+        }
+
     def _runtime_randomize_workflow_seed_inputs(workflow_json, params):
         if str((params or {}).get("seed_after_generate") or "").strip().lower() != "random":
             return workflow_json, params

@@ -59,7 +59,7 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert 'id="ai-agent-comfyui-vae"' in html
     assert 'id="ai-agent-comfyui-generate-btn"' in html
     assert 'id="s-module-ai-agent-min-role"' in html
-    _warn_if_asset_cache_version_changed(html, "/js/37-ai-agent.js", "20260613-ai-agent-capability-planner-v9")
+    _warn_if_asset_cache_version_changed(html, "/js/37-ai-agent.js", "20260614-ai-agent-scroll-bottom-v12")
     _warn_if_asset_cache_version_changed(html, "/js/90-bootstrap.js", "20260611-ai-agent-comfyui-write-tool")
 
     assert '"ai-agent": "feature_ai_agent_enabled"' in core_js
@@ -104,7 +104,8 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert "function aiAgentImageAnalysisError" in ai_agent_js
     assert "function aiAgentImageTransportError" in ai_agent_js
     assert "圖片分析請求傳輸失敗" in ai_agent_js
-    assert "function aiAgentReadonlyIntent" in ai_agent_js
+    assert "function aiAgentNormalizeReadonlyScope" in ai_agent_js
+    assert "async function aiAgentRunReadonlyQuery" in ai_agent_js
     assert "describe.*image" in ai_agent_js
     assert "參考.*圖|照.*圖" not in ai_agent_js
     assert 'scope: "comfyui"' in ai_agent_js
@@ -139,9 +140,10 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert 'throw new Error("目前沒有可用的圖片理解模型。請在 AI Agent 模型允許清單加入 vision 模型（例如 qwen3-vl）後再試。")' in ai_agent_js
     assert 'const selectedModel = mode === "image" ? aiAgentVisionModel() : aiAgentSelectedTextModel();' in ai_agent_js
     assert 'return "";' in ai_agent_js
-    assert "const fallbackReadonly = mode === \"text\" ? aiAgentReadonlyIntent(prompt) : null" in ai_agent_js
+    assert 'action === "readonly" || action === "comfyui_status"' in ai_agent_js
+    assert '/ai-agent/readonly?scope=${encodeURIComponent(requestScope)}&limit=20' in ai_agent_js
     assert 'image_data_url: mode === "image" ? AI_AGENT_STATE.imageDataUrl : ""' in ai_agent_js
-    assert 'return { scope: "all", label: "唯讀狀態總覽" }' in ai_agent_js
+    assert "action=readonly 並 readonly_scope=all" in ai_agent_js
     assert "effective_tools" in ai_agent_js
     assert "writable_tools" in ai_agent_js
     assert "不要用關鍵字索引決策" in ai_agent_js
@@ -154,7 +156,7 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert "rerunComfyuiArgs" not in ai_agent_js
     assert "aiAgentHasPendingComfyuiClarification" not in ai_agent_js
     assert "aiAgentLooksLikeImageDescription" not in ai_agent_js
-    assert "跑出來了嗎" in ai_agent_js
+    assert "跑出結果或目前進度" in ai_agent_js
     assert "再來" in ai_agent_js
     assert "接回 ComfyUI 任務進度追蹤" in ai_agent_js
     assert "ComfyUI 產圖進度更新" in ai_agent_js

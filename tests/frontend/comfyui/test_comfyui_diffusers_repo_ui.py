@@ -201,7 +201,7 @@ def test_diffusers_text_only_repo_hides_image_cards_and_omits_image_payloads():
 
 def test_diffusers_cache_busts_preflight_ui_assets():
     html = _read("public/index.html")
-    assert "/js/36-comfyui.js?v=20260614-comfyui-progress-temp-embedding-commas" in html
+    assert "/js/36-comfyui.js?v=20260621-comfyui-draft-restore" in html
     assert "/js/36-comfyui-workflows.js?v=20260614-comfyui-embedding-commas" in html
 
 

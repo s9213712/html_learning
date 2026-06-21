@@ -8,6 +8,19 @@ from services.users.profiles import (
 )
 
 
+class _DuplicateDisplayTimezoneRaceConnection(sqlite3.Connection):
+    def execute(self, sql, parameters=(), /):
+        normalized = " ".join(str(sql).split()).lower()
+        target = "alter table user_profiles add column display_timezone"
+        if target in normalized and not getattr(self, "_display_timezone_race_done", False):
+            self._display_timezone_race_done = True
+            sqlite3.Connection.execute(
+                self,
+                "ALTER TABLE user_profiles ADD COLUMN display_timezone TEXT NOT NULL DEFAULT 'auto'",
+            )
+        return super().execute(sql, parameters)
+
+
 def _conn():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -15,6 +28,33 @@ def _conn():
     conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT)")
     conn.execute("INSERT INTO users (id, username) VALUES (1, 'alice')")
     return conn
+
+
+def test_user_profile_schema_tolerates_duplicate_column_race():
+    conn = sqlite3.connect(":memory:", factory=_DuplicateDisplayTimezoneRaceConnection)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT)")
+    conn.execute(
+        """
+        CREATE TABLE user_profiles (
+            user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+            display_name TEXT,
+            bio TEXT,
+            signature TEXT,
+            location TEXT,
+            website TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+
+    ensure_user_profile_schema(conn)
+
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(user_profiles)").fetchall()}
+    assert "display_timezone" in columns
+    assert "profile_public_info_json" in columns
 
 
 def test_user_profile_appearance_roundtrip_and_reset():

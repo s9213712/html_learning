@@ -6,7 +6,11 @@ ROOT = Path(__file__).resolve().parents[3]
 
 def test_grid_fee_ui_shows_net_profit_break_even_and_confirmation_wiring():
     index_html = (ROOT / "public" / "index.html").read_text(encoding="utf-8")
-    trading_js = (ROOT / "public" / "js" / "56-trading.js").read_text(encoding="utf-8")
+    trading_js = (
+        (ROOT / "public" / "js" / "56-trading.js").read_text(encoding="utf-8")
+        + "\n"
+        + (ROOT / "public" / "js" / "56-trading-bots.js").read_text(encoding="utf-8")
+    )
 
     assert 'id="trading-grid-preview"' in index_html
     assert "trading/grid/preview" in trading_js
@@ -23,7 +27,11 @@ def test_grid_fee_ui_shows_net_profit_break_even_and_confirmation_wiring():
 
 
 def test_grid_preset_apply_populates_and_persists_form_fields():
-    trading_js = (ROOT / "public" / "js" / "56-trading.js").read_text(encoding="utf-8")
+    trading_js = (
+        (ROOT / "public" / "js" / "56-trading.js").read_text(encoding="utf-8")
+        + "\n"
+        + (ROOT / "public" / "js" / "56-trading-bots.js").read_text(encoding="utf-8")
+    )
 
     assert "function tradingSetGridPresetFieldValue" in trading_js
     assert 'tradingSetGridPresetFieldValue("trading-grid-lower-price", lower);' in trading_js

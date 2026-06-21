@@ -26,7 +26,7 @@ def test_personal_appearance_editor_and_routes_are_wired():
     assert '<option value="ocean">Ocean Console</option>' in index_html
     assert '<option value="terminal">Terminal</option>' in index_html
     assert 'id="edit-user-appearance-reset"' in index_html
-    assert '視窗底部的「恢復全站預設」' in index_html
+    assert '按視窗底部的「儲存」後才會寫入帳號' in auth_js
     assert 'id="edit-user-appearance-status"' in index_html
     assert 'id="edit-user-site-radius-px"' in index_html
     assert 'id="edit-user-site-font-scale"' in index_html

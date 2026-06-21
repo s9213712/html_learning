@@ -138,6 +138,8 @@ function comfyuiUserStorageKey(key) {
   return `hackme_web:${scope}:${String(key || "state")}`;
 }
 const COMFYUI_DRAFT_FIELD_IDS = [
+  "comfyui-generation-mode",
+  "comfyui-template-select",
   "comfyui-model-download-type",
   "comfyui-model-relative-path",
   "comfyui-diffusers-model-repo",
@@ -174,6 +176,7 @@ const COMFYUI_DRAFT_FIELD_IDS = [
   "comfyui-album-select",
 ];
 const COMFYUI_DYNAMIC_SELECT_IDS = [
+  "comfyui-template-select",
   "comfyui-model-select",
   "comfyui-vae-select",
   "comfyui-sampler",
@@ -2874,12 +2877,37 @@ function readComfyuiDraft() {
   }
 }
 
+function comfyuiJsonClone(value, fallback) {
+  try {
+    if (value === undefined) return fallback;
+    return JSON.parse(JSON.stringify(value));
+  } catch (err) {
+    return fallback;
+  }
+}
+
+function serializableComfyuiInputAssets() {
+  const assets = {};
+  COMFYUI_IMAGE_ASSET_KEYS.forEach((key) => {
+    const asset = comfyuiInputAssets[key] || {};
+    if (!asset.imageRef?.filename) return;
+    assets[key] = {
+      imageRef: comfyuiJsonClone(asset.imageRef, null),
+      filename: asset.filename || asset.imageRef.filename || "",
+      cloudFileId: asset.cloudFileId || "",
+    };
+  });
+  return assets;
+}
+
 function writeComfyuiDraft() {
   const draft = {};
   COMFYUI_DRAFT_FIELD_IDS.forEach((id) => {
     const el = $(id);
     if (!el) return;
-    if (id === "comfyui-diffusers-model-repo") {
+    if (el.type === "checkbox") {
+      draft[id] = !!el.checked;
+    } else if (id === "comfyui-diffusers-model-repo") {
       const repo = normalizeComfyuiHuggingFaceRepoInput(el.value || "");
       draft[id] = repo && isComfyuiHuggingFaceRepoLike(repo) ? repo : "";
     } else {
@@ -2887,6 +2915,28 @@ function writeComfyuiDraft() {
     }
   });
   draft.selected_loras = comfyuiSelectedLoras;
+  draft.input_assets = serializableComfyuiInputAssets();
+  if (typeof comfyuiTemplateFieldOverrides !== "undefined") {
+    draft.template_field_overrides = comfyuiJsonClone(comfyuiTemplateFieldOverrides, {});
+  }
+  if (typeof comfyuiTemplateLoraOverrides !== "undefined") {
+    draft.template_lora_overrides = comfyuiJsonClone(comfyuiTemplateLoraOverrides, {});
+  }
+  if (typeof comfyuiTemplatePromptShareMode !== "undefined") {
+    draft.template_prompt_share_mode = comfyuiTemplatePromptShareMode;
+  }
+  if (typeof comfyuiTemplateSdxlSkipRefiner !== "undefined") {
+    draft.template_sdxl_skip_refiner = !!comfyuiTemplateSdxlSkipRefiner;
+  }
+  if (typeof comfyuiTemplateGgufProfileState !== "undefined") {
+    draft.template_gguf_profile_state = comfyuiJsonClone(comfyuiTemplateGgufProfileState, {});
+  }
+  if (typeof comfyuiMultiCompareState !== "undefined") {
+    draft.template_multi_compare_state = comfyuiJsonClone(comfyuiMultiCompareState, {});
+  }
+  if (typeof comfyuiUpscaleBreakpointState !== "undefined") {
+    draft.template_upscale_breakpoint_state = comfyuiJsonClone(comfyuiUpscaleBreakpointState, {});
+  }
   try {
     localStorage.setItem(comfyuiDraftStorageKey(), JSON.stringify(draft));
   } catch (err) {
@@ -2901,6 +2951,10 @@ function setComfyuiFieldValue(id, value, { preserveMissingOption = false } = {})
     const repo = normalizeComfyuiHuggingFaceRepoInput(value);
     if (!repo || !isComfyuiHuggingFaceRepoLike(repo)) return;
     value = repo;
+  }
+  if (el.type === "checkbox") {
+    el.checked = value === true || value === "true" || value === "1" || value === 1;
+    return;
   }
   if (el.tagName === "SELECT") {
     const exists = Array.from(el.options || []).some((option) => option.value === String(value));
@@ -3052,6 +3106,42 @@ function setComfyuiSamplingFieldsFromValues(samplerName = "", scheduler = "") {
   };
 }
 
+function restoreComfyuiTemplateDraftState(draft = {}) {
+  if (typeof comfyuiTemplateFieldOverrides !== "undefined") {
+    comfyuiTemplateFieldOverrides = draft.template_field_overrides && typeof draft.template_field_overrides === "object" && !Array.isArray(draft.template_field_overrides)
+      ? comfyuiJsonClone(draft.template_field_overrides, {})
+      : {};
+  }
+  if (typeof comfyuiTemplateLoraOverrides !== "undefined") {
+    comfyuiTemplateLoraOverrides = draft.template_lora_overrides && typeof draft.template_lora_overrides === "object" && !Array.isArray(draft.template_lora_overrides)
+      ? comfyuiJsonClone(draft.template_lora_overrides, {})
+      : {};
+  }
+  if (typeof comfyuiTemplatePromptShareMode !== "undefined") {
+    const mode = String(draft.template_prompt_share_mode || "").trim();
+    comfyuiTemplatePromptShareMode = ["ask", "shared", "independent"].includes(mode) ? mode : comfyuiTemplatePromptShareMode;
+  }
+  if (typeof comfyuiTemplateSdxlSkipRefiner !== "undefined") {
+    comfyuiTemplateSdxlSkipRefiner = !!draft.template_sdxl_skip_refiner;
+  }
+  if (typeof comfyuiTemplateGgufProfileState !== "undefined" && draft.template_gguf_profile_state && typeof draft.template_gguf_profile_state === "object") {
+    comfyuiTemplateGgufProfileState = {
+      bundleId: String(draft.template_gguf_profile_state.bundleId || ""),
+      profileId: String(draft.template_gguf_profile_state.profileId || ""),
+      variantId: String(draft.template_gguf_profile_state.variantId || ""),
+    };
+  }
+  if (typeof comfyuiMultiCompareState !== "undefined" && draft.template_multi_compare_state && typeof draft.template_multi_compare_state === "object") {
+    comfyuiMultiCompareState = comfyuiJsonClone(draft.template_multi_compare_state, comfyuiMultiCompareState);
+  }
+  if (typeof comfyuiUpscaleBreakpointState !== "undefined" && draft.template_upscale_breakpoint_state && typeof draft.template_upscale_breakpoint_state === "object") {
+    comfyuiUpscaleBreakpointState = {
+      bundleId: String(draft.template_upscale_breakpoint_state.bundleId || ""),
+      stage: String(draft.template_upscale_breakpoint_state.stage || ""),
+    };
+  }
+}
+
 function comfyuiCurrentSamplingFieldsForPayload() {
   return setComfyuiSamplingFieldsFromValues($("comfyui-sampler")?.value || "euler", $("comfyui-scheduler")?.value || "normal");
 }
@@ -3062,6 +3152,7 @@ function normalizeComfyuiLoraName(name) {
 
 function restoreComfyuiDraft({ includeDynamicSelects = true } = {}) {
   const draft = readComfyuiDraft();
+  restoreComfyuiTemplateDraftState(draft);
   if (Array.isArray(draft.selected_loras)) {
     comfyuiSelectedLoras = draft.selected_loras
       .filter((item) => item && typeof item === "object" && normalizeComfyuiLoraName(item.name))
@@ -3085,6 +3176,51 @@ function restoreComfyuiDraft({ includeDynamicSelects = true } = {}) {
     setComfyuiFieldValue("comfyui-diffusers-gguf-variant", draft["comfyui-diffusers-gguf-variant"]);
     updateComfyuiGgufProfileSelection({ syncRepo: false });
   }
+  updateComfyuiModeVisibility();
+}
+
+async function restoreComfyuiDraftInputAssets(draft = {}) {
+  const assets = draft.input_assets && typeof draft.input_assets === "object" && !Array.isArray(draft.input_assets)
+    ? draft.input_assets
+    : {};
+  for (const key of COMFYUI_IMAGE_ASSET_KEYS) {
+    const saved = assets[key];
+    if (!saved?.imageRef?.filename) continue;
+    await hydrateComfyuiInputAssetFromRef(key, saved.imageRef);
+    if (saved.cloudFileId && comfyuiInputAssets[key]) {
+      comfyuiInputAssets[key].cloudFileId = String(saved.cloudFileId);
+    }
+    if (saved.filename && comfyuiInputAssets[key]) {
+      comfyuiInputAssets[key].filename = String(saved.filename);
+    }
+    renderComfyuiInputAsset(key);
+  }
+}
+
+async function restoreComfyuiDraftForManualLoad() {
+  const draft = readComfyuiDraft();
+  const templatePresetId = Number(draft["comfyui-template-select"] || 0);
+  if (templatePresetId > 0 && typeof loadComfyuiWorkflowPresets === "function") {
+    await loadComfyuiWorkflowPresets({ silentTemplateReload: true });
+  }
+  restoreComfyuiDraft();
+  if (templatePresetId > 0) {
+    const select = $("comfyui-template-select");
+    if (select) setComfyuiFieldValue("comfyui-template-select", templatePresetId, { preserveMissingOption: true });
+    comfyuiSelectedTemplatePresetId = templatePresetId;
+    if (typeof loadComfyuiSelectedTemplateDetail === "function") {
+      await loadComfyuiSelectedTemplateDetail(templatePresetId, { silent: true, applyDefaults: false });
+      restoreComfyuiTemplateDraftState(draft);
+      if (typeof renderSelectedComfyuiTemplate === "function") renderSelectedComfyuiTemplate();
+    } else if (typeof queueRenderSelectedComfyuiTemplate === "function") {
+      queueRenderSelectedComfyuiTemplate();
+    }
+  } else {
+    comfyuiSelectedTemplatePresetId = null;
+    comfyuiSelectedTemplateDetail = null;
+    if (typeof queueRenderSelectedComfyuiTemplate === "function") queueRenderSelectedComfyuiTemplate();
+  }
+  await restoreComfyuiDraftInputAssets(draft);
   updateComfyuiModeVisibility();
 }
 
@@ -4006,7 +4142,7 @@ async function loadComfyuiLastSettings() {
   if (!comfyuiModelsLoaded && comfyuiServerAvailable !== false) {
     await loadComfyuiModels();
   }
-  restoreComfyuiDraft();
+  await restoreComfyuiDraftForManualLoad();
   setComfyuiMessage("已載入上次 ComfyUI 設定", true);
 }
 

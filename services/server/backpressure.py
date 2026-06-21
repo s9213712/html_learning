@@ -304,8 +304,10 @@ def _auto_fast_lane_reserved(thread_capacity: int, settings: dict | None = None)
         return min(configured, max(1, thread_capacity - 2))
     if thread_capacity <= 3:
         return 1
+    if thread_capacity <= 6:
+        return min(4, max(1, thread_capacity - 2))
     if thread_capacity <= 8:
-        return min(2, max(1, thread_capacity - 2))
+        return min(3, max(1, thread_capacity - 2))
     return min(max(2, thread_capacity // 3), max(1, thread_capacity - 2))
 
 
@@ -356,17 +358,19 @@ def _resolve_gate_limits(settings: dict | None = None) -> dict:
     reserved = _auto_fast_lane_reserved(thread_capacity, manual_settings)
     heavy_limit, heavy_source = _auto_heavy_limit(thread_capacity, cpu_count, mem_mb, manual_settings)
     root_limit, root_source = _auto_root_limit(thread_capacity, manual_settings if mode == "manual" else settings)
+    feature_limit = max(1, thread_capacity - reserved)
+    heavy_limit = min(heavy_limit, feature_limit)
     if mode == "manual":
         root_limit = min(root_limit, max(0, thread_capacity - reserved - heavy_limit))
     setting_normal = _setting_int_or_none(manual_settings, "server_backpressure_normal_limit", minimum=1, maximum=2048)
     env_normal = _env_int_or_none("HTML_LEARNING_BACKPRESSURE_NORMAL_LIMIT", minimum=1, maximum=2048)
     configured_normal = setting_normal or env_normal
     normal_source = "settings" if setting_normal else ("env" if env_normal else "auto")
-    # In auto mode, let the WSGI worker's own thread pool own normal request
-    # queueing. Keeping the normal gate below the detected gthread count caused
-    # short, ordinary frontend bursts to get 503 responses while CPU and memory
-    # still had headroom. Manual mode still honors explicit reserve budgeting.
-    fast_lane_budget = reserved if mode == "manual" else 0
+    # App-level gates cannot reject requests until a WSGI thread starts running.
+    # Keep normal traffic below the detected worker thread count even in auto
+    # mode so health/static/auth fast-lane requests have threads left to drain
+    # instead of timing out behind ordinary feature work.
+    fast_lane_budget = reserved
     heavy_budget = heavy_limit if mode == "manual" else 0
     max_normal = max(1, thread_capacity - fast_lane_budget - heavy_budget)
     normal_limit = min(configured_normal, max_normal) if configured_normal else max_normal
@@ -377,7 +381,6 @@ def _resolve_gate_limits(settings: dict | None = None) -> dict:
     if normal_limit + heavy_budget + fast_lane_budget > thread_capacity:
         overflow = normal_limit + heavy_budget + fast_lane_budget - thread_capacity
         normal_limit = max(1, normal_limit - overflow)
-    feature_limit = max(1, thread_capacity - reserved)
     return {
         "normal": int(normal_limit),
         "heavy": int(heavy_limit),

@@ -865,8 +865,17 @@ def register_ai_agent_routes(app, deps):
         ]
         if not options:
             return ""
+        configured_default = str(os.environ.get("HACKME_AI_AGENT_DEFAULT_COMFYUI_CHECKPOINT") or "").strip()
+        if configured_default:
+            configured_key = _comfyui_model_match_key(configured_default)
+            configured_matches = [
+                option
+                for option in options
+                if option == configured_default or _comfyui_model_match_key(option) == configured_key
+            ]
+            if len(set(configured_matches)) == 1:
+                return configured_matches[0]
         preferred_terms = (
-            ("v777", 100),
             ("jankutrainedchenkinnoobai", 90),
             ("janku", 80),
             ("noob", 70),

@@ -56,7 +56,7 @@ def test_generation_mode_is_inferred_from_source_and_mask_assets():
     js = _read("public/js/36-comfyui.js")
     html = _read("public/index.html")
     assert "const sourceCard = $(COMFYUI_INPUT_ASSET_META.source.cardId);" in js
-    assert 'if (sourceCard) sourceCard.style.display = comfyuiShouldShowSourceImageCard(mode) ? "" : "none";' in js
+    assert "comfyuiShouldShowSourceImageCard(mode) || comfyuiDiffusersSupportsImageInputMode()" in js
     assert 'if (upscaleField) upscaleField.style.display = comfyuiHasInputAsset("source") || comfyuiModeUsesUpscale(mode) ? "" : "none";' in js
     assert 'if (comfyuiHasInputAsset("mask")) return "inpaint";' in js
     assert 'return "img2img";' in js

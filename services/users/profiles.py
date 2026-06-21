@@ -1,5 +1,6 @@
 import json
 import secrets
+import sqlite3
 from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -69,6 +70,23 @@ COMMON_DISPLAY_TIMEZONES = (
 )
 
 
+def _is_duplicate_column_error(exc):
+    return isinstance(exc, sqlite3.OperationalError) and "duplicate column name" in str(exc).lower()
+
+
+def _add_user_profile_column_if_missing(conn, columns, name, ddl):
+    if name in columns:
+        return
+    try:
+        conn.execute(f"ALTER TABLE user_profiles ADD COLUMN {name} {ddl}")
+    except sqlite3.OperationalError as exc:
+        if not _is_duplicate_column_error(exc):
+            raise
+        if name not in _table_columns(conn, "user_profiles"):
+            raise
+    columns.add(name)
+
+
 def ensure_user_profile_schema(conn):
     conn.execute(
         """
@@ -97,27 +115,20 @@ def ensure_user_profile_schema(conn):
         )
         """
     )
-    columns = {row[1] for row in conn.execute("PRAGMA table_info(user_profiles)").fetchall()}
-    if "appearance_json" not in columns:
-        conn.execute("ALTER TABLE user_profiles ADD COLUMN appearance_json TEXT NOT NULL DEFAULT '{}'")
-    if "friend_code" not in columns:
-        conn.execute("ALTER TABLE user_profiles ADD COLUMN friend_code TEXT")
-    if "friend_code_rotated_at" not in columns:
-        conn.execute("ALTER TABLE user_profiles ADD COLUMN friend_code_rotated_at TEXT")
-    if "display_timezone" not in columns:
-        conn.execute("ALTER TABLE user_profiles ADD COLUMN display_timezone TEXT NOT NULL DEFAULT 'auto'")
-    if "profile_template" not in columns:
-        conn.execute("ALTER TABLE user_profiles ADD COLUMN profile_template TEXT NOT NULL DEFAULT 'classic'")
-    if "profile_accent" not in columns:
-        conn.execute("ALTER TABLE user_profiles ADD COLUMN profile_accent TEXT NOT NULL DEFAULT 'default'")
-    if "profile_density" not in columns:
-        conn.execute("ALTER TABLE user_profiles ADD COLUMN profile_density TEXT NOT NULL DEFAULT 'comfortable'")
-    if "profile_style_json" not in columns:
-        conn.execute("ALTER TABLE user_profiles ADD COLUMN profile_style_json TEXT NOT NULL DEFAULT '{}'")
-    if "public_account_fields_json" not in columns:
-        conn.execute("ALTER TABLE user_profiles ADD COLUMN public_account_fields_json TEXT NOT NULL DEFAULT '[]'")
-    if "profile_public_info_json" not in columns:
-        conn.execute("ALTER TABLE user_profiles ADD COLUMN profile_public_info_json TEXT NOT NULL DEFAULT '[]'")
+    columns = _table_columns(conn, "user_profiles")
+    for name, ddl in (
+        ("appearance_json", "TEXT NOT NULL DEFAULT '{}'"),
+        ("friend_code", "TEXT"),
+        ("friend_code_rotated_at", "TEXT"),
+        ("display_timezone", "TEXT NOT NULL DEFAULT 'auto'"),
+        ("profile_template", "TEXT NOT NULL DEFAULT 'classic'"),
+        ("profile_accent", "TEXT NOT NULL DEFAULT 'default'"),
+        ("profile_density", "TEXT NOT NULL DEFAULT 'comfortable'"),
+        ("profile_style_json", "TEXT NOT NULL DEFAULT '{}'"),
+        ("public_account_fields_json", "TEXT NOT NULL DEFAULT '[]'"),
+        ("profile_public_info_json", "TEXT NOT NULL DEFAULT '[]'"),
+    ):
+        _add_user_profile_column_if_missing(conn, columns, name, ddl)
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_user_profiles_friend_code ON user_profiles(friend_code) WHERE friend_code IS NOT NULL AND friend_code<>''")
 
 

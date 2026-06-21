@@ -52,7 +52,11 @@ def test_pointschain_financial_settlement_architecture_is_formalized():
 
 
 def test_pointschain_ui_and_invariant_names_match_federated_architecture():
-    economy_js = (ROOT / "public" / "js" / "55-economy.js").read_text(encoding="utf-8")
+    economy_js = (
+        (ROOT / "public" / "js" / "55-economy.js").read_text(encoding="utf-8")
+        + "\n"
+        + (ROOT / "public" / "js" / "55-economy-explorer.js").read_text(encoding="utf-8")
+    )
     service = (ROOT / "services" / "points_chain" / "service.py").read_text(encoding="utf-8")
 
     for required in [

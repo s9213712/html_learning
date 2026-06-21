@@ -8,11 +8,13 @@ service entry points. The frontend is not part of this execution path.
 from __future__ import annotations
 
 import json
+import threading
 import socket
 import time
 import uuid
 from datetime import datetime, timedelta
 
+from services.core.sqlite_hardening import is_sqlite_retryable_operational_error
 from services.server_mode.context import SmV2Context
 
 
@@ -60,6 +62,31 @@ BACKGROUND_JOB_LABELS = {
 PAUSED_MODES = {"maintenance", "incident_lockdown", "superweak"}
 SHADOW_REQUIRES_TESTER_MODES = {"internal_test"}
 SYSTEM_ACTOR = {"id": 0, "username": "system", "role": "system"}
+_BACKGROUND_SCHEMA_LOCK = threading.RLock()
+_BACKGROUND_SCHEMA_READY_KEYS = set()
+
+
+def _background_schema_cache_key(service, conn):
+    try:
+        rows = conn.execute("PRAGMA database_list").fetchall()
+        for row in rows:
+            name = row["name"] if hasattr(row, "keys") else row[1]
+            path = row["file"] if hasattr(row, "keys") else row[2]
+            if str(name or "") == "main" and str(path or ""):
+                return str(path)
+    except Exception:
+        pass
+    return f"service:{id(service)}"
+
+
+def _with_sqlite_background_retry(operation, *, attempts=20, base_sleep=0.05):
+    for attempt in range(max(1, int(attempts or 1))):
+        try:
+            return operation()
+        except Exception as exc:
+            if not is_sqlite_retryable_operational_error(exc) or attempt >= attempts - 1:
+                raise
+            time.sleep(min(0.25, float(base_sleep or 0.05) * (attempt + 1)))
 
 
 def _now_dt() -> datetime:
@@ -237,116 +264,122 @@ def ensure_background_schema(service, conn=None):
     owns_conn = conn is None
     conn = conn or service.get_db()
     try:
-        service.ensure_schema(conn)
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS trading_background_jobs (
-                job_key TEXT PRIMARY KEY,
-                enabled INTEGER NOT NULL DEFAULT 1,
-                interval_seconds INTEGER NOT NULL DEFAULT 30,
-                lease_seconds INTEGER NOT NULL DEFAULT 60,
-                lease_owner TEXT,
-                lease_until TEXT,
-                last_started_at TEXT,
-                last_finished_at TEXT,
-                last_success_at TEXT,
-                last_error TEXT NOT NULL DEFAULT '',
-                last_status TEXT NOT NULL DEFAULT 'never_run',
-                last_summary_json TEXT NOT NULL DEFAULT '{}',
-                run_count INTEGER NOT NULL DEFAULT 0,
-                failure_count INTEGER NOT NULL DEFAULT 0,
-                next_run_at TEXT,
-                paused_reason TEXT NOT NULL DEFAULT '',
-                updated_at TEXT NOT NULL
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS trading_background_locks (
-                job_key TEXT PRIMARY KEY,
-                lease_owner TEXT NOT NULL,
-                lease_until TEXT NOT NULL,
-                acquired_at TEXT NOT NULL,
-                renewed_at TEXT NOT NULL
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS trading_background_job_runs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                run_uuid TEXT NOT NULL UNIQUE,
-                job_key TEXT NOT NULL,
-                lease_owner TEXT NOT NULL,
-                server_mode TEXT NOT NULL,
-                status TEXT NOT NULL,
-                started_at TEXT NOT NULL,
-                finished_at TEXT,
-                duration_ms REAL,
-                result_json TEXT NOT NULL DEFAULT '{}',
-                error TEXT NOT NULL DEFAULT ''
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS trading_background_job_queue (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                queue_uuid TEXT NOT NULL UNIQUE,
-                job_key TEXT NOT NULL,
-                requested_by_user_id INTEGER,
-                requested_by_username TEXT NOT NULL DEFAULT '',
-                force INTEGER NOT NULL DEFAULT 1,
-                status TEXT NOT NULL DEFAULT 'queued',
-                requested_at TEXT NOT NULL,
-                next_attempt_at TEXT,
-                started_at TEXT,
-                finished_at TEXT,
-                attempt_count INTEGER NOT NULL DEFAULT 0,
-                worker_owner TEXT NOT NULL DEFAULT '',
-                result_json TEXT NOT NULL DEFAULT '{}',
-                error TEXT NOT NULL DEFAULT ''
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS trading_root_snapshots (
-                snapshot_key TEXT PRIMARY KEY,
-                payload_json TEXT NOT NULL DEFAULT '{}',
-                generated_at TEXT NOT NULL,
-                source_job_key TEXT NOT NULL DEFAULT '',
-                source_run_uuid TEXT NOT NULL DEFAULT '',
-                error TEXT NOT NULL DEFAULT '',
-                updated_at TEXT NOT NULL
-            )
-            """
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_trading_background_job_runs_job_started ON trading_background_job_runs(job_key, started_at)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_trading_background_job_queue_status_next ON trading_background_job_queue(status, next_attempt_at, id)"
-        )
-        now = _now_text()
-        for job_key, definition in BACKGROUND_JOB_DEFINITIONS.items():
+        cache_key = _background_schema_cache_key(service, conn)
+        if cache_key in _BACKGROUND_SCHEMA_READY_KEYS:
+            return
+        with _BACKGROUND_SCHEMA_LOCK:
+            if cache_key in _BACKGROUND_SCHEMA_READY_KEYS:
+                return
+            service.ensure_schema(conn)
             conn.execute(
                 """
-                INSERT OR IGNORE INTO trading_background_jobs (
-                    job_key, enabled, interval_seconds, lease_seconds,
-                    last_summary_json, updated_at
-                ) VALUES (?, 1, ?, ?, '{}', ?)
-                """,
-                (
-                    job_key,
-                    int(definition["interval_seconds"]),
-                    int(definition["lease_seconds"]),
-                    now,
-                ),
+                CREATE TABLE IF NOT EXISTS trading_background_jobs (
+                    job_key TEXT PRIMARY KEY,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    interval_seconds INTEGER NOT NULL DEFAULT 30,
+                    lease_seconds INTEGER NOT NULL DEFAULT 60,
+                    lease_owner TEXT,
+                    lease_until TEXT,
+                    last_started_at TEXT,
+                    last_finished_at TEXT,
+                    last_success_at TEXT,
+                    last_error TEXT NOT NULL DEFAULT '',
+                    last_status TEXT NOT NULL DEFAULT 'never_run',
+                    last_summary_json TEXT NOT NULL DEFAULT '{}',
+                    run_count INTEGER NOT NULL DEFAULT 0,
+                    failure_count INTEGER NOT NULL DEFAULT 0,
+                    next_run_at TEXT,
+                    paused_reason TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL
+                )
+                """
             )
-        if owns_conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS trading_background_locks (
+                    job_key TEXT PRIMARY KEY,
+                    lease_owner TEXT NOT NULL,
+                    lease_until TEXT NOT NULL,
+                    acquired_at TEXT NOT NULL,
+                    renewed_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS trading_background_job_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_uuid TEXT NOT NULL UNIQUE,
+                    job_key TEXT NOT NULL,
+                    lease_owner TEXT NOT NULL,
+                    server_mode TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    finished_at TEXT,
+                    duration_ms REAL,
+                    result_json TEXT NOT NULL DEFAULT '{}',
+                    error TEXT NOT NULL DEFAULT ''
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS trading_background_job_queue (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    queue_uuid TEXT NOT NULL UNIQUE,
+                    job_key TEXT NOT NULL,
+                    requested_by_user_id INTEGER,
+                    requested_by_username TEXT NOT NULL DEFAULT '',
+                    force INTEGER NOT NULL DEFAULT 1,
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    requested_at TEXT NOT NULL,
+                    next_attempt_at TEXT,
+                    started_at TEXT,
+                    finished_at TEXT,
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    worker_owner TEXT NOT NULL DEFAULT '',
+                    result_json TEXT NOT NULL DEFAULT '{}',
+                    error TEXT NOT NULL DEFAULT ''
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS trading_root_snapshots (
+                    snapshot_key TEXT PRIMARY KEY,
+                    payload_json TEXT NOT NULL DEFAULT '{}',
+                    generated_at TEXT NOT NULL,
+                    source_job_key TEXT NOT NULL DEFAULT '',
+                    source_run_uuid TEXT NOT NULL DEFAULT '',
+                    error TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_trading_background_job_runs_job_started ON trading_background_job_runs(job_key, started_at)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_trading_background_job_queue_status_next ON trading_background_job_queue(status, next_attempt_at, id)"
+            )
+            now = _now_text()
+            for job_key, definition in BACKGROUND_JOB_DEFINITIONS.items():
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO trading_background_jobs (
+                        job_key, enabled, interval_seconds, lease_seconds,
+                        last_summary_json, updated_at
+                    ) VALUES (?, 1, ?, ?, '{}', ?)
+                    """,
+                    (
+                        job_key,
+                        int(definition["interval_seconds"]),
+                        int(definition["lease_seconds"]),
+                        now,
+                    ),
+                )
             conn.commit()
+            _BACKGROUND_SCHEMA_READY_KEYS.add(cache_key)
     finally:
         if owns_conn:
             conn.close()
@@ -1081,31 +1114,37 @@ def get_background_status(service, *, limit=20):
     try:
         ensure_background_schema(service, conn)
         conn.commit()
-        jobs = [dict(row) for row in conn.execute("SELECT * FROM trading_background_jobs ORDER BY job_key").fetchall()]
-        locks = [dict(row) for row in conn.execute("SELECT * FROM trading_background_locks ORDER BY job_key").fetchall()]
-        runs = [
-            dict(row)
-            for row in conn.execute(
-                """
-                SELECT * FROM trading_background_job_runs
-                ORDER BY id DESC
-                LIMIT ?
-                """,
-                (max(1, min(int(limit or 20), 200)),),
-            ).fetchall()
-        ]
-        queued = [
-            dict(row)
-            for row in conn.execute(
-                """
-                SELECT *
-                FROM trading_background_job_queue
-                ORDER BY id DESC
-                LIMIT ?
-                """,
-                (max(1, min(int(limit or 20), 200)),),
-            ).fetchall()
-        ]
+        row_limit = max(1, min(int(limit or 20), 200))
+
+        def read_status_rows():
+            jobs_rows = [dict(row) for row in conn.execute("SELECT * FROM trading_background_jobs ORDER BY job_key").fetchall()]
+            locks_rows = [dict(row) for row in conn.execute("SELECT * FROM trading_background_locks ORDER BY job_key").fetchall()]
+            runs_rows = [
+                dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT * FROM trading_background_job_runs
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (row_limit,),
+                ).fetchall()
+            ]
+            queued_rows = [
+                dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT *
+                    FROM trading_background_job_queue
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (row_limit,),
+                ).fetchall()
+            ]
+            return jobs_rows, locks_rows, runs_rows, queued_rows
+
+        jobs, locks, runs, queued = _with_sqlite_background_retry(read_status_rows)
     finally:
         conn.close()
     now_dt = _now_dt()

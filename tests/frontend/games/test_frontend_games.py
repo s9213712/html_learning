@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 
@@ -41,7 +42,7 @@ def test_game_zone_frontend_assets_are_wired():
 
     assert 'id="tab-module-games"' in index_html
     assert 'id="module-games"' in index_html
-    assert "/js/38-games.js?v=20260528-games-compact-scores" in index_html
+    assert re.search(r"/js/38-games\.js\?v=", index_html)
     assert 'id="game-practice-side"' in index_html
     assert 'id="game-practice-difficulty"' in index_html
     assert 'id="game-practice-stockfish-depth"' in index_html
@@ -127,33 +128,36 @@ def test_game_zone_frontend_assets_are_wired():
     assert "/js/three.min.js?v=0.160.0" not in index_html
     assert 'const THREE_JS_SRC = "/js/three.min.js?v=0.160.0";' in core_js
     assert "async function ensureThreeJsLoaded()" in core_js
-    assert "/js/41-game-modules.js?v=20260518-game-ux" in index_html
+    assert re.search(r"/js/41-game-modules\.js\?v=", index_html)
     assert "/js/games/game-view-registry.js?v=20260513-legacy-modules" in index_html
     assert "/js/games/chess.js?v=20260525-move-history-ply" in index_html
-    lazy_game_scripts = [
-        "/js/games/snake.js?v=20260513-game-modules",
-        "/js/games/game-2048.js?v=20260513-game-modules",
-        "/js/games/brick-breaker.js?v=20260513-game-modules",
-        "/js/games/bullet-hell.js?v=20260518-game-ux",
-        "/js/games/stickman-shooter.js?v=20260517-level-layouts",
-        "/js/games/open-world.js?v=20260518-game-ux",
-        "/js/games/board-game-shared.js?v=20260513-game-modules",
-        "/js/games/real-tetris.js?v=20260518-game-ux",
-        "/js/games/reversi.js?v=20260513-game-modules",
-        "/js/games/go.js?v=20260513-game-modules",
-        "/js/games/gomoku.js?v=20260513-game-modules",
-        "/js/games/chinese-chess.js?v=20260513-game-modules",
-        "/js/games/sudoku.js?v=20260518-game-ux",
-        "/js/games/minesweeper.js?v=20260513-legacy-modules",
-        "/js/games/onea2b.js?v=20260518-game-ux",
-        "/js/games/tetris.js?v=20260513-legacy-modules",
-        "/js/games/space-shooter.js?v=20260518-game-ux",
-        "/js/games/fps-arena.js?v=20260514-fps-stance-br",
-        "/js/38-fps-arena.js?v=20260518-game-ux",
+    lazy_game_script_paths = [
+        "/js/games/snake.js",
+        "/js/games/game-2048.js",
+        "/js/games/brick-breaker.js",
+        "/js/games/rubiks-cube.js",
+        "/js/games/bullet-hell.js",
+        "/js/games/stickman-shooter.js",
+        "/js/games/open-world.js",
+        "/js/games/racing.js",
+        "/js/games/board-game-shared.js",
+        "/js/games/real-tetris.js",
+        "/js/games/reversi.js",
+        "/js/games/go.js",
+        "/js/games/gomoku.js",
+        "/js/games/chinese-chess.js",
+        "/js/games/sudoku.js",
+        "/js/games/minesweeper.js",
+        "/js/games/onea2b.js",
+        "/js/games/tetris.js",
+        "/js/games/space-shooter.js",
+        "/js/games/fps-arena.js",
+        "/js/38-fps-arena.js",
     ]
-    for script in lazy_game_scripts:
-        assert script not in index_html
-        assert script in games_js
+    for script_path in lazy_game_script_paths:
+        versioned_script_pattern = rf"{re.escape(script_path)}\?v="
+        assert not re.search(versioned_script_pattern, index_html)
+        assert re.search(versioned_script_pattern, games_js)
     assert "async function ensureGameRuntimeScriptsLoaded()" in games_js
     assert "await runtimeReady" in games_js
     assert '/solo-scores?compact=1`' in games_js

@@ -1,6 +1,7 @@
 import json
 import os
 import time
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from flask import Flask, jsonify
@@ -9,6 +10,9 @@ import routes.trading as trading_routes
 from services.trading import btc_bridge
 from routes.trading import register_trading_routes
 from services.trading.btc_bridge import BtcTradeBridge
+
+
+ROOT = Path(__file__).resolve().parents[3]
 
 
 class _FakeBinanceResponse:
@@ -814,7 +818,7 @@ def test_root_btc_trade_start_returns_background_job(monkeypatch, tmp_path):
     assert captured["repo_url"] == "https://github.com/s9213712/BTC_trade.git"
     assert captured["branch"] == "strategy/v15b-plus"
     assert captured["setup_if_needed"] is True
-    assert captured["base_dir"].name == "hackme_web"
+    assert captured["base_dir"] == ROOT
 
 
 def test_root_btc_trade_start_surfaces_immediate_job_failure(monkeypatch, tmp_path):
