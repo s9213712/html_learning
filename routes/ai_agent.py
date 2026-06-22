@@ -499,7 +499,7 @@ AI_AGENT_WRITE_TOOL_SPECS = {
         "write": True,
     },
     "write_automation_job_run": {
-        "label": "重試任務",
+        "label": "重試自動化任務",
         "description": "以 Job Center retry handler 執行可重試的自動化任務。",
         "method": "POST",
         "path": "/api/jobs/{job_uuid}/retry",
@@ -569,7 +569,7 @@ AI_AGENT_WRITE_TOOL_SPECS = {
         "write": True,
     },
     "write_video_upload": {
-        "label": "發布既有雲端影音",
+        "label": "AI Agent JSON 版影音發布",
         "description": "AI Agent JSON 版影音發布：使用既有 cloud_file_id 發布影音並可排程 HLS。",
         "method": "POST",
         "path": "/api/videos/publish",

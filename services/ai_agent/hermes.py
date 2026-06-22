@@ -442,7 +442,7 @@ AI_AGENT_TOOL_BLUEPRINT = {
     "write_album_add_file": {"label": "加入相簿檔案", "description": "root 專用白名單工具：加入相簿檔案。", "min_role": "super_admin", "data_scope": "write_tool:albums"},
     "write_album_remove_file": {"label": "移除相簿檔案", "description": "root 專用白名單工具：移除相簿檔案。", "min_role": "super_admin", "data_scope": "write_tool:albums"},
     "write_album_smart_organize": {"label": "相簿智慧整理", "description": "root 專用白名單工具：執行相簿智慧整理。", "min_role": "super_admin", "data_scope": "write_tool:albums"},
-    "write_video_upload": {"label": "發布既有雲端影音", "description": "root 專用白名單工具：發布既有雲端影音。", "min_role": "super_admin", "data_scope": "write_tool:media"},
+    "write_video_upload": {"label": "AI Agent JSON 版影音發布", "description": "root 專用白名單工具：用既有 cloud_file_id 透過 JSON 參數發布影音。", "min_role": "super_admin", "data_scope": "write_tool:media"},
     "write_video_publish": {"label": "發布既有雲端影音", "description": "root 專用白名單工具：發布影音。", "min_role": "super_admin", "data_scope": "write_tool:media"},
     "write_video_update": {"label": "更新影音", "description": "root 專用白名單工具：更新影音。", "min_role": "super_admin", "data_scope": "write_tool:media"},
     "write_video_delete": {"label": "刪除影音", "description": "root 專用白名單工具：刪除影音。", "min_role": "super_admin", "data_scope": "write_tool:media"},
@@ -463,6 +463,29 @@ AI_AGENT_TOOL_BLUEPRINT = {
     "write_server_mode_switch": {"label": "切換伺服器模式", "description": "root 專用白名單工具：切換 server-mode。", "min_role": "super_admin", "data_scope": "write_tool:server"},
     "write_incident_enter": {"label": "進入緊急事件模式", "description": "root 專用白名單工具：進入 incident lockdown。", "min_role": "super_admin", "data_scope": "write_tool:server"},
     "write_incident_resolve": {"label": "解除緊急事件模式", "description": "root 專用白名單工具：解除 incident lockdown。", "min_role": "super_admin", "data_scope": "write_tool:server"},
+}
+
+AI_AGENT_TOOL_ARGUMENT_HINTS = {
+    "write_community_create_thread": "canonical args: board_id,title,content,post_type；把 forum_id/討論版/版面 ID 轉成 board_id。",
+    "write_comfyui_generate": "canonical args: prompt,negative_prompt,width,height,steps,batch_size,confirm_billing；生圖請保留 batch_size 與 confirm_billing。",
+    "write_member_update_user": "canonical args: user_id,nickname,role,status,member_level,base_level,level_update_reason,sanction_status,sanction_until；即使目前模式不能執行，也要辨識此工具。",
+    "write_member_set_avatar_from_cloud": "canonical args: user_id,cloud_file_id,crop,rotation,zoom,decision_reason；裁切/旋轉/縮放必須使用 crop/rotation/zoom。",
+    "write_trading_place_order": "canonical args: market_symbol,side,order_type,quantity,limit_price_points；把 market 轉成 market_symbol，把 price 轉成 limit_price_points。",
+    "write_trading_bot_create": "canonical args: market_symbol,bot_type,strategy,budget_points,order_size_points,parameters；把 market/type 轉成 market_symbol/bot_type。",
+    "write_trading_bot_backtest": "canonical args: market_symbol,strategy,parameters,lookback_days,initial_cash；把 market/period 轉成 market_symbol/lookback_days。",
+    "write_trading_grid_preview": "canonical args: market_symbol,lower_price_points,upper_price_points,grid_count,budget_points；把 price_min/price_max 轉成 lower_price_points/upper_price_points。",
+    "write_trading_grid_bot_create": "canonical args: market_symbol,lower_price_points,upper_price_points,grid_count,budget_points,enabled；name 不是必要欄位，不能因缺 name 而 clarify。",
+    "write_cloud_drive_create_text": "canonical args: filename,content,virtual_path,privacy_mode；把 file_name/name 轉成 filename。",
+    "write_cloud_drive_upload": "canonical args: filename,content,virtual_path,privacy_mode；把 file_name/name 轉成 filename。",
+    "write_album_create": "canonical args: title,description,visibility；把 name 轉成 title。",
+    "write_automation_job_run": "canonical args: job_uuid；只有明確提到自動化作業/automation 時選此工具；一般重試 Job Center 任務選 write_task_retry。",
+    "write_video_upload": "canonical args: cloud_file_id,title,visibility,streaming_modes；只有要求 AI Agent JSON 版影音發布/上傳時選此工具。",
+    "write_video_publish": "canonical args: cloud_file_id,title,visibility,streaming_modes；一般『發布既有雲端影音』選此工具。",
+    "write_video_streaming_modes": "canonical args: video_id,streaming_modes；把影片 ID 轉成 video_id。",
+    "write_transcode_hls": "canonical args: file_id；排程 HLS 轉檔用檔案 file_id，不是 video_id。",
+    "write_hls_rebuild": "canonical args: file_id；重建 HLS 用檔案 file_id，不是 video_id。",
+    "write_subtitle_upload": "canonical args: video_id,subtitle_text,filename,language,label；把 subtitle_content 轉成 subtitle_text，把 subtitle_filename 轉成 filename。",
+    "write_points_wallet_transfer": "canonical args: source_wallet_address,destination_wallet_address,amount_points,fee_points,request_uuid,memo,signature,compact；把 source_wallet/destination_wallet/amount/fee/request_id 轉成 canonical 欄位。",
 }
 
 AI_AGENT_SAFETY_BOUNDARIES = (
@@ -655,6 +678,7 @@ def ai_agent_effective_tools(settings, *, actor_role="user"):
             "description": details["description"],
             "min_role": details.get("min_role") or "user",
             "data_scope": details.get("data_scope") or "",
+            "arg_hint": AI_AGENT_TOOL_ARGUMENT_HINTS.get(tool_name, ""),
         })
     return result
 
@@ -676,7 +700,9 @@ def _ai_agent_system_prompt(behavior, *, role="user", actor=None, allow_tool_run
     ]
     tool_lines = []
     for detail in behavior.get("tools") or []:
-        tool_lines.append(f"- {detail.get('name')}（{detail.get('label')}）：{detail.get('description')}；資料範圍={detail.get('data_scope') or '-'}")
+        arg_hint = str(detail.get("arg_hint") or "").strip()
+        suffix = f"；{arg_hint}" if arg_hint else ""
+        tool_lines.append(f"- {detail.get('name')}（{detail.get('label')}）：{detail.get('description')}；資料範圍={detail.get('data_scope') or '-'}{suffix}")
     if mode_policy.get("write_enabled") and normalized_role == "super_admin":
         tool_scope = (
             "目前是 root 專用執行寫入模式：你不是一般使用者助手，也不是唯讀模式。"
@@ -708,6 +734,10 @@ def _ai_agent_system_prompt(behavior, *, role="user", actor=None, allow_tool_run
         + "工具公告：\n"
         + "\n".join(tool_lines) + "\n"
         f"{tool_scope}\n"
+        "Planner 輸出規則：若使用者要求站內白名單 write-tool，請先辨識最符合的 tool 與 canonical args；"
+        "即使目前模式是 assist/read-only 或尚不能實際寫入，也不要只因模式不能執行就 clarify，應輸出 write_tool plan 並把 execute_write 設為 false。"
+        "只有缺少 schema required 參數且無法從語意推得時才 clarify；optional 參數缺少不得 clarify。"
+        "args 欄位名稱必須使用工具公告中的 canonical args，禁止使用 forum_id、market、price、file_name、name、request_id 等同義別名。\n"
         "工具鐵則：你不能在一般聊天中聲稱已呼叫、正在呼叫或已完成任何工具/API。"
         "禁止輸出「工具：check_generation_progress」、「送出產圖任務」、「執行寫入中」等假工具狀態。"
         "若需要工具，請說明需要由前台工具流程處理或等待實際工具結果；只有系統/前端回傳工具結果後才能回報狀態。\n"

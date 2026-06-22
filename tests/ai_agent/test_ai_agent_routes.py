@@ -359,6 +359,35 @@ def test_ai_agent_all_write_tool_names_are_recognized_when_allowed(tmp_path):
         assert payload.get("msg") != "此工具未在目前 AI Agent allowed_tools/角色範圍內啟用", tool_name
 
 
+def test_ai_agent_write_tools_labels_disambiguate_similar_actions(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    tool_names = [
+        "write_task_retry",
+        "write_automation_job_run",
+        "write_video_upload",
+        "write_video_publish",
+    ]
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "write",
+            "ai_agent_allowed_tools": ",".join(tool_names),
+        },
+    )
+
+    response = app.test_client().get("/api/ai-agent/write-tools")
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    labels = {tool["name"]: tool["label"] for tool in payload["tools"]}
+    assert labels["write_task_retry"] == "重試任務"
+    assert labels["write_automation_job_run"] == "重試自動化任務"
+    assert labels["write_video_upload"] == "AI Agent JSON 版影音發布"
+    assert labels["write_video_publish"] == "發布既有雲端影音"
+
+
 def test_ai_agent_write_tool_execute_requires_write_mode_for_mutation(tmp_path):
     db_path = tmp_path / "ai_agent_routes.db"
     _build_db(db_path)
