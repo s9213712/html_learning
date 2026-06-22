@@ -764,20 +764,19 @@ async function aiAgentRunGenericWriteTool(plan, userText, input) {
   setAiAgentMessage(`執行 ${toolName} 中...`, "info");
   const started = performance.now();
   try {
-    const res = await apiFetch(API + "/ai-agent/write-tools/execute", {
-      method: "POST",
-      credentials: "same-origin",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+    const result = await aiAgentPostWriteToolExecute({
         tool: toolName,
         arguments: args,
         confirm: "EXECUTE",
         elevate_once: elevateOnce ? "ALLOW_WRITE_ONCE" : undefined,
-      }),
-    });
-    const json = await res.json().catch(() => ({}));
-    const elapsed = Math.round(performance.now() - started);
-    AI_AGENT_STATE.messages.push({ role: "assistant", content: aiAgentWriteToolResultSummary(toolName, json, elapsed) });
+      },
+      { toolName },
+    );
+    const res = result?.res || { ok: false, status: 0 };
+    const json = result?.json || {};
+    const elapsed = result?.elapsed || Math.round(performance.now() - started);
+    const retryNote = result?.attempt > 1 ? `\n重試次數：${result.attempt - 1}` : "";
+    AI_AGENT_STATE.messages.push({ role: "assistant", content: `${aiAgentWriteToolResultSummary(toolName, json, elapsed)}${retryNote}` });
     renderAiAgentThread();
     setAiAgentMessage(json.ok && res.ok ? `${toolName} 已完成` : `${toolName} 失敗`, json.ok && res.ok ? "ok" : "err");
   } catch (err) {
@@ -1245,6 +1244,47 @@ function aiAgentWriteToolErrorMessage(json = {}, status = 0) {
   return msg || `ComfyUI 產圖送出失敗（HTTP ${status || "-"})`;
 }
 
+function aiAgentSleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
+}
+
+function aiAgentServerBusyDelayMs(json = {}, status = 0, attempt = 1) {
+  const error = String(json.error || json.msg || json.message || "").toLowerCase();
+  if (Number(status) !== 503 && !error.includes("server_busy")) return 0;
+  const retryAfter = Number(json.retry_after_seconds || json.retry_after || 0);
+  if (Number.isFinite(retryAfter) && retryAfter > 0) return Math.min(10000, Math.max(500, retryAfter * 1000));
+  return Math.min(10000, 1000 * Math.max(1, attempt));
+}
+
+async function aiAgentPostWriteToolExecute(payload, { toolName = "", maxAttempts = 4 } = {}) {
+  const started = performance.now();
+  let last = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const res = await apiFetch(API + "/ai-agent/write-tools/execute", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const json = await res.json().catch(() => ({}));
+    last = { res, json, attempt, elapsed: Math.round(performance.now() - started) };
+    const delayMs = aiAgentServerBusyDelayMs(json, res.status, attempt);
+    if (delayMs > 0 && attempt < maxAttempts) {
+      const label = toolName || payload?.tool || "write-tool";
+      AI_AGENT_STATE.messages.push({
+        role: "assistant",
+        content: `${label} 暫時受到伺服器保護限制，${Math.round(delayMs / 1000)} 秒後自動重試（${attempt}/${maxAttempts - 1}）。`,
+      });
+      renderAiAgentThread();
+      setAiAgentMessage(`${label} 等待 backpressure 重試...`, "info");
+      await aiAgentSleep(delayMs);
+      continue;
+    }
+    return last;
+  }
+  return last;
+}
+
 async function runAiAgentComfyuiGenerate(overrides = null) {
   if (AI_AGENT_STATE.sendingTool) return;
   const canRunDirectly = aiAgentCanRunWriteTool("write_comfyui_generate");
@@ -1292,18 +1332,16 @@ async function runAiAgentComfyuiGenerate(overrides = null) {
   renderAiAgentWriteTools();
   setAiAgentMessage("ComfyUI 產圖任務送出中...", "info");
   try {
-    const res = await apiFetch(API + "/ai-agent/write-tools/execute", {
-      method: "POST",
-      credentials: "same-origin",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+    const result = await aiAgentPostWriteToolExecute({
         tool: "write_comfyui_generate",
         arguments: args,
         confirm: "EXECUTE",
         elevate_once: elevateOnce ? "ALLOW_WRITE_ONCE" : "",
-      }),
-    });
-    const json = await res.json().catch(() => ({}));
+      },
+      { toolName: "write_comfyui_generate" },
+    );
+    const res = result?.res || { ok: false, status: 0 };
+    const json = result?.json || {};
     if (!res.ok || !json.ok) {
       const msg = aiAgentWriteToolErrorMessage(json, res.status);
       if (attempt) aiAgentRememberComfyuiAttempt(args, { attempt_id: attempt.attempt_id, status: "error", error: msg });
@@ -1324,9 +1362,10 @@ async function runAiAgentComfyuiGenerate(overrides = null) {
       if (attempt) aiAgentRememberComfyuiAttempt(args, { attempt_id: attempt.attempt_id, status: initialStatus, job_id: jobId, error: "" });
       aiAgentRememberComfyuiSubmit(args, job);
     }
+    const retryNote = result?.attempt > 1 ? `\n重試次數：${result.attempt - 1}` : "";
     AI_AGENT_STATE.messages.push({
       role: "assistant",
-      content: `ComfyUI 產圖已送出，正在確認後端接收狀態。\n工具：write_comfyui_generate\nJob ID：${jobId}\n狀態：${initialStatus}`,
+      content: `ComfyUI 產圖已送出，正在確認後端接收狀態。\n工具：write_comfyui_generate\nJob ID：${jobId}\n狀態：${initialStatus}${retryNote}`,
     });
     renderAiAgentThread();
     setAiAgentMessage("ComfyUI 產圖已送出，正在確認狀態", "info");

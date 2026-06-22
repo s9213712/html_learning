@@ -98,6 +98,10 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert "aiAgentExecuteToolPlan(plan, plannerText" in ai_agent_js
     assert "write_tool=執行 context.effective_tools" in ai_agent_js
     assert "async function aiAgentRunGenericWriteTool" in ai_agent_js
+    assert "async function aiAgentPostWriteToolExecute" in ai_agent_js
+    assert "function aiAgentServerBusyDelayMs" in ai_agent_js
+    assert "retry_after_seconds" in ai_agent_js
+    assert "等待 backpressure 重試" in ai_agent_js
     assert "function aiAgentScrollThreadToBottom" in ai_agent_js
     assert "host.scrollTop = host.scrollHeight" in ai_agent_js
     assert 'requestAnimationFrame(scroll)' in ai_agent_js
