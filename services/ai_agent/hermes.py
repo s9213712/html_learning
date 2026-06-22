@@ -372,6 +372,12 @@ AI_AGENT_TOOL_BLUEPRINT = {
         "min_role": "super_admin",
         "data_scope": "write_tool:members",
     },
+    "write_member_set_avatar_from_cloud": {
+        "label": "設定會員頭像",
+        "description": "root 專用白名單工具：從站內雲端圖片設定頭像，可帶入 AI 判斷的裁切與旋轉。",
+        "min_role": "super_admin",
+        "data_scope": "write_tool:members",
+    },
     "write_bug_report_review": {
         "label": "審核 Bug 回報",
         "description": "root 專用白名單寫入工具：審核 bug report 並可設定獎勵點數。",

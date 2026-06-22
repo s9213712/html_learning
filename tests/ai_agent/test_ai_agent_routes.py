@@ -234,7 +234,7 @@ def test_ai_agent_write_tools_include_expanded_capability_domains(tmp_path):
             "write_trading_place_order,write_remote_download_direct,write_cloud_drive_create_text,"
             "write_share_create,write_album_create,write_video_publish,write_transcode_hls,"
             "write_subtitle_upload,write_community_post_penalty,write_points_governance_execute,"
-            "write_points_wallet_transfer,write_server_restart,write_incident_enter"
+            "write_points_wallet_transfer,write_member_set_avatar_from_cloud,write_server_restart,write_incident_enter"
         ),
     }
     app = _build_app(db_path, {"id": 1, "username": "root", "role": "user"}, settings=settings)
@@ -481,6 +481,47 @@ def test_ai_agent_points_wallet_transfer_dispatches_submit_transaction(tmp_path)
     assert captured["destination_wallet_address"] == "HP_DST"
     assert captured["amount_points"] == 10
     assert captured["request_uuid"] == "ai-agent-transfer-test-1"
+
+
+def test_ai_agent_member_avatar_from_cloud_wraps_multipart_crop_decision(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "write",
+            "ai_agent_allowed_tools": "write_member_set_avatar_from_cloud",
+        },
+    )
+    captured = {}
+
+    @app.route("/api/admin/users/<int:user_id>/avatar", methods=["POST"])
+    def fake_avatar_upload(user_id):
+        captured["user_id"] = user_id
+        captured["cloud_file_id"] = request.form.get("cloud_file_id")
+        captured["crop_json"] = request.form.get("crop_json")
+        return _json_resp({"ok": True, "avatar_file_id": captured["cloud_file_id"], "avatar_crop": json.loads(captured["crop_json"])})
+
+    response = app.test_client().post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_member_set_avatar_from_cloud",
+        "confirm": "EXECUTE",
+        "arguments": {
+            "user_id": 1,
+            "cloud_file_id": "generated-avatar-file",
+            "crop": {"x": 8, "y": 4, "width": 512, "height": 512, "rotation": 90},
+            "zoom": 1.2,
+            "decision_reason": "portrait is sideways; rotate right and center crop",
+        },
+    })
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert captured["user_id"] == 1
+    assert captured["cloud_file_id"] == "generated-avatar-file"
+    assert json.loads(captured["crop_json"]) == {"x": 8, "y": 4, "width": 512, "height": 512, "rotation": 90}
+    assert payload["result"]["avatar_ai_decision"]["zoom"] == 1.2
 
 
 def test_ai_agent_safe_path_param_supports_market_symbol(tmp_path):

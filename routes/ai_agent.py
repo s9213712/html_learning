@@ -107,6 +107,18 @@ AI_AGENT_WRITE_TOOL_SPECS = {
         "required": {"user_id"},
         "write": True,
     },
+    "write_member_set_avatar_from_cloud": {
+        "label": "設定會員頭像",
+        "description": "從該會員自己的站內雲端圖片設定頭像；可帶入 AI 判斷的裁切、旋轉與縮放後 crop。",
+        "method": "DIRECT",
+        "path_params": {},
+        "body_fields": {
+            "user_id", "cloud_file_id", "existing_file_id", "crop", "crop_json",
+            "x", "y", "width", "height", "rotation", "zoom", "decision_reason",
+        },
+        "required": {"user_id", "cloud_file_id"},
+        "write": True,
+    },
     "write_bug_report_review": {
         "label": "審核 Bug 回報",
         "description": "審核 bug report，核准時可設定獎勵點數。",
@@ -1764,6 +1776,42 @@ def register_ai_agent_routes(app, deps):
         }
         return _dispatch_internal_multipart(f"/api/videos/{video_id}/subtitles", form_data)
 
+    def _execute_member_avatar_from_cloud(args):
+        try:
+            user_id = int(args.get("user_id") or 0)
+        except Exception:
+            user_id = 0
+        if user_id <= 0:
+            return 400, {"ok": False, "msg": "user_id 必須是正整數"}
+        cloud_file_id = str(args.get("cloud_file_id") or args.get("existing_file_id") or "").strip()
+        if not cloud_file_id:
+            return 400, {"ok": False, "msg": "cloud_file_id 必填"}
+        crop = args.get("crop") if isinstance(args.get("crop"), dict) else None
+        crop_json = args.get("crop_json")
+        if crop is None and isinstance(crop_json, str) and crop_json.strip():
+            try:
+                parsed = json.loads(crop_json)
+                crop = parsed if isinstance(parsed, dict) else None
+            except Exception:
+                crop = None
+        if crop is None:
+            crop = {}
+            for key in ("x", "y", "width", "height", "rotation"):
+                if key in args:
+                    crop[key] = args.get(key)
+        form_data = {
+            "cloud_file_id": cloud_file_id,
+            "crop_json": json.dumps(crop or {}, ensure_ascii=False),
+        }
+        status, payload = _dispatch_internal_multipart(f"/api/admin/users/{user_id}/avatar", form_data)
+        if isinstance(payload, dict):
+            payload.setdefault("avatar_ai_decision", {
+                "crop": crop or {},
+                "zoom": args.get("zoom"),
+                "decision_reason": str(args.get("decision_reason") or "")[:500],
+            })
+        return status, payload
+
     def _safe_tool_payload(payload, *, max_chars=16000):
         try:
             raw = json.dumps(payload, ensure_ascii=False, default=str)
@@ -1888,6 +1936,8 @@ def register_ai_agent_routes(app, deps):
                     status_code, payload = _execute_share_create(actor, args)
                 elif tool_name == "write_subtitle_upload":
                     status_code, payload = _execute_subtitle_upload(args)
+                elif tool_name == "write_member_set_avatar_from_cloud":
+                    status_code, payload = _execute_member_avatar_from_cloud(args)
                 else:
                     return json_resp({"ok": False, "msg": "DIRECT tool 尚未實作", "tool": tool_name}), 500
             else:
