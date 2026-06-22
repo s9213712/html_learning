@@ -407,6 +407,12 @@ def test_backpressure_qos_classification_matches_route_planes():
     assert backpressure_module.classify_request_qos("/api/chat/rooms", "POST") == "api_write"
 
 
+def test_backpressure_keeps_lightweight_background_polls_in_fast_lane():
+    assert backpressure_module.is_backpressure_fast_lane_path("/api/comfyui/resources")
+    assert backpressure_module.is_backpressure_fast_lane_path("/api/notifications/unread-count")
+    assert backpressure_module.is_backpressure_fast_lane_path("/api/games/multiplayer/invites/pending")
+
+
 def test_backpressure_auto_uses_gunicorn_threads_from_argv(monkeypatch):
     monkeypatch.delenv("HTML_LEARNING_BACKPRESSURE_THREAD_CAPACITY", raising=False)
     monkeypatch.delenv("HACKME_DEV_GUNICORN_THREADS", raising=False)
