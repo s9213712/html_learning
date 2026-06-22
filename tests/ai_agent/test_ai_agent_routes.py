@@ -234,7 +234,7 @@ def test_ai_agent_write_tools_include_expanded_capability_domains(tmp_path):
             "write_trading_place_order,write_remote_download_direct,write_cloud_drive_create_text,"
             "write_share_create,write_album_create,write_video_publish,write_transcode_hls,"
             "write_subtitle_upload,write_community_post_penalty,write_points_governance_execute,"
-            "write_server_restart,write_incident_enter"
+            "write_points_wallet_transfer,write_server_restart,write_incident_enter"
         ),
     }
     app = _build_app(db_path, {"id": 1, "username": "root", "role": "user"}, settings=settings)
@@ -439,6 +439,48 @@ def test_ai_agent_expanded_write_tool_dispatches_json_route(tmp_path):
     assert payload["ok"] is True
     assert captured["market_symbol"] == "BTC/POINTS"
     assert captured["side"] == "buy"
+
+
+def test_ai_agent_points_wallet_transfer_dispatches_submit_transaction(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "write",
+            "ai_agent_allowed_tools": "write_points_wallet_transfer",
+        },
+    )
+    captured = {}
+
+    @app.route("/api/points/transactions/submit", methods=["POST"])
+    def fake_points_transfer():
+        captured.update(request.get_json(silent=True) or {})
+        return _json_resp({"ok": True, "transaction_hash": "tx-1", "compact": bool(captured.get("compact"))})
+
+    response = app.test_client().post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_points_wallet_transfer",
+        "confirm": "EXECUTE",
+        "arguments": {
+            "source_wallet_address": "HP_SRC",
+            "destination_wallet_address": "HP_DST",
+            "amount_points": 10,
+            "fee_points": 1,
+            "request_uuid": "ai-agent-transfer-test-1",
+            "memo": "ai agent qa",
+            "signature": "test-signature",
+            "compact": True,
+        },
+    })
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert captured["source_wallet_address"] == "HP_SRC"
+    assert captured["destination_wallet_address"] == "HP_DST"
+    assert captured["amount_points"] == 10
+    assert captured["request_uuid"] == "ai-agent-transfer-test-1"
 
 
 def test_ai_agent_safe_path_param_supports_market_symbol(tmp_path):

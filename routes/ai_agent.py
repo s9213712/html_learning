@@ -694,6 +694,20 @@ AI_AGENT_WRITE_TOOL_SPECS = {
         "required": {"reason"},
         "write": True,
     },
+    "write_points_wallet_transfer": {
+        "label": "提交錢包轉帳",
+        "description": "提交站內點數鏈錢包轉帳交易；仍套用既有錢包、簽章、防重複與限制檢查。",
+        "method": "POST",
+        "path": "/api/points/transactions/submit",
+        "path_params": {},
+        "body_fields": {
+            "source_wallet_address", "destination_wallet_address", "from", "to",
+            "amount_points", "value", "fee_points", "request_uuid", "memo",
+            "signature", "wallet_signature", "compact",
+        },
+        "required": {"source_wallet_address", "destination_wallet_address", "amount_points", "request_uuid"},
+        "write": True,
+    },
     "write_server_integrity_repair": {
         "label": "修復完整性鏈",
         "description": "root 執行 audit/violation chain reseal 修復。",

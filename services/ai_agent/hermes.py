@@ -450,6 +450,7 @@ AI_AGENT_TOOL_BLUEPRINT = {
     "write_points_governance_sponsor": {"label": "贊助治理提案", "description": "root 專用白名單工具：贊助治理提案。", "min_role": "super_admin", "data_scope": "write_tool:governance"},
     "write_points_governance_cancel": {"label": "取消治理提案", "description": "root 專用白名單工具：取消治理提案。", "min_role": "super_admin", "data_scope": "write_tool:governance"},
     "write_points_wallet_freeze_proposal": {"label": "建立錢包凍結治理提案", "description": "root 專用白名單工具：建立錢包凍結治理提案。", "min_role": "super_admin", "data_scope": "write_tool:governance"},
+    "write_points_wallet_transfer": {"label": "提交錢包轉帳", "description": "root 專用白名單工具：提交站內點數鏈錢包轉帳交易。", "min_role": "super_admin", "data_scope": "write_tool:points_wallet"},
     "write_server_integrity_repair": {"label": "修復完整性鏈", "description": "root 專用白名單工具：修復完整性鏈。", "min_role": "super_admin", "data_scope": "write_tool:server"},
     "write_server_restart": {"label": "重啟伺服器", "description": "root 專用白名單工具：排程伺服器重啟。", "min_role": "super_admin", "data_scope": "write_tool:server"},
     "write_server_mode_checkpoint": {"label": "建立伺服器模式 checkpoint", "description": "root 專用白名單工具：建立 server-mode checkpoint。", "min_role": "super_admin", "data_scope": "write_tool:server"},

@@ -98,6 +98,9 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert "aiAgentExecuteToolPlan(plan, plannerText" in ai_agent_js
     assert "write_tool=執行 context.effective_tools" in ai_agent_js
     assert "async function aiAgentRunGenericWriteTool" in ai_agent_js
+    assert "function aiAgentScrollThreadToBottom" in ai_agent_js
+    assert "host.scrollTop = host.scrollHeight" in ai_agent_js
+    assert 'requestAnimationFrame(scroll)' in ai_agent_js
     assert "function aiAgentAnalyzeImageForComfyui" in ai_agent_js
     assert "function aiAgentAnalyzeTextForComfyui" in ai_agent_js
     assert "function aiAgentComfyuiTextHasSubject" in ai_agent_js
