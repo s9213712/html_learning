@@ -6,7 +6,7 @@ import threading
 from collections import Counter
 from datetime import datetime, timedelta
 import shutil
-from time import time
+from time import monotonic, time
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 from urllib.parse import urljoin, urlparse
@@ -1027,6 +1027,9 @@ def _backend_headers(settings, *, session_key=""):
 def _json_request(settings, method, path, payload=None, *, session_key="", timeout=None):
     base_url = _backend_base_url(settings)
     url = urljoin(base_url.rstrip("/") + "/", path.lstrip("/"))
+    effective_timeout = max(1, int(timeout or _backend_timeout(settings)))
+    read_timeout = max(1, min(10, effective_timeout))
+    deadline = monotonic() + effective_timeout
     body = None
     if payload is not None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -1037,8 +1040,25 @@ def _json_request(settings, method, path, payload=None, *, session_key="", timeo
         method=method.upper(),
     )
     try:
-        with urllib_request.urlopen(req, timeout=timeout or _backend_timeout(settings)) as resp:
-            raw = resp.read(10 * 1024 * 1024)
+        with urllib_request.urlopen(req, timeout=effective_timeout) as resp:
+            try:
+                resp.fp.raw._sock.settimeout(read_timeout)
+            except Exception:
+                pass
+            chunks = []
+            total = 0
+            max_bytes = 10 * 1024 * 1024
+            while True:
+                if monotonic() > deadline:
+                    raise TimeoutError(f"AI Agent backend request exceeded {effective_timeout}s")
+                chunk = resp.read(64 * 1024)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+                if total > max_bytes:
+                    raise AiAgentError("AI Agent backend 回應超過大小上限")
+            raw = b"".join(chunks)
             if not raw:
                 return {}
             return json.loads(raw.decode("utf-8"))

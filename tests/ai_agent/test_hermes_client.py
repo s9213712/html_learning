@@ -148,6 +148,34 @@ def test_ai_agent_rejects_image_when_disabled():
         )
 
 
+def test_json_request_enforces_total_read_timeout(monkeypatch):
+    class SlowResponse:
+        def read(self, _size):
+            return b'{"still":"streaming"}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    times = iter([0.0, 0.5, 2.0])
+
+    monkeypatch.setattr(hermes_client.urllib_request, "urlopen", lambda *_args, **_kwargs: SlowResponse())
+    monkeypatch.setattr(hermes_client, "monotonic", lambda: next(times))
+
+    with pytest.raises(AiAgentError) as exc:
+        hermes_client._json_request(
+            {"ai_agent_api_base_url": "http://127.0.0.1:8642/v1"},
+            "POST",
+            "/chat/completions",
+            {"stream": False},
+            timeout=1,
+        )
+
+    assert "exceeded 1s" in str(exc.value)
+
+
 def test_ai_agent_health_checks_base_path_when_present(monkeypatch):
     class FakeResponse:
         def __init__(self, payload):
@@ -220,7 +248,13 @@ def test_ai_agent_health_marks_mock_backend_as_unhealthy(monkeypatch):
 
 def test_ai_agent_health_openai_compatible_uses_models_endpoint(monkeypatch):
     class FakeResponse:
+        def __init__(self):
+            self._sent = False
+
         def read(self, _size):
+            if self._sent:
+                return b""
+            self._sent = True
             return json.dumps({"object": "list", "data": [{"id": "gpt-oss:120b-cloud"}]}).encode("utf-8")
 
         def __enter__(self):
