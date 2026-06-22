@@ -117,6 +117,8 @@ AI_AGENT_WRITE_TOOL_SPECS = {
             "user_id", "cloud_file_id", "existing_file_id", "crop", "crop_json",
             "x", "y", "width", "height", "rotation", "zoom", "decision_reason",
             "confidence", "subject_detected", "crop_quality", "issues", "target_description",
+            "preflight_ok", "preflight_crop_quality", "preflight_issues",
+            "final_avatar_ok", "final_crop_quality", "final_issues",
         },
         "required": {"user_id", "cloud_file_id"},
         "write": True,
@@ -1806,14 +1808,31 @@ def register_ai_agent_routes(app, deps):
             "zoom": args.get("zoom"),
             "decision_reason": str(args.get("decision_reason") or "")[:500],
         }
-        for key in ("confidence", "subject_detected", "crop_quality", "issues", "target_description"):
+        for key in (
+            "confidence", "subject_detected", "crop_quality", "issues", "target_description",
+            "preflight_ok", "preflight_crop_quality", "preflight_issues",
+            "final_avatar_ok", "final_crop_quality", "final_issues",
+        ):
             if key in args:
                 payload[key] = args.get(key)
         return payload
 
     def _avatar_ai_decision_reject_reason(args):
-        if not any(key in args for key in ("confidence", "subject_detected", "crop_quality", "decision_reason", "issues")):
+        visual_keys = (
+            "confidence", "subject_detected", "crop_quality", "decision_reason", "issues",
+            "preflight_ok", "preflight_crop_quality", "preflight_issues",
+            "final_avatar_ok", "final_crop_quality", "final_issues",
+        )
+        if not any(key in args for key in visual_keys):
             return ""
+        explicit_bool_checks = (
+            ("preflight_ok", "視覺預檢判斷裁切後頭像不合格"),
+            ("final_avatar_ok", "最終視覺驗證判斷頭像不合格"),
+        )
+        for key, message in explicit_bool_checks:
+            value = args.get(key)
+            if value is False or str(value or "").strip().lower() in {"false", "no", "0"}:
+                return message
         subject_detected = args.get("subject_detected")
         if subject_detected is False or str(subject_detected or "").strip().lower() in {"false", "no", "0"}:
             return "未偵測到清晰頭像主體"
@@ -1823,12 +1842,26 @@ def register_ai_agent_routes(app, deps):
             confidence = None
         if confidence is not None and confidence < 0.55:
             return f"視覺信心過低（confidence={confidence:.2f}）"
-        crop_quality = str(args.get("crop_quality") or "").strip().lower()
-        if crop_quality in {"poor", "invalid", "bad", "unusable", "low"}:
-            return f"裁切品質不合格（crop_quality={crop_quality}）"
+        bad_quality_values = {"poor", "invalid", "bad", "unusable", "low", "needs_adjustment", "off_center", "text_interference"}
+        for key, label in (
+            ("crop_quality", "crop_quality"),
+            ("preflight_crop_quality", "preflight_crop_quality"),
+            ("final_crop_quality", "final_crop_quality"),
+        ):
+            crop_quality = str(args.get(key) or "").strip().lower()
+            if crop_quality in bad_quality_values:
+                return f"裁切品質不合格（{label}={crop_quality}）"
         issues = args.get("issues")
-        issue_text = " ".join(str(item) for item in issues) if isinstance(issues, list) else str(issues or "")
-        negative_text = " ".join([str(args.get("decision_reason") or ""), issue_text]).lower()
+        preflight_issues = args.get("preflight_issues")
+        final_issues = args.get("final_issues")
+        issue_parts = []
+        for value in (issues, preflight_issues, final_issues):
+            issue_parts.append(" ".join(str(item) for item in value) if isinstance(value, list) else str(value or ""))
+        issue_text = " ".join(issue_parts)
+        negative_text = " ".join([
+            str(args.get("decision_reason") or ""),
+            issue_text,
+        ]).lower()
         negative_markers = (
             "no discernible human",
             "no clear human",
@@ -1836,6 +1869,12 @@ def register_ai_agent_routes(app, deps):
             "no face",
             "not a portrait",
             "blank image",
+            "face_off_center",
+            "off center",
+            "off-center",
+            "excessive_whitespace",
+            "text_interference",
+            "watermark",
             "無清晰人像",
             "沒有清晰人像",
             "沒有主體",

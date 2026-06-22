@@ -206,6 +206,80 @@ def test_avatar_crop_near_edge_keeps_requested_box_inside_image(tmp_path):
     assert cropped.getpixel((256, 256)) == (10, 80, 220)
 
 
+def test_avatar_upload_handles_1024_square_crop_without_blanking(tmp_path):
+    pytest.importorskip("PIL")
+    from PIL import Image
+
+    db_path = tmp_path / "avatar.db"
+    storage_root = tmp_path / "storage"
+    storage_root.mkdir()
+    _seed_db(db_path)
+    actor_box = {"actor": {"id": 1, "username": "alice", "role": "user", "member_level": "trusted", "effective_level": "trusted"}}
+    client = _build_app(db_path, storage_root, actor_box).test_client()
+
+    source = Image.new("RGB", (1024, 1024), color=(245, 245, 245))
+    for x in range(312, 712):
+        for y in range(220, 820):
+            source.putpixel((x, y), (32, 72, 180))
+    buf = io.BytesIO()
+    source.save(buf, format="JPEG", quality=92)
+    buf.seek(0)
+
+    res = client.post(
+        "/api/admin/users/1/avatar",
+        data={
+            "file": (buf, "avatar-1024.jpg", "image/jpeg"),
+            "crop_json": '{"x":212,"y":212,"width":600,"height":600}',
+        },
+        content_type="multipart/form-data",
+    )
+    assert res.status_code == 200
+
+    avatar_res = client.get("/api/admin/users/1/avatar")
+    assert avatar_res.status_code == 200
+    cropped = Image.open(io.BytesIO(avatar_res.data)).convert("RGB")
+    assert cropped.size == (512, 512)
+    r, g, b = cropped.getpixel((256, 256))
+    assert r < 70 and 45 <= g <= 100 and b > 140
+
+
+def test_avatar_upload_handles_1920x1080_wide_crop_without_server_failure(tmp_path):
+    pytest.importorskip("PIL")
+    from PIL import Image
+
+    db_path = tmp_path / "avatar.db"
+    storage_root = tmp_path / "storage"
+    storage_root.mkdir()
+    _seed_db(db_path)
+    actor_box = {"actor": {"id": 1, "username": "alice", "role": "user", "member_level": "trusted", "effective_level": "trusted"}}
+    client = _build_app(db_path, storage_root, actor_box).test_client()
+
+    source = Image.new("RGB", (1920, 1080), color=(250, 250, 250))
+    for x in range(760, 1160):
+        for y in range(280, 800):
+            source.putpixel((x, y), (180, 42, 62))
+    buf = io.BytesIO()
+    source.save(buf, format="JPEG", quality=90)
+    buf.seek(0)
+
+    res = client.post(
+        "/api/admin/users/1/avatar",
+        data={
+            "file": (buf, "avatar-1920x1080.jpg", "image/jpeg"),
+            "crop_json": '{"x":640,"y":120,"width":720,"height":720}',
+        },
+        content_type="multipart/form-data",
+    )
+    assert res.status_code == 200
+
+    avatar_res = client.get("/api/admin/users/1/avatar")
+    assert avatar_res.status_code == 200
+    cropped = Image.open(io.BytesIO(avatar_res.data)).convert("RGB")
+    assert cropped.size == (512, 512)
+    r, g, b = cropped.getpixel((256, 256))
+    assert r > 140 and g < 80 and b < 100
+
+
 def test_user_can_select_existing_cloud_image_as_avatar(tmp_path):
     pytest.importorskip("PIL")
     from PIL import Image
