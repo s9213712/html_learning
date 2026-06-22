@@ -364,7 +364,7 @@ SETTING_DETAILS = {
     },
     "ai_agent_max_prompt_chars": {
         "label": "AI Agent 文字上限",
-        "description": "單次請求文字內容的最大字元數，避免用戶把主 server thread 卡住太久。",
+        "description": "單次請求送往模型的最大字元數；長對話會自動保留最新上下文並裁掉最舊訊息。",
     },
     "ai_agent_audit_cpu_percent_threshold": {
         "label": "AI Agent 審計 CPU 閾值 (%)",

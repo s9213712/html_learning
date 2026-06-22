@@ -163,7 +163,7 @@ DEFAULT_SETTINGS = {
     "ai_agent_allowed_tools": "",
     "ai_agent_audit_interval_minutes": AI_AGENT_AUDIT_INTERVAL_MINUTES_DEFAULT,
     "ai_agent_request_timeout_seconds": 120,
-    "ai_agent_max_prompt_chars": 20000,
+    "ai_agent_max_prompt_chars": 80000,
     "ai_agent_audit_cpu_percent_threshold": AI_AGENT_AUDIT_CPU_PERCENT_THRESHOLD_DEFAULT,
     "ai_agent_audit_ram_percent_threshold": AI_AGENT_AUDIT_RAM_PERCENT_THRESHOLD_DEFAULT,
     "ai_agent_audit_disk_percent_threshold": AI_AGENT_AUDIT_DISK_PERCENT_THRESHOLD_DEFAULT,

@@ -906,7 +906,7 @@ def public_ai_agent_settings(settings, *, actor=None):
         "api_key_configured": bool(key),
         "model": normalize_ai_agent_model(settings.get("ai_agent_model")) or DEFAULT_AI_AGENT_MODEL,
         "request_timeout_seconds": parse_int_setting(settings, "ai_agent_request_timeout_seconds", 120, 5, 600),
-        "max_prompt_chars": parse_int_setting(settings, "ai_agent_max_prompt_chars", 20000, 1000, 200000),
+        "max_prompt_chars": parse_int_setting(settings, "ai_agent_max_prompt_chars", 80000, 1000, 200000),
         "allow_image_input": bool(settings.get("ai_agent_allow_image_input", True)),
         "allow_tool_runs": bool(settings.get("ai_agent_allow_tool_runs", False)),
         "operation_mode": audit_settings["operation_mode"],
@@ -1586,6 +1586,22 @@ def _message_text_length(messages):
     return total
 
 
+def _trim_chat_history_to_budget(messages, max_chars):
+    """Keep the newest chat turns when accumulated history exceeds the prompt budget."""
+    if _message_text_length(messages) <= max_chars:
+        return list(messages or [])
+    kept = []
+    total = 0
+    for message in reversed(list(messages or [])):
+        message_len = _message_text_length([message])
+        if not kept and message_len > max_chars:
+            return [message]
+        if total + message_len <= max_chars:
+            kept.append(message)
+            total += message_len
+    return list(reversed(kept))
+
+
 def _normalize_chat_messages(messages, *, prompt="", image_data_url="", allow_image_input=True):
     normalized = []
     source = messages if isinstance(messages, list) else []
@@ -1674,11 +1690,11 @@ def ai_agent_chat(settings, *, messages=None, prompt="", image_data_url="", mode
         allow_tool_runs=bool(public["allow_tool_runs"]),
         operation_mode=public["operation_mode"],
     )
-    sanitized_messages = [{"role": "system", "content": system_prompt}, *sanitized_messages]
-
     max_prompt_chars = public["max_prompt_chars"]
-    if _message_text_length(sanitized_messages[1:]) > max_prompt_chars:
+    sanitized_messages = _trim_chat_history_to_budget(sanitized_messages, max_prompt_chars)
+    if _message_text_length(sanitized_messages) > max_prompt_chars:
         raise AiAgentError(f"訊息內容超過上限 {max_prompt_chars} 字", http_status=413)
+    sanitized_messages = [{"role": "system", "content": system_prompt}, *sanitized_messages]
     requested_model = str(model or "").strip()
     model_name = (
         normalize_ai_agent_model(requested_model)

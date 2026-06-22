@@ -52,6 +52,12 @@ def test_ai_agent_public_settings_redacts_secret_and_keeps_connection_fields():
     }
 
 
+def test_ai_agent_public_settings_default_prompt_limit_is_relaxed():
+    payload = public_ai_agent_settings({})
+
+    assert payload["max_prompt_chars"] == 80000
+
+
 def test_ai_agent_base_url_rejects_credentials_query_and_fragment():
     assert normalize_ai_agent_api_base_url("http://127.0.0.1:8642/v1") == "http://127.0.0.1:8642/v1"
     assert normalize_ai_agent_api_base_url("https://agent.example.test/v1/") == "https://agent.example.test/v1"
@@ -355,6 +361,42 @@ def test_ai_agent_chat_empty_model_uses_configured_allowed_model(monkeypatch):
     assert captured["payload"]["model"] == "gpt-oss:120b-cloud"
     assert result["content"] == "{\"ok\":true}"
     assert result["usage"]["total_tokens"] == 12
+
+
+def test_ai_agent_chat_trims_old_history_before_prompt_limit(monkeypatch):
+    captured = {}
+
+    def fake_json_request(_settings, method, path, payload=None, session_key="", timeout=None):
+        assert path == "/chat/completions"
+        captured["payload"] = payload
+        return {
+            "model": "gpt-oss:120b",
+            "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+        }
+
+    monkeypatch.setattr(hermes_client, "_json_request", fake_json_request)
+
+    result = hermes_client.ai_agent_chat(
+        {
+            "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
+            "ai_agent_api_key": "dummy-key",
+            "ai_agent_model": "gpt-oss:120b-cloud",
+            "ai_agent_max_prompt_chars": 1000,
+        },
+        messages=[
+            {"role": "user", "content": "OLD-" * 400},
+            {"role": "assistant", "content": "PREVIOUS-" * 100},
+            {"role": "user", "content": "最新指令：請查伺服器狀態"},
+        ],
+        model="",
+    )
+
+    sent_messages = captured["payload"]["messages"]
+    sent_text = "\n".join(str(message.get("content") or "") for message in sent_messages)
+    assert result["content"] == "ok"
+    assert sent_messages[0]["role"] == "system"
+    assert "最新指令" in sent_text
+    assert "OLD-" not in sent_text
 
 
 def test_ai_agent_chat_detects_error_finish_reason(monkeypatch):
