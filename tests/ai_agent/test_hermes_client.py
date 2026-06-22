@@ -911,6 +911,66 @@ def test_ai_agent_audit_scan_locks_down_write_tools_on_sensitive_setting_change(
     assert any(event["args"][0] == "AI_AGENT_AUDIT_MAIN_AI_GUARD" for event in audit_events)
 
 
+def test_ai_agent_audit_scan_does_not_lock_down_on_operation_mode_only(tmp_path):
+    clear_ai_agent_audit_scan_state()
+    db_path = tmp_path / "ai_agent_audit_guard_mode_only.sqlite"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE secure_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT,
+            action TEXT,
+            ip TEXT,
+            user TEXT,
+            success INTEGER,
+            detail TEXT
+        )
+        """
+    )
+    now = datetime.now().replace(microsecond=0)
+    conn.execute(
+        "INSERT INTO secure_audit (ts, action, ip, user, success, detail) VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            now.isoformat(),
+            "SETTINGS_CHANGED",
+            "127.0.0.1",
+            "root",
+            1,
+            json.dumps({"changed_keys": ["ai_agent_operation_mode"], "scope": "system_settings"}),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    def get_db():
+        db = sqlite3.connect(db_path)
+        db.row_factory = sqlite3.Row
+        return db
+
+    scan = run_ai_agent_audit_scan(
+        {
+            "ai_agent_audit_interval_minutes": 1,
+            "ai_agent_audit_ip_event_rate_threshold": 100,
+            "ai_agent_audit_ip_event_rate_window_minutes": 1,
+            "ai_agent_audit_security_event_rate_threshold": 100,
+            "ai_agent_audit_security_event_rate_window_minutes": 1,
+            "ai_agent_audit_cpu_percent_threshold": 100,
+            "ai_agent_audit_ram_percent_threshold": 100,
+            "ai_agent_audit_disk_percent_threshold": 100,
+            "ai_agent_audit_auto_block_suspect_ip": False,
+            "ai_agent_audit_notify_root": False,
+        },
+        get_db=get_db,
+        actor={"id": 1, "username": "root", "role": "super_admin"},
+        force=True,
+    )
+
+    assert scan["status"] == "ok"
+    assert not scan["interventions"]
+    assert ai_agent_write_guard_status()["blocked"] is False
+
+
 def test_ai_agent_write_guard_persistent_clear_event_unblocks(tmp_path):
     clear_ai_agent_audit_scan_state()
     db_path = tmp_path / "ai_agent_audit_guard_clear.sqlite"

@@ -807,13 +807,16 @@ def _safe_parse_iso(value):
         return None
 
 
-AI_AGENT_SENSITIVE_SETTING_KEYS = {
+AI_AGENT_LOCKDOWN_SETTING_KEYS = {
     "ai_agent_allowed_tools",
-    "ai_agent_operation_mode",
     "ai_agent_api_base_url",
     "ai_agent_provider",
     "ai_agent_model",
     "ai_agent_allowed_models",
+}
+
+AI_AGENT_SENSITIVE_SETTING_KEYS = AI_AGENT_LOCKDOWN_SETTING_KEYS | {
+    "ai_agent_operation_mode",
 }
 
 
@@ -1411,7 +1414,8 @@ def run_ai_agent_audit_scan(settings, *, get_db, get_audit_db=None, actor=None, 
             continue
         changed_keys = set(_settings_changed_keys(_row_get(row, "detail")))
         sensitive_keys = sorted(changed_keys.intersection(AI_AGENT_SENSITIVE_SETTING_KEYS))
-        if not sensitive_keys:
+        lockdown_keys = sorted(changed_keys.intersection(AI_AGENT_LOCKDOWN_SETTING_KEYS))
+        if not lockdown_keys:
             continue
         event_user = str(_row_get(row, "user") or "-").strip()
         event_ts = str(_row_get(row, "ts") or "").strip()
@@ -1419,13 +1423,14 @@ def run_ai_agent_audit_scan(settings, *, get_db, get_audit_db=None, actor=None, 
             "ai_agent.sensitive_settings_changed",
             "alert",
             "AI Agent 敏感設定近期被修改，已要求暫停 write-tools 直到 root 檢查。",
-            {"keys": sensitive_keys, "user": event_user, "ts": event_ts},
+            {"keys": lockdown_keys, "sensitive_keys": sensitive_keys, "user": event_user, "ts": event_ts},
         )
         interventions.append({
             "type": "ai_agent_write_tools_lockdown",
             "status": "active",
             "reason": "sensitive_settings_changed",
-            "keys": sensitive_keys,
+            "keys": lockdown_keys,
+            "sensitive_keys": sensitive_keys,
             "user": event_user,
             "ts": event_ts,
         })
@@ -1437,7 +1442,7 @@ def run_ai_agent_audit_scan(settings, *, get_db, get_audit_db=None, actor=None, 
                 actor_name or "-",
                 ua=get_ua() if callable(get_ua) else "",
                 success=False,
-                detail=f"sensitive_settings_changed keys={','.join(sensitive_keys)} user={event_user}",
+                detail=f"sensitive_settings_changed keys={','.join(lockdown_keys)} user={event_user}",
             )
         break
 
