@@ -295,7 +295,7 @@ def test_ai_agent_chat_detects_hermes_failed_envelope(monkeypatch):
     def fake_json_request(_settings, method, path, payload=None, session_key="", timeout=None):
         assert path == "/chat/completions"
         return {
-            "model": "qwen3-vl:235b-instruct-cloud",
+            "model": "qwen3.5:cloud",
             "choices": [
                 {
                     "finish_reason": "error",
@@ -319,10 +319,10 @@ def test_ai_agent_chat_detects_hermes_failed_envelope(monkeypatch):
             {
                 "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
                 "ai_agent_api_key": "dummy-key",
-                "ai_agent_allowed_models": "qwen3-vl:235b-instruct-cloud",
+                "ai_agent_allowed_models": "qwen3.5:cloud",
             },
             messages=[{"role": "user", "content": "分析圖片"}],
-            model="qwen3-vl:235b-instruct-cloud",
+            model="qwen3.5:cloud",
         )
     assert "後端執行失敗" in str(exc.value)
 
@@ -353,7 +353,7 @@ def test_ai_agent_chat_empty_model_uses_configured_allowed_model(monkeypatch):
             "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
             "ai_agent_api_key": "dummy-key",
             "ai_agent_model": "gpt-oss:120b-cloud",
-            "ai_agent_allowed_models": "gpt-oss:120b-cloud,qwen3-vl:235b-instruct-cloud",
+            "ai_agent_allowed_models": "gpt-oss:120b-cloud,qwen3.5:cloud",
         },
         messages=[{"role": "user", "content": "只回覆 JSON"}],
         model="",
@@ -404,7 +404,7 @@ def test_ai_agent_chat_detects_error_finish_reason(monkeypatch):
     def fake_json_request(_settings, method, path, payload=None, session_key="", timeout=None):
         assert path == "/chat/completions"
         return {
-            "model": "qwen3-vl:235b-instruct-cloud",
+            "model": "qwen3.5:cloud",
             "choices": [
                 {
                     "finish_reason": "error",
@@ -423,10 +423,10 @@ def test_ai_agent_chat_detects_error_finish_reason(monkeypatch):
             {
                 "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
                 "ai_agent_api_key": "dummy-key",
-                "ai_agent_allowed_models": "qwen3-vl:235b-instruct-cloud",
+                "ai_agent_allowed_models": "qwen3.5:cloud",
             },
             messages=[{"role": "user", "content": "分析圖片"}],
-            model="qwen3-vl:235b-instruct-cloud",
+            model="qwen3.5:cloud",
         )
     assert "後端執行失敗" in str(exc.value)
 
