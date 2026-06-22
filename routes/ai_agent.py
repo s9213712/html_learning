@@ -5,6 +5,7 @@ import io
 import os
 import re
 import shutil
+import threading
 from urllib.parse import urlencode
 
 from flask import request
@@ -22,6 +23,10 @@ from services.ai_agent.hermes import (
     public_ai_agent_settings,
 )
 from services.storage.catalog import create_share_link
+
+
+AI_AGENT_CHAT_WORKER_LIMIT = max(1, int(os.environ.get("HACKME_AI_AGENT_CHAT_WORKER_LIMIT", "8") or "8"))
+AI_AGENT_CHAT_WORKERS = threading.BoundedSemaphore(AI_AGENT_CHAT_WORKER_LIMIT)
 
 
 AI_AGENT_WRITE_TOOL_SPECS = {
@@ -1356,6 +1361,36 @@ def register_ai_agent_routes(app, deps):
             return None, (json_resp({"ok": False, "msg": "請求內容格式錯誤"}), 400)
         return data, None
 
+    def _run_ai_agent_chat_with_timeout(timeout_seconds, **kwargs):
+        timeout_seconds = max(5, min(610, int(timeout_seconds or 120)))
+        if not AI_AGENT_CHAT_WORKERS.acquire(blocking=False):
+            raise AiAgentError(
+                "AI Agent chat 執行槽已滿，請稍後重試",
+                http_status=503,
+            )
+        box = {}
+
+        def worker():
+            try:
+                box["result"] = ai_agent_chat(**kwargs)
+            except BaseException as exc:
+                box["exc"] = exc
+            finally:
+                try:
+                    AI_AGENT_CHAT_WORKERS.release()
+                except ValueError:
+                    pass
+
+        thread = threading.Thread(target=worker, name="ai-agent-chat-request", daemon=True)
+        thread.start()
+        thread.join(timeout_seconds)
+        if thread.is_alive():
+            box["timed_out"] = True
+            return None, True
+        if "exc" in box:
+            raise box["exc"]
+        return box.get("result"), False
+
     def _ensure_ai_agent_conversation_schema(conn):
         conn.execute(
             """
@@ -2470,9 +2505,12 @@ def register_ai_agent_routes(app, deps):
         binding = _actor_session_binding()
         base_key = f"hackme:{user_id}:{session_id or 'default'}"
         session_key = f"hackme:{user_id}:{binding}:{session_id or 'default'}" if binding else base_key
+        public_settings = public_ai_agent_settings(settings, actor=actor)
+        route_timeout_seconds = max(5, min(610, int(public_settings.get("request_timeout_seconds") or 120) + 5))
         try:
-            result = ai_agent_chat(
-                settings,
+            result, timed_out = _run_ai_agent_chat_with_timeout(
+                route_timeout_seconds,
+                settings=settings,
                 messages=data.get("messages"),
                 prompt=data.get("prompt") or "",
                 image_data_url=data.get("image_data_url") or "",
@@ -2480,6 +2518,21 @@ def register_ai_agent_routes(app, deps):
                 session_key=session_key,
                 actor=actor,
             )
+            if timed_out:
+                audit(
+                    "AI_AGENT_CHAT",
+                    get_client_ip(),
+                    user=_actor_value(actor, "username", "-"),
+                    ua=get_ua(),
+                    success=False,
+                    detail=f"status=504,error=route_timeout_{route_timeout_seconds}s,image={bool(data.get('image_data_url'))}",
+                )
+                return json_resp({
+                    "ok": False,
+                    "msg": f"AI Agent backend 請求逾時（{route_timeout_seconds} 秒），已停止等待。請稍後重試或檢查 cloud vision 模型服務。",
+                    "status": 504,
+                    "payload": {"route_timeout_seconds": route_timeout_seconds},
+                }), 504
         except AiAgentError as exc:
             response_status = int(getattr(exc, "http_status", None) or 502)
             if response_status < 400 or response_status > 599:
