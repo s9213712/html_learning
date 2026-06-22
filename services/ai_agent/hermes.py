@@ -515,9 +515,10 @@ AI_AGENT_ROLE_SCOPES = {
 class AiAgentError(Exception):
     """Raised when the configured AI Agent backend cannot satisfy a request."""
 
-    def __init__(self, message, *, status=None, payload=None):
+    def __init__(self, message, *, status=None, payload=None, http_status=None):
         self.status = status
         self.payload = payload
+        self.http_status = http_status
         super().__init__(message)
 
 
@@ -1619,10 +1620,10 @@ def _normalize_chat_messages(messages, *, prompt="", image_data_url="", allow_im
         normalized.append({"role": "user", "content": str(prompt)})
     if image_data_url:
         if not allow_image_input:
-            raise AiAgentError("目前設定不允許圖片輸入")
+            raise AiAgentError("目前設定不允許圖片輸入", http_status=403)
         image_data_url = str(image_data_url or "")
         if not image_data_url.startswith("data:image/") or len(image_data_url) > MAX_AI_AGENT_IMAGE_DATA_URL_CHARS:
-            raise AiAgentError("圖片資料格式錯誤或超過大小限制")
+            raise AiAgentError("圖片資料格式錯誤或超過大小限制", http_status=400)
         if not normalized:
             normalized.append({"role": "user", "content": []})
         last = normalized[-1]
@@ -1645,7 +1646,7 @@ def ai_agent_chat(settings, *, messages=None, prompt="", image_data_url="", mode
         allow_image_input=public["allow_image_input"],
     )
     if not normalized_messages:
-        raise AiAgentError("請輸入訊息")
+        raise AiAgentError("請輸入訊息", http_status=400)
 
     sanitized_messages = [
         message
@@ -1653,18 +1654,18 @@ def ai_agent_chat(settings, *, messages=None, prompt="", image_data_url="", mode
         if str(message.get("role") or "").strip() in {"user", "assistant"}
     ]
     if not sanitized_messages:
-        raise AiAgentError("請輸入訊息")
+        raise AiAgentError("請輸入訊息", http_status=400)
     actor_role = normalize_ai_agent_actor_role(actor if actor is not None else "user")
     behavior = _normalize_ai_agent_behavior(settings, actor_role=actor_role)
 
     if public["operation_mode"] == "readonly" and _contains_audit_mode_prohibited_action(_extract_text_from_messages(normalized_messages)):
-        raise AiAgentError("AI Agent 目前為唯讀模式，僅提供查詢與排查建議，不接受操作類指令。")
+        raise AiAgentError("AI Agent 目前為唯讀模式，僅提供查詢與排查建議，不接受操作類指令。", http_status=403)
 
     if public["operation_mode"] == "audit" and actor_role != "super_admin":
-        raise AiAgentError("AI Agent 目前為審計模式，僅 root 可執行。")
+        raise AiAgentError("AI Agent 目前為審計模式，僅 root 可執行。", http_status=403)
 
     if public["operation_mode"] == "write" and actor_role != "super_admin":
-        raise AiAgentError("AI Agent 目前為執行寫入模式，僅 root 可執行。")
+        raise AiAgentError("AI Agent 目前為執行寫入模式，僅 root 可執行。", http_status=403)
 
     system_prompt = _ai_agent_system_prompt(
         behavior,
@@ -1677,7 +1678,7 @@ def ai_agent_chat(settings, *, messages=None, prompt="", image_data_url="", mode
 
     max_prompt_chars = public["max_prompt_chars"]
     if _message_text_length(sanitized_messages[1:]) > max_prompt_chars:
-        raise AiAgentError(f"訊息內容超過上限 {max_prompt_chars} 字")
+        raise AiAgentError(f"訊息內容超過上限 {max_prompt_chars} 字", http_status=413)
     requested_model = str(model or "").strip()
     model_name = (
         normalize_ai_agent_model(requested_model)
@@ -1685,10 +1686,10 @@ def ai_agent_chat(settings, *, messages=None, prompt="", image_data_url="", mode
         else (public["model"] or DEFAULT_AI_AGENT_MODEL)
     )
     if not model_name:
-        raise AiAgentError("model 格式不正確")
+        raise AiAgentError("model 格式不正確", http_status=400)
     allowed_models = [item for item in str(public.get("allowed_models") or "").split(",") if item]
     if allowed_models and model_name not in allowed_models:
-        raise AiAgentError("model 不在允許清單，請改用允許的模型")
+        raise AiAgentError("model 不在允許清單，請改用允許的模型", http_status=400)
     payload = {
         "model": model_name,
         "messages": sanitized_messages,

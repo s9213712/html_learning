@@ -2240,15 +2240,18 @@ def register_ai_agent_routes(app, deps):
                 actor=actor,
             )
         except AiAgentError as exc:
+            response_status = int(getattr(exc, "http_status", None) or 502)
+            if response_status < 400 or response_status > 599:
+                response_status = 502
             audit(
                 "AI_AGENT_CHAT",
                 get_client_ip(),
                 user=_actor_value(actor, "username", "-"),
                 ua=get_ua(),
                 success=False,
-                detail=f"status={exc.status or '-'},error={str(exc)[:180]}",
+                detail=f"status={exc.status or response_status or '-'},error={str(exc)[:180]}",
             )
-            return json_resp({"ok": False, "msg": str(exc), "status": exc.status, "payload": exc.payload}), 502
+            return json_resp({"ok": False, "msg": str(exc), "status": exc.status, "payload": exc.payload}), response_status
 
         if _is_mock_chat_reply(result.get("content", "")):
             _audit_agent_event("AI_AGENT_CHAT", actor, success=False, detail="mock_backend_reply")

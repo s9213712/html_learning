@@ -1397,6 +1397,30 @@ def test_ai_agent_chat_rejects_mock_reply(tmp_path, monkeypatch):
     assert "mock" in payload["msg"]
 
 
+def test_ai_agent_chat_uses_validation_http_status(tmp_path, monkeypatch):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(db_path, {"id": 2, "username": "userA", "role": "user"}, settings={
+        "module_ai_agent_min_role": "user",
+        "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
+    })
+
+    def fake_chat(settings, *, messages=None, prompt="", image_data_url="", model="", session_key="", actor=None):
+        raise AiAgentError("訊息內容超過上限 20000 字", http_status=413)
+
+    monkeypatch.setattr("routes.ai_agent.ai_agent_chat", fake_chat)
+
+    response = app.test_client().post("/api/ai-agent/chat", json={
+        "session_id": "long-prompt-test",
+        "messages": [{"role": "user", "content": "x" * 20001}],
+    })
+    payload = response.get_json()
+
+    assert response.status_code == 413
+    assert payload["ok"] is False
+    assert "訊息內容超過上限" in payload["msg"]
+
+
 def test_ai_agent_chat_rejects_mock_reply_even_if_service_bypasses_guard(tmp_path, monkeypatch):
     db_path = tmp_path / "ai_agent_routes.db"
     _build_db(db_path)
