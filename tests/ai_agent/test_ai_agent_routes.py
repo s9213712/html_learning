@@ -681,6 +681,34 @@ def test_ai_agent_frontend_routes_emit_audit_events(monkeypatch, tmp_path):
     )
 
 
+def test_ai_agent_models_backend_unavailable_degrades_without_5xx(monkeypatch, tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    audit_events = []
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        audit_events=audit_events,
+    )
+
+    def unavailable_models(settings):
+        raise AiAgentError("AI Agent backend 無法連線：connection refused")
+
+    monkeypatch.setattr("routes.ai_agent.ai_agent_models", unavailable_models)
+    response = app.test_client().get("/api/ai-agent/models")
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload["ok"] is False
+    assert payload["models"] == {}
+    assert payload["backend_unavailable"] is True
+    assert any(
+        event["args"][0] == "AI_AGENT_MODELS"
+        and event["kwargs"].get("success") is False
+        for event in audit_events
+    )
+
+
 def test_ai_agent_status_only_super_admin_gets_audit_scan(monkeypatch, tmp_path):
     clear_ai_agent_audit_scan_state()
     db_path = tmp_path / "ai_agent_routes.db"

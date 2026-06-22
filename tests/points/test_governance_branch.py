@@ -1382,6 +1382,77 @@ def test_governance_clock_fast_forward_enters_safe_mode(tmp_path, monkeypatch):
     assert safe_mode["verification"]["violation"] == "wall_clock_fast_forward"
 
 
+def test_governance_clock_uses_suspend_aware_boottime_when_available(tmp_path, monkeypatch):
+    service = _service(tmp_path, user_count=3, mode="production")
+    baseline_wall = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+    service._governance_clock_wall = baseline_wall
+    service._governance_clock_monotonic = 1000.0
+
+    class SuspendedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            value = baseline_wall + timedelta(hours=13)
+            if tz is None:
+                return value.replace(tzinfo=None)
+            return value.astimezone(tz)
+
+    class BootTimeClock:
+        CLOCK_BOOTTIME = 7
+
+        @staticmethod
+        def clock_gettime(clock_id):
+            assert clock_id == BootTimeClock.CLOCK_BOOTTIME
+            return 1000.0 + (13 * 60 * 60)
+
+        @staticmethod
+        def monotonic():
+            return 1005.0
+
+    monkeypatch.setattr(points_service_module, "datetime", SuspendedDateTime)
+    monkeypatch.setattr(points_service_module, "_monotonic_time", BootTimeClock)
+    conn = service.get_db()
+    try:
+        service.ensure_schema(conn)
+        service._governance_assert_clock_safe_locked(conn, "qa_host_suspend")
+    finally:
+        conn.close()
+
+    assert service.safe_mode_status()["safe_mode"] is False
+    assert service._governance_clock_monotonic == 1000.0 + (13 * 60 * 60)
+
+
+def test_governance_clock_tolerates_small_long_running_host_drift(tmp_path, monkeypatch):
+    service = _service(tmp_path, user_count=3, mode="production")
+    baseline_wall = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+    service._governance_clock_wall = baseline_wall
+    service._governance_clock_monotonic = 1000.0
+
+    class DriftedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            value = baseline_wall + timedelta(seconds=858)
+            if tz is None:
+                return value.replace(tzinfo=None)
+            return value.astimezone(tz)
+
+    class DriftedMonotonic:
+        @staticmethod
+        def monotonic():
+            return 1815.0
+
+    monkeypatch.setattr(points_service_module, "datetime", DriftedDateTime)
+    monkeypatch.setattr(points_service_module, "_monotonic_time", DriftedMonotonic)
+    conn = service.get_db()
+    try:
+        service.ensure_schema(conn)
+        service._governance_assert_clock_safe_locked(conn, "qa_host_drift_under_load")
+    finally:
+        conn.close()
+
+    assert service.safe_mode_status()["safe_mode"] is False
+    assert service._governance_clock_monotonic == 1815.0
+
+
 def test_emergency_recovery_branch_is_governance_branch_not_ledger_rollback(tmp_path):
     service = _service(tmp_path, user_count=10)
     root = _actor(1, "root", "super_admin")

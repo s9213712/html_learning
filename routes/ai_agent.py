@@ -885,13 +885,19 @@ def register_ai_agent_routes(app, deps):
             ("sdxl", 40),
             ("xl", 20),
         )
+        def version_score(option):
+            key = _comfyui_model_match_key(option)
+            versions = [int(match) for match in re.findall(r"(?:^|v)(\d{1,5})(?=$|[a-z])", key)]
+            if not versions:
+                versions = [int(match) for match in re.findall(r"\d{1,5}", key)]
+            return max(versions) if versions else 0
         scored = []
         for index, option in enumerate(options):
             key = _comfyui_model_match_key(option)
             score = sum(weight for term, weight in preferred_terms if term in key)
-            scored.append((score, -index, option))
+            scored.append((score, version_score(option), -index, option))
         scored.sort(reverse=True)
-        return scored[0][2]
+        return scored[0][3]
 
     def _resolve_comfyui_checkpoint_name(raw_name, model_options):
         requested = str(raw_name or "").strip()
@@ -1393,7 +1399,14 @@ def register_ai_agent_routes(app, deps):
             models = ai_agent_models(settings)
         except AiAgentError as exc:
             _audit_agent_event("AI_AGENT_MODELS", actor, success=False, detail=f"status={exc.status or '-'},error={str(exc)[:180]}")
-            return json_resp({"ok": False, "msg": str(exc), "status": exc.status, "payload": exc.payload}), 502
+            return json_resp({
+                "ok": False,
+                "msg": str(exc),
+                "status": exc.status,
+                "payload": exc.payload,
+                "models": {},
+                "backend_unavailable": True,
+            })
         model_count = len(models.get("data") or []) if isinstance(models, dict) else 0
         _audit_agent_event("AI_AGENT_MODELS", actor, success=True, detail=f"models={model_count}")
         return json_resp({"ok": True, "models": models})

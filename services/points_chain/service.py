@@ -76,6 +76,8 @@ PC1_CANONICAL_SETTLEMENT_RAILS = {
     "withdrawal_bridge_confirm",
 }
 GOVERNANCE_CLOCK_JUMP_TOLERANCE_SECONDS = 30
+GOVERNANCE_CLOCK_DRIFT_TOLERANCE_RATIO = 0.10
+GOVERNANCE_CLOCK_DRIFT_TOLERANCE_MAX_SECONDS = 5 * 60
 WALLET_CREATION_FEE_BASE_POINTS = 25
 WALLET_CREATION_FEE_MULTIPLIER = 2
 WALLET_CREATION_FEE_MAX_POINTS = 100_000
@@ -122,6 +124,18 @@ def _is_duplicate_column_error(exc):
     return isinstance(exc, sqlite3.OperationalError) and "duplicate column name" in str(exc).lower()
 
 
+def _governance_monotonic_seconds():
+    """Use a suspend-aware clock when the platform exposes one."""
+    clock_id = getattr(_monotonic_time, "CLOCK_BOOTTIME", None)
+    clock_gettime = getattr(_monotonic_time, "clock_gettime", None)
+    if clock_id is not None and callable(clock_gettime):
+        try:
+            return float(clock_gettime(clock_id))
+        except Exception:
+            pass
+    return float(_monotonic_time.monotonic())
+
+
 class PointsLedgerService:
     _schema_lock = threading.Lock()
     _schema_ready_paths = set()
@@ -144,7 +158,7 @@ class PointsLedgerService:
         self._security_event_recorder = security_event_recorder or (lambda *a, **kw: None)
         self._governance_clock_lock = threading.Lock()
         self._governance_clock_wall = datetime.now(timezone.utc)
-        self._governance_clock_monotonic = _monotonic_time.monotonic()
+        self._governance_clock_monotonic = _governance_monotonic_seconds()
         self._governance_clock_last_error = ""
         self._observability_lock = threading.Lock()
         self._last_transfer_compact_sweep = {}
@@ -238,7 +252,7 @@ class PointsLedgerService:
         and host time monitoring are still required for full host compromise.
         """
         wall_now = datetime.now(timezone.utc)
-        monotonic_now = _monotonic_time.monotonic()
+        monotonic_now = _governance_monotonic_seconds()
         with self._governance_clock_lock:
             previous_wall = self._governance_clock_wall
             previous_monotonic = self._governance_clock_monotonic
@@ -246,10 +260,15 @@ class PointsLedgerService:
             monotonic_elapsed = monotonic_now - previous_monotonic
             forward_jump = wall_elapsed - max(0.0, monotonic_elapsed)
             backward_jump = -wall_elapsed
+            elapsed_basis = max(abs(wall_elapsed), abs(monotonic_elapsed), 1.0)
+            drift_tolerance = min(
+                GOVERNANCE_CLOCK_DRIFT_TOLERANCE_MAX_SECONDS,
+                max(GOVERNANCE_CLOCK_JUMP_TOLERANCE_SECONDS, elapsed_basis * GOVERNANCE_CLOCK_DRIFT_TOLERANCE_RATIO),
+            )
             violation = ""
-            if forward_jump > GOVERNANCE_CLOCK_JUMP_TOLERANCE_SECONDS:
+            if forward_jump > drift_tolerance:
                 violation = "wall_clock_fast_forward"
-            elif backward_jump > GOVERNANCE_CLOCK_JUMP_TOLERANCE_SECONDS:
+            elif backward_jump > drift_tolerance:
                 violation = "wall_clock_moved_backward"
             if violation:
                 details = {
@@ -259,7 +278,10 @@ class PointsLedgerService:
                     "previous_wall": previous_wall.replace(microsecond=0).isoformat().replace("+00:00", "Z"),
                     "wall_elapsed_seconds": round(wall_elapsed, 3),
                     "monotonic_elapsed_seconds": round(monotonic_elapsed, 3),
-                    "tolerance_seconds": GOVERNANCE_CLOCK_JUMP_TOLERANCE_SECONDS,
+                    "tolerance_seconds": round(drift_tolerance, 3),
+                    "base_tolerance_seconds": GOVERNANCE_CLOCK_JUMP_TOLERANCE_SECONDS,
+                    "drift_tolerance_ratio": GOVERNANCE_CLOCK_DRIFT_TOLERANCE_RATIO,
+                    "drift_tolerance_max_seconds": GOVERNANCE_CLOCK_DRIFT_TOLERANCE_MAX_SECONDS,
                     "guard_model": "wall_clock_vs_monotonic_v1",
                 }
                 self._governance_clock_last_error = canonical_json(details)
