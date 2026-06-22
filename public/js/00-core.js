@@ -1419,18 +1419,26 @@ function renderServerVersion(meta) {
 }
 
 async function loadSiteConfig() {
-  try {
-    const res = await fetch(API + "/site-config", { credentials: "same-origin" });
-    const json = await res.json().catch(() => ({}));
-    if (json && json.ok && json.site_config) {
-      applySiteConfig(json.site_config);
+  let lastError = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const res = await fetch(API + "/site-config", { credentials: "same-origin" });
+      const json = await res.json().catch(() => ({}));
+      if (json && json.ok && json.site_config) {
+        applySiteConfig(json.site_config);
+      }
+      if (json && json.ok && json.server_meta) {
+        renderServerVersion(json.server_meta);
+      }
+      return;
+    } catch (err) {
+      lastError = err;
+      if (attempt === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 350));
+      }
     }
-    if (json && json.ok && json.server_meta) {
-      renderServerVersion(json.server_meta);
-    }
-  } catch (err) {
-    console.error("site config load failed", err);
   }
+  console.warn("site config load skipped after retry", lastError);
 }
 
 function setServerConnectionState(state, label) {

@@ -1698,6 +1698,16 @@ def register_ai_agent_routes(app, deps):
         return "", f"模型名稱「{requested}」不在 ComfyUI checkpoint 清單中。可用模型：{preview}", []
 
     def _build_write_tool_request(tool_name, spec, args):
+        args = dict(args or {})
+        if tool_name in {"write_cloud_drive_remote_download", "write_remote_download_direct", "write_remote_download_bt"}:
+            for alias in ("url", "download_url", "source_url", "magnet_uri", "magnet", "torrent_url"):
+                value = str(args.get(alias) or "").strip()
+                if value:
+                    args["url"] = value
+                    break
+        if tool_name == "write_cloud_drive_remote_download" and not str(args.get("source_type") or "").strip():
+            url_value = str(args.get("url") or "").strip().lower()
+            args["source_type"] = "bt" if url_value.startswith("magnet:") or url_value.endswith(".torrent") else "direct"
         missing = [
             key for key in sorted(spec.get("required") or [])
             if _is_missing_arg(args.get(key))

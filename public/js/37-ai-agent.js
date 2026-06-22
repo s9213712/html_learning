@@ -791,6 +791,7 @@ async function aiAgentPlanToolAction(userText, options = {}) {
     "args 對 write_tool 應依 context.effective_tools 的工具語意填入站內欄位；例如頭像工具可填 user_id, cloud_file_id, crop{x,y,width,height,rotation}, zoom, decision_reason。",
     "工具語意：readonly=讀取指定 readonly_scope 的站內唯讀資料；comfyui_status=讀取 ComfyUI 目前可用性與生圖進度；comfyui_generate=建立新的 ComfyUI 生圖任務；comfyui_rerun=沿用上一筆生圖參數並套用使用者修改；write_tool=執行 context.effective_tools 中的白名單站內工具；community_post_draft=只產生發文草稿，不直接發布。",
     "若 action=write_tool，tool 必須完全等於 context.effective_tools[].name，args 只能包含使用者明確提供或可從 recent_messages/站內上下文推得的站內欄位；不得產生 shell、SQL、外部檔案路徑或站外操作。",
+    "若 action=write_tool 且使用者明確要求建立、更新、刪除、執行、下載、轉帳、交易或治理處置，execute_write 必須是 true；只有使用者要草稿、詢問、資料不足或權限不足時才可為 false。",
     "若使用者目的需要工具，但 effective_tools 或權限不足，仍可輸出該 action；前端會處理提權、拒絕或反問。",
     "若使用者目的不明或缺少必要資料，action=clarify 並用 question 提出一個具體反問。",
     "若使用者以短句詢問某件事是否開始、完成、跑出結果或目前進度，請先依 recent_messages 與 submitted_comfyui_jobs 判斷目標；若仍不確定，action=readonly 並 readonly_scope=all，讓前端回報真實可見任務狀態。",
@@ -1020,6 +1021,18 @@ async function aiAgentExecuteToolPlan(plan, userText, input, options = {}) {
     return true;
   }
   if (action === "write_tool") {
+    if (!aiAgentPlanConfirmedWrite(plan)) {
+      const toolName = String(plan?.tool || "").trim();
+      AI_AGENT_STATE.messages.push({ role: "user", content: userText });
+      AI_AGENT_STATE.messages.push({
+        role: "assistant",
+        content: `我識別到可能需要站內工具${toolName ? `：${toolName}` : ""}，但規劃結果未確認這是可執行寫入，所以沒有執行。請明確指定要執行後再送出。`,
+      });
+      renderAiAgentThread();
+      if (input) input.value = "";
+      setAiAgentMessage("未確認寫入，已停止執行", "info");
+      return true;
+    }
     return aiAgentRunGenericWriteTool(plan, userText, input);
   }
   if (action === "comfyui_generate" || action === "comfyui_rerun") {

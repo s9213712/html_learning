@@ -656,6 +656,39 @@ def test_ai_agent_expanded_write_tool_dispatches_json_route(tmp_path):
     assert captured["side"] == "buy"
 
 
+def test_ai_agent_remote_download_bt_aliases_magnet_uri_to_url(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "write",
+            "ai_agent_allowed_tools": "write_remote_download_bt",
+        },
+    )
+    captured = {}
+
+    @app.route("/api/cloud-drive/remote-download/torrent-tasks", methods=["POST"])
+    def fake_remote_download_bt():
+        captured.update(request.get_json(silent=True) or {})
+        return _json_resp({"ok": True, "task_id": "bt-1"})
+
+    magnet_uri = "magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567&dn=audit-test.iso"
+    response = app.test_client().post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_remote_download_bt",
+        "confirm": "EXECUTE",
+        "arguments": {"magnet_uri": magnet_uri, "filename": "audit-test.iso"},
+    })
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert captured["url"] == magnet_uri
+    assert "magnet_uri" not in captured
+    assert captured["filename"] == "audit-test.iso"
+
+
 def test_ai_agent_points_wallet_transfer_dispatches_submit_transaction(tmp_path):
     db_path = tmp_path / "ai_agent_routes.db"
     _build_db(db_path)

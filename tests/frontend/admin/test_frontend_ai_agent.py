@@ -59,10 +59,13 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert 'id="ai-agent-comfyui-vae"' in html
     assert 'id="ai-agent-comfyui-generate-btn"' in html
     assert 'id="s-module-ai-agent-min-role"' in html
-    _warn_if_asset_cache_version_changed(html, "/js/37-ai-agent.js", "20260623-ai-agent-image-context-v3")
+    _warn_if_asset_cache_version_changed(html, "/js/37-ai-agent.js", "20260623-ai-agent-download-gate-v1")
     _warn_if_asset_cache_version_changed(html, "/js/90-bootstrap.js", "20260611-ai-agent-comfyui-write-tool")
 
     assert '"ai-agent": "feature_ai_agent_enabled"' in core_js
+    assert '/js/00-core.js?v=20260623-site-config-retry' in html
+    assert "site config load skipped after retry" in core_js
+    assert "site config load failed" not in core_js
     assert "normalizeModuleSettingKey(moduleKey)" in core_js
     assert '"module_ai_agent_min_role": settings.get("module_ai_agent_min_role")' in public_routes_py
     assert 'tab-module-ai-agent' in core_js
@@ -169,6 +172,9 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert 'const mode = hasAttachedImage ? "image" : selectedMode;' in ai_agent_js
     assert "若 input_mode=image，請用語意判斷使用者是要圖片問答、圖片分析產 prompt，還是要求用附圖執行生圖" in ai_agent_js
     assert "若 input_mode=image 且使用者意圖依上下文仍不明，請輸出 chat 或 clarify；不得設定 execute_write=true" in ai_agent_js
+    assert "若 action=write_tool 且使用者明確要求建立、更新、刪除、執行、下載、轉帳、交易或治理處置，execute_write 必須是 true" in ai_agent_js
+    assert "未確認寫入，已停止執行" in ai_agent_js
+    assert "規劃結果未確認這是可執行寫入，所以沒有執行" in ai_agent_js
     assert "action=readonly 並 readonly_scope=all" in ai_agent_js
     assert "effective_tools" in ai_agent_js
     assert "writable_tools" in ai_agent_js
