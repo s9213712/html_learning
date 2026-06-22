@@ -1678,7 +1678,14 @@ def ai_agent_chat(settings, *, messages=None, prompt="", image_data_url="", mode
     max_prompt_chars = public["max_prompt_chars"]
     if _message_text_length(sanitized_messages[1:]) > max_prompt_chars:
         raise AiAgentError(f"訊息內容超過上限 {max_prompt_chars} 字")
-    model_name = normalize_ai_agent_model(model) or public["model"] or DEFAULT_AI_AGENT_MODEL
+    requested_model = str(model or "").strip()
+    model_name = (
+        normalize_ai_agent_model(requested_model)
+        if requested_model
+        else (public["model"] or DEFAULT_AI_AGENT_MODEL)
+    )
+    if not model_name:
+        raise AiAgentError("model 格式不正確")
     allowed_models = [item for item in str(public.get("allowed_models") or "").split(",") if item]
     if allowed_models and model_name not in allowed_models:
         raise AiAgentError("model 不在允許清單，請改用允許的模型")

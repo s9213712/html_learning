@@ -320,6 +320,43 @@ def test_ai_agent_chat_detects_hermes_failed_envelope(monkeypatch):
     assert "後端執行失敗" in str(exc.value)
 
 
+def test_ai_agent_chat_empty_model_uses_configured_allowed_model(monkeypatch):
+    captured = {}
+
+    def fake_json_request(_settings, method, path, payload=None, session_key="", timeout=None):
+        assert path == "/chat/completions"
+        captured["payload"] = payload
+        return {
+            "model": "gpt-oss:120b",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "{\"ok\":true}",
+                    },
+                },
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
+        }
+
+    monkeypatch.setattr(hermes_client, "_json_request", fake_json_request)
+
+    result = hermes_client.ai_agent_chat(
+        {
+            "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
+            "ai_agent_api_key": "dummy-key",
+            "ai_agent_model": "gpt-oss:120b-cloud",
+            "ai_agent_allowed_models": "gpt-oss:120b-cloud,qwen3-vl:235b-instruct-cloud",
+        },
+        messages=[{"role": "user", "content": "只回覆 JSON"}],
+        model="",
+    )
+
+    assert captured["payload"]["model"] == "gpt-oss:120b-cloud"
+    assert result["content"] == "{\"ok\":true}"
+    assert result["usage"]["total_tokens"] == 12
+
+
 def test_ai_agent_chat_detects_error_finish_reason(monkeypatch):
     def fake_json_request(_settings, method, path, payload=None, session_key="", timeout=None):
         assert path == "/chat/completions"
