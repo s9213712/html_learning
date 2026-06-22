@@ -13,6 +13,8 @@ const AI_AGENT_STATE = {
   actor: {},
   audit: {},
   modelIds: [],
+  unavailableModelIds: new Set(),
+  unavailableModelReasons: {},
   sessionId: "",
   accountScope: "",
   comfyuiWatchJobs: {},
@@ -1178,10 +1180,11 @@ function aiAgentNormalizeAnalysisArgs(parsed, userText) {
 }
 
 async function aiAgentAnalyzeImageForComfyui(userText) {
+  await aiAgentRefreshModelState();
   const selectedModel = aiAgentVisionModel();
   const selectableModels = aiAgentSelectableModels();
   if (!selectedModel) {
-    throw new Error("目前沒有可用的圖片理解模型。請在 AI Agent 模型允許清單加入 vision 模型（例如 qwen3-vl）後再試。");
+    throw new Error("目前沒有可用的圖片理解模型。請在 AI Agent 模型允許清單加入 /models 回傳且支援圖片的模型後再試。");
   }
   if (selectableModels.length && !selectableModels.includes(selectedModel)) {
     throw new Error("請從模型選單選擇可用模型後再做圖片分析。");
@@ -1207,6 +1210,9 @@ async function aiAgentAnalyzeImageForComfyui(userText) {
   const json = await res.json().catch(() => ({}));
   const content = json?.message?.content || json?.msg || "";
   if (!res.ok || !json.ok || isMockAiAgentReply(content)) {
+    if (aiAgentImageModelUnavailable(json, res.status)) {
+      aiAgentMarkModelUnavailable(selectedModel, aiAgentImageAnalysisError(json, res.status));
+    }
     throw new Error(aiAgentImageAnalysisError(json, res.status));
   }
   const parsed = aiAgentExtractJsonObject(content);
@@ -2092,7 +2098,7 @@ function renderAiAgentStatus(json) {
   const health = json?.health || {};
   const status = $("ai-agent-status");
   if (status) {
-    const providerLabel = settings.provider === "openai_compatible" ? "OpenAI-compatible" : "Hermes Agent";
+    const providerLabel = settings.provider === "openai_compatible" ? "OpenAI-compatible" : "Local AI Backend";
     status.textContent = health.ok ? `${providerLabel} 已連線` : `${providerLabel} 未連線${health.msg ? `：${health.msg}` : ""}`;
     status.style.color = health.ok ? "var(--accent2)" : "var(--muted)";
   }
@@ -2240,7 +2246,10 @@ function aiAgentSelectableModels() {
   });
   const configured = AI_AGENT_STATE.settings?.model || "";
   if (configured && !modelIds.includes(configured)) modelIds.unshift(configured);
-  return modelIds.filter((id) => !allowedModels.length || allowedModels.includes(id));
+  return modelIds.filter((id) => {
+    if (AI_AGENT_STATE.unavailableModelIds?.has(id)) return false;
+    return !allowedModels.length || allowedModels.includes(id);
+  });
 }
 
 function aiAgentSelectedTextModel() {
@@ -2262,7 +2271,7 @@ function aiAgentSelectedTextModel() {
 function aiAgentVisionModel() {
   const options = aiAgentSelectableModels();
   const selected = ($("ai-agent-model")?.value || "").trim();
-  const vision = options.find((id) => /(?:^|[-_:])vl(?:[-_:]|$)|vision|qwen3-vl/i.test(id));
+  const vision = options.find((id) => /(?:^|[-_:])vl(?:[-_:]|$)|vision|multimodal/i.test(id));
   if (vision) {
     const select = $("ai-agent-model");
     if (select && select.value !== vision) select.value = vision;
@@ -2274,18 +2283,39 @@ function aiAgentVisionModel() {
 function aiAgentImageAnalysisError(json = {}, status = 0) {
   const raw = String(json?.msg || json?.error || json?.message?.content || "").trim();
   const lowered = raw.toLowerCase();
+  const effectiveStatus = Number(json?.status || status || 0);
+  if (effectiveStatus === 410 || lowered.includes("retired") || lowered.includes("not found") || lowered.includes("unavailable") || lowered.includes("已下架")) {
+    return raw
+      ? `圖片理解模型不可用或已下架：${raw}`
+      : "圖片理解模型不可用或已下架。請改用目前 /models 可呼叫的 cloud vision 模型。";
+  }
   if (lowered.includes("does not support image input") || lowered.includes("不支援圖片")) {
-    return "目前選用模型不支援圖片分析，請改用 vision 模型（例如 qwen3-vl）後再試。";
+    return "目前選用模型不支援圖片分析，請改用 /models 回傳且支援圖片的模型後再試。";
   }
   if (status >= 500 || lowered.includes("internal server error")) {
-    return `圖片分析後端目前不可用（HTTP ${status || 500}）。${raw ? `後端訊息：${raw}` : "請稍後重試或檢查 Ollama/Hermes vision 模型服務。"}`;
+    return `圖片分析後端目前不可用（HTTP ${status || 500}）。${raw ? `後端訊息：${raw}` : "請稍後重試或檢查 vision 模型服務。"}`;
   }
   return raw || `圖片分析失敗（HTTP ${status || "-"}）`;
 }
 
+function aiAgentImageModelUnavailable(json = {}, status = 0) {
+  const raw = String(json?.msg || json?.error || json?.payload?.error || "").toLowerCase();
+  const effectiveStatus = Number(json?.status || status || 0);
+  return effectiveStatus === 410 || raw.includes("http 410") || raw.includes("retired") || raw.includes("not found") || raw.includes("unavailable") || raw.includes("已下架");
+}
+
+function aiAgentMarkModelUnavailable(modelId, reason = "") {
+  const id = String(modelId || "").trim();
+  if (!id) return;
+  AI_AGENT_STATE.unavailableModelIds.add(id);
+  AI_AGENT_STATE.unavailableModelReasons[id] = String(reason || "backend rejected model").slice(0, 180);
+  syncAiAgentModelSelect();
+  renderAiAgentModels({ data: (AI_AGENT_STATE.modelIds || []).map((model) => ({ id: model })) });
+}
+
 function aiAgentImageTransportError(err) {
   const raw = String(err?.message || err || "Load failed").trim();
-  return `圖片分析請求傳輸失敗：${raw}。請重試或改用較小圖片；若仍失敗，代表目前 Hermes/Ollama vision 後端不可用。`;
+  return `圖片分析請求傳輸失敗：${raw}。請重試或改用較小圖片；若仍失敗，代表目前 vision 後端不可用。`;
 }
 
 function aiAgentLooksLikeComfyuiRecall(prompt) {
@@ -2496,8 +2526,10 @@ function renderAiAgentModels(modelsPayload) {
   }
   host.innerHTML = modelIds.slice(0, 16).map((id) => {
     const allowed = !allowedModels.length || allowedModels.includes(id);
-    const suffix = allowed ? "" : "（未在允許清單）";
-    return `<button class="drive-file-row ai-agent-model-option${allowed ? "" : " disabled"}" type="button" ${allowed ? "" : "disabled"} data-ai-agent-model="${sanitize(id)}">${sanitize(id || "-")}${sanitize(suffix)}</button>`;
+    const unavailable = AI_AGENT_STATE.unavailableModelIds?.has(id);
+    const reason = AI_AGENT_STATE.unavailableModelReasons?.[id] || "";
+    const suffix = unavailable ? `（不可用${reason ? `：${reason}` : ""}）` : (allowed ? "" : "（未在允許清單）");
+    return `<button class="drive-file-row ai-agent-model-option${allowed && !unavailable ? "" : " disabled"}" type="button" ${allowed && !unavailable ? "" : "disabled"} data-ai-agent-model="${sanitize(id)}">${sanitize(id || "-")}${sanitize(suffix)}</button>`;
   }).join("");
   host.querySelectorAll("[data-ai-agent-model]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -2508,6 +2540,19 @@ function renderAiAgentModels(modelsPayload) {
       }
     });
   });
+}
+
+async function aiAgentRefreshModelState() {
+  const statusRes = await apiFetch(API + "/ai-agent/status", { credentials: "same-origin" });
+  const statusJson = await statusRes.json().catch(() => ({}));
+  if (statusRes.ok && statusJson.ok) {
+    renderAiAgentStatus(statusJson);
+  }
+  const modelsRes = await apiFetch(API + "/ai-agent/models", { credentials: "same-origin" });
+  const modelsJson = await modelsRes.json().catch(() => ({}));
+  if (modelsRes.ok && modelsJson.ok) {
+    renderAiAgentModels(modelsJson.models || {});
+  }
 }
 
 function renderAiAgentAuditStatus(audit = {}, actor = {}) {
@@ -2694,6 +2739,7 @@ function handleAiAgentImagePick(event) {
   reader.onload = () => {
     AI_AGENT_STATE.imageDataUrl = String(reader.result || "");
     AI_AGENT_STATE.imageLoading = false;
+    if ($("ai-agent-mode")) $("ai-agent-mode").value = "image";
     if ($("ai-agent-image-state")) $("ai-agent-image-state").textContent = file.name || "已附加圖片";
   };
   reader.onerror = () => {
@@ -2723,7 +2769,9 @@ async function sendAiAgentMessage() {
   if (AI_AGENT_STATE.sending) return;
   const input = $("ai-agent-input");
   const prompt = (input?.value || "").trim();
-  const mode = $("ai-agent-mode")?.value || "text";
+  const selectedMode = $("ai-agent-mode")?.value || "text";
+  const hasAttachedImage = !!AI_AGENT_STATE.imageDataUrl;
+  const mode = hasAttachedImage ? "image" : selectedMode;
   if (!prompt && !(mode === "image" && AI_AGENT_STATE.imageDataUrl)) {
     setAiAgentMessage("請輸入訊息", "err");
     return;
@@ -2790,7 +2838,7 @@ async function sendAiAgentMessage() {
   if (mode === "image" && !selectedModel) {
     AI_AGENT_STATE.sending = false;
     if (sendBtn) sendBtn.disabled = false;
-    setAiAgentMessage("目前沒有可用的圖片理解模型。請在 AI Agent 模型允許清單加入 vision 模型（例如 qwen3-vl）後再試。", "err");
+    setAiAgentMessage("目前沒有可用的圖片理解模型。請在 AI Agent 模型允許清單加入 /models 回傳且支援圖片的模型後再試。", "err");
     return;
   }
   if (selectableModels.length && (!selectedModel || !selectableModels.includes(selectedModel))) {

@@ -2560,7 +2560,7 @@ def register_ai_agent_routes(app, deps):
             _audit_agent_event("AI_AGENT_CHAT", actor, success=False, detail="mock_backend_reply")
             return json_resp({
                 "ok": False,
-                "msg": "AI Agent 後端仍回傳 mock 回覆，請確認 ai_agent_api_base_url 是否指向真實 Hermes endpoint",
+                "msg": "AI Agent 後端仍回傳 mock 回覆，請確認 ai_agent_api_base_url 是否指向真實 AI Agent endpoint",
             }), 502
 
         audit(

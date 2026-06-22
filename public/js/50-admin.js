@@ -2639,9 +2639,9 @@ async function loadSettings() {
   if ($("ai-agent-api-key-state")) {
     $("ai-agent-api-key-state").textContent = s.ai_agent_api_key_configured
       ? "目前已儲存 AI Agent API Key；留空儲存不會變更。"
-      : "目前未儲存 AI Agent API Key。本機 Hermes local-only 模式可不填。";
+      : "目前未儲存 AI Agent API Key。本機 local-only backend 可不填。";
   }
-  if ($("s-ai-agent-model")) $("s-ai-agent-model").value = s.ai_agent_model || "hermes-agent";
+  if ($("s-ai-agent-model")) $("s-ai-agent-model").value = s.ai_agent_model || "";
   if ($("s-ai-agent-operation-mode")) $("s-ai-agent-operation-mode").value = s.ai_agent_operation_mode || "assist";
   if ($("s-ai-agent-allowed-models")) $("s-ai-agent-allowed-models").value = s.ai_agent_allowed_models || "";
   if ($("s-ai-agent-allowed-tools")) $("s-ai-agent-allowed-tools").value = s.ai_agent_allowed_tools || "";
@@ -4971,7 +4971,7 @@ async function saveSettings() {
     ai_agent_api_base_url: ($("s-ai-agent-api-base-url")?.value || "http://127.0.0.1:8642/v1").trim(),
     ai_agent_api_key: ($("s-ai-agent-api-key")?.value || "").trim(),
     ai_agent_api_key_clear: !!$("s-ai-agent-api-key-clear")?.checked,
-    ai_agent_model: ($("s-ai-agent-model")?.value || "hermes-agent").trim(),
+    ai_agent_model: ($("s-ai-agent-model")?.value || "").trim(),
     ai_agent_operation_mode: $("s-ai-agent-operation-mode")?.value || "assist",
     ai_agent_allowed_models: ($("s-ai-agent-allowed-models")?.value || "").trim(),
     ai_agent_allowed_tools: ($("s-ai-agent-allowed-tools")?.value || "").trim(),

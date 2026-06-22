@@ -1,4 +1,5 @@
 import pytest
+import io
 import json
 import sqlite3
 from datetime import datetime, timedelta
@@ -105,6 +106,7 @@ def test_ai_agent_chat_injects_persona_and_task_scope(monkeypatch):
             "ai_agent_task_site_guide": True,
             "ai_agent_task_troubleshoot": False,
             "ai_agent_allow_tool_runs": False,
+            "ai_agent_model": "test-model",
         },
         messages=[{"role": "user", "content": "我想知道為什麼下載沒反應"}],
     )
@@ -174,6 +176,26 @@ def test_json_request_enforces_total_read_timeout(monkeypatch):
         )
 
     assert "exceeded 1s" in str(exc.value)
+
+
+def test_json_request_preserves_string_error_payload(monkeypatch):
+    def fake_urlopen(_req, timeout=5):
+        body = json.dumps({"error": "vision-cloud-model was retired at 2026-06-16"}).encode("utf-8")
+        raise urllib_error.HTTPError("http://127.0.0.1:8642/v1/chat/completions", 410, "Gone", {}, io.BytesIO(body))
+
+    monkeypatch.setattr(hermes_client.urllib_request, "urlopen", fake_urlopen)
+
+    with pytest.raises(AiAgentError) as exc:
+        hermes_client._json_request(
+            {"ai_agent_api_base_url": "http://127.0.0.1:8642/v1"},
+            "POST",
+            "/chat/completions",
+            {"stream": False},
+        )
+
+    assert exc.value.status == 410
+    assert "retired at 2026-06-16" in str(exc.value)
+    assert exc.value.payload == {"error": "vision-cloud-model was retired at 2026-06-16"}
 
 
 def test_ai_agent_health_checks_base_path_when_present(monkeypatch):
@@ -319,6 +341,7 @@ def test_ai_agent_chat_detects_mock_reply(monkeypatch):
             {
                 "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
                 "ai_agent_api_key": "dummy-key",
+                "ai_agent_model": "test-model",
             },
             messages=[{"role": "user", "content": "幫我看一下下載進度"}],
         )
@@ -487,6 +510,7 @@ def test_ai_agent_chat_detects_mock_reply_with_whitespace(monkeypatch):
             {
                 "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
                 "ai_agent_api_key": "dummy-key",
+                "ai_agent_model": "test-model",
             },
             messages=[{"role": "user", "content": "幫我看一下下載進度"}],
         )
@@ -515,6 +539,7 @@ def test_ai_agent_chat_detects_mock_reply_simplified_chinese(monkeypatch):
             {
                 "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
                 "ai_agent_api_key": "dummy-key",
+                "ai_agent_model": "test-model",
             },
             messages=[{"role": "user", "content": "幫我看一下下載進度"}],
         )
@@ -536,6 +561,7 @@ def test_ai_agent_chat_detects_mock_reply_in_nested_field(monkeypatch):
             {
                 "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
                 "ai_agent_api_key": "dummy-key",
+                "ai_agent_model": "test-model",
             },
             messages=[{"role": "user", "content": "幫我看一下下載進度"}],
         )
@@ -564,6 +590,7 @@ def test_ai_agent_chat_detects_mock_reply_with_interleaving_whitespace(monkeypat
             {
                 "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
                 "ai_agent_api_key": "dummy-key",
+                "ai_agent_model": "test-model",
             },
             messages=[{"role": "user", "content": "幫我看一下下載進度"}],
         )
@@ -659,6 +686,7 @@ def test_ai_agent_chat_blocks_non_root_in_audit_mode(monkeypatch):
             "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
             "ai_agent_api_key": "dummy-key",
             "ai_agent_operation_mode": "audit",
+            "ai_agent_model": "test-model",
         },
         messages=[{"role": "user", "content": "查一下目前任務進度"}],
         actor={"username": "root", "role": "user"},
@@ -692,6 +720,7 @@ def test_ai_agent_chat_write_mode_is_root_only(monkeypatch):
             "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
             "ai_agent_api_key": "dummy-key",
             "ai_agent_operation_mode": "write",
+            "ai_agent_model": "test-model",
         },
         messages=[{"role": "user", "content": "幫我調整設定"}],
         actor={"username": "root", "role": "user"},
@@ -705,6 +734,12 @@ def test_ai_agent_chat_write_mode_is_root_only(monkeypatch):
     assert "不要要求複製 JSON 或手動 POST" in system_prompt
     assert "/api/ai-agent/write-tools/execute" in system_prompt
     assert "confirm=EXECUTE" in system_prompt
+    assert "創作技能" in system_prompt
+    assert "視覺參考重建" in system_prompt
+    assert "反推提示詞" in system_prompt
+    assert "圖片輸入本身不代表使用者要產提示詞或生圖" in system_prompt
+    assert "不要假裝已經看過尚未回傳的生成圖" in system_prompt
+    assert "不要把多輪創作硬套成固定流程" in system_prompt
 
 
 def test_ai_agent_audit_scan_reports_anomalies_and_uses_cache(tmp_path):

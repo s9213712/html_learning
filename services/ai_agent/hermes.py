@@ -13,7 +13,7 @@ from urllib.parse import urljoin, urlparse
 
 
 DEFAULT_AI_AGENT_API_BASE_URL = os.environ.get("HACKME_AI_AGENT_API_BASE_URL", "http://127.0.0.1:8642/v1")
-DEFAULT_AI_AGENT_MODEL = os.environ.get("HACKME_AI_AGENT_MODEL", "hermes-agent")
+DEFAULT_AI_AGENT_MODEL = os.environ.get("HACKME_AI_AGENT_MODEL", "").strip()
 DEFAULT_AI_AGENT_PROVIDER = "hermes"
 DEFAULT_AI_AGENT_PERSONA = "concise_helper"
 DEFAULT_AI_AGENT_OPERATION_MODE = "readonly"
@@ -471,7 +471,7 @@ AI_AGENT_TOOL_BLUEPRINT = {
 
 AI_AGENT_TOOL_ARGUMENT_HINTS = {
     "write_community_create_thread": "canonical args: board_id,title,content,post_type；把 forum_id/討論版/版面 ID 轉成 board_id。",
-    "write_comfyui_generate": "canonical args: prompt,negative_prompt,width,height,steps,batch_size,confirm_billing；生圖請保留 batch_size 與 confirm_billing。",
+    "write_comfyui_generate": "canonical args: prompt,negative_prompt,width,height,steps,batch_size,confirm_billing；生圖請保留 batch_size 與 confirm_billing；可作為視覺參考重建的一輪產圖步驟，但不要把多輪創作硬套成固定流程。",
     "write_member_update_user": "canonical args: user_id,nickname,role,status,member_level,base_level,level_update_reason,sanction_status,sanction_until；即使目前模式不能執行，也要辨識此工具。",
     "write_member_set_avatar_from_cloud": "canonical args: user_id,cloud_file_id,crop,rotation,zoom,decision_reason；裁切/旋轉/縮放必須使用 crop/rotation/zoom。",
     "write_trading_place_order": "canonical args: market_symbol,side,order_type,quantity,limit_price_points；把 market 轉成 market_symbol，把 price 轉成 limit_price_points。",
@@ -491,6 +491,38 @@ AI_AGENT_TOOL_ARGUMENT_HINTS = {
     "write_subtitle_upload": "canonical args: video_id,subtitle_text,filename,language,label；把 subtitle_content 轉成 subtitle_text，把 subtitle_filename 轉成 filename。",
     "write_points_wallet_transfer": "canonical args: source_wallet_address,destination_wallet_address,amount_points,fee_points,request_uuid,memo,signature,compact；把 source_wallet/destination_wallet/amount/fee/request_id 轉成 canonical 欄位。",
 }
+
+AI_AGENT_CREATIVE_SKILLS = (
+    {
+        "name": "視覺參考重建",
+        "description": (
+            "當使用者提供圖片並要求反推提示詞、仿圖、縮小差異或多輪修正時，"
+            "先以自然語言觀察來源圖的主體、構圖、比例、鏡頭、姿態、光線、色彩、風格、文字與瑕疵，"
+            "再產生可執行 prompt/negative prompt 與尺寸參數。"
+        ),
+        "practice": (
+            "每一輪都要明確說出本輪改了哪些提示詞與原因；可用 write_comfyui_generate 產圖、"
+            "用 check_generation_progress 或前台回傳結果追蹤完成狀態，看到生成圖後再比較差異並修正。"
+        ),
+        "boundary": (
+            "圖片輸入本身不代表使用者要產提示詞或生圖，必須依上下文判斷；"
+            "不要假裝已經看過尚未回傳的生成圖；若只能看到原圖但看不到產物，"
+            "只能提出下一輪 prompt 或要求等待/提供生成結果，不能宣稱差異已達標。"
+        ),
+    },
+    {
+        "name": "創作迭代判斷",
+        "description": (
+            "差異判斷以可見證據為準：主體是否一致、構圖是否一致、角度/裁切是否偏移、"
+            "色彩與光影是否接近、畫風與細節是否漂移。"
+        ),
+        "practice": (
+            "若使用者指定門檻，使用該門檻；否則以『剩餘差異只剩小幅細節』作為停止條件。"
+            "若生成失敗、卡住或沒有圖片，先處理失敗原因或重試，不要跳到下一輪評分。"
+        ),
+        "boundary": "不要自造精確相似度數字；只有工具或視覺模型真的回傳評分時才能引用數值。",
+    },
+)
 
 AI_AGENT_SAFETY_BOUNDARIES = (
     "不得要求或收集帳號憑證、API key、session token、私密金鑰。",
@@ -709,6 +741,11 @@ def _ai_agent_system_prompt(behavior, *, role="user", actor=None, allow_tool_run
         arg_hint = str(detail.get("arg_hint") or "").strip()
         suffix = f"；{arg_hint}" if arg_hint else ""
         tool_lines.append(f"- {detail.get('name')}（{detail.get('label')}）：{detail.get('description')}；資料範圍={detail.get('data_scope') or '-'}{suffix}")
+    creative_skill_lines = []
+    for skill in AI_AGENT_CREATIVE_SKILLS:
+        creative_skill_lines.append(
+            f"- {skill['name']}：{skill['description']} 做法：{skill['practice']} 邊界：{skill['boundary']}"
+        )
     if mode_policy.get("write_enabled") and normalized_role == "super_admin":
         tool_scope = (
             "目前是 root 專用執行寫入模式：你不是一般使用者助手，也不是唯讀模式。"
@@ -737,6 +774,8 @@ def _ai_agent_system_prompt(behavior, *, role="user", actor=None, allow_tool_run
         + "\n".join(f"- {item}" for item in scope["capabilities"]) + "\n"
         + "安全邊際：\n"
         + "\n".join(f"- {item}" for item in AI_AGENT_SAFETY_BOUNDARIES) + "\n"
+        + "創作技能：\n"
+        + "\n".join(creative_skill_lines) + "\n"
         + "工具公告：\n"
         + "\n".join(tool_lines) + "\n"
         f"{tool_scope}\n"
@@ -1075,11 +1114,13 @@ def _json_request(settings, method, path, payload=None, *, session_key="", timeo
             payload = json.loads(raw.decode("utf-8")) if raw else {}
         except Exception:
             payload = {"raw": raw.decode("utf-8", "replace")}
-        message = (
-            payload.get("error", {}).get("message")
-            if isinstance(payload.get("error"), dict)
-            else payload.get("msg") or payload.get("message")
-        )
+        error_value = payload.get("error") if isinstance(payload, dict) else None
+        if isinstance(error_value, dict):
+            message = error_value.get("message")
+        elif isinstance(error_value, str):
+            message = error_value
+        else:
+            message = payload.get("msg") or payload.get("message")
         raise AiAgentError(message or f"AI Agent backend HTTP {exc.code}", status=exc.code, payload=payload)
     except (urllib_error.URLError, TimeoutError, OSError) as exc:
         raise AiAgentError(f"AI Agent backend 無法連線：{exc}") from exc
@@ -1947,13 +1988,13 @@ def ai_agent_chat(settings, *, messages=None, prompt="", image_data_url="", mode
     }
     response = _json_request(settings, "POST", "/chat/completions", payload, session_key=session_key)
     if _contains_mock_phrase(response):
-        raise AiAgentError("AI Agent 後端仍回傳 mock 回覆，請確認 ai_agent_api_base_url 是否指向真實 Hermes endpoint")
+        raise AiAgentError("AI Agent 後端仍回傳 mock 回覆，請確認 ai_agent_api_base_url 是否指向真實 AI Agent endpoint")
     if isinstance(response, dict):
         hermes_meta = response.get("hermes") if isinstance(response.get("hermes"), dict) else {}
         hermes_error = str(hermes_meta.get("error") or "").strip()
         if hermes_meta.get("failed") is True or hermes_meta.get("completed") is False:
             raise AiAgentError(
-                f"AI Agent 後端執行失敗：{hermes_error or 'Hermes 回報 failed'}",
+                f"AI Agent 後端執行失敗：{hermes_error or 'AI backend 回報 failed'}",
                 payload=response,
             )
     choices = response.get("choices") if isinstance(response, dict) else None
@@ -1972,7 +2013,7 @@ def ai_agent_chat(settings, *, messages=None, prompt="", image_data_url="", mode
         )
     normalized = str(content or "").strip().lower()
     if _is_mock_chat_reply(normalized):
-        raise AiAgentError("AI Agent 後端仍回傳 mock 回覆，請確認 ai_agent_api_base_url 是否指向真實 Hermes endpoint")
+        raise AiAgentError("AI Agent 後端仍回傳 mock 回覆，請確認 ai_agent_api_base_url 是否指向真實 AI Agent endpoint")
     return {
         "content": str(content or ""),
         "model": response.get("model") if isinstance(response, dict) else model_name,

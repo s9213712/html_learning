@@ -367,7 +367,7 @@ def register_system_admin_settings_routes(app, ctx):
         if "ai_agent_provider" in data:
             provider = normalize_ai_agent_provider(data.get("ai_agent_provider"))
             if provider is None:
-                return json_resp({"ok":False,"msg":"ai_agent_provider 必須是 hermes 或 openai_compatible"}), 400
+                return json_resp({"ok":False,"msg":"ai_agent_provider 必須是 local backend（相容舊值 hermes）或 openai_compatible"}), 400
             data["ai_agent_provider"] = provider
         if "ai_agent_api_base_url" in data:
             api_url = normalize_ai_agent_api_base_url(data.get("ai_agent_api_base_url"), allow_blank=False)

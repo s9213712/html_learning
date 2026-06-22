@@ -199,7 +199,7 @@ SETTING_GROUPS = (
     {
         "key": "ai_agent",
         "title": "AI Agent / LLM",
-        "description": "Hermes / OpenAI-compatible API 連線、模型、逾時與輸入限制。",
+        "description": "AI Agent backend / OpenAI-compatible API 連線、模型、逾時與輸入限制。",
         "settings": tuple(key for key in DEFAULT_SETTINGS if key.startswith("ai_agent_")),
     },
     {
@@ -328,11 +328,11 @@ SETTING_DETAILS = {
     },
     "ai_agent_provider": {
         "label": "AI Agent Provider",
-        "description": "目前支援 hermes 或 OpenAI-compatible API；預設 hermes。",
+        "description": "目前支援 local backend（相容舊值 hermes）或 OpenAI-compatible API。",
     },
     "ai_agent_api_base_url": {
         "label": "AI Agent API Base URL",
-        "description": "Hermes API server / OpenAI-compatible endpoint，例如 http://127.0.0.1:8642/v1。",
+        "description": "AI Agent backend / OpenAI-compatible endpoint，例如 http://127.0.0.1:8642/v1。",
     },
     "ai_agent_api_key": {
         "label": "AI Agent API Key",
@@ -360,7 +360,7 @@ SETTING_DETAILS = {
     },
     "ai_agent_request_timeout_seconds": {
         "label": "AI Agent 逾時秒數",
-        "description": "等待 Hermes / OpenAI-compatible API 回應的最長時間。",
+        "description": "等待 AI Agent backend / OpenAI-compatible API 回應的最長時間。",
     },
     "ai_agent_max_prompt_chars": {
         "label": "AI Agent 文字上限",

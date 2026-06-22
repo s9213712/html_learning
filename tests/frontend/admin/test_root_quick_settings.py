@@ -116,11 +116,11 @@ def test_ai_agent_quick_settings_provider_presets_update_connection_fields():
 
     assert "AI_AGENT_PROVIDER_QUICK_PRESETS" in quick_js
     assert 'apiBaseUrl: "http://127.0.0.1:8642/v1"' in quick_js
-    assert 'model: "hermes-agent"' in quick_js
-    assert 'allowedModels: "hermes-agent"' in quick_js
+    assert 'model: ""' in quick_js
+    assert 'allowedModels: ""' in quick_js
     assert 'apiBaseUrl: "http://127.0.0.1:11434/v1"' in quick_js
-    assert 'model: "gpt-oss:120b-cloud"' in quick_js
-    assert 'allowedModels: "gpt-oss:120b-cloud,qwen3.5:cloud,minimax-m2.7:cloud"' in quick_js
+    assert 'gpt-oss:120b-cloud' not in quick_js
+    assert 'minimax-m2.7:cloud' not in quick_js
     assert 'applyAiAgentProviderQuickPreset(provider.value)' in quick_js
     assert 'setRootModuleFieldValue("s-ai-agent-api-base-url", preset.apiBaseUrl)' in quick_js
     assert 'setRootModuleFieldValue("s-ai-agent-model", preset.model)' in quick_js

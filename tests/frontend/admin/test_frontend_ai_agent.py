@@ -59,7 +59,7 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert 'id="ai-agent-comfyui-vae"' in html
     assert 'id="ai-agent-comfyui-generate-btn"' in html
     assert 'id="s-module-ai-agent-min-role"' in html
-    _warn_if_asset_cache_version_changed(html, "/js/37-ai-agent.js", "20260622-ai-agent-write-tools-v1")
+    _warn_if_asset_cache_version_changed(html, "/js/37-ai-agent.js", "20260623-ai-agent-image-context-v3")
     _warn_if_asset_cache_version_changed(html, "/js/90-bootstrap.js", "20260611-ai-agent-comfyui-write-tool")
 
     assert '"ai-agent": "feature_ai_agent_enabled"' in core_js
@@ -110,6 +110,17 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert "function aiAgentComfyuiTextHasSubject" in ai_agent_js
     assert "不會自行沿用前文、記憶或模型猜提示詞" in ai_agent_js
     assert "function aiAgentVisionModel" in ai_agent_js
+    assert "async function aiAgentRefreshModelState" in ai_agent_js
+    assert 'const statusRes = await apiFetch(API + "/ai-agent/status"' in ai_agent_js
+    assert 'const modelsRes = await apiFetch(API + "/ai-agent/models"' in ai_agent_js
+    assert "await aiAgentRefreshModelState();" in ai_agent_js
+    assert "unavailableModelIds: new Set()" in ai_agent_js
+    assert "AI_AGENT_STATE.unavailableModelIds?.has(id)" in ai_agent_js
+    assert "function aiAgentImageModelUnavailable" in ai_agent_js
+    assert "function aiAgentMarkModelUnavailable" in ai_agent_js
+    assert "json?.status || status" in ai_agent_js
+    assert "圖片理解模型不可用或已下架" in ai_agent_js
+    assert "aiAgentMarkModelUnavailable(selectedModel" in ai_agent_js
     assert "function aiAgentImageAnalysisError" in ai_agent_js
     assert "function aiAgentImageTransportError" in ai_agent_js
     assert "圖片分析請求傳輸失敗" in ai_agent_js
@@ -122,7 +133,8 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert 'scope: "resources"' in ai_agent_js
     assert 'scope: "attack_diag"' in ai_agent_js
     assert "const selectedModel = aiAgentVisionModel();" in ai_agent_js
-    assert "qwen3-vl" in ai_agent_js
+    assert "qwen3-vl" not in ai_agent_js
+    assert "/models 回傳且支援圖片的模型" in ai_agent_js
     assert "圖片分析後端目前不可用" in ai_agent_js
     assert "圖片分析與生圖參數生成中" in ai_agent_js
     assert "ComfyUI 產圖送出失敗（HTTP ${res.status}）" in ai_agent_js
@@ -146,12 +158,17 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert "前幾個版本" in ai_agent_js
     assert "vae\" && autoLike.test(value)" in ai_agent_js
     assert "comfyuiAttemptHistory" in ai_agent_js
-    assert 'throw new Error("目前沒有可用的圖片理解模型。請在 AI Agent 模型允許清單加入 vision 模型（例如 qwen3-vl）後再試。")' in ai_agent_js
+    assert 'throw new Error("目前沒有可用的圖片理解模型。請在 AI Agent 模型允許清單加入 /models 回傳且支援圖片的模型後再試。")' in ai_agent_js
     assert 'const selectedModel = mode === "image" ? aiAgentVisionModel() : aiAgentSelectedTextModel();' in ai_agent_js
     assert 'return "";' in ai_agent_js
     assert 'action === "readonly" || action === "comfyui_status"' in ai_agent_js
     assert '/ai-agent/readonly?scope=${encodeURIComponent(requestScope)}&limit=20' in ai_agent_js
     assert 'image_data_url: mode === "image" ? AI_AGENT_STATE.imageDataUrl : ""' in ai_agent_js
+    assert 'if ($("ai-agent-mode")) $("ai-agent-mode").value = "image";' in ai_agent_js
+    assert 'const hasAttachedImage = !!AI_AGENT_STATE.imageDataUrl;' in ai_agent_js
+    assert 'const mode = hasAttachedImage ? "image" : selectedMode;' in ai_agent_js
+    assert "若 input_mode=image，請用語意判斷使用者是要圖片問答、圖片分析產 prompt，還是要求用附圖執行生圖" in ai_agent_js
+    assert "若 input_mode=image 且使用者意圖依上下文仍不明，請輸出 chat 或 clarify；不得設定 execute_write=true" in ai_agent_js
     assert "action=readonly 並 readonly_scope=all" in ai_agent_js
     assert "effective_tools" in ai_agent_js
     assert "writable_tools" in ai_agent_js
@@ -200,7 +217,8 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert 'panel.hidden = true;' in ai_agent_js
     assert '對話解析後會直接送出' in ai_agent_js
     assert "OpenAI-compatible" in ai_agent_js
-    assert "Hermes Agent" in ai_agent_js
+    assert "Local AI Backend" in ai_agent_js
+    assert "Hermes Agent" not in ai_agent_js
     assert "Hermes API 已連線" not in ai_agent_js
     assert "AI Agent 後端已連線" not in ai_agent_js
     assert 'operation_mode_policy' in ai_agent_js

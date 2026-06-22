@@ -24,13 +24,13 @@ window.HACKME_SERVICE_FEE_PRICING_PRESETS = ROOT_SERVICE_FEE_QUICK_PRESETS;
 const AI_AGENT_PROVIDER_QUICK_PRESETS = {
   hermes: {
     apiBaseUrl: "http://127.0.0.1:8642/v1",
-    model: "hermes-agent",
-    allowedModels: "hermes-agent",
+    model: "",
+    allowedModels: "",
   },
   openai_compatible: {
     apiBaseUrl: "http://127.0.0.1:11434/v1",
-    model: "gpt-oss:120b-cloud",
-    allowedModels: "gpt-oss:120b-cloud,qwen3.5:cloud,minimax-m2.7:cloud",
+    model: "",
+    allowedModels: "",
   },
 };
 
@@ -366,9 +366,9 @@ function setRootModuleFieldValue(id, value) {
 function applyAiAgentProviderQuickPreset(provider) {
   const preset = AI_AGENT_PROVIDER_QUICK_PRESETS[provider];
   if (!preset) return;
-  setRootModuleFieldValue("s-ai-agent-api-base-url", preset.apiBaseUrl);
-  setRootModuleFieldValue("s-ai-agent-model", preset.model);
-  setRootModuleFieldValue("s-ai-agent-allowed-models", preset.allowedModels);
+  if (preset.apiBaseUrl) setRootModuleFieldValue("s-ai-agent-api-base-url", preset.apiBaseUrl);
+  if (preset.model) setRootModuleFieldValue("s-ai-agent-model", preset.model);
+  if (preset.allowedModels) setRootModuleFieldValue("s-ai-agent-allowed-models", preset.allowedModels);
 }
 
 function rootModuleFieldValue(source) {

@@ -6042,7 +6042,7 @@
               <summary>
                 <div>
                   <div class="drive-card-title">AI Agent / LLM</div>
-                  <div class="drive-card-sub">Hermes / OpenAI-compatible API 設定。</div>
+                  <div class="drive-card-sub">AI Agent backend / OpenAI-compatible API 設定。</div>
                 </div>
               </summary>
               <div class="drive-collapsible-body">
@@ -6050,7 +6050,7 @@
               <div class="field">
                 <label>Provider</label>
                 <select id="s-ai-agent-provider">
-                  <option value="hermes">Hermes Agent</option>
+                  <option value="hermes">Local AI Backend</option>
                   <option value="openai_compatible">OpenAI-compatible</option>
                 </select>
               </div>
@@ -6066,7 +6066,7 @@
               </div>
               <div class="field">
                 <label>Model</label>
-                <input type="text" id="s-ai-agent-model" placeholder="hermes-agent" autocomplete="off" />
+                <input type="text" id="s-ai-agent-model" placeholder="請填入 /models 回傳的模型名稱" autocomplete="off" />
               </div>
               <div class="field">
                 <label>運作模式</label>
@@ -6080,7 +6080,7 @@
               </div>
               <div class="field">
                 <label>允許模型清單（逗號分隔，空白代表不限）</label>
-                <input type="text" id="s-ai-agent-allowed-models" placeholder="hermes-agent, llama3.1:8b" autocomplete="off" />
+                <input type="text" id="s-ai-agent-allowed-models" placeholder="留空代表不限；或填入目前 /models 回傳的名稱" autocomplete="off" />
               </div>
               <div class="field">
                 <label>可調用工具清單（逗號分隔，空白代表依角色預設）</label>
@@ -7933,7 +7933,7 @@
 <!-- cache marker retained for template-import regression: /js/36-comfyui.js?v=20260509-comfyui-template-embeddings -->
 <script src="/js/36-comfyui.js?v=20260621-comfyui-draft-restore" defer></script>
 <script src="/js/36-comfyui-workflows.js?v=20260614-comfyui-embedding-commas" defer></script>
-<script src="/js/37-ai-agent.js?v=20260622-ai-agent-write-tools-v1" defer></script>
+<script src="/js/37-ai-agent.js?v=20260623-ai-agent-image-context-v3" defer></script>
 <script src="/js/37-bug-report.js?v=20260502-device-feature" defer></script>
 <script src="/js/41-game-modules.js?v=20260601-rubiks-visible" defer></script>
 <script src="/js/games/game-view-registry.js?v=20260513-legacy-modules" defer></script>
