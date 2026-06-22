@@ -190,6 +190,13 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert "elevate_once" in ai_agent_js
     assert 'official_workflow_id = "origin_sdxl_txt2img"' in ai_agent_js
     assert 'ai-agent-write-tools-panel' in ai_agent_js
+    assert 'ai-agent-tool-selector' in html
+    assert 'ai-agent-tool-selector-list' in html
+    assert 'include_all=1' in ai_agent_js
+    assert 'ai_agent_allowed_tools: allowedTools' in ai_agent_js
+    assert '"__none__"' in ai_agent_js
+    assert 'setAiAgentToolSelection("comfyui")' in ai_agent_js
+    assert ".ai-agent-tool-selector" in css
     assert 'panel.hidden = true;' in ai_agent_js
     assert '對話解析後會直接送出' in ai_agent_js
     assert "OpenAI-compatible" in ai_agent_js

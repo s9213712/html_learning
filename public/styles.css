@@ -2232,6 +2232,34 @@
       margin-top: .65rem;
     }
 
+    .ai-agent-tool-selector {
+      margin-top: .85rem;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: .65rem .7rem;
+      background: rgba(255,255,255,.025);
+    }
+
+    .ai-agent-tool-selector-list {
+      max-height: 360px;
+      overflow: auto;
+      margin-top: .65rem;
+    }
+
+    .ai-agent-tool-selector-row {
+      grid-template-columns: auto minmax(8rem, 1fr);
+      align-items: start;
+      gap: .35rem .6rem;
+      cursor: pointer;
+    }
+
+    .ai-agent-tool-selector-row input {
+      width: 1rem;
+      height: 1rem;
+      margin-top: .15rem;
+      grid-row: span 3;
+    }
+
     .ai-agent-readonly-kv {
       grid-template-columns: auto minmax(0, 1fr);
       margin-top: .5rem;

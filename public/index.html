@@ -2348,6 +2348,24 @@
           <div class="ai-agent-readonly-panel" id="ai-agent-safety-boundaries">尚未載入安全規則。</div>
           <div class="drive-card-title" style="margin-top:1rem;">可調用工具</div>
           <div class="ai-agent-readonly-panel" id="ai-agent-effective-tools">尚未載入工具策略。</div>
+          <div class="ai-agent-tool-selector" id="ai-agent-tool-selector" hidden aria-hidden="true">
+            <div class="drive-card-heading compact-heading">
+              <div>
+                <div class="drive-card-title">write tools 啟用清單</div>
+                <div class="drive-card-sub" id="ai-agent-tool-selector-state">尚未載入工具 catalog</div>
+              </div>
+              <button class="btn btn-sm" id="ai-agent-tool-selector-refresh-btn" type="button">刷新</button>
+            </div>
+            <div class="edit-user-actions">
+              <button class="btn btn-sm" id="ai-agent-tool-select-all-btn" type="button">全選</button>
+              <button class="btn btn-sm" id="ai-agent-tool-select-none-btn" type="button">全不選</button>
+              <button class="btn btn-sm" id="ai-agent-tool-select-comfyui-btn" type="button">只保留生圖</button>
+            </div>
+            <div class="drive-file-list ai-agent-tool-selector-list" id="ai-agent-tool-selector-list"></div>
+            <div class="edit-user-actions">
+              <button class="btn btn-primary btn-sm" id="ai-agent-tool-selector-save-btn" type="button">儲存工具清單</button>
+            </div>
+          </div>
           <div class="drive-card-title" style="margin-top:1rem;">Models</div>
           <div class="drive-file-list ai-agent-model-list" id="ai-agent-model-list"></div>
 

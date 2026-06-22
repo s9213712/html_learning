@@ -167,6 +167,10 @@ def normalize_ai_agent_allowed_tools(value):
     for part in parts:
         if not part:
             continue
+        if part in {"__none__", "none"}:
+            if tools or any(item and item not in {"__none__", "none"} for item in parts):
+                return None
+            return "__none__"
         if part not in valid:
             return None
         if part not in seen:
@@ -665,6 +669,8 @@ def _role_allows(required_role, actor_role):
 
 def ai_agent_effective_tools(settings, *, actor_role="user"):
     configured = normalize_ai_agent_allowed_tools((settings or {}).get("ai_agent_allowed_tools"))
+    if configured == "__none__":
+        return []
     configured_set = set(configured.split(",")) if configured else set()
     result = []
     for tool_name, details in AI_AGENT_TOOL_BLUEPRINT.items():

@@ -28,6 +28,10 @@ const AI_AGENT_STATE = {
   historyOpen: false,
   conversationHistory: [],
   historySelected: null,
+  writeToolCatalog: [],
+  writeToolEnabled: new Set(),
+  writeToolLoading: false,
+  writeToolSaving: false,
 };
 
 const AI_AGENT_OPERATION_MODE_LABELS = {
@@ -278,9 +282,13 @@ function aiAgentResetScopeState() {
     AI_AGENT_STATE.historyOpen = false;
     AI_AGENT_STATE.conversationHistory = [];
     AI_AGENT_STATE.historySelected = null;
+    AI_AGENT_STATE.writeToolCatalog = [];
+    AI_AGENT_STATE.writeToolEnabled = new Set();
+    AI_AGENT_STATE.writeToolGuard = {};
     aiAgentLoadConversation(nextScope);
     renderAiAgentThread();
     renderAiAgentConversationHistory();
+    renderAiAgentToolSelector();
     aiAgentHydratePersistedComfyuiImages();
   }
 }
@@ -1291,6 +1299,137 @@ function aiAgentCanRequestWriteElevation(toolName) {
     && aiAgentHasEffectiveTool(toolName);
 }
 
+function aiAgentConfiguredWriteTools(configured = AI_AGENT_STATE.settings?.allowed_tools || "") {
+  const raw = String(configured || "").trim();
+  if (raw === "__none__") return new Set();
+  const catalogNames = (AI_AGENT_STATE.writeToolCatalog || []).map((tool) => tool.name).filter(Boolean);
+  if (!raw) return new Set(catalogNames);
+  return new Set(raw.split(",").map((item) => item.trim()).filter(Boolean));
+}
+
+function renderAiAgentToolSelector() {
+  const panel = $("ai-agent-tool-selector");
+  const state = $("ai-agent-tool-selector-state");
+  const list = $("ai-agent-tool-selector-list");
+  const saveBtn = $("ai-agent-tool-selector-save-btn");
+  const isRoot = AI_AGENT_STATE.actor?.role === "super_admin";
+  if (panel) {
+    panel.hidden = !isRoot;
+    panel.setAttribute("aria-hidden", isRoot ? "false" : "true");
+  }
+  if (!isRoot || !list) return;
+  const catalog = Array.isArray(AI_AGENT_STATE.writeToolCatalog) ? AI_AGENT_STATE.writeToolCatalog : [];
+  const enabled = AI_AGENT_STATE.writeToolEnabled instanceof Set ? AI_AGENT_STATE.writeToolEnabled : new Set();
+  if (saveBtn) saveBtn.disabled = AI_AGENT_STATE.writeToolSaving || AI_AGENT_STATE.writeToolLoading || !catalog.length;
+  const blocked = !!AI_AGENT_STATE.writeToolGuard?.blocked;
+  if (state) {
+    if (AI_AGENT_STATE.writeToolLoading) {
+      state.textContent = "工具 catalog 載入中...";
+    } else if (!catalog.length) {
+      state.textContent = "尚未載入工具 catalog";
+    } else {
+      const suffix = blocked ? "，audit lockdown 中，儲存設定可用但執行仍會被擋" : "";
+      state.textContent = `已啟用 ${enabled.size}/${catalog.length} 個 write tools${suffix}`;
+    }
+  }
+  if (!catalog.length) {
+    list.innerHTML = '<div class="drive-empty">尚未載入工具 catalog</div>';
+    return;
+  }
+  list.innerHTML = catalog.map((tool) => {
+    const name = String(tool.name || "");
+    const checked = enabled.has(name) ? "checked" : "";
+    return `
+      <label class="drive-file-row ai-agent-tool-selector-row">
+        <input type="checkbox" data-ai-agent-tool-toggle="${sanitize(name)}" ${checked} />
+        <strong>${sanitize(tool.label || name)}</strong>
+        <span>${sanitize(name)}</span>
+        <span>${sanitize(tool.description || "")}</span>
+      </label>
+    `;
+  }).join("");
+  list.querySelectorAll("[data-ai-agent-tool-toggle]").forEach((input) => {
+    input.addEventListener("change", () => {
+      const name = input.getAttribute("data-ai-agent-tool-toggle") || "";
+      if (!name) return;
+      if (input.checked) AI_AGENT_STATE.writeToolEnabled.add(name);
+      else AI_AGENT_STATE.writeToolEnabled.delete(name);
+      renderAiAgentToolSelector();
+    });
+  });
+}
+
+async function loadAiAgentWriteToolCatalog(options = {}) {
+  if (AI_AGENT_STATE.writeToolLoading && !options.force) return;
+  if (AI_AGENT_STATE.actor?.role !== "super_admin") {
+    renderAiAgentToolSelector();
+    return;
+  }
+  AI_AGENT_STATE.writeToolLoading = true;
+  renderAiAgentToolSelector();
+  try {
+    const res = await apiFetch(`${API}/ai-agent/write-tools?include_all=1`, {
+      credentials: "same-origin",
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok || !json.ok) {
+      setAiAgentMessage(json.msg || "write tools catalog 載入失敗", "err");
+      return;
+    }
+    AI_AGENT_STATE.writeToolCatalog = Array.isArray(json.catalog_tools) ? json.catalog_tools : [];
+    AI_AGENT_STATE.writeToolGuard = json.guard || {};
+    AI_AGENT_STATE.writeToolEnabled = aiAgentConfiguredWriteTools(json.allowed_tools ?? AI_AGENT_STATE.settings?.allowed_tools ?? "");
+  } catch (err) {
+    setAiAgentMessage(`write tools catalog 載入失敗：${err}`, "err");
+  } finally {
+    AI_AGENT_STATE.writeToolLoading = false;
+    renderAiAgentToolSelector();
+  }
+}
+
+function setAiAgentToolSelection(mode) {
+  const names = (AI_AGENT_STATE.writeToolCatalog || []).map((tool) => tool.name).filter(Boolean);
+  if (mode === "all") {
+    AI_AGENT_STATE.writeToolEnabled = new Set(names);
+  } else if (mode === "none") {
+    AI_AGENT_STATE.writeToolEnabled = new Set();
+  } else if (mode === "comfyui") {
+    AI_AGENT_STATE.writeToolEnabled = new Set(names.includes("write_comfyui_generate") ? ["write_comfyui_generate"] : []);
+  }
+  renderAiAgentToolSelector();
+}
+
+async function saveAiAgentToolSelection() {
+  if (AI_AGENT_STATE.writeToolSaving || AI_AGENT_STATE.actor?.role !== "super_admin") return;
+  const names = (AI_AGENT_STATE.writeToolCatalog || []).map((tool) => tool.name).filter(Boolean);
+  const enabled = names.filter((name) => AI_AGENT_STATE.writeToolEnabled.has(name));
+  const allowedTools = enabled.length ? enabled.join(",") : "__none__";
+  AI_AGENT_STATE.writeToolSaving = true;
+  renderAiAgentToolSelector();
+  try {
+    const res = await apiFetch(`${API}/admin/settings`, {
+      method: "PUT",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ai_agent_allowed_tools: allowedTools }),
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok || !json.ok) {
+      setAiAgentMessage(json.msg || "write tools 清單儲存失敗", "err");
+      return;
+    }
+    setAiAgentMessage("write tools 清單已儲存", "ok");
+    AI_AGENT_STATE.loaded = false;
+    await loadAiAgentStatus({ force: true });
+    await loadAiAgentWriteToolCatalog({ force: true });
+  } catch (err) {
+    setAiAgentMessage(`write tools 清單儲存失敗：${err}`, "err");
+  } finally {
+    AI_AGENT_STATE.writeToolSaving = false;
+    renderAiAgentToolSelector();
+  }
+}
+
 function aiAgentAuditTimeLabel(value, fallback = "尚未掃描") {
   const raw = String(value || "").trim();
   if (!raw) return fallback;
@@ -1992,6 +2131,8 @@ function renderAiAgentStatus(json) {
       ? tools.map((tool) => `<div>${sanitize(tool.label || tool.name || "-")}：${sanitize(tool.description || "")}<br><span class="drive-card-sub">${sanitize(tool.name || "")} / ${sanitize(tool.data_scope || "")}</span></div>`).join("")
       : "目前沒有可調用工具。";
   }
+  AI_AGENT_STATE.writeToolEnabled = aiAgentConfiguredWriteTools(settings.allowed_tools || "");
+  renderAiAgentToolSelector();
   renderAiAgentWriteTools();
   renderAiAgentAuditStatus(AI_AGENT_STATE.audit, actor);
 }
@@ -2454,6 +2595,9 @@ async function loadAiAgentStatus(options = {}) {
         return;
       }
       renderAiAgentStatus(json);
+      if (json?.actor?.role === "super_admin") {
+        await loadAiAgentWriteToolCatalog({ force: true }).catch(() => undefined);
+      }
       await loadAiAgentReadOnly({ scope: "all", limit: 20, silent: true }).catch(() => undefined);
       if (json?.actor?.scope?.can_manage_servers) {
         await loadAiAgentAuditStatus({ silent: true }).catch(() => undefined);
@@ -2718,6 +2862,11 @@ document.addEventListener("hackme:module-changed", (event) => {
 document.addEventListener("hackme:account-context-changed", handleAiAgentAccountContextChanged);
 
 $("ai-agent-history-btn")?.addEventListener("click", toggleAiAgentConversationHistory);
+$("ai-agent-tool-selector-refresh-btn")?.addEventListener("click", () => loadAiAgentWriteToolCatalog({ force: true }));
+$("ai-agent-tool-selector-save-btn")?.addEventListener("click", saveAiAgentToolSelection);
+$("ai-agent-tool-select-all-btn")?.addEventListener("click", () => setAiAgentToolSelection("all"));
+$("ai-agent-tool-select-none-btn")?.addEventListener("click", () => setAiAgentToolSelection("none"));
+$("ai-agent-tool-select-comfyui-btn")?.addEventListener("click", () => setAiAgentToolSelection("comfyui"));
 
 aiAgentResetScopeState();
 

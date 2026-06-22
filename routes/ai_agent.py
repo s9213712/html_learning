@@ -2039,7 +2039,9 @@ def register_ai_agent_routes(app, deps):
         actor, denied = _require_write_tool_actor()
         if denied:
             return denied
-        guard_denied = _ai_agent_write_guard_denied(actor, endpoint="list")
+        include_all = _parse_bool(request.args.get("include_all")) is True
+        guard = ai_agent_write_guard_status(get_db=get_audit_db)
+        guard_denied = _ai_agent_write_guard_denied(actor, endpoint="list") if guard.get("blocked") and not include_all else None
         if guard_denied:
             return guard_denied
         settings = get_system_settings() or {}
@@ -2050,19 +2052,26 @@ def register_ai_agent_routes(app, deps):
             for name, spec in AI_AGENT_WRITE_TOOL_SPECS.items()
             if name in effective_names
         ]
+        catalog_tools = [
+            _write_tool_public_spec(name, spec)
+            for name, spec in AI_AGENT_WRITE_TOOL_SPECS.items()
+        ] if include_all else []
         catalog_sha256 = _write_tool_catalog_fingerprint(tools)
         _audit_agent_event(
             "AI_AGENT_WRITE_TOOLS_LIST",
             actor,
             success=True,
-            detail=f"mode={public.get('operation_mode')},tools={len(tools)},catalog_sha256={catalog_sha256}",
+            detail=f"mode={public.get('operation_mode')},tools={len(tools)},include_all={include_all},catalog_sha256={catalog_sha256}",
         )
         return json_resp({
             "ok": True,
             "root_only": True,
             "operation_mode": public.get("operation_mode"),
             "write_enabled": bool((public.get("operation_mode_policy") or {}).get("write_enabled")),
+            "guard": guard,
             "catalog_sha256": catalog_sha256,
+            "allowed_tools": public.get("allowed_tools") or "",
+            "catalog_tools": catalog_tools,
             "tools": tools,
         })
 

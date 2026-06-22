@@ -237,6 +237,48 @@ def test_ai_agent_write_tools_root_only_and_lists_allowed_tools(tmp_path):
     ]
 
 
+def test_ai_agent_write_tools_can_return_full_catalog_for_root_selector(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "write",
+            "ai_agent_allowed_tools": "write_community_create_thread",
+        },
+    )
+
+    response = app.test_client().get("/api/ai-agent/write-tools?include_all=1")
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload["allowed_tools"] == "write_community_create_thread"
+    assert [tool["name"] for tool in payload["tools"]] == ["write_community_create_thread"]
+    assert {tool["name"] for tool in payload["catalog_tools"]} == set(AI_AGENT_WRITE_TOOL_SPECS)
+
+
+def test_ai_agent_write_tools_none_sentinel_disables_all_tools(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "write",
+            "ai_agent_allowed_tools": "__none__",
+        },
+    )
+
+    response = app.test_client().get("/api/ai-agent/write-tools?include_all=1")
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload["allowed_tools"] == "__none__"
+    assert payload["tools"] == []
+    assert len(payload["catalog_tools"]) == len(AI_AGENT_WRITE_TOOL_SPECS)
+
+
 def test_ai_agent_write_tools_lockdown_blocks_list_and_execute(monkeypatch, tmp_path):
     db_path = tmp_path / "ai_agent_routes.db"
     _build_db(db_path)

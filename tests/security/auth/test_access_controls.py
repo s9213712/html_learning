@@ -839,6 +839,10 @@ def test_ai_agent_audit_settings_are_configurable_and_validated():
     assert payload["ai_agent_allowed_models"] == "hermes-agent,stable-diffusion-xl-base-1.0"
     assert payload["ai_agent_allowed_tools"] == "check_resource_state,audit_scan"
 
+    saved_none = client.put("/api/admin/settings", json={"ai_agent_allowed_tools": "__none__"})
+    assert saved_none.status_code == 200, saved_none.get_json()
+    assert state["ai_agent_allowed_tools"] == "__none__"
+
     assert client.put("/api/admin/settings", json={"ai_agent_operation_mode": "invalid"}).status_code == 400
     assert client.put("/api/admin/settings", json={"ai_agent_allowed_models": ["hermes\nagent"]}).status_code == 400
     assert client.put("/api/admin/settings", json={"ai_agent_allowed_tools": "bad_tool"}).status_code == 400

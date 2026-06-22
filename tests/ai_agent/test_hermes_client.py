@@ -581,6 +581,8 @@ def test_ai_agent_operation_mode_normalizes_and_keeps_allowed_models():
     assert normalize_ai_agent_allowed_models("  ") == ""
     assert normalize_ai_agent_allowed_models("model\nx") is None
     assert normalize_ai_agent_allowed_tools("check_resource_state,audit_scan") == "check_resource_state,audit_scan"
+    assert normalize_ai_agent_allowed_tools("__none__") == "__none__"
+    assert normalize_ai_agent_allowed_tools("__none__,audit_scan") is None
     assert normalize_ai_agent_allowed_tools("bad_tool") is None
 
     write_policy = ai_agent_operation_mode_policy("write")
