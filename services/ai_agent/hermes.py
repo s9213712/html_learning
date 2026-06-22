@@ -485,6 +485,7 @@ AI_AGENT_TOOL_ARGUMENT_HINTS = {
     "write_remote_download_direct": "canonical args: url,filename,virtual_path,privacy_mode；HTTP/HTTPS Direct download 必須把 download_url/source_url 轉成 url。",
     "write_remote_download_bt": "canonical args: url,filename,virtual_path,privacy_mode；magnet_uri/magnet/torrent_url 都必須轉成 url。",
     "write_album_create": "canonical args: title,description,visibility；把 name 轉成 title。",
+    "write_album_add_file": "canonical args: album_id,file_id,storage_file_id,caption,sort_order；把 cloud_file_id 轉成 file_id。",
     "write_automation_job_run": "canonical args: job_uuid；只有明確提到自動化作業/automation 時選此工具；一般重試 Job Center 任務選 write_task_retry。",
     "write_video_upload": "canonical args: cloud_file_id,title,visibility,streaming_modes；只有要求 AI Agent JSON 版影音發布/上傳時選此工具。",
     "write_video_publish": "canonical args: cloud_file_id,title,visibility,streaming_modes；一般『發布既有雲端影音』選此工具。",

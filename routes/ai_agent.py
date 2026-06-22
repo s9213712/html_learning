@@ -1708,12 +1708,18 @@ def register_ai_agent_routes(app, deps):
         if tool_name == "write_cloud_drive_remote_download" and not str(args.get("source_type") or "").strip():
             url_value = str(args.get("url") or "").strip().lower()
             args["source_type"] = "bt" if url_value.startswith("magnet:") or url_value.endswith(".torrent") else "direct"
+        if tool_name == "write_album_add_file":
+            cloud_file_id = str(args.get("cloud_file_id") or "").strip()
+            if cloud_file_id and not str(args.get("file_id") or args.get("storage_file_id") or "").strip():
+                args["file_id"] = cloud_file_id
         missing = [
             key for key in sorted(spec.get("required") or [])
             if _is_missing_arg(args.get(key))
         ]
         if missing:
             return None, None, f"缺少必要參數：{', '.join(missing)}"
+        if tool_name == "write_album_add_file" and not str(args.get("file_id") or args.get("storage_file_id") or "").strip():
+            return None, None, "缺少必要參數：file_id 或 storage_file_id"
 
         path = spec.get("path") or ""
         for name, kind in (spec.get("path_params") or {}).items():

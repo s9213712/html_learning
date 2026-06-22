@@ -689,6 +689,48 @@ def test_ai_agent_remote_download_bt_aliases_magnet_uri_to_url(tmp_path):
     assert captured["filename"] == "audit-test.iso"
 
 
+def test_ai_agent_album_add_file_aliases_cloud_file_id(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "write",
+            "ai_agent_allowed_tools": "write_album_add_file",
+        },
+    )
+    captured = {}
+
+    @app.route("/api/storage/albums/<album_id>/files", methods=["POST"])
+    def fake_album_add_file(album_id):
+        captured["album_id"] = album_id
+        captured.update(request.get_json(silent=True) or {})
+        return _json_resp({"ok": True, "album_id": album_id})
+
+    response = app.test_client().post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_album_add_file",
+        "confirm": "EXECUTE",
+        "arguments": {"album_id": "album-audit-1", "cloud_file_id": "file-audit-1", "caption": "AI audit sample"},
+    })
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert captured["album_id"] == "album-audit-1"
+    assert captured["file_id"] == "file-audit-1"
+    assert "cloud_file_id" not in captured
+    assert captured["caption"] == "AI audit sample"
+
+    missing = app.test_client().post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_album_add_file",
+        "confirm": "EXECUTE",
+        "arguments": {"album_id": "album-audit-1"},
+    })
+    assert missing.status_code == 400
+    assert "file_id 或 storage_file_id" in missing.get_json()["msg"]
+
+
 def test_ai_agent_points_wallet_transfer_dispatches_submit_transaction(tmp_path):
     db_path = tmp_path / "ai_agent_routes.db"
     _build_db(db_path)
