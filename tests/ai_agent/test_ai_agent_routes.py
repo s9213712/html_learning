@@ -627,6 +627,9 @@ def test_ai_agent_member_avatar_from_cloud_wraps_multipart_crop_decision(tmp_pat
             "crop": {"x": 8, "y": 4, "width": 512, "height": 512, "rotation": 90},
             "zoom": 1.2,
             "decision_reason": "portrait is sideways; rotate right and center crop",
+            "confidence": 0.88,
+            "subject_detected": True,
+            "crop_quality": "good",
         },
     })
     payload = response.get_json()
@@ -637,6 +640,46 @@ def test_ai_agent_member_avatar_from_cloud_wraps_multipart_crop_decision(tmp_pat
     assert captured["cloud_file_id"] == "generated-avatar-file"
     assert json.loads(captured["crop_json"]) == {"x": 8, "y": 4, "width": 512, "height": 512, "rotation": 90}
     assert payload["result"]["avatar_ai_decision"]["zoom"] == 1.2
+    assert payload["result"]["avatar_ai_decision"]["confidence"] == 0.88
+
+
+def test_ai_agent_member_avatar_rejects_low_confidence_visual_decision(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "write",
+            "ai_agent_allowed_tools": "write_member_set_avatar_from_cloud",
+        },
+    )
+
+    @app.route("/api/admin/users/<int:user_id>/avatar", methods=["POST"])
+    def fake_avatar_upload(user_id):
+        raise AssertionError("low-confidence AI avatar decision must not write")
+
+    response = app.test_client().post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_member_set_avatar_from_cloud",
+        "confirm": "EXECUTE",
+        "arguments": {
+            "user_id": 1,
+            "cloud_file_id": "generated-avatar-file",
+            "crop": {"x": 0, "y": 0, "width": 512, "height": 512},
+            "zoom": 1.5,
+            "decision_reason": "Image contains abstract glitch art with no discernible human face or shoulders.",
+            "confidence": 0.4,
+            "subject_detected": False,
+            "crop_quality": "poor",
+            "issues": ["no visible subject"],
+        },
+    })
+    payload = response.get_json()
+
+    assert response.status_code == 400
+    assert payload["ok"] is False
+    assert "不適合作為頭像" in payload["result"]["msg"]
+    assert payload["result"]["avatar_ai_decision"]["confidence"] == 0.4
 
 
 def test_ai_agent_safe_path_param_supports_market_symbol(tmp_path):

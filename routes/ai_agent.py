@@ -116,6 +116,7 @@ AI_AGENT_WRITE_TOOL_SPECS = {
         "body_fields": {
             "user_id", "cloud_file_id", "existing_file_id", "crop", "crop_json",
             "x", "y", "width", "height", "rotation", "zoom", "decision_reason",
+            "confidence", "subject_detected", "crop_quality", "issues", "target_description",
         },
         "required": {"user_id", "cloud_file_id"},
         "write": True,
@@ -1799,6 +1800,52 @@ def register_ai_agent_routes(app, deps):
         }
         return _dispatch_internal_multipart(f"/api/videos/{video_id}/subtitles", form_data)
 
+    def _avatar_ai_decision_payload(args, crop):
+        payload = {
+            "crop": crop or {},
+            "zoom": args.get("zoom"),
+            "decision_reason": str(args.get("decision_reason") or "")[:500],
+        }
+        for key in ("confidence", "subject_detected", "crop_quality", "issues", "target_description"):
+            if key in args:
+                payload[key] = args.get(key)
+        return payload
+
+    def _avatar_ai_decision_reject_reason(args):
+        if not any(key in args for key in ("confidence", "subject_detected", "crop_quality", "decision_reason", "issues")):
+            return ""
+        subject_detected = args.get("subject_detected")
+        if subject_detected is False or str(subject_detected or "").strip().lower() in {"false", "no", "0"}:
+            return "未偵測到清晰頭像主體"
+        try:
+            confidence = float(args.get("confidence"))
+        except Exception:
+            confidence = None
+        if confidence is not None and confidence < 0.55:
+            return f"視覺信心過低（confidence={confidence:.2f}）"
+        crop_quality = str(args.get("crop_quality") or "").strip().lower()
+        if crop_quality in {"poor", "invalid", "bad", "unusable", "low"}:
+            return f"裁切品質不合格（crop_quality={crop_quality}）"
+        issues = args.get("issues")
+        issue_text = " ".join(str(item) for item in issues) if isinstance(issues, list) else str(issues or "")
+        negative_text = " ".join([str(args.get("decision_reason") or ""), issue_text]).lower()
+        negative_markers = (
+            "no discernible human",
+            "no clear human",
+            "no visible subject",
+            "no face",
+            "not a portrait",
+            "blank image",
+            "無清晰人像",
+            "沒有清晰人像",
+            "沒有主體",
+            "無主體",
+            "不適合作為頭像",
+        )
+        if any(marker in negative_text for marker in negative_markers):
+            return "AI 判斷圖片沒有可用的人像主體"
+        return ""
+
     def _execute_member_avatar_from_cloud(args):
         try:
             user_id = int(args.get("user_id") or 0)
@@ -1809,6 +1856,13 @@ def register_ai_agent_routes(app, deps):
         cloud_file_id = str(args.get("cloud_file_id") or args.get("existing_file_id") or "").strip()
         if not cloud_file_id:
             return 400, {"ok": False, "msg": "cloud_file_id 必填"}
+        reject_reason = _avatar_ai_decision_reject_reason(args)
+        if reject_reason:
+            return 400, {
+                "ok": False,
+                "msg": f"AI 視覺判斷此圖片不適合作為頭像：{reject_reason}",
+                "avatar_ai_decision": _avatar_ai_decision_payload(args, {}),
+            }
         crop = args.get("crop") if isinstance(args.get("crop"), dict) else None
         crop_json = args.get("crop_json")
         if crop is None and isinstance(crop_json, str) and crop_json.strip():
@@ -1828,11 +1882,7 @@ def register_ai_agent_routes(app, deps):
         }
         status, payload = _dispatch_internal_multipart(f"/api/admin/users/{user_id}/avatar", form_data)
         if isinstance(payload, dict):
-            payload.setdefault("avatar_ai_decision", {
-                "crop": crop or {},
-                "zoom": args.get("zoom"),
-                "decision_reason": str(args.get("decision_reason") or "")[:500],
-            })
+            payload.setdefault("avatar_ai_decision", _avatar_ai_decision_payload(args, crop or {}))
         return status, payload
 
     def _safe_tool_payload(payload, *, max_chars=16000):
