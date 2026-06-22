@@ -16,6 +16,7 @@ from services.ai_agent.hermes import (
     ai_agent_health,
     public_ai_agent_audit_status,
     run_ai_agent_audit_scan,
+    ai_agent_write_guard_status,
     ai_agent_models,
     _is_mock_chat_reply,
     public_ai_agent_settings,
@@ -1304,6 +1305,15 @@ def register_ai_agent_routes(app, deps):
             "requires_confirm": bool(spec.get("write")),
         }
 
+    def _write_tool_catalog_fingerprint(tools=None):
+        if tools is None:
+            tools = [
+                _write_tool_public_spec(name, spec)
+                for name, spec in AI_AGENT_WRITE_TOOL_SPECS.items()
+            ]
+        canonical = json.dumps(tools, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
     def _write_tool_effective_names(settings, actor):
         public = public_ai_agent_settings(settings, actor=actor)
         return {
@@ -1320,6 +1330,18 @@ def register_ai_agent_routes(app, deps):
             _audit_agent_event("AI_AGENT_WRITE_TOOLS_DENIED", actor, success=False, detail="root_only")
             return None, (json_resp({"ok": False, "msg": "write-tool endpoint 目前僅開放 root"}), 403)
         return actor, None
+
+    def _ai_agent_write_guard_denied(actor, *, endpoint):
+        guard = ai_agent_write_guard_status()
+        if not guard.get("blocked"):
+            return None
+        detail = f"endpoint={endpoint},reason={str(guard.get('reason') or '')[:180]}"
+        _audit_agent_event("AI_AGENT_WRITE_TOOLS_LOCKDOWN", actor, success=False, detail=detail)
+        return json_resp({
+            "ok": False,
+            "msg": "AI Agent audit 已偵測異常，write-tools 已暫停，請 root 檢查 audit log 後重新審計。",
+            "guard": guard,
+        }), 423
 
     def _request_json_dict():
         try:
@@ -1851,6 +1873,9 @@ def register_ai_agent_routes(app, deps):
         actor, denied = _require_write_tool_actor()
         if denied:
             return denied
+        guard_denied = _ai_agent_write_guard_denied(actor, endpoint="list")
+        if guard_denied:
+            return guard_denied
         settings = get_system_settings() or {}
         public = public_ai_agent_settings(settings, actor=actor)
         effective_names = _write_tool_effective_names(settings, actor)
@@ -1859,17 +1884,19 @@ def register_ai_agent_routes(app, deps):
             for name, spec in AI_AGENT_WRITE_TOOL_SPECS.items()
             if name in effective_names
         ]
+        catalog_sha256 = _write_tool_catalog_fingerprint(tools)
         _audit_agent_event(
             "AI_AGENT_WRITE_TOOLS_LIST",
             actor,
             success=True,
-            detail=f"mode={public.get('operation_mode')},tools={len(tools)}",
+            detail=f"mode={public.get('operation_mode')},tools={len(tools)},catalog_sha256={catalog_sha256}",
         )
         return json_resp({
             "ok": True,
             "root_only": True,
             "operation_mode": public.get("operation_mode"),
             "write_enabled": bool((public.get("operation_mode_policy") or {}).get("write_enabled")),
+            "catalog_sha256": catalog_sha256,
             "tools": tools,
         })
 
@@ -1879,6 +1906,9 @@ def register_ai_agent_routes(app, deps):
         actor, denied = _require_write_tool_actor()
         if denied:
             return denied
+        guard_denied = _ai_agent_write_guard_denied(actor, endpoint="execute")
+        if guard_denied:
+            return guard_denied
         data, bad_request = _request_json_dict()
         if bad_request:
             return bad_request

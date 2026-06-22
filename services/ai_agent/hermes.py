@@ -807,6 +807,38 @@ def _safe_parse_iso(value):
         return None
 
 
+AI_AGENT_SENSITIVE_SETTING_KEYS = {
+    "ai_agent_allowed_tools",
+    "ai_agent_operation_mode",
+    "ai_agent_api_base_url",
+    "ai_agent_provider",
+    "ai_agent_model",
+    "ai_agent_allowed_models",
+}
+
+
+def _json_dict_or_empty(value):
+    try:
+        parsed = json.loads(str(value or ""))
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _settings_changed_keys(detail):
+    payload = _json_dict_or_empty(detail)
+    keys = set()
+    for key in payload.get("changed_keys") or []:
+        if isinstance(key, str) and key.strip():
+            keys.add(key.strip())
+    for item in payload.get("changes") or []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("changed") is True and isinstance(item.get("key"), str):
+            keys.add(item["key"].strip())
+    return sorted(key for key in keys if key)
+
+
 def _extract_text_from_messages(messages):
     pieces = []
     for message in messages or []:
@@ -1363,6 +1395,42 @@ def run_ai_agent_audit_scan(settings, *, get_db, actor=None, force=False, get_cl
         )
         recommendations.append("請檢查是否有大量下載/大檔輸出或流量放大來源。")
 
+    for row in request_rows:
+        action = str(_row_get(row, "action") or "").strip()
+        if action != "SETTINGS_CHANGED":
+            continue
+        changed_keys = set(_settings_changed_keys(_row_get(row, "detail")))
+        sensitive_keys = sorted(changed_keys.intersection(AI_AGENT_SENSITIVE_SETTING_KEYS))
+        if not sensitive_keys:
+            continue
+        event_user = str(_row_get(row, "user") or "-").strip()
+        event_ts = str(_row_get(row, "ts") or "").strip()
+        add_anomaly(
+            "ai_agent.sensitive_settings_changed",
+            "alert",
+            "AI Agent 敏感設定近期被修改，已要求暫停 write-tools 直到 root 檢查。",
+            {"keys": sensitive_keys, "user": event_user, "ts": event_ts},
+        )
+        interventions.append({
+            "type": "ai_agent_write_tools_lockdown",
+            "status": "active",
+            "reason": "sensitive_settings_changed",
+            "keys": sensitive_keys,
+            "user": event_user,
+            "ts": event_ts,
+        })
+        recommendations.append("請 root 檢查 AI Agent allowed_tools / operation mode / backend 設定變更是否為預期操作；確認後再強制重新審計。")
+        if audit:
+            audit(
+                "AI_AGENT_AUDIT_MAIN_AI_GUARD",
+                get_client_ip() if callable(get_client_ip) else "-",
+                actor_name or "-",
+                ua=get_ua() if callable(get_ua) else "",
+                success=False,
+                detail=f"sensitive_settings_changed keys={','.join(sensitive_keys)} user={event_user}",
+            )
+        break
+
     status = "ok"
     for item in anomalies:
         if item["severity"] == "alert":
@@ -1495,6 +1563,24 @@ def get_ai_agent_audit_last_scan():
             "has_result": bool(payload),
             "scan": payload,
         }
+
+
+def ai_agent_write_guard_status():
+    scan = get_ai_agent_audit_last_scan().get("scan") or {}
+    blocking = []
+    for item in scan.get("anomalies") or []:
+        if not isinstance(item, dict):
+            continue
+        code = str(item.get("code") or "")
+        severity = str(item.get("severity") or "")
+        if severity == "alert" and code.startswith("ai_agent."):
+            blocking.append(item)
+    return {
+        "blocked": bool(blocking),
+        "reason": blocking[0].get("message") if blocking else "",
+        "anomalies": blocking,
+        "scanned_at": scan.get("scanned_at"),
+    }
 
 
 def _safe_datetime_from_timestamp(ts):

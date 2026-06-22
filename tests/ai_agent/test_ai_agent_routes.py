@@ -219,10 +219,50 @@ def test_ai_agent_write_tools_root_only_and_lists_allowed_tools(tmp_path):
     assert payload["ok"] is True
     assert payload["root_only"] is True
     assert payload["write_enabled"] is True
+    assert len(payload["catalog_sha256"]) == 64
     assert [tool["name"] for tool in payload["tools"]] == [
         "write_community_create_thread",
         "write_launch_requirements_check",
     ]
+
+
+def test_ai_agent_write_tools_lockdown_blocks_list_and_execute(monkeypatch, tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    audit_events = []
+    settings = {
+        "ai_agent_operation_mode": "write",
+        "ai_agent_allowed_tools": "write_community_create_thread",
+    }
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings=settings,
+        audit_events=audit_events,
+    )
+    monkeypatch.setattr("routes.ai_agent.ai_agent_write_guard_status", lambda: {
+        "blocked": True,
+        "reason": "AI Agent 敏感設定近期被修改",
+        "anomalies": [{"code": "ai_agent.sensitive_settings_changed", "severity": "alert"}],
+        "scanned_at": "2026-06-22T15:00:00",
+    })
+    client = app.test_client()
+
+    listed = client.get("/api/ai-agent/write-tools")
+    executed = client.post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_community_create_thread",
+        "confirm": "EXECUTE",
+        "arguments": {"board_id": 1, "title": "hello", "content": "world"},
+    })
+
+    assert listed.status_code == 423
+    assert executed.status_code == 423
+    assert listed.get_json()["guard"]["blocked"] is True
+    lockdown_events = [
+        event for event in audit_events
+        if event["args"][0] == "AI_AGENT_WRITE_TOOLS_LOCKDOWN"
+    ]
+    assert len(lockdown_events) == 2
 
 
 def test_ai_agent_write_tools_include_expanded_capability_domains(tmp_path):
