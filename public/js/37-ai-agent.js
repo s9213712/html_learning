@@ -24,6 +24,10 @@ const AI_AGENT_STATE = {
   comfyuiPreviewLoads: {},
   persistTimer: null,
   loadingConversation: false,
+  historyLoading: false,
+  historyOpen: false,
+  conversationHistory: [],
+  historySelected: null,
 };
 
 const AI_AGENT_OPERATION_MODE_LABELS = {
@@ -137,6 +141,132 @@ async function aiAgentLoadEncryptedConversation(conversationId = "default") {
   }
 }
 
+function aiAgentRenderHistoryDetail(item = null) {
+  const host = $("ai-agent-history-detail");
+  if (!host) return;
+  if (!item || !item.payload) {
+    host.innerHTML = '<div class="drive-empty">選擇一筆歷史對話後查看內容</div>';
+    return;
+  }
+  const messages = Array.isArray(item.payload.messages) ? item.payload.messages : [];
+  if (!messages.length) {
+    host.innerHTML = '<div class="drive-empty">這筆歷史對話沒有訊息</div>';
+    return;
+  }
+  host.innerHTML = messages.map((message) => {
+    const role = message.role === "assistant" ? "assistant" : "user";
+    const label = role === "assistant" ? "AI" : "使用者";
+    return `
+      <div class="ai-agent-message ${role}">
+        <div class="ai-agent-message-role">${sanitize(label)}</div>
+        <div class="ai-agent-message-body">${sanitize(message.content || "")}</div>
+        ${aiAgentRenderMessageImages(message)}
+      </div>
+    `;
+  }).join("");
+  aiAgentScrollElementToBottom(host);
+}
+
+function renderAiAgentConversationHistory() {
+  const panel = $("ai-agent-history-panel");
+  const list = $("ai-agent-history-list");
+  const state = $("ai-agent-history-state");
+  const button = $("ai-agent-history-btn");
+  const canView = aiAgentCanViewConversationHistory();
+  if (button) button.hidden = !canView;
+  if (panel) panel.hidden = !canView || !AI_AGENT_STATE.historyOpen;
+  if (!canView || !list || !state) return;
+  if (AI_AGENT_STATE.historyLoading) {
+    state.textContent = "歷史對話載入中...";
+    return;
+  }
+  const rows = AI_AGENT_STATE.conversationHistory || [];
+  state.textContent = rows.length
+    ? `共 ${rows.length} 筆最近 AI Agent 歷史對話`
+    : "目前沒有可回顧的歷史對話";
+  list.innerHTML = rows.map((item, index) => {
+    const title = `${item.owner_username || item.owner_user_id || "-"} / ${item.conversation_id || "default"}`;
+    const time = item.updated_at || item.created_at || "";
+    const preview = item.last_user || item.last_assistant || "沒有摘要";
+    return `
+      <button class="drive-file-row" type="button"
+        data-ai-agent-history-index="${index}"
+        title="${sanitize(preview)}">
+        <strong>${sanitize(title)}</strong>
+        <span>${sanitize(time)}，${Number(item.message_count || 0)} 則，session ${sanitize(item.session_binding || "-")}</span>
+        <span>${sanitize(preview)}</span>
+      </button>
+    `;
+  }).join("");
+  list.querySelectorAll("[data-ai-agent-history-index]").forEach((row) => {
+    row.addEventListener("click", () => {
+      const index = parseInt(row.getAttribute("data-ai-agent-history-index") || "-1", 10);
+      const item = AI_AGENT_STATE.conversationHistory[index];
+      if (item) loadAiAgentConversationHistoryPayload(item);
+    });
+  });
+  aiAgentRenderHistoryDetail(AI_AGENT_STATE.historySelected);
+}
+
+async function loadAiAgentConversationHistory(options = {}) {
+  if (!aiAgentCanViewConversationHistory()) return;
+  if (AI_AGENT_STATE.historyLoading && !options.force) return;
+  AI_AGENT_STATE.historyLoading = true;
+  renderAiAgentConversationHistory();
+  try {
+    const res = await apiFetch(`${API}/ai-agent/conversation-history?limit=50`, {
+      credentials: "same-origin",
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok || !json.ok) {
+      setAiAgentMessage(json.msg || "AI Agent 歷史對話讀取失敗", "err");
+      return;
+    }
+    AI_AGENT_STATE.conversationHistory = Array.isArray(json.conversations) ? json.conversations : [];
+    if (!AI_AGENT_STATE.historySelected && AI_AGENT_STATE.conversationHistory.length) {
+      AI_AGENT_STATE.historySelected = null;
+    }
+  } catch (err) {
+    setAiAgentMessage(`AI Agent 歷史對話讀取失敗：${err}`, "err");
+  } finally {
+    AI_AGENT_STATE.historyLoading = false;
+    renderAiAgentConversationHistory();
+  }
+}
+
+async function loadAiAgentConversationHistoryPayload(item = {}) {
+  if (!aiAgentCanViewConversationHistory()) return;
+  const params = new URLSearchParams({
+    limit: "1",
+    include_payload: "1",
+    owner_user_id: String(item.owner_user_id || ""),
+    session_binding: String(item.session_binding || ""),
+    conversation_id: String(item.conversation_id || "default"),
+  });
+  try {
+    const res = await apiFetch(`${API}/ai-agent/conversation-history?${params.toString()}`, {
+      credentials: "same-origin",
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok || !json.ok || !Array.isArray(json.conversations) || !json.conversations.length) {
+      setAiAgentMessage(json.msg || "歷史對話內容讀取失敗", "err");
+      return;
+    }
+    AI_AGENT_STATE.historySelected = json.conversations[0];
+    renderAiAgentConversationHistory();
+    setAiAgentMessage("已載入歷史對話", "ok");
+  } catch (err) {
+    setAiAgentMessage(`歷史對話內容讀取失敗：${err}`, "err");
+  }
+}
+
+function toggleAiAgentConversationHistory() {
+  if (!aiAgentCanViewConversationHistory()) return;
+  AI_AGENT_STATE.historyOpen = !AI_AGENT_STATE.historyOpen;
+  renderAiAgentConversationHistory();
+  if (AI_AGENT_STATE.historyOpen) loadAiAgentConversationHistory({ force: true });
+}
+
 function aiAgentResetScopeState() {
   const nextScope = aiAgentCurrentAccountScope();
   const previousScope = AI_AGENT_STATE.accountScope;
@@ -145,8 +275,12 @@ function aiAgentResetScopeState() {
   }
   AI_AGENT_STATE.accountScope = nextScope;
   if (!previousScope || previousScope !== nextScope) {
+    AI_AGENT_STATE.historyOpen = false;
+    AI_AGENT_STATE.conversationHistory = [];
+    AI_AGENT_STATE.historySelected = null;
     aiAgentLoadConversation(nextScope);
     renderAiAgentThread();
+    renderAiAgentConversationHistory();
     aiAgentHydratePersistedComfyuiImages();
   }
 }
@@ -163,6 +297,42 @@ function setAiAgentMessage(text = "", kind = "info") {
   el.textContent = text || "";
   el.className = "msg";
   if (text) el.classList.add("show", kind === "err" ? "err" : kind === "ok" ? "ok" : "info");
+}
+
+function aiAgentRequestTimeoutMs(mode = "text") {
+  const configured = parseInt(AI_AGENT_STATE.settings?.request_timeout_seconds || "", 10);
+  const seconds = Number.isFinite(configured) && configured > 0 ? configured : (mode === "image" ? 180 : 120);
+  return Math.max(10000, Math.min(610000, (seconds + 10) * 1000));
+}
+
+async function aiAgentChatFetch(payload, options = {}) {
+  const mode = options.mode || payload?.mode || "text";
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  const timeoutMs = aiAgentRequestTimeoutMs(mode);
+  const timer = controller
+    ? setTimeout(() => controller.abort(), timeoutMs)
+    : null;
+  try {
+    return await apiFetch(API + "/ai-agent/chat", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      ...(controller ? { signal: controller.signal } : {}),
+    });
+  } catch (err) {
+    if (err?.name === "AbortError") {
+      throw new Error(`AI Agent 請求逾時（${Math.round(timeoutMs / 1000)} 秒），已中止前端等待。`);
+    }
+    throw err;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function aiAgentCanViewConversationHistory() {
+  const actor = AI_AGENT_STATE.actor || {};
+  return actor.username === "root" || actor.role === "super_admin";
 }
 
 function isMockAiAgentReply(text) {
@@ -623,17 +793,14 @@ async function aiAgentPlanToolAction(userText, options = {}) {
     `user=${userText}`,
   ].join("\n");
   const started = performance.now();
-  const res = await apiFetch(API + "/ai-agent/chat", {
-    method: "POST",
-    credentials: "same-origin",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      session_id: aiAgentEnsureSessionId(),
-      model: selectedModel,
-      mode: "text",
-      messages: [{ role: "user", content: planningPrompt }],
-      image_data_url: "",
-    }),
+  const res = await aiAgentChatFetch({
+    session_id: aiAgentEnsureSessionId(),
+    model: selectedModel,
+    mode: "text",
+    messages: [{ role: "user", content: planningPrompt }],
+    image_data_url: "",
+  }, {
+    mode: "text",
   });
   const json = await res.json().catch(() => ({}));
   const content = json?.message?.content || json?.msg || "";
@@ -1020,17 +1187,14 @@ async function aiAgentAnalyzeImageForComfyui(userText) {
     `使用者需求：${userText || "參考圖片產生相似風格圖片"}`,
   ].join("\n");
   const started = performance.now();
-  const res = await apiFetch(API + "/ai-agent/chat", {
-    method: "POST",
-    credentials: "same-origin",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      session_id: aiAgentEnsureSessionId(),
-      model: selectedModel,
-      mode: "image",
-      messages: [{ role: "user", content: analysisPrompt }],
-      image_data_url: AI_AGENT_STATE.imageDataUrl,
-    }),
+  const res = await aiAgentChatFetch({
+    session_id: aiAgentEnsureSessionId(),
+    model: selectedModel,
+    mode: "image",
+    messages: [{ role: "user", content: analysisPrompt }],
+    image_data_url: AI_AGENT_STATE.imageDataUrl,
+  }, {
+    mode: "image",
   });
   const json = await res.json().catch(() => ({}));
   const content = json?.message?.content || json?.msg || "";
@@ -1063,17 +1227,14 @@ async function aiAgentAnalyzeTextForComfyui(userText) {
     `使用者需求：${userText}`,
   ].join("\n");
   const started = performance.now();
-  const res = await apiFetch(API + "/ai-agent/chat", {
-    method: "POST",
-    credentials: "same-origin",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      session_id: aiAgentEnsureSessionId(),
-      model: selectedModel,
-      mode: "text",
-      messages: [{ role: "user", content: analysisPrompt }],
-      image_data_url: "",
-    }),
+  const res = await aiAgentChatFetch({
+    session_id: aiAgentEnsureSessionId(),
+    model: selectedModel,
+    mode: "text",
+    messages: [{ role: "user", content: analysisPrompt }],
+    image_data_url: "",
+  }, {
+    mode: "text",
   });
   const json = await res.json().catch(() => ({}));
   const content = json?.message?.content || json?.msg || "";
@@ -1741,6 +1902,10 @@ function renderAiAgentThread(options = {}) {
 
 function aiAgentScrollThreadToBottom() {
   const host = $("ai-agent-thread");
+  aiAgentScrollElementToBottom(host);
+}
+
+function aiAgentScrollElementToBottom(host) {
   if (!host) return;
   const scroll = () => {
     host.scrollTop = host.scrollHeight;
@@ -1784,6 +1949,7 @@ function renderAiAgentStatus(json) {
   const actor = json?.actor || {};
   AI_AGENT_STATE.actor = actor;
   AI_AGENT_STATE.audit = json?.audit || {};
+  renderAiAgentConversationHistory();
   const health = json?.health || {};
   const status = $("ai-agent-status");
   if (status) {
@@ -2373,8 +2539,8 @@ function handleAiAgentImagePick(event) {
     event.target.value = "";
     return;
   }
-  if (file.size > 2 * 1024 * 1024) {
-    setAiAgentMessage("圖片大小不可超過 2 MB", "err");
+  if (file.size > 3 * 1024 * 1024) {
+    setAiAgentMessage("圖片大小不可超過 3 MB；可上傳 1024 或一般 1920x1080 JPEG，過大的 PNG 請先轉成 JPEG。", "err");
     event.target.value = "";
     return;
   }
@@ -2500,12 +2666,7 @@ async function sendAiAgentMessage() {
       messages: aiAgentBuildMessages(userText, mode),
       image_data_url: mode === "image" ? AI_AGENT_STATE.imageDataUrl : "",
     };
-    const raw = await apiFetch(API + "/ai-agent/chat", {
-      method: "POST",
-      credentials: "same-origin",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    }).then(async (res) => {
+    const raw = await aiAgentChatFetch(payload, { mode }).then(async (res) => {
       const text = await res.text();
       let parsed = {};
       try {
@@ -2555,6 +2716,8 @@ document.addEventListener("hackme:module-changed", (event) => {
 });
 
 document.addEventListener("hackme:account-context-changed", handleAiAgentAccountContextChanged);
+
+$("ai-agent-history-btn")?.addEventListener("click", toggleAiAgentConversationHistory);
 
 aiAgentResetScopeState();
 

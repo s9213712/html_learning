@@ -145,7 +145,7 @@ def _build_db(path):
     conn.close()
 
 
-def _build_app(db_path, actor, *, settings=None, audit_events=None):
+def _build_app(db_path, actor, *, settings=None, audit_events=None, fernet=None):
     def get_db():
         conn = sqlite3.connect(db_path)
         conn.row_factory = sqlite3.Row
@@ -170,7 +170,7 @@ def _build_app(db_path, actor, *, settings=None, audit_events=None):
             "require_csrf": lambda x: x,
             "require_csrf_safe": lambda x: x,
             "get_db": get_db,
-            "fernet": Fernet(Fernet.generate_key()),
+            "fernet": fernet or Fernet(Fernet.generate_key()),
             "role_rank": lambda role: {"user": 0, "manager": 1, "admin": 1, "super_admin": 2}.get(role or "user", 0),
         }
     )
@@ -485,6 +485,64 @@ def test_ai_agent_conversation_memory_is_encrypted_and_user_isolated(tmp_path):
     assert root_loaded.get_json()["payload"]["messages"][0]["content"] == "secret habit: use ogipote style"
     assert user_loaded.status_code == 200
     assert user_loaded.get_json()["payload"]["messages"] == []
+
+
+def test_ai_agent_conversation_history_is_root_only_and_cross_session(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    shared_fernet = Fernet(Fernet.generate_key())
+    root_app = _build_app(db_path, {"id": 1, "username": "root", "role": "user"}, fernet=shared_fernet)
+    user_app = _build_app(db_path, {"id": 2, "username": "userA", "role": "user"}, fernet=shared_fernet)
+
+    saved = root_app.test_client().put("/api/ai-agent/conversation", json={
+        "conversation_id": "default",
+        "payload": {
+            "sessionId": "default",
+            "messages": [{"role": "user", "content": "live browser request"}],
+        },
+    })
+    encrypted = shared_fernet.encrypt(json.dumps({
+        "sessionId": "avatar-audit",
+        "messages": [
+            {"role": "user", "content": "請產圖並替換頭像"},
+            {"role": "assistant", "content": "已完成視覺預檢並拒絕低品質裁切"},
+        ],
+        "habits": {},
+    }, ensure_ascii=False).encode("utf-8")).decode("utf-8")
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO ai_agent_conversations
+                (owner_user_id, session_binding, conversation_id, payload_encrypted, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (1, "playwright-session", "avatar-audit", encrypted, "2026-06-22T20:00:00", "2026-06-22T20:10:00"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    denied = user_app.test_client().get("/api/ai-agent/conversation-history")
+    listed = root_app.test_client().get("/api/ai-agent/conversation-history?limit=10")
+    detail = root_app.test_client().get(
+        "/api/ai-agent/conversation-history"
+        "?limit=1&include_payload=1&owner_user_id=1&session_binding=playwright-session&conversation_id=avatar-audit"
+    )
+    listed_payload = listed.get_json()
+    detail_payload = detail.get_json()
+
+    assert saved.status_code == 200
+    assert denied.status_code == 403
+    assert listed.status_code == 200
+    assert listed_payload["root_only"] is True
+    assert {item["conversation_id"] for item in listed_payload["conversations"]} >= {"default", "avatar-audit"}
+    audit_row = next(item for item in listed_payload["conversations"] if item["conversation_id"] == "avatar-audit")
+    assert audit_row["session_binding"] == "playwright-session"
+    assert audit_row["message_count"] == 2
+    assert "請產圖" in audit_row["last_user"]
+    assert detail.status_code == 200
+    assert detail_payload["conversations"][0]["payload"]["messages"][1]["content"] == "已完成視覺預檢並拒絕低品質裁切"
 
 
 def test_ai_agent_write_tool_execute_dispatches_allowlisted_read_tool(tmp_path):

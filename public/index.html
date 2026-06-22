@@ -2230,7 +2230,15 @@
               <div class="drive-card-title">對話</div>
               <div class="drive-card-sub" id="ai-agent-model-state">模型：尚未讀取</div>
             </div>
-            <button class="btn btn-sm" id="ai-agent-clear-btn" type="button">清空</button>
+            <div class="edit-user-actions">
+              <button class="btn btn-sm" id="ai-agent-history-btn" type="button" hidden>歷史</button>
+              <button class="btn btn-sm" id="ai-agent-clear-btn" type="button">清空</button>
+            </div>
+          </div>
+          <div class="ai-agent-history-panel" id="ai-agent-history-panel" hidden>
+            <div class="drive-card-sub" id="ai-agent-history-state">尚未載入歷史對話</div>
+            <div class="drive-file-list" id="ai-agent-history-list"></div>
+            <div class="ai-agent-thread ai-agent-history-detail" id="ai-agent-history-detail"></div>
           </div>
           <div class="ai-agent-thread" id="ai-agent-thread" aria-live="polite"></div>
           <div class="ai-agent-composer">

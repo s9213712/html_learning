@@ -1439,6 +1439,47 @@ def register_ai_agent_routes(app, deps):
         parsed = json.loads(raw)
         return _sanitize_conversation_payload(parsed if isinstance(parsed, dict) else {})
 
+    def _conversation_preview(payload):
+        messages = payload.get("messages") if isinstance(payload, dict) else []
+        if not isinstance(messages, list):
+            messages = []
+        last_user = ""
+        last_assistant = ""
+        for message in reversed(messages):
+            if not isinstance(message, dict):
+                continue
+            role = str(message.get("role") or "")
+            content = " ".join(str(message.get("content") or "").split())[:240]
+            if role == "user" and not last_user:
+                last_user = content
+            elif role == "assistant" and not last_assistant:
+                last_assistant = content
+            if last_user and last_assistant:
+                break
+        return {
+            "message_count": len(messages),
+            "last_user": last_user,
+            "last_assistant": last_assistant,
+        }
+
+    def _conversation_history_row(row, *, include_payload=False):
+        payload = _decrypt_conversation_payload(_row_value(row, "payload_encrypted"))
+        preview = _conversation_preview(payload)
+        result = {
+            "owner_user_id": int(_row_value(row, "owner_user_id") or 0),
+            "owner_username": _row_value(row, "owner_username") or "",
+            "session_binding": _row_value(row, "session_binding") or "",
+            "conversation_id": _row_value(row, "conversation_id") or "default",
+            "created_at": _row_value(row, "created_at") or "",
+            "updated_at": _row_value(row, "updated_at") or "",
+            "message_count": preview["message_count"],
+            "last_user": preview["last_user"],
+            "last_assistant": preview["last_assistant"],
+        }
+        if include_payload:
+            result["payload"] = payload
+        return result
+
     def _is_missing_arg(value):
         return value is None or (isinstance(value, str) and not value.strip())
 
@@ -2229,6 +2270,84 @@ def register_ai_agent_routes(app, deps):
             except Exception:
                 pass
             _audit_agent_event("AI_AGENT_CONVERSATION_ERROR", actor, success=False, detail=str(exc)[:180])
+            return json_resp({"ok": False, "msg": str(exc)}), 500
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    @app.route("/api/ai-agent/conversation-history", methods=["GET"])
+    @require_csrf_safe
+    def ai_agent_conversation_history_route():
+        actor, denied = _actor_or_401()
+        if denied:
+            return denied
+        if not _actor_is_super_admin(actor):
+            _audit_agent_event("AI_AGENT_CONVERSATION_HISTORY_DENIED", actor, success=False, detail="root_only")
+            return json_resp({"ok": False, "msg": "只有 root 可檢視 AI Agent 歷史對話"}), 403
+        if not fernet:
+            return json_resp({"ok": False, "msg": "AI Agent encrypted memory key is unavailable"}), 503
+        limit = _coerce_limit(request.args.get("limit") or "30")
+        owner_filter = request.args.get("owner_user_id")
+        conversation_filter = request.args.get("conversation_id")
+        session_filter = request.args.get("session_binding")
+        read_full = _parse_bool(request.args.get("include_payload")) is True
+        clauses = ["1=1"]
+        params = []
+        if owner_filter not in {None, ""}:
+            try:
+                owner_id = int(owner_filter)
+            except Exception:
+                return json_resp({"ok": False, "msg": "owner_user_id 必須是整數"}), 400
+            clauses.append("c.owner_user_id=?")
+            params.append(owner_id)
+        if conversation_filter:
+            clauses.append("c.conversation_id=?")
+            params.append(_conversation_id(conversation_filter))
+        if session_filter:
+            clauses.append("c.session_binding=?")
+            params.append(str(session_filter)[:80])
+        params.append(limit)
+        conn = get_db()
+        try:
+            _ensure_ai_agent_conversation_schema(conn)
+            rows = conn.execute(
+                f"""
+                SELECT
+                    c.owner_user_id,
+                    COALESCE(u.username, '') AS owner_username,
+                    c.session_binding,
+                    c.conversation_id,
+                    c.payload_encrypted,
+                    c.created_at,
+                    c.updated_at
+                FROM ai_agent_conversations c
+                LEFT JOIN users u ON u.id = c.owner_user_id
+                WHERE {' AND '.join(clauses)}
+                ORDER BY c.updated_at DESC, c.created_at DESC
+                LIMIT ?
+                """,
+                tuple(params),
+            ).fetchall()
+            conversations = [
+                _conversation_history_row(row, include_payload=read_full)
+                for row in rows
+            ]
+            _audit_agent_event(
+                "AI_AGENT_CONVERSATION_HISTORY",
+                actor,
+                success=True,
+                detail=f"count={len(conversations)},include_payload={read_full}",
+            )
+            return json_resp({
+                "ok": True,
+                "encrypted": True,
+                "root_only": True,
+                "conversations": conversations,
+            })
+        except Exception as exc:
+            _audit_agent_event("AI_AGENT_CONVERSATION_HISTORY_ERROR", actor, success=False, detail=str(exc)[:180])
             return json_resp({"ok": False, "msg": str(exc)}), 500
         finally:
             try:
