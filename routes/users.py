@@ -1626,15 +1626,17 @@ def register_user_routes(app, deps):
                         "width": side,
                         "height": side,
                     }
-                x = max(0, min(int(crop.get("x", 0) or 0), image_width - 1))
-                y = max(0, min(int(crop.get("y", 0) or 0), image_height - 1))
-                crop_width = max(0, min(int(crop.get("width", 0) or 0), image_width - x))
-                crop_height = max(0, min(int(crop.get("height", 0) or 0), image_height - y))
+                raw_x = max(0, int(crop.get("x", 0) or 0))
+                raw_y = max(0, int(crop.get("y", 0) or 0))
+                crop_width = max(1, min(int(crop.get("width", 0) or 0), image_width))
+                crop_height = max(1, min(int(crop.get("height", 0) or 0), image_height))
+                x = min(raw_x, max(0, image_width - crop_width))
+                y = min(raw_y, max(0, image_height - crop_height))
                 side = min(crop_width, crop_height)
                 if side <= 0:
                     return None
-                left = x + max(0, (crop_width - side) // 2)
-                top = y + max(0, (crop_height - side) // 2)
+                left = min(x + max(0, (crop_width - side) // 2), max(0, image_width - side))
+                top = min(y + max(0, (crop_height - side) // 2), max(0, image_height - side))
                 cropped = clean.crop((left, top, left + side, top + side))
                 resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS", Image.BICUBIC)
                 cropped = cropped.resize((512, 512), resample)
