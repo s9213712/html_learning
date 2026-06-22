@@ -1439,6 +1439,21 @@ def run_ai_agent_audit_scan(settings, *, get_db, actor=None, force=False, get_cl
     if status != "alert" and any(item["severity"] == "warn" for item in anomalies):
         status = "warn"
 
+    has_ai_agent_alert = any(
+        str(item.get("severity") or "") == "alert" and str(item.get("code") or "").startswith("ai_agent.")
+        for item in anomalies
+        if isinstance(item, dict)
+    )
+    if audit and force and not has_ai_agent_alert:
+        audit(
+            "AI_AGENT_AUDIT_MAIN_AI_GUARD_CLEAR",
+            get_client_ip() if callable(get_client_ip) else "-",
+            actor_name or "-",
+            ua=get_ua() if callable(get_ua) else "",
+            success=True,
+            detail="forced_scan_no_ai_agent_alert",
+        )
+
     if audit_settings["audit_notify_root"] and status != "ok":
         notifications.append({
             "target": "root",
@@ -1565,7 +1580,65 @@ def get_ai_agent_audit_last_scan():
         }
 
 
-def ai_agent_write_guard_status():
+def _persistent_ai_agent_write_guard_status(get_db, *, window_minutes=60):
+    if not callable(get_db):
+        return None
+    since_iso = _safe_audit_timestamp(datetime.now() - timedelta(minutes=max(1, int(window_minutes or 60))), default_minutes=60)
+    conn = None
+    try:
+        conn = get_db()
+        if not _table_exists(conn, "secure_audit"):
+            return None
+        rows = _safe_rows(
+            conn,
+            """
+            SELECT ts, action, ip, user, success, detail
+            FROM secure_audit
+            WHERE ts>=?
+              AND action IN ('AI_AGENT_AUDIT_MAIN_AI_GUARD', 'AI_AGENT_AUDIT_MAIN_AI_GUARD_CLEAR')
+            ORDER BY id DESC
+            LIMIT 20
+            """,
+            (since_iso,),
+        )
+    except Exception:
+        return None
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    if not rows:
+        return None
+    latest = rows[0]
+    action = str(_row_get(latest, "action") or "")
+    success = _row_get(latest, "success")
+    try:
+        success_ok = int(success) == 1
+    except Exception:
+        success_ok = bool(success)
+    if action == "AI_AGENT_AUDIT_MAIN_AI_GUARD_CLEAR" and success_ok:
+        return None
+    if action != "AI_AGENT_AUDIT_MAIN_AI_GUARD" or success_ok:
+        return None
+    detail = str(_row_get(latest, "detail") or "")
+    ts = str(_row_get(latest, "ts") or "")
+    user = str(_row_get(latest, "user") or "-")
+    return {
+        "code": "ai_agent.persistent_write_guard",
+        "severity": "alert",
+        "message": "AI Agent audit 已寫入跨 worker 鎖定事件，write-tools 暫停直到 root 重新審計解除。",
+        "details": {
+            "ts": ts,
+            "user": user,
+            "detail": detail[:500],
+            "source": "secure_audit",
+        },
+    }
+
+
+def ai_agent_write_guard_status(get_db=None):
     scan = get_ai_agent_audit_last_scan().get("scan") or {}
     blocking = []
     for item in scan.get("anomalies") or []:
@@ -1575,11 +1648,15 @@ def ai_agent_write_guard_status():
         severity = str(item.get("severity") or "")
         if severity == "alert" and code.startswith("ai_agent."):
             blocking.append(item)
+    persistent = _persistent_ai_agent_write_guard_status(get_db)
+    if persistent:
+        blocking.append(persistent)
     return {
         "blocked": bool(blocking),
         "reason": blocking[0].get("message") if blocking else "",
         "anomalies": blocking,
         "scanned_at": scan.get("scanned_at"),
+        "source": "secure_audit" if persistent and len(blocking) == 1 else ("mixed" if persistent else "process"),
     }
 
 

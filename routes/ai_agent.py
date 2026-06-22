@@ -1332,7 +1332,7 @@ def register_ai_agent_routes(app, deps):
         return actor, None
 
     def _ai_agent_write_guard_denied(actor, *, endpoint):
-        guard = ai_agent_write_guard_status()
+        guard = ai_agent_write_guard_status(get_db=get_db)
         if not guard.get("blocked"):
             return None
         detail = f"endpoint={endpoint},reason={str(guard.get('reason') or '')[:180]}"

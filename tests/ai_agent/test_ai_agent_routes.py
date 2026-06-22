@@ -1,6 +1,7 @@
 import json
 import hashlib
 import sqlite3
+from datetime import datetime
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 
@@ -65,6 +66,16 @@ def _build_db(path):
             target_user TEXT,
             detail TEXT,
             created_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS secure_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT,
+            action TEXT,
+            ip TEXT,
+            user TEXT,
+            success INTEGER,
+            detail TEXT
         );
 
         CREATE TABLE IF NOT EXISTS uploaded_files (
@@ -240,7 +251,7 @@ def test_ai_agent_write_tools_lockdown_blocks_list_and_execute(monkeypatch, tmp_
         settings=settings,
         audit_events=audit_events,
     )
-    monkeypatch.setattr("routes.ai_agent.ai_agent_write_guard_status", lambda: {
+    monkeypatch.setattr("routes.ai_agent.ai_agent_write_guard_status", lambda **kwargs: {
         "blocked": True,
         "reason": "AI Agent 敏感設定近期被修改",
         "anomalies": [{"code": "ai_agent.sensitive_settings_changed", "severity": "alert"}],
@@ -263,6 +274,41 @@ def test_ai_agent_write_tools_lockdown_blocks_list_and_execute(monkeypatch, tmp_
         if event["args"][0] == "AI_AGENT_WRITE_TOOLS_LOCKDOWN"
     ]
     assert len(lockdown_events) == 2
+
+
+def test_ai_agent_write_tools_lockdown_uses_persistent_audit_guard(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO secure_audit (ts, action, ip, user, success, detail) VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            datetime.now().replace(microsecond=0).isoformat(),
+            "AI_AGENT_AUDIT_MAIN_AI_GUARD",
+            "127.0.0.1",
+            "root",
+            0,
+            "sensitive_settings_changed keys=ai_agent_allowed_tools user=root",
+        ),
+    )
+    conn.commit()
+    conn.close()
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "write",
+            "ai_agent_allowed_tools": "write_community_create_thread",
+        },
+    )
+
+    response = app.test_client().get("/api/ai-agent/write-tools")
+    payload = response.get_json()
+
+    assert response.status_code == 423
+    assert payload["guard"]["blocked"] is True
+    assert payload["guard"]["source"] == "secure_audit"
+    assert payload["guard"]["anomalies"][0]["code"] == "ai_agent.persistent_write_guard"
 
 
 def test_ai_agent_write_tools_include_expanded_capability_domains(tmp_path):

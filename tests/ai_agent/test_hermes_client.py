@@ -911,6 +911,43 @@ def test_ai_agent_audit_scan_locks_down_write_tools_on_sensitive_setting_change(
     assert any(event["args"][0] == "AI_AGENT_AUDIT_MAIN_AI_GUARD" for event in audit_events)
 
 
+def test_ai_agent_write_guard_persistent_clear_event_unblocks(tmp_path):
+    clear_ai_agent_audit_scan_state()
+    db_path = tmp_path / "ai_agent_audit_guard_clear.sqlite"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE secure_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT,
+            action TEXT,
+            ip TEXT,
+            user TEXT,
+            success INTEGER,
+            detail TEXT
+        )
+        """
+    )
+    now = datetime.now().replace(microsecond=0)
+    conn.execute(
+        "INSERT INTO secure_audit (ts, action, ip, user, success, detail) VALUES (?, ?, ?, ?, ?, ?)",
+        (now.isoformat(), "AI_AGENT_AUDIT_MAIN_AI_GUARD", "127.0.0.1", "root", 0, "blocked"),
+    )
+    conn.execute(
+        "INSERT INTO secure_audit (ts, action, ip, user, success, detail) VALUES (?, ?, ?, ?, ?, ?)",
+        ((now + timedelta(seconds=1)).isoformat(), "AI_AGENT_AUDIT_MAIN_AI_GUARD_CLEAR", "127.0.0.1", "root", 1, "clear"),
+    )
+    conn.commit()
+    conn.close()
+
+    def get_db():
+        db = sqlite3.connect(db_path)
+        db.row_factory = sqlite3.Row
+        return db
+
+    assert ai_agent_write_guard_status(get_db=get_db)["blocked"] is False
+
+
 def test_public_ai_agent_audit_status_uses_last_scan_cache(tmp_path):
     clear_ai_agent_audit_scan_state()
     db_path = tmp_path / "ai_agent_audit_status.sqlite"
