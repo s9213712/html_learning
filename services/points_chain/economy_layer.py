@@ -446,6 +446,7 @@ def append_economy_event(
     actor=None,
     allow_mint_override=False,
     chain_branch="main",
+    skip_preflight_replay=False,
 ):
     policy = load_economy_policy(conn)
     wallets = ensure_economy_fund_wallets(conn, chain_secret=chain_secret)
@@ -506,8 +507,12 @@ def append_economy_event(
             raise ValueError("economy idempotency key conflict")
         return existing, False
 
-    replay = replay_economy_events(conn, policy=policy, chain_secret=chain_secret, persist_cache=False, chain_branch=chain_branch)
+    replay = None
+    if not skip_preflight_replay:
+        replay = replay_economy_events(conn, policy=policy, chain_secret=chain_secret, persist_cache=False, chain_branch=chain_branch)
     if source_fund_key == "mint" and not allow_mint_override:
+        if replay is None:
+            replay = replay_economy_events(conn, policy=policy, chain_secret=chain_secret, persist_cache=False, chain_branch=chain_branch)
         releasable = int(policy["max_supply"]) - int(policy["reserved_locked"])
         if int(replay["minted_total"]) + amount > releasable:
             if int(replay["minted_total"]) >= releasable:
@@ -522,6 +527,8 @@ def append_economy_event(
             if destination_fund_key != restricted_destination:
                 raise ValueError("mint destination violates supply expansion restriction")
     elif source_fund_key is not None and source_fund_key != "mint":
+        if replay is None:
+            replay = replay_economy_events(conn, policy=policy, chain_secret=chain_secret, persist_cache=False, chain_branch=chain_branch)
         source_balance = int((replay.get("balances") or {}).get(source_fund_key, {}).get("balance") or 0)
         if source_balance < amount:
             raise ValueError("source fund balance is insufficient")
@@ -662,8 +669,6 @@ def replay_economy_events(conn, *, policy=None, chain_secret, persist_cache=Fals
                 raise ValueError(f"economy replay would create negative balance for {source}")
         elif source_address:
             external_balances[source_address] = int(external_balances.get(source_address, 0)) - amount
-            if external_balances[source_address] < 0:
-                raise ValueError(f"economy replay would create negative external balance for {source_address}")
         if dest == "burn" or (not dest and _is_burn_address(dest_address, wallets=wallets)):
             burned_total += amount
             balances["burn"]["balance"] += amount
@@ -686,6 +691,14 @@ def replay_economy_events(conn, *, policy=None, chain_secret, persist_cache=Fals
             if exchange_receivable_principal < 0:
                 raise ValueError("economy replay would create negative exchange principal receivable")
 
+    negative_external = {
+        address: balance
+        for address, balance in external_balances.items()
+        if int(balance or 0) < 0
+    }
+    if negative_external:
+        first_address = sorted(negative_external)[0]
+        raise ValueError(f"economy replay would create negative external balance for {first_address}")
     releasable_supply = int(policy["max_supply"]) - int(policy["reserved_locked"])
     if minted_total > releasable_supply:
         raise ValueError("economy replay exceeds releasable supply")

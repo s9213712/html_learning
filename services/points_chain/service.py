@@ -9468,7 +9468,7 @@ class PointsLedgerService:
                 public_metadata=public_metadata,
             )
             flow["walletization_note"] = "auto distribution source repaired from action_type for economy backfill"
-        if flow.get("internal_movement"):
+        if flow.get("internal_movement") and str(ledger_row["action_type"] or "") != "wallet_transfer_out":
             return None, False
         if not flow.get("walletized"):
             return None, False
@@ -9504,6 +9504,7 @@ class PointsLedgerService:
             },
             actor=actor,
             chain_branch=branch,
+            skip_preflight_replay=str(ledger_row["action_type"] or "") == "wallet_transfer_out",
         )
 
     def _wallet_identity_owner_for_address(self, conn, address):
@@ -16712,6 +16713,7 @@ class PointsLedgerService:
                 actor={"role": "system", "id": None},
                 limit=1000,
             )
+            pre_backfill = self._backfill_walletized_ledger_events(conn)
             conn.commit()
             if chain is None:
                 chain = self.verify_chain()
@@ -16931,6 +16933,8 @@ class PointsLedgerService:
                         chain_branch=self._canonical_branch_uuid(conn),
                     )
                     economy_layer["walletization_backfill"] = backfill
+            elif pre_backfill.get("created"):
+                economy_layer["walletization_backfill"] = pre_backfill
             conn.commit()
             return {
                 "wallets": wallet_data,

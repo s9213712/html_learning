@@ -749,6 +749,125 @@ def test_pc0_to_pc0_wallet_transfer_is_immediate_fee_free_internal_ledger(tmp_pa
     assert result["transfer_in_ledger"]["wallet_flow"]["settlement_rail"] == "internal_hot_wallet"
     assert service.get_wallet(1)["wallet_identity_balances"][source["address"]]["points_balance"] == 55
     assert service.get_wallet(2)["wallet_identity_balances"][destination["address"]]["points_balance"] == 25
+    supply_equation = service.economy_stats()["economy_layer"]["supply_equation"]
+    external_breakdown = supply_equation["economy_external_balance_breakdown"]
+    assert external_breakdown["pc0_member_points"] == 80
+    assert external_breakdown["nonzero_address_count"] == 2
+    assert service.verify_chain()["ok"] is True
+
+
+def test_pc0_internal_transfer_recipient_can_later_withdraw_without_negative_economy_replay(tmp_path):
+    service = _service(tmp_path)
+    sender_actor = {"id": 1, "username": "alice", "role": "user"}
+    recipient_actor = {"id": 2, "username": "bob", "role": "user"}
+    source = _official_hot_wallet(service, 1)
+    recipient_hot = _official_hot_wallet(service, 2)
+    cold_destination = "pc1" + "9" * 48
+    service.record_transaction(
+        user_id=1,
+        currency_type="points",
+        direction="credit",
+        amount=80,
+        action_type="admin_adjust_credit",
+        reference_type="test",
+        reference_id="fund-pc0-withdraw-after-internal",
+        idempotency_key="fund-pc0-withdraw-after-internal",
+        actor={"id": 3, "username": "root", "role": "super_admin"},
+    )
+
+    internal = service.submit_wallet_transaction(
+        actor=sender_actor,
+        source_wallet_address=source["address"],
+        destination_wallet_address=recipient_hot["address"],
+        amount_points=25,
+        fee_points=0,
+        request_uuid="pc0-internal-before-withdraw",
+        memo="internal first",
+    )
+    outgoing = service.submit_wallet_transaction(
+        actor=recipient_actor,
+        source_wallet_address=recipient_hot["address"],
+        destination_wallet_address=cold_destination,
+        amount_points=25,
+        fee_points=0,
+        request_uuid="pc0-recipient-withdraw-after-internal",
+        memo="withdraw after internal",
+    )
+    _force_request_proved(service, outgoing["transaction_hash"])
+    proved = service.explorer_transaction(outgoing["transaction_hash"])["transaction"]
+
+    assert internal["transaction"]["status"] == "confirmed"
+    assert proved["status"] == "confirmed"
+    assert service.explorer_wallet(recipient_hot["address"])["wallet"]["points_balance"] == 0
+    assert service.explorer_wallet(cold_destination)["wallet"]["points_balance"] == 25
+    supply_equation = service.economy_stats()["economy_layer"]["supply_equation"]
+    external_breakdown = supply_equation["economy_external_balance_breakdown"]
+    bridge_flow = supply_equation["bridge_flow_totals"]
+    assert external_breakdown["pc0_member_points"] == 55
+    assert external_breakdown["pc1_unbound_points"] == 25
+    assert external_breakdown["nonzero_address_count"] == 2
+    assert bridge_flow["hot_to_cold_confirmed_points"] == 25
+    assert bridge_flow["economy_external_flow_net_points"] == 25
+    assert bridge_flow["economy_flow_reconciliation_gap_points"] == 0
+    assert service.verify_chain()["ok"] is True
+
+
+def test_walletized_backfill_repairs_legacy_missing_internal_transfer_event(tmp_path):
+    service = _service(tmp_path)
+    sender_actor = {"id": 1, "username": "alice", "role": "user"}
+    recipient_actor = {"id": 2, "username": "bob", "role": "user"}
+    source = _official_hot_wallet(service, 1)
+    recipient_hot = _official_hot_wallet(service, 2)
+    cold_destination = "pc1" + "8" * 48
+    service.record_transaction(
+        user_id=1,
+        currency_type="points",
+        direction="credit",
+        amount=80,
+        action_type="admin_adjust_credit",
+        reference_type="test",
+        reference_id="fund-legacy-missing-internal-backfill",
+        idempotency_key="fund-legacy-missing-internal-backfill",
+        actor={"id": 3, "username": "root", "role": "super_admin"},
+    )
+
+    internal = service.submit_wallet_transaction(
+        actor=sender_actor,
+        source_wallet_address=source["address"],
+        destination_wallet_address=recipient_hot["address"],
+        amount_points=25,
+        fee_points=0,
+        request_uuid="legacy-missing-pc0-internal-before-withdraw",
+        memo="legacy internal first",
+    )
+    missing_idempotency = f"walletized_ledger:{internal['transfer_out_ledger']['ledger_uuid']}"
+    conn = service.get_db()
+    try:
+        service.ensure_schema(conn)
+        conn.execute("DROP TRIGGER trg_points_economy_events_no_delete")
+        conn.execute("DELETE FROM points_economy_events WHERE idempotency_key=?", (missing_idempotency,))
+        conn.commit()
+    finally:
+        conn.close()
+
+    outgoing = service.submit_wallet_transaction(
+        actor=recipient_actor,
+        source_wallet_address=recipient_hot["address"],
+        destination_wallet_address=cold_destination,
+        amount_points=25,
+        fee_points=0,
+        request_uuid="legacy-missing-pc0-recipient-withdraw-after-internal",
+        memo="withdraw after legacy internal",
+    )
+    _force_request_proved(service, outgoing["transaction_hash"])
+    service.explorer_transaction(outgoing["transaction_hash"])
+
+    stats = service.economy_stats()["economy_layer"]
+    assert stats["walletization_backfill"]["created"] >= 1
+    external_breakdown = stats["supply_equation"]["economy_external_balance_breakdown"]
+    assert external_breakdown["pc0_member_points"] == 55
+    assert external_breakdown["pc1_unbound_points"] == 25
+    assert service.verify_chain()["ok"] is True
 
 
 def test_deposit_bridge_credits_pc0_hot_wallet_without_chain_destination_pc0(tmp_path):
