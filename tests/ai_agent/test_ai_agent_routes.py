@@ -9,6 +9,7 @@ from flask import Flask, jsonify, make_response, request
 from services.ai_agent.hermes import AiAgentError, clear_ai_agent_audit_scan_state
 
 from routes.ai_agent import register_ai_agent_routes
+from routes.ai_agent import AI_AGENT_WRITE_TOOL_SPECS
 
 
 def _json_resp(payload, status=200):
@@ -224,6 +225,54 @@ def test_ai_agent_write_tools_root_only_and_lists_allowed_tools(tmp_path):
     ]
 
 
+def test_ai_agent_write_tools_include_expanded_capability_domains(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    settings = {
+        "ai_agent_operation_mode": "write",
+        "ai_agent_allowed_tools": (
+            "write_trading_place_order,write_remote_download_direct,write_cloud_drive_create_text,"
+            "write_share_create,write_album_create,write_video_publish,write_transcode_hls,"
+            "write_subtitle_upload,write_community_post_penalty,write_points_governance_execute,"
+            "write_server_restart,write_incident_enter"
+        ),
+    }
+    app = _build_app(db_path, {"id": 1, "username": "root", "role": "user"}, settings=settings)
+
+    response = app.test_client().get("/api/ai-agent/write-tools")
+    payload = response.get_json()
+    names = [tool["name"] for tool in payload["tools"]]
+
+    assert response.status_code == 200
+    assert set(names) == set(settings["ai_agent_allowed_tools"].split(","))
+    assert all(tool["requires_confirm"] for tool in payload["tools"])
+
+
+def test_ai_agent_all_write_tool_names_are_recognized_when_allowed(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    tool_names = [name for name in AI_AGENT_WRITE_TOOL_SPECS if name != "audit_scan"]
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "write",
+            "ai_agent_allowed_tools": ",".join(tool_names),
+        },
+    )
+    client = app.test_client()
+
+    for tool_name in tool_names:
+        response = client.post("/api/ai-agent/write-tools/execute", json={
+            "tool": tool_name,
+            "confirm": "EXECUTE",
+            "arguments": {},
+        })
+        payload = response.get_json()
+        assert payload.get("msg") != "不支援的 write tool", tool_name
+        assert payload.get("msg") != "此工具未在目前 AI Agent allowed_tools/角色範圍內啟用", tool_name
+
+
 def test_ai_agent_write_tool_execute_requires_write_mode_for_mutation(tmp_path):
     db_path = tmp_path / "ai_agent_routes.db"
     _build_db(db_path)
@@ -353,6 +402,125 @@ def test_ai_agent_write_tool_execute_dispatches_allowlisted_read_tool(tmp_path):
     assert payload["tool"] == "write_launch_requirements_check"
     assert payload["result"]["checked"] is True
     assert payload["result"]["session_cookie_seen"] is True
+
+
+def test_ai_agent_expanded_write_tool_dispatches_json_route(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "write",
+            "ai_agent_allowed_tools": "write_trading_place_order",
+        },
+    )
+    captured = {}
+
+    @app.route("/api/trading/orders", methods=["POST"])
+    def fake_trading_order():
+        captured.update(request.get_json(silent=True) or {})
+        return _json_resp({"ok": True, "order": {"order_uuid": "ord-1", "market_symbol": captured.get("market_symbol")}})
+
+    response = app.test_client().post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_trading_place_order",
+        "confirm": "EXECUTE",
+        "arguments": {
+            "market_symbol": "BTC/POINTS",
+            "side": "buy",
+            "order_type": "limit",
+            "quantity": "0.01",
+            "limit_price_points": 100,
+        },
+    })
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert captured["market_symbol"] == "BTC/POINTS"
+    assert captured["side"] == "buy"
+
+
+def test_ai_agent_safe_path_param_supports_market_symbol(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "write",
+            "ai_agent_allowed_tools": "write_trading_market_update",
+        },
+    )
+    captured = {}
+
+    @app.route("/api/root/trading/markets/<path:symbol>", methods=["POST"])
+    def fake_market_update(symbol):
+        captured["symbol"] = symbol
+        captured["body"] = request.get_json(silent=True) or {}
+        return _json_resp({"ok": True, "symbol": symbol})
+
+    allowed = app.test_client().post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_trading_market_update",
+        "confirm": "EXECUTE",
+        "arguments": {"symbol": "BTC/POINTS", "enabled": True},
+    })
+    blocked = app.test_client().post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_trading_market_update",
+        "confirm": "EXECUTE",
+        "arguments": {"symbol": "../server.py", "enabled": True},
+    })
+
+    assert allowed.status_code == 200
+    assert allowed.get_json()["ok"] is True
+    assert captured["symbol"] == "BTC/POINTS"
+    assert blocked.status_code == 400
+    assert "相對跳脫" in blocked.get_json()["msg"]
+
+
+def test_ai_agent_subtitle_tool_wraps_text_as_multipart(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "write",
+            "ai_agent_allowed_tools": "write_subtitle_upload",
+        },
+    )
+    captured = {}
+
+    @app.route("/api/videos/<int:video_id>/subtitles", methods=["POST"])
+    def fake_subtitle_upload(video_id):
+        upload = request.files.get("subtitle")
+        captured["video_id"] = video_id
+        captured["filename"] = upload.filename
+        captured["text"] = upload.read().decode("utf-8")
+        captured["label"] = request.form.get("label")
+        return _json_resp({"ok": True, "video_id": video_id, "filename": upload.filename})
+
+    response = app.test_client().post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_subtitle_upload",
+        "confirm": "EXECUTE",
+        "arguments": {
+            "video_id": 7,
+            "subtitle_text": "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nHello",
+            "filename": "agent.vtt",
+            "label": "English",
+            "language": "en",
+        },
+    })
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert captured == {
+        "video_id": 7,
+        "filename": "agent.vtt",
+        "text": "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nHello",
+        "label": "English",
+    }
 
 
 def test_ai_agent_community_write_tool_maps_discussion_post_type(tmp_path):

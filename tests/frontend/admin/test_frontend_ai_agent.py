@@ -59,7 +59,7 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert 'id="ai-agent-comfyui-vae"' in html
     assert 'id="ai-agent-comfyui-generate-btn"' in html
     assert 'id="s-module-ai-agent-min-role"' in html
-    _warn_if_asset_cache_version_changed(html, "/js/37-ai-agent.js", "20260614-ai-agent-scroll-bottom-v12")
+    _warn_if_asset_cache_version_changed(html, "/js/37-ai-agent.js", "20260622-ai-agent-write-tools-v1")
     _warn_if_asset_cache_version_changed(html, "/js/90-bootstrap.js", "20260611-ai-agent-comfyui-write-tool")
 
     assert '"ai-agent": "feature_ai_agent_enabled"' in core_js
@@ -96,6 +96,8 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert "function aiAgentLooksLikeComfyuiModelLine" in ai_agent_js
     assert "aiAgentPlanToolAction(plannerText" in ai_agent_js
     assert "aiAgentExecuteToolPlan(plan, plannerText" in ai_agent_js
+    assert "write_tool=執行 context.effective_tools" in ai_agent_js
+    assert "async function aiAgentRunGenericWriteTool" in ai_agent_js
     assert "function aiAgentAnalyzeImageForComfyui" in ai_agent_js
     assert "function aiAgentAnalyzeTextForComfyui" in ai_agent_js
     assert "function aiAgentComfyuiTextHasSubject" in ai_agent_js

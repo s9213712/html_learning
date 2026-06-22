@@ -1,6 +1,7 @@
 import json
 from datetime import datetime
 import hashlib
+import io
 import os
 import re
 import shutil
@@ -19,6 +20,7 @@ from services.ai_agent.hermes import (
     _is_mock_chat_reply,
     public_ai_agent_settings,
 )
+from services.storage.catalog import create_share_link
 
 
 AI_AGENT_WRITE_TOOL_SPECS = {
@@ -153,6 +155,604 @@ AI_AGENT_WRITE_TOOL_SPECS = {
         "body_fields": {"force"},
         "required": set(),
         "write": False,
+    },
+    "write_trading_place_order": {
+        "label": "建立交易掛單",
+        "description": "透過既有交易 API 建立現貨/合約交易訂單。",
+        "method": "POST",
+        "path": "/api/trading/orders",
+        "path_params": {},
+        "body_fields": {"market_symbol", "side", "order_type", "quantity", "limit_price_points", "stop_loss_percent", "take_profit_percent", "emergency_close", "source_wallet_address"},
+        "required": {"market_symbol", "side", "order_type", "quantity"},
+        "write": True,
+    },
+    "write_trading_cancel_order": {
+        "label": "取消交易掛單",
+        "description": "取消指定交易訂單。",
+        "method": "POST",
+        "path": "/api/trading/orders/{order_uuid}/cancel",
+        "path_params": {"order_uuid": "safe_id"},
+        "body_fields": set(),
+        "required": {"order_uuid"},
+        "write": True,
+    },
+    "write_trading_bot_create": {
+        "label": "建立交易機器人",
+        "description": "建立 DCA/交易機器人；參數仍由交易 API 驗證。",
+        "method": "POST",
+        "path": "/api/trading/bots",
+        "path_params": {},
+        "body_fields": {"name", "bot_type", "market_symbol", "strategy", "enabled", "budget_points", "order_size_points", "interval_minutes", "max_runs", "parameters", "config"},
+        "required": {"market_symbol"},
+        "write": True,
+    },
+    "write_trading_bot_backtest": {
+        "label": "交易機器人回測",
+        "description": "執行交易策略回測。",
+        "method": "POST",
+        "path": "/api/trading/bots/backtest",
+        "path_params": {},
+        "body_fields": {"market_symbol", "strategy", "initial_cash", "lookback_days", "parameters", "config", "candles", "start_at", "end_at"},
+        "required": {"market_symbol"},
+        "write": True,
+    },
+    "write_trading_bot_scan": {
+        "label": "執行交易機器人掃描",
+        "description": "手動觸發目前使用者交易機器人掃描。",
+        "method": "POST",
+        "path": "/api/trading/bots/scan",
+        "path_params": {},
+        "body_fields": {"limit"},
+        "required": set(),
+        "write": True,
+    },
+    "write_trading_grid_preview": {
+        "label": "網格交易預覽",
+        "description": "預覽網格交易參數與費用。",
+        "method": "POST",
+        "path": "/api/trading/grid/preview",
+        "path_params": {},
+        "body_fields": {"market_symbol", "lower_price_points", "upper_price_points", "grid_count", "budget_points", "quantity", "config"},
+        "required": {"market_symbol"},
+        "write": True,
+    },
+    "write_trading_grid_bot_create": {
+        "label": "建立網格交易機器人",
+        "description": "建立網格交易機器人並由交易 API 驗證參數。",
+        "method": "POST",
+        "path": "/api/trading/grid-bots",
+        "path_params": {},
+        "body_fields": {"market_symbol", "lower_price_points", "upper_price_points", "grid_count", "budget_points", "enabled", "share_parameters", "config"},
+        "required": {"market_symbol"},
+        "write": True,
+    },
+    "write_trading_grid_bot_toggle": {
+        "label": "切換網格機器人",
+        "description": "啟用或停用指定網格機器人。",
+        "method": "POST",
+        "path": "/api/trading/grid-bots/{bot_uuid}/toggle",
+        "path_params": {"bot_uuid": "safe_id"},
+        "body_fields": {"enabled"},
+        "required": {"bot_uuid", "enabled"},
+        "write": True,
+    },
+    "write_trading_margin_open": {
+        "label": "開立槓桿倉位",
+        "description": "開立槓桿交易倉位；必須提供 idempotency_key 防重複。",
+        "method": "POST",
+        "path": "/api/trading/margin/open",
+        "path_params": {},
+        "body_fields": {"market_symbol", "position_type", "quantity", "collateral_points", "stop_loss_percent", "take_profit_percent", "idempotency_key"},
+        "required": {"market_symbol", "position_type", "quantity", "collateral_points", "idempotency_key"},
+        "write": True,
+    },
+    "write_trading_margin_close": {
+        "label": "關閉槓桿倉位",
+        "description": "關閉指定槓桿倉位。",
+        "method": "POST",
+        "path": "/api/trading/margin/{position_uuid}/close",
+        "path_params": {"position_uuid": "safe_id"},
+        "body_fields": set(),
+        "required": {"position_uuid"},
+        "write": True,
+    },
+    "write_trading_margin_add_collateral": {
+        "label": "追加槓桿保證金",
+        "description": "對指定槓桿倉位追加保證金。",
+        "method": "POST",
+        "path": "/api/trading/margin/{position_uuid}/collateral",
+        "path_params": {"position_uuid": "safe_id"},
+        "body_fields": {"amount_points", "idempotency_key"},
+        "required": {"position_uuid", "amount_points", "idempotency_key"},
+        "write": True,
+    },
+    "write_trading_margin_withdraw_collateral": {
+        "label": "提領槓桿保證金",
+        "description": "從指定槓桿倉位提領保證金。",
+        "method": "POST",
+        "path": "/api/trading/margin/{position_uuid}/collateral/withdraw",
+        "path_params": {"position_uuid": "safe_id"},
+        "body_fields": {"amount_points", "idempotency_key"},
+        "required": {"position_uuid", "amount_points", "idempotency_key"},
+        "write": True,
+    },
+    "write_trading_background_run_once": {
+        "label": "執行交易背景任務",
+        "description": "root 觸發交易背景 engine 單次執行。",
+        "method": "POST",
+        "path": "/api/root/trading/background/run-once",
+        "path_params": {},
+        "body_fields": {"limit", "reason"},
+        "required": set(),
+        "write": True,
+    },
+    "write_trading_liquidation_scan": {
+        "label": "掃描借貸清算",
+        "description": "root 觸發槓桿/借貸清算掃描。",
+        "method": "POST",
+        "path": "/api/root/trading/liquidations/scan",
+        "path_params": {},
+        "body_fields": {"limit", "market_symbol", "reason"},
+        "required": set(),
+        "write": True,
+    },
+    "write_trading_order_match": {
+        "label": "撮合交易訂單",
+        "description": "root 觸發交易訂單撮合。",
+        "method": "POST",
+        "path": "/api/root/trading/orders/match",
+        "path_params": {},
+        "body_fields": {"market_symbol", "limit"},
+        "required": set(),
+        "write": True,
+    },
+    "write_trading_bot_audit_run": {
+        "label": "交易機器人審計",
+        "description": "root 執行交易機器人審計。",
+        "method": "POST",
+        "path": "/api/root/trading/bot-audit/run",
+        "path_params": {},
+        "body_fields": {"limit", "reason"},
+        "required": set(),
+        "write": True,
+    },
+    "write_trading_verify_jobs": {
+        "label": "交易記帳驗證",
+        "description": "root 觸發交易/鏈上記帳驗證 job。",
+        "method": "POST",
+        "path": "/api/root/trading/verify/jobs",
+        "path_params": {},
+        "body_fields": {"scope", "limit", "reason"},
+        "required": set(),
+        "write": True,
+    },
+    "write_trading_market_update": {
+        "label": "更新交易市場",
+        "description": "root 更新指定交易市場設定。",
+        "method": "POST",
+        "path": "/api/root/trading/markets/{symbol}",
+        "path_params": {"symbol": "safe_path"},
+        "body_fields": {"enabled", "manual_price_points", "price_source", "fee_rate_percent", "min_order_points", "max_order_points"},
+        "required": {"symbol"},
+        "write": True,
+    },
+    "write_cloud_drive_create_text": {
+        "label": "建立雲端文字檔",
+        "description": "在雲端硬碟建立文字檔。",
+        "method": "POST",
+        "path": "/api/cloud-drive/files/text",
+        "path_params": {},
+        "body_fields": {"filename", "content", "privacy_mode", "virtual_path"},
+        "required": {"filename", "content"},
+        "write": True,
+    },
+    "write_cloud_drive_upload": {
+        "label": "建立雲端文字檔",
+        "description": "AI Agent JSON 版上傳：建立文字檔；二進位上傳需使用使用者選檔流程。",
+        "method": "POST",
+        "path": "/api/cloud-drive/files/text",
+        "path_params": {},
+        "body_fields": {"filename", "content", "privacy_mode", "virtual_path"},
+        "required": {"filename", "content"},
+        "write": True,
+    },
+    "write_cloud_drive_delete": {
+        "label": "刪除雲端檔案",
+        "description": "刪除指定雲端硬碟檔案。",
+        "method": "DELETE",
+        "path": "/api/cloud-drive/files/{file_id}",
+        "path_params": {"file_id": "safe_id"},
+        "body_fields": set(),
+        "required": {"file_id"},
+        "write": True,
+    },
+    "write_cloud_drive_remote_download": {
+        "label": "建立遠端下載",
+        "description": "建立 Direct 或 BT 遠端下載任務。",
+        "method": "POST",
+        "path": "/api/cloud-drive/remote-download/tasks",
+        "path_params": {},
+        "body_fields": {"url", "source_type", "privacy_mode", "virtual_path", "filename"},
+        "required": {"url"},
+        "write": True,
+    },
+    "write_remote_download_direct": {
+        "label": "建立 Direct download",
+        "description": "建立 Direct download 任務。",
+        "method": "POST",
+        "path": "/api/cloud-drive/remote-download/tasks",
+        "path_params": {},
+        "body_fields": {"url", "privacy_mode", "virtual_path", "filename"},
+        "required": {"url"},
+        "write": True,
+    },
+    "write_remote_download_bt": {
+        "label": "建立 BT/magnet download",
+        "description": "建立 magnet 或 .torrent URL 下載任務。",
+        "method": "POST",
+        "path": "/api/cloud-drive/remote-download/torrent-tasks",
+        "path_params": {},
+        "body_fields": {"url", "privacy_mode", "virtual_path", "filename"},
+        "required": {"url"},
+        "write": True,
+    },
+    "write_remote_download_pause": {
+        "label": "暫停遠端下載",
+        "description": "暫停指定遠端下載任務。",
+        "method": "POST",
+        "path": "/api/cloud-drive/remote-download/tasks/{task_id}/pause",
+        "path_params": {"task_id": "safe_id"},
+        "body_fields": set(),
+        "required": {"task_id"},
+        "write": True,
+    },
+    "write_remote_download_resume": {
+        "label": "恢復遠端下載",
+        "description": "恢復指定遠端下載任務。",
+        "method": "POST",
+        "path": "/api/cloud-drive/remote-download/tasks/{task_id}/resume",
+        "path_params": {"task_id": "safe_id"},
+        "body_fields": set(),
+        "required": {"task_id"},
+        "write": True,
+    },
+    "write_remote_download_cancel": {
+        "label": "取消遠端下載",
+        "description": "取消指定遠端下載任務。",
+        "method": "POST",
+        "path": "/api/cloud-drive/remote-download/tasks/{task_id}/cancel",
+        "path_params": {"task_id": "safe_id"},
+        "body_fields": set(),
+        "required": {"task_id"},
+        "write": True,
+    },
+    "write_remote_download_recover": {
+        "label": "恢復中斷下載",
+        "description": "恢復指定中斷遠端下載任務。",
+        "method": "POST",
+        "path": "/api/cloud-drive/remote-download/tasks/{task_id}/recover",
+        "path_params": {"task_id": "safe_id"},
+        "body_fields": set(),
+        "required": {"task_id"},
+        "write": True,
+    },
+    "write_share_create": {
+        "label": "建立檔案分享",
+        "description": "為雲端硬碟檔案建立分享連結。",
+        "method": "DIRECT",
+        "path_params": {},
+        "body_fields": {"storage_file_id", "file_id", "expires_at", "can_preview", "access_scope", "required_user_id", "required_username", "max_views", "wrapped_file_key_envelope", "share_password"},
+        "required": set(),
+        "write": True,
+    },
+    "write_share_update": {
+        "label": "更新分享",
+        "description": "更新檔案、相簿或影音分享設定。",
+        "method": "PUT",
+        "path": "/api/shares/{share_type}/{share_id}",
+        "path_params": {"share_type": "safe_id", "share_id": "safe_id"},
+        "body_fields": {"expires_at", "max_views", "access_scope", "required_user_id", "required_username", "share_password", "clear_share_password", "reset_access_count"},
+        "required": {"share_type", "share_id"},
+        "write": True,
+    },
+    "write_share_revoke": {
+        "label": "撤銷分享",
+        "description": "撤銷檔案、相簿或影音分享。",
+        "method": "POST",
+        "path": "/api/shares/{share_type}/{share_id}/revoke",
+        "path_params": {"share_type": "safe_id", "share_id": "safe_id"},
+        "body_fields": set(),
+        "required": {"share_type", "share_id"},
+        "write": True,
+    },
+    "write_task_cancel": {
+        "label": "取消任務",
+        "description": "取消 Job Center 任務。",
+        "method": "POST",
+        "path": "/api/jobs/{job_uuid}/cancel",
+        "path_params": {"job_uuid": "safe_id"},
+        "body_fields": set(),
+        "required": {"job_uuid"},
+        "write": True,
+    },
+    "write_task_retry": {
+        "label": "重試任務",
+        "description": "重試 Job Center 任務。",
+        "method": "POST",
+        "path": "/api/jobs/{job_uuid}/retry",
+        "path_params": {"job_uuid": "safe_id"},
+        "body_fields": set(),
+        "required": {"job_uuid"},
+        "write": True,
+    },
+    "write_automation_job_run": {
+        "label": "重試任務",
+        "description": "以 Job Center retry handler 執行可重試的自動化任務。",
+        "method": "POST",
+        "path": "/api/jobs/{job_uuid}/retry",
+        "path_params": {"job_uuid": "safe_id"},
+        "body_fields": set(),
+        "required": {"job_uuid"},
+        "write": True,
+    },
+    "write_album_create": {
+        "label": "建立相簿",
+        "description": "建立雲端相簿。",
+        "method": "POST",
+        "path": "/api/storage/albums",
+        "path_params": {},
+        "body_fields": {"title", "description", "visibility", "share_password"},
+        "required": {"title"},
+        "write": True,
+    },
+    "write_album_update": {
+        "label": "更新相簿",
+        "description": "更新雲端相簿設定。",
+        "method": "PUT",
+        "path": "/api/storage/albums/{album_id}",
+        "path_params": {"album_id": "safe_id"},
+        "body_fields": {"title", "description", "visibility", "share_password", "clear_share_password"},
+        "required": {"album_id"},
+        "write": True,
+    },
+    "write_album_delete": {
+        "label": "刪除相簿",
+        "description": "刪除雲端相簿。",
+        "method": "DELETE",
+        "path": "/api/storage/albums/{album_id}",
+        "path_params": {"album_id": "safe_id"},
+        "body_fields": set(),
+        "required": {"album_id"},
+        "write": True,
+    },
+    "write_album_add_file": {
+        "label": "加入相簿檔案",
+        "description": "把雲端檔案加入指定相簿。",
+        "method": "POST",
+        "path": "/api/storage/albums/{album_id}/files",
+        "path_params": {"album_id": "safe_id"},
+        "body_fields": {"storage_file_id", "file_id", "caption", "sort_order"},
+        "required": {"album_id"},
+        "write": True,
+    },
+    "write_album_remove_file": {
+        "label": "移除相簿檔案",
+        "description": "從指定相簿移除檔案。",
+        "method": "DELETE",
+        "path": "/api/storage/albums/{album_id}/files/{album_file_id}",
+        "path_params": {"album_id": "safe_id", "album_file_id": "safe_id"},
+        "body_fields": set(),
+        "required": {"album_id", "album_file_id"},
+        "write": True,
+    },
+    "write_album_smart_organize": {
+        "label": "相簿智慧整理",
+        "description": "依站內策略自動整理相簿。",
+        "method": "POST",
+        "path": "/api/storage/albums/smart-organize",
+        "path_params": {},
+        "body_fields": {"strategy", "visibility"},
+        "required": set(),
+        "write": True,
+    },
+    "write_video_upload": {
+        "label": "發布既有雲端影音",
+        "description": "AI Agent JSON 版影音發布：使用既有 cloud_file_id 發布影音並可排程 HLS。",
+        "method": "POST",
+        "path": "/api/videos/publish",
+        "path_params": {},
+        "body_fields": {"cloud_file_id", "title", "description", "visibility", "cover_file_id", "share_password", "share_expires_at", "share_max_views", "streaming_modes"},
+        "required": {"cloud_file_id", "title"},
+        "write": True,
+    },
+    "write_video_publish": {
+        "label": "發布既有雲端影音",
+        "description": "使用既有 cloud_file_id 發布影音並可排程 HLS。",
+        "method": "POST",
+        "path": "/api/videos/publish",
+        "path_params": {},
+        "body_fields": {"cloud_file_id", "title", "description", "visibility", "cover_file_id", "share_password", "share_expires_at", "share_max_views", "streaming_modes"},
+        "required": {"cloud_file_id", "title"},
+        "write": True,
+    },
+    "write_video_update": {
+        "label": "更新影音",
+        "description": "更新影音標題、描述、可見性等設定。",
+        "method": "PUT",
+        "path": "/api/videos/{video_id}/manage",
+        "path_params": {"video_id": "positive_int"},
+        "body_fields": {"title", "description", "visibility", "share_password", "share_expires_at", "share_max_views", "streaming_modes"},
+        "required": {"video_id"},
+        "write": True,
+    },
+    "write_video_delete": {
+        "label": "刪除影音",
+        "description": "刪除指定影音。",
+        "method": "DELETE",
+        "path": "/api/videos/{video_id}/manage",
+        "path_params": {"video_id": "positive_int"},
+        "body_fields": set(),
+        "required": {"video_id"},
+        "write": True,
+    },
+    "write_video_streaming_modes": {
+        "label": "更新影音串流模式",
+        "description": "更新指定影音的串流模式。",
+        "method": "PUT",
+        "path": "/api/videos/{video_id}/streaming-modes",
+        "path_params": {"video_id": "positive_int"},
+        "body_fields": {"streaming_modes"},
+        "required": {"video_id", "streaming_modes"},
+        "write": True,
+    },
+    "write_transcode_hls": {
+        "label": "排程 HLS 轉檔",
+        "description": "對指定雲端影音檔案排程 HLS 轉檔。",
+        "method": "POST",
+        "path": "/api/media/{file_id}/prepare-stream",
+        "path_params": {"file_id": "safe_id"},
+        "body_fields": set(),
+        "required": {"file_id"},
+        "write": True,
+    },
+    "write_hls_rebuild": {
+        "label": "重建 HLS",
+        "description": "強制重新排程指定影音檔案 HLS 轉檔。",
+        "method": "POST",
+        "path": "/api/media/{file_id}/prepare-stream",
+        "path_params": {"file_id": "safe_id"},
+        "body_fields": set(),
+        "required": {"file_id"},
+        "write": True,
+    },
+    "write_subtitle_upload": {
+        "label": "上傳字幕文字",
+        "description": "把字幕文字作為站內字幕檔加入影音。",
+        "method": "DIRECT",
+        "path_params": {},
+        "body_fields": {"video_id", "subtitle_text", "filename", "label", "language"},
+        "required": {"video_id", "subtitle_text"},
+        "write": True,
+    },
+    "write_community_thread_reward": {
+        "label": "獎勵主題作者",
+        "description": "對討論區主題作者加聲望獎勵。",
+        "method": "POST",
+        "path": "/api/community/threads/{thread_id}/reward",
+        "path_params": {"thread_id": "positive_int"},
+        "body_fields": {"points", "reason"},
+        "required": {"thread_id", "points"},
+        "write": True,
+    },
+    "write_community_post_penalty": {
+        "label": "處罰留言作者",
+        "description": "對討論區留言作者加違規點數。",
+        "method": "POST",
+        "path": "/api/community/posts/{post_id}/penalty",
+        "path_params": {"post_id": "positive_int"},
+        "body_fields": {"points", "reason"},
+        "required": {"post_id", "points"},
+        "write": True,
+    },
+    "write_points_governance_execute": {
+        "label": "執行治理提案",
+        "description": "執行指定點數鏈治理提案。",
+        "method": "POST",
+        "path": "/api/root/points/governance/proposals/{proposal_uuid}/execute",
+        "path_params": {"proposal_uuid": "safe_path"},
+        "body_fields": set(),
+        "required": {"proposal_uuid"},
+        "write": True,
+    },
+    "write_points_governance_sponsor": {
+        "label": "贊助治理提案",
+        "description": "贊助指定點數鏈治理提案。",
+        "method": "POST",
+        "path": "/api/admin/points/governance/proposals/{proposal_uuid}/sponsor",
+        "path_params": {"proposal_uuid": "safe_path"},
+        "body_fields": set(),
+        "required": {"proposal_uuid"},
+        "write": True,
+    },
+    "write_points_governance_cancel": {
+        "label": "取消治理提案",
+        "description": "取消指定點數鏈治理提案。",
+        "method": "POST",
+        "path": "/api/admin/points/governance/proposals/{proposal_uuid}/cancel",
+        "path_params": {"proposal_uuid": "safe_path"},
+        "body_fields": {"reason"},
+        "required": {"proposal_uuid", "reason"},
+        "write": True,
+    },
+    "write_points_wallet_freeze_proposal": {
+        "label": "建立錢包凍結治理提案",
+        "description": "建立錢包凍結或解除凍結治理提案。",
+        "method": "POST",
+        "path": "/api/root/points/governance/wallet-freeze",
+        "path_params": {},
+        "body_fields": {"wallet_address", "address", "reason", "evidence", "reference", "action"},
+        "required": {"reason"},
+        "write": True,
+    },
+    "write_server_integrity_repair": {
+        "label": "修復完整性鏈",
+        "description": "root 執行 audit/violation chain reseal 修復。",
+        "method": "POST",
+        "path": "/api/admin/integrity/repair",
+        "path_params": {},
+        "body_fields": set(),
+        "required": set(),
+        "write": True,
+    },
+    "write_server_restart": {
+        "label": "重啟伺服器",
+        "description": "root 排程站內伺服器重啟。",
+        "method": "POST",
+        "path": "/api/admin/restart",
+        "path_params": {},
+        "body_fields": {"reason"},
+        "required": set(),
+        "write": True,
+    },
+    "write_server_mode_checkpoint": {
+        "label": "建立伺服器模式 checkpoint",
+        "description": "建立 server-mode checkpoint。",
+        "method": "POST",
+        "path": "/api/root/server-mode/checkpoint",
+        "path_params": {},
+        "body_fields": {"target_mode", "mode", "reason", "notes"},
+        "required": set(),
+        "write": True,
+    },
+    "write_server_mode_switch": {
+        "label": "切換伺服器模式",
+        "description": "切換 server-mode profile。",
+        "method": "POST",
+        "path": "/api/root/server-mode/switch",
+        "path_params": {},
+        "body_fields": {"mode", "target_mode", "confirm", "reason", "notes"},
+        "required": {"mode", "confirm"},
+        "write": True,
+    },
+    "write_incident_enter": {
+        "label": "進入緊急事件模式",
+        "description": "root 進入 incident lockdown。",
+        "method": "POST",
+        "path": "/api/root/incident/enter",
+        "path_params": {},
+        "body_fields": {"confirm", "trigger_type", "reason", "verification"},
+        "required": {"confirm", "reason"},
+        "write": True,
+    },
+    "write_incident_resolve": {
+        "label": "解除緊急事件模式",
+        "description": "root 解除 incident lockdown。",
+        "method": "POST",
+        "path": "/api/root/incident/resolve",
+        "path_params": {},
+        "body_fields": {"confirm", "notes", "verification"},
+        "required": {"confirm"},
+        "write": True,
     },
 }
 
@@ -807,6 +1407,19 @@ def register_ai_agent_routes(app, deps):
             if any(ch not in allowed for ch in raw):
                 return None, f"{name} 只能包含英數、底線、減號、冒號或點"
             return raw, ""
+        if kind == "safe_path":
+            raw = str(value or "").strip()
+            if not raw or len(raw) > 180:
+                return None, f"{name} 格式錯誤"
+            if raw.startswith("/") or "?" in raw or "#" in raw or "\\" in raw:
+                return None, f"{name} 不可包含 URL 跳脫字元"
+            parts = [part for part in raw.split("/") if part]
+            if not parts or any(part in {".", ".."} for part in parts):
+                return None, f"{name} 不可包含相對跳脫"
+            allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-.:/")
+            if any(ch not in allowed for ch in raw):
+                return None, f"{name} 只能包含英數、底線、減號、冒號、點或斜線"
+            return raw, ""
         return str(value or "").strip(), ""
 
     def _validate_launch_doc_path(raw):
@@ -1007,6 +1620,10 @@ def register_ai_agent_routes(app, deps):
             fallback_model = str(body.get("checkpoint") or body.get("checkpoint_name") or "").strip()
             if fallback_model:
                 body["model"] = fallback_model
+        if tool_name == "write_remote_download_direct":
+            body["source_type"] = "direct"
+        if tool_name == "write_cloud_drive_remote_download" and not str(body.get("source_type") or "").strip():
+            body["source_type"] = "direct"
         return path, body, ""
 
     def _prepare_comfyui_write_body(body):
@@ -1054,7 +1671,7 @@ def register_ai_agent_routes(app, deps):
             response = client.open(
                 path,
                 method=method,
-                json=body if method in {"POST", "PUT", "PATCH"} else None,
+                json=body if method in {"POST", "PUT", "PATCH", "DELETE"} else None,
                 headers=headers,
                 environ_base={"hackme.internal_dispatch": "ai_agent_write_tool"},
             )
@@ -1062,6 +1679,76 @@ def register_ai_agent_routes(app, deps):
         if payload is None:
             payload = {"raw": response.get_data(as_text=True)[:4000]}
         return response.status_code, payload
+
+    def _dispatch_internal_multipart(path, data):
+        headers = {}
+        csrf = request.headers.get("X-CSRF-Token") or request.headers.get("X-CSRFToken") or request.cookies.get("csrf_token") or ""
+        if csrf:
+            headers["X-CSRF-Token"] = csrf
+        with app.test_client() as client:
+            for name, value in request.cookies.items():
+                client.set_cookie(str(name), str(value))
+            response = client.post(
+                path,
+                data=data,
+                headers=headers,
+                content_type="multipart/form-data",
+                environ_base={"hackme.internal_dispatch": "ai_agent_write_tool"},
+            )
+        payload = response.get_json(silent=True)
+        if payload is None:
+            payload = {"raw": response.get_data(as_text=True)[:4000]}
+        return response.status_code, payload
+
+    def _execute_share_create(actor, args):
+        if not str(args.get("storage_file_id") or args.get("file_id") or "").strip():
+            return 400, {"ok": False, "msg": "storage_file_id 或 file_id 至少需要一個"}
+        conn = get_db()
+        try:
+            link, msg = create_share_link(
+                conn,
+                actor=actor,
+                storage_file_id=args.get("storage_file_id"),
+                file_id=args.get("file_id"),
+                expires_at=args.get("expires_at"),
+                can_preview=bool(args.get("can_preview", True)),
+                access_scope=args.get("access_scope") or "link",
+                required_user_id=args.get("required_user_id"),
+                required_username=args.get("required_username"),
+                max_views=args.get("max_views") or 0,
+                wrapped_file_key_envelope=args.get("wrapped_file_key_envelope"),
+                share_password=args.get("share_password"),
+            )
+            if msg:
+                conn.rollback()
+                return 400, {"ok": False, "msg": msg}
+            conn.commit()
+            return 200, {"ok": True, "share": link}
+        finally:
+            conn.close()
+
+    def _execute_subtitle_upload(args):
+        try:
+            video_id = int(args.get("video_id") or 0)
+        except Exception:
+            video_id = 0
+        if video_id <= 0:
+            return 400, {"ok": False, "msg": "video_id 必須是正整數"}
+        text = str(args.get("subtitle_text") or "")
+        if not text.strip():
+            return 400, {"ok": False, "msg": "subtitle_text 不可為空"}
+        raw = text.encode("utf-8")
+        if len(raw) > 512 * 1024:
+            return 400, {"ok": False, "msg": "subtitle_text 目前限制 512KB 以內"}
+        filename = str(args.get("filename") or "ai-agent-subtitle.vtt").strip() or "ai-agent-subtitle.vtt"
+        if not re.search(r"\.(srt|vtt|ass|ssa)$", filename, re.I):
+            filename += ".vtt"
+        form_data = {
+            "subtitle": (io.BytesIO(raw), filename),
+            "label": str(args.get("label") or "")[:80],
+            "language": str(args.get("language") or "und")[:16] or "und",
+        }
+        return _dispatch_internal_multipart(f"/api/videos/{video_id}/subtitles", form_data)
 
     def _safe_tool_payload(payload, *, max_chars=16000):
         try:
@@ -1170,18 +1857,25 @@ def register_ai_agent_routes(app, deps):
 
         status_code = 200
         try:
-            if spec.get("method") == "DIRECT" and tool_name == "audit_scan":
-                force = _parse_bool(args.get("force"))
-                scan = run_ai_agent_audit_scan(
-                    settings,
-                    get_db=get_db,
-                    actor=actor,
-                    force=bool(force),
-                    get_client_ip=get_client_ip,
-                    get_ua=get_ua,
-                    audit=audit,
-                )
-                payload = {"ok": True, "scan": scan}
+            if spec.get("method") == "DIRECT":
+                if tool_name == "audit_scan":
+                    force = _parse_bool(args.get("force"))
+                    scan = run_ai_agent_audit_scan(
+                        settings,
+                        get_db=get_db,
+                        actor=actor,
+                        force=bool(force),
+                        get_client_ip=get_client_ip,
+                        get_ua=get_ua,
+                        audit=audit,
+                    )
+                    payload = {"ok": True, "scan": scan}
+                elif tool_name == "write_share_create":
+                    status_code, payload = _execute_share_create(actor, args)
+                elif tool_name == "write_subtitle_upload":
+                    status_code, payload = _execute_subtitle_upload(args)
+                else:
+                    return json_resp({"ok": False, "msg": "DIRECT tool 尚未實作", "tool": tool_name}), 500
             else:
                 path, body, msg = _build_write_tool_request(tool_name, spec, args)
                 if msg:

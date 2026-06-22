@@ -604,11 +604,12 @@ async function aiAgentPlanToolAction(userText, options = {}) {
   const planningPrompt = [
     "你是網站 AI Agent 的工具路由器。你的任務是理解使用者意圖、檢查可用工具與權限，然後只輸出 JSON 決策。",
     "不要用關鍵字索引決策；請根據完整上下文、使用者目的、input_mode、has_image、readonly_tools、effective_tools、operation_mode_policy 判斷。",
-    "可用 action：chat、clarify、readonly、comfyui_status、comfyui_generate、comfyui_rerun、community_post_draft。",
-    "JSON 欄位：action, confidence, reason, question, readonly_scope, merge_strategy, execute_write, args。",
+    "可用 action：chat、clarify、readonly、comfyui_status、comfyui_generate、comfyui_rerun、write_tool、community_post_draft。",
+    "JSON 欄位：action, confidence, reason, question, readonly_scope, merge_strategy, execute_write, tool, args。",
     "readonly_scope 必須從 context.readonly_tools 的 scope 中選最貼近使用者目的的一項；除非使用者明確要求全站總覽，否則不可使用 all。",
     "args 可含：prompt, negative_prompt, width, height, steps, cfg_scale, batch_size, seed, checkpoint, vae, sampler, scheduler, official_workflow_id。",
-    "工具語意：readonly=讀取指定 readonly_scope 的站內唯讀資料；comfyui_status=讀取 ComfyUI 目前可用性與生圖進度；comfyui_generate=建立新的 ComfyUI 生圖任務；comfyui_rerun=沿用上一筆生圖參數並套用使用者修改；community_post_draft=只產生發文草稿，不直接發布。",
+    "工具語意：readonly=讀取指定 readonly_scope 的站內唯讀資料；comfyui_status=讀取 ComfyUI 目前可用性與生圖進度；comfyui_generate=建立新的 ComfyUI 生圖任務；comfyui_rerun=沿用上一筆生圖參數並套用使用者修改；write_tool=執行 context.effective_tools 中的白名單站內工具；community_post_draft=只產生發文草稿，不直接發布。",
+    "若 action=write_tool，tool 必須完全等於 context.effective_tools[].name，args 只能包含使用者明確提供或可從 recent_messages/站內上下文推得的站內欄位；不得產生 shell、SQL、外部檔案路徑或站外操作。",
     "若使用者目的需要工具，但 effective_tools 或權限不足，仍可輸出該 action；前端會處理提權、拒絕或反問。",
     "若使用者目的不明或缺少必要資料，action=clarify 並用 question 提出一個具體反問。",
     "若使用者以短句詢問某件事是否開始、完成、跑出結果或目前進度，請先依 recent_messages 與 submitted_comfyui_jobs 判斷目標；若仍不確定，action=readonly 並 readonly_scope=all，讓前端回報真實可見任務狀態。",
@@ -695,6 +696,100 @@ function aiAgentPlanConfirmedWrite(plan = {}) {
   return plan?.execute_write === true || String(plan?.execute_write || "").toLowerCase() === "true";
 }
 
+function aiAgentWriteToolResultSummary(toolName, json = {}, elapsedMs = 0) {
+  const result = json.result || json.payload || {};
+  const status = json.status || result.status || "";
+  const ok = json.ok !== false;
+  const lines = [
+    `${ok ? "已執行" : "執行失敗"}：${toolName}`,
+    `HTTP 狀態：${status || "-"}`,
+    `耗時：${elapsedMs} ms`,
+  ];
+  const msg = aiAgentWriteToolErrorMessage(json, status);
+  if (!ok && msg) lines.push(`錯誤：${msg}`);
+  const nested = result.result || result.payload || result;
+  const previewSource = nested && typeof nested === "object" ? nested : result;
+  try {
+    const preview = JSON.stringify(previewSource, null, 2);
+    if (preview && preview !== "{}") lines.push(`結果摘要：\n${preview.slice(0, 1800)}`);
+  } catch (err) {}
+  return lines.join("\n");
+}
+
+async function aiAgentRunGenericWriteTool(plan, userText, input) {
+  const toolName = String(plan?.tool || plan?.args?.tool || "").trim();
+  if (!toolName) {
+    AI_AGENT_STATE.messages.push({ role: "user", content: userText });
+    AI_AGENT_STATE.messages.push({ role: "assistant", content: "需要指定要執行的站內白名單工具。" });
+    renderAiAgentThread();
+    if (input) input.value = "";
+    setAiAgentMessage("缺少工具名稱", "err");
+    return true;
+  }
+  const canRunDirectly = aiAgentCanRunWriteTool(toolName);
+  let elevateOnce = false;
+  if (!canRunDirectly) {
+    if (aiAgentCanRequestWriteElevation(toolName)) {
+      const ok = window.confirm(
+        `AI Agent 目前不是 write 模式。\n\n這個請求需要本次提權執行 ${toolName}。\n是否只允許這一次寫入？`
+      );
+      if (!ok) {
+        AI_AGENT_STATE.messages.push({ role: "user", content: userText });
+        AI_AGENT_STATE.messages.push({ role: "assistant", content: `已取消本次提權，未執行 ${toolName}。` });
+        renderAiAgentThread();
+        if (input) input.value = "";
+        setAiAgentMessage("已取消本次提權", "info");
+        return true;
+      }
+      elevateOnce = true;
+    } else {
+      AI_AGENT_STATE.messages.push({ role: "user", content: userText });
+      AI_AGENT_STATE.messages.push({ role: "assistant", content: `目前不可執行 ${toolName}。請確認 root 身分、operation mode 與 allowed_tools。` });
+      renderAiAgentThread();
+      if (input) input.value = "";
+      setAiAgentMessage("工具未允許", "err");
+      return true;
+    }
+  }
+  const args = plan?.args && typeof plan.args === "object" ? { ...plan.args } : {};
+  delete args.tool;
+  AI_AGENT_STATE.messages.push({ role: "user", content: userText });
+  AI_AGENT_STATE.messages.push({
+    role: "assistant",
+    content: `我理解為執行站內工具：${toolName}\n規劃耗時：${plan.elapsedMs || 0} ms`,
+  });
+  renderAiAgentThread();
+  if (input) input.value = "";
+  AI_AGENT_STATE.sendingTool = true;
+  setAiAgentMessage(`執行 ${toolName} 中...`, "info");
+  const started = performance.now();
+  try {
+    const res = await apiFetch(API + "/ai-agent/write-tools/execute", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        tool: toolName,
+        arguments: args,
+        confirm: "EXECUTE",
+        elevate_once: elevateOnce ? "ALLOW_WRITE_ONCE" : undefined,
+      }),
+    });
+    const json = await res.json().catch(() => ({}));
+    const elapsed = Math.round(performance.now() - started);
+    AI_AGENT_STATE.messages.push({ role: "assistant", content: aiAgentWriteToolResultSummary(toolName, json, elapsed) });
+    renderAiAgentThread();
+    setAiAgentMessage(json.ok && res.ok ? `${toolName} 已完成` : `${toolName} 失敗`, json.ok && res.ok ? "ok" : "err");
+  } catch (err) {
+    AI_AGENT_STATE.messages.push({ role: "assistant", content: `${toolName} 執行失敗：${err?.message || err}` });
+    renderAiAgentThread();
+    setAiAgentMessage(`${toolName} 執行失敗：${err?.message || err}`, "err");
+  } finally {
+    AI_AGENT_STATE.sendingTool = false;
+  }
+  return true;
+}
+
 async function aiAgentRunReadonlyQuery(intent, userText, input) {
   AI_AGENT_STATE.sending = true;
   const sendBtn = $("ai-agent-send-btn");
@@ -746,6 +841,9 @@ async function aiAgentExecuteToolPlan(plan, userText, input, options = {}) {
       label: action === "comfyui_status" ? "ComfyUI 產圖進度" : "唯讀查詢",
     }, userText, input);
     return true;
+  }
+  if (action === "write_tool") {
+    return aiAgentRunGenericWriteTool(plan, userText, input);
   }
   if (action === "comfyui_generate" || action === "comfyui_rerun") {
     if (options.hasImage && action === "comfyui_generate" && !aiAgentPlanConfirmedWrite(plan)) {
