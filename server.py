@@ -1802,6 +1802,7 @@ def start_ai_agent_audit_worker(shutdown_event=None):
     return start_ai_agent_audit_worker_helper(
         get_system_settings=get_system_settings,
         get_db=get_db,
+        get_audit_db=get_audit_db,
         audit=audit,
         notify_root=_notify_root_from_ai_agent_audit,
         shutdown_event=shutdown_event or SERVER_SHUTDOWN_EVENT,

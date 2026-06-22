@@ -799,6 +799,7 @@ def register_ai_agent_routes(app, deps):
     get_client_ip = deps.get("get_client_ip", lambda: "")
     get_ua = deps.get("get_ua", lambda: "")
     get_db = deps["get_db"]
+    get_audit_db = deps.get("get_audit_db", get_db)
     fernet = deps.get("fernet")
     audit = deps.get("audit", lambda *args, **kwargs: None)
     json_resp = deps["json_resp"]
@@ -1332,7 +1333,7 @@ def register_ai_agent_routes(app, deps):
         return actor, None
 
     def _ai_agent_write_guard_denied(actor, *, endpoint):
-        guard = ai_agent_write_guard_status(get_db=get_db)
+        guard = ai_agent_write_guard_status(get_db=get_audit_db)
         if not guard.get("blocked"):
             return None
         detail = f"endpoint={endpoint},reason={str(guard.get('reason') or '')[:180]}"
@@ -1955,6 +1956,7 @@ def register_ai_agent_routes(app, deps):
                     scan = run_ai_agent_audit_scan(
                         settings,
                         get_db=get_db,
+                        get_audit_db=get_audit_db,
                         actor=actor,
                         force=bool(force),
                         get_client_ip=get_client_ip,
@@ -2216,6 +2218,7 @@ def register_ai_agent_routes(app, deps):
             scan = run_ai_agent_audit_scan(
                 settings,
                 get_db=get_db,
+                get_audit_db=get_audit_db,
                 actor=actor,
                 force=force,
                 get_client_ip=get_client_ip,

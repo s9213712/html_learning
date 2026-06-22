@@ -948,6 +948,85 @@ def test_ai_agent_write_guard_persistent_clear_event_unblocks(tmp_path):
     assert ai_agent_write_guard_status(get_db=get_db)["blocked"] is False
 
 
+def test_ai_agent_audit_scan_reads_secure_audit_from_split_audit_db(tmp_path):
+    clear_ai_agent_audit_scan_state()
+    main_db_path = tmp_path / "ai_agent_main.sqlite"
+    audit_db_path = tmp_path / "ai_agent_audit.sqlite"
+    main_conn = sqlite3.connect(main_db_path)
+    main_conn.execute(
+        """
+        CREATE TABLE security_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_type TEXT,
+            ip_address TEXT,
+            target_user TEXT,
+            detail TEXT,
+            created_at TEXT
+        )
+        """
+    )
+    main_conn.commit()
+    main_conn.close()
+    audit_conn = sqlite3.connect(audit_db_path)
+    audit_conn.execute(
+        """
+        CREATE TABLE secure_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT,
+            action TEXT,
+            ip TEXT,
+            user TEXT,
+            success INTEGER,
+            detail TEXT
+        )
+        """
+    )
+    audit_conn.execute(
+        "INSERT INTO secure_audit (ts, action, ip, user, success, detail) VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            datetime.now().replace(microsecond=0).isoformat(),
+            "SETTINGS_CHANGED",
+            "127.0.0.1",
+            "root",
+            1,
+            json.dumps({"changed_keys": ["ai_agent_allowed_tools"], "scope": "system_settings"}),
+        ),
+    )
+    audit_conn.commit()
+    audit_conn.close()
+
+    def get_main_db():
+        db = sqlite3.connect(main_db_path)
+        db.row_factory = sqlite3.Row
+        return db
+
+    def get_audit_db():
+        db = sqlite3.connect(audit_db_path)
+        db.row_factory = sqlite3.Row
+        return db
+
+    scan = run_ai_agent_audit_scan(
+        {
+            "ai_agent_audit_interval_minutes": 1,
+            "ai_agent_audit_ip_event_rate_threshold": 100,
+            "ai_agent_audit_ip_event_rate_window_minutes": 1,
+            "ai_agent_audit_security_event_rate_threshold": 100,
+            "ai_agent_audit_security_event_rate_window_minutes": 1,
+            "ai_agent_audit_cpu_percent_threshold": 100,
+            "ai_agent_audit_ram_percent_threshold": 100,
+            "ai_agent_audit_disk_percent_threshold": 100,
+        },
+        get_db=get_main_db,
+        get_audit_db=get_audit_db,
+        actor={"id": 1, "username": "root", "role": "super_admin"},
+        force=True,
+    )
+
+    assert scan["aggregates"]["secure_audit_total"] == 1
+    assert scan["status"] == "alert"
+    assert any(item["code"] == "ai_agent.sensitive_settings_changed" for item in scan["anomalies"])
+
+
 def test_public_ai_agent_audit_status_uses_last_scan_cache(tmp_path):
     clear_ai_agent_audit_scan_state()
     db_path = tmp_path / "ai_agent_audit_status.sqlite"

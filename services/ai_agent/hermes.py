@@ -1212,7 +1212,7 @@ def _collect_security_samples(conn, *, since_iso):
     return result
 
 
-def run_ai_agent_audit_scan(settings, *, get_db, actor=None, force=False, get_client_ip=None, get_ua=None, audit=None):
+def run_ai_agent_audit_scan(settings, *, get_db, get_audit_db=None, actor=None, force=False, get_client_ip=None, get_ua=None, audit=None):
     settings = settings or {}
     actor = actor or {}
     audit_settings = _coerce_audit_settings(settings)
@@ -1245,6 +1245,16 @@ def run_ai_agent_audit_scan(settings, *, get_db, actor=None, force=False, get_cl
         samples = _collect_security_samples(conn, since_iso=since_iso)
     finally:
         conn.close()
+    if callable(get_audit_db):
+        audit_conn = None
+        try:
+            audit_conn = get_audit_db()
+            audit_samples = _collect_security_samples(audit_conn, since_iso=since_iso)
+            samples["secure_audit"] = audit_samples.get("secure_audit", [])
+            samples["secure_audit_total"] = audit_samples.get("secure_audit_total", 0)
+        finally:
+            if audit_conn is not None:
+                audit_conn.close()
 
     security_rows = []
     for row in samples.get("security_events", []):

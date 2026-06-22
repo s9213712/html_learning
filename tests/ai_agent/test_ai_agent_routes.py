@@ -1293,7 +1293,7 @@ def test_ai_agent_audit_scan_requires_super_admin(tmp_path, monkeypatch):
 
     called = []
 
-    def fake_scan(settings, *, get_db, actor=None, force=False, get_client_ip=None, get_ua=None, audit=None):
+    def fake_scan(settings, *, get_db, get_audit_db=None, actor=None, force=False, get_client_ip=None, get_ua=None, audit=None):
         called.append({"actor": actor, "force": force})
         return {"status": "ok", "cached": False}
 
@@ -1319,7 +1319,7 @@ def test_ai_agent_audit_scan_accepts_force_query_string(tmp_path, monkeypatch):
 
     called = []
 
-    def fake_scan(settings, *, get_db, actor=None, force=False, get_client_ip=None, get_ua=None, audit=None):
+    def fake_scan(settings, *, get_db, get_audit_db=None, actor=None, force=False, get_client_ip=None, get_ua=None, audit=None):
         called.append(force)
         return {"status": "ok", "cached": False}
 

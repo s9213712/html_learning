@@ -278,6 +278,7 @@ def start_ai_agent_audit_worker(
     *,
     get_system_settings,
     get_db,
+    get_audit_db=None,
     audit,
     notify_root=None,
     shutdown_event=None,
@@ -345,6 +346,7 @@ def start_ai_agent_audit_worker(
                 scan = run_ai_agent_audit_scan(
                     settings,
                     get_db=get_db,
+                    get_audit_db=get_audit_db,
                     actor={"id": 0, "username": "system-audit-worker", "role": "super_admin"},
                     get_client_ip=lambda: "0.0.0.0",
                     get_ua=lambda: "ai-agent-audit-worker",
