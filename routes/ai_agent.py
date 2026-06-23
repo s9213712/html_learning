@@ -398,7 +398,7 @@ AI_AGENT_WRITE_TOOL_SPECS = {
         "method": "POST",
         "path": "/api/cloud-drive/remote-download/tasks",
         "path_params": {},
-        "body_fields": {"url", "source_type", "privacy_mode", "virtual_path", "filename"},
+        "body_fields": {"url", "source_type", "download_mode", "privacy_mode", "virtual_path", "filename"},
         "required": {"url"},
         "write": True,
     },
@@ -408,7 +408,7 @@ AI_AGENT_WRITE_TOOL_SPECS = {
         "method": "POST",
         "path": "/api/cloud-drive/remote-download/tasks",
         "path_params": {},
-        "body_fields": {"url", "privacy_mode", "virtual_path", "filename"},
+        "body_fields": {"url", "download_mode", "privacy_mode", "virtual_path", "filename"},
         "required": {"url"},
         "write": True,
     },
@@ -416,9 +416,9 @@ AI_AGENT_WRITE_TOOL_SPECS = {
         "label": "建立 BT/magnet download",
         "description": "建立 magnet 或 .torrent URL 下載任務。",
         "method": "POST",
-        "path": "/api/cloud-drive/remote-download/torrent-tasks",
+        "path": "/api/cloud-drive/remote-download/tasks",
         "path_params": {},
-        "body_fields": {"url", "privacy_mode", "virtual_path", "filename"},
+        "body_fields": {"url", "download_mode", "privacy_mode", "virtual_path", "filename"},
         "required": {"url"},
         "write": True,
     },
@@ -2377,8 +2377,13 @@ def register_ai_agent_routes(app, deps):
             body = {key: value for key, value in body.items() if not _is_missing_arg(value)}
         if tool_name == "write_remote_download_direct":
             body["source_type"] = "direct"
+            body["download_mode"] = "direct"
+        if tool_name == "write_remote_download_bt":
+            body["download_mode"] = "bt"
         if tool_name == "write_cloud_drive_remote_download" and not str(body.get("source_type") or "").strip():
             body["source_type"] = "direct"
+        if tool_name == "write_cloud_drive_remote_download" and not str(body.get("download_mode") or "").strip():
+            body["download_mode"] = "bt" if str(body.get("source_type") or "").strip().lower() in {"bt", "magnet", "torrent_url", "torrent_file"} else "direct"
         return path, body, ""
 
     def _prepare_comfyui_write_body(body):

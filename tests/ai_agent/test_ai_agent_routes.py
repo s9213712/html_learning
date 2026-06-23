@@ -686,7 +686,7 @@ def test_ai_agent_remote_download_bt_aliases_magnet_uri_to_url(tmp_path):
     )
     captured = {}
 
-    @app.route("/api/cloud-drive/remote-download/torrent-tasks", methods=["POST"])
+    @app.route("/api/cloud-drive/remote-download/tasks", methods=["POST"])
     def fake_remote_download_bt():
         captured.update(request.get_json(silent=True) or {})
         return _json_resp({"ok": True, "task_id": "bt-1"})
@@ -702,6 +702,7 @@ def test_ai_agent_remote_download_bt_aliases_magnet_uri_to_url(tmp_path):
     assert response.status_code == 200
     assert payload["ok"] is True
     assert captured["url"] == magnet_uri
+    assert captured["download_mode"] == "bt"
     assert "magnet_uri" not in captured
     assert captured["filename"] == "audit-test.iso"
 
