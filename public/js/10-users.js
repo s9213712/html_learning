@@ -1,3 +1,67 @@
+let adminUserActionMenusBound = false;
+
+function closeAdminUserActionMenus(except = null) {
+  document.querySelectorAll(".admin-user-actions.open").forEach((wrap) => {
+    if (wrap === except) return;
+    wrap.classList.remove("open");
+    const toggle = wrap.querySelector(".admin-user-action-toggle");
+    if (toggle) toggle.setAttribute("aria-expanded", "false");
+    const menu = wrap.querySelector(".admin-user-action-menu");
+    if (menu) menu.setAttribute("aria-hidden", "true");
+  });
+}
+
+function ensureAdminUserActionMenuListeners() {
+  if (adminUserActionMenusBound) return;
+  adminUserActionMenusBound = true;
+  document.addEventListener("click", (event) => {
+    if (!(event.target instanceof Element)) return;
+    if (!event.target.closest(".admin-user-actions")) closeAdminUserActionMenus();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") closeAdminUserActionMenus();
+  });
+}
+
+function buildAdminUserActionMenu(actionButtons, user) {
+  const actions = document.createElement("div");
+  actions.className = "action admin-user-actions";
+  if (!actionButtons.length) return actions;
+
+  ensureAdminUserActionMenuListeners();
+  const menuId = `admin-user-action-menu-${user?.id || "unknown"}`;
+  const toggle = document.createElement("button");
+  toggle.className = "btn btn-primary admin-user-action-toggle";
+  toggle.type = "button";
+  toggle.textContent = "操作";
+  toggle.setAttribute("aria-label", `${user?.username || "用戶"} 的可用操作`);
+  toggle.setAttribute("aria-haspopup", "menu");
+  toggle.setAttribute("aria-expanded", "false");
+  toggle.setAttribute("aria-controls", menuId);
+
+  const menu = document.createElement("div");
+  menu.className = "admin-user-action-menu";
+  menu.id = menuId;
+  menu.setAttribute("role", "menu");
+  menu.setAttribute("aria-hidden", "true");
+  menu.addEventListener("click", (event) => event.stopPropagation());
+  actionButtons.forEach((btn) => menu.appendChild(btn));
+
+  toggle.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const willOpen = !actions.classList.contains("open");
+    closeAdminUserActionMenus(actions);
+    actions.classList.toggle("open", willOpen);
+    toggle.setAttribute("aria-expanded", String(willOpen));
+    menu.setAttribute("aria-hidden", String(!willOpen));
+  });
+
+  actions.appendChild(toggle);
+  actions.appendChild(menu);
+  return actions;
+}
+
 function renderUsers() {
   const tbody = $("user-table")?.querySelector("tbody");
   if (!tbody) return;
@@ -184,9 +248,7 @@ function renderUsers() {
       selectCell.textContent = "—";
       selectCell.style.color = "var(--muted)";
     }
-    const actions = document.createElement("div");
-    actions.className = "action";
-    actionButtons.forEach((btn) => actions.appendChild(btn));
+    const actions = buildAdminUserActionMenu(actionButtons, u);
     appendTextCell(u.id);
     const onlineCell = document.createElement("td");
     const onlineDot = document.createElement("span");

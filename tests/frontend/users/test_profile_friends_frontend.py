@@ -48,7 +48,7 @@ def test_profile_friends_panel_is_wired_as_user_module():
     assert '<option value="star">星形</option>' in index_html
     assert '<option value="custom">自訂遮罩</option>' in index_html
     assert 'id="profile-edit-avatar-mask"' in index_html
-    assert '/styles.css?v=20260621-avatar-rotation-controls' in index_html
+    assert '/styles.css?v=20260623-account-actions-mobile-v2' in index_html
     assert 'id="profile-edit-display-timezone"' in index_html
     assert 'id="profile-quick-customize-card"' in index_html
     assert 'id="profile-public-info-editor-list"' in index_html

@@ -8,6 +8,7 @@ def test_admin_user_delete_shows_visible_account_page_feedback():
     users_js = (ROOT / "public" / "js" / "10-users.js").read_text(encoding="utf-8")
     auth_js = (ROOT / "public" / "js" / "40-auth-users.js").read_text(encoding="utf-8")
     index_html = (ROOT / "public" / "index.html").read_text(encoding="utf-8")
+    styles_css = (ROOT / "public" / "styles.css").read_text(encoding="utf-8")
 
     assert 'id="admin-users-msg"' in index_html
     assert 'id="admin-users-page-size"' in index_html
@@ -44,6 +45,12 @@ def test_admin_user_delete_shows_visible_account_page_feedback():
     assert 'flash(pageMsgEl, json.msg || "帳號已建立", true);' in auth_js
     assert "真實姓名（選填）" in index_html
     assert "身分證（選填）" in index_html
+    assert "function buildAdminUserActionMenu(actionButtons, user)" in users_js
+    assert "admin-user-action-toggle" in users_js
+    assert "admin-user-action-menu" in users_js
+    assert "/js/10-users.js?v=20260623-account-actions-mobile-v2" in index_html
+    assert "#sec-users .user-table .admin-user-action-toggle" in styles_css
+    assert "#sec-users .user-table .admin-user-action-menu" in styles_css
 
 
 def test_disabled_appeals_are_not_prefetched_for_users_or_root():
