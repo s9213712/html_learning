@@ -348,7 +348,7 @@ AI_AGENT_TOOL_BLUEPRINT = {
     },
     "write_comfyui_generate": {
         "label": "執行生圖",
-        "description": "root 專用白名單寫入工具：送出 ComfyUI 生圖任務。",
+        "description": "root 專用白名單寫入工具：送出 ComfyUI 生圖、圖生圖、局部重繪與外延任務。",
         "min_role": "super_admin",
         "data_scope": "write_tool:comfyui",
     },
@@ -471,7 +471,7 @@ AI_AGENT_TOOL_BLUEPRINT = {
 
 AI_AGENT_TOOL_ARGUMENT_HINTS = {
     "write_community_create_thread": "canonical args: board_id,title,content,post_type；把 forum_id/討論版/版面 ID 轉成 board_id。",
-    "write_comfyui_generate": "canonical args: prompt,negative_prompt,width,height,steps,batch_size,confirm_billing；生圖請保留 batch_size 與 confirm_billing；可作為視覺參考重建的一輪產圖步驟，但不要把多輪創作硬套成固定流程。",
+    "write_comfyui_generate": "canonical args: prompt,negative_prompt,width,height,steps,batch_size,confirm_billing,generation_mode,source_image_ref,mask_image_ref,denoise_strength,outpaint_left,outpaint_top,outpaint_right,outpaint_bottom,outpaint_feathering；文字生圖 generation_mode=txt2img，風格化/以圖生圖=img2img，局部重繪=inpaint 且必須有 mask_image_ref，外延=outpaint；生圖請保留 batch_size 與 confirm_billing；可作為視覺參考重建的一輪產圖步驟，但不要把多輪創作硬套成固定流程。",
     "write_member_update_user": "canonical args: user_id,nickname,role,status,member_level,base_level,level_update_reason,sanction_status,sanction_until；即使目前模式不能執行，也要辨識此工具。",
     "write_member_set_avatar_from_cloud": "canonical args: user_id,cloud_file_id,crop,rotation,zoom,decision_reason；裁切/旋轉/縮放必須使用 crop/rotation/zoom。",
     "write_trading_place_order": "canonical args: market_symbol,side,order_type,quantity,limit_price_points；把 market 轉成 market_symbol，把 price 轉成 limit_price_points。",

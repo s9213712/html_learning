@@ -1203,6 +1203,102 @@ def test_ai_agent_comfyui_write_tool_defaults_missing_checkpoint(tmp_path):
     assert captured["checkpoint"] == "JANKUTrainedChenkinNoobai_v777.safetensors"
 
 
+def test_ai_agent_comfyui_write_tool_preserves_image_edit_args(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "write",
+            "ai_agent_allowed_tools": "write_comfyui_generate",
+        },
+    )
+    captured = {}
+
+    @app.route("/api/comfyui/models", methods=["GET"])
+    def fake_comfyui_models():
+        return _json_resp({"ok": True, "models": ["JANKUTrainedChenkinNoobai_v777.safetensors"]})
+
+    @app.route("/api/comfyui/generate", methods=["POST"])
+    def fake_comfyui_generate():
+        captured.update(request.get_json(silent=True) or {})
+        return _json_resp({"ok": True, "job": {"job_id": "job-img2img-edit", "status": "queued"}})
+
+    source_ref = {"filename": "source.png", "subfolder": "2026-06-23", "type": "output"}
+    response = app.test_client().post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_comfyui_generate",
+        "confirm": "EXECUTE",
+        "arguments": {
+            "prompt": "turn the existing portrait into watercolor style",
+            "generation_mode": "style_transfer",
+            "image_ref": source_ref,
+            "denoise": 0.62,
+            "cfg_scale": 6.5,
+            "sampler": "euler",
+            "mask_image_ref": None,
+            "vae": None,
+            "confirm_billing": True,
+        },
+    })
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert captured["generation_mode"] == "img2img"
+    assert captured["source_image_ref"] == source_ref
+    assert captured["denoise_strength"] == 0.62
+    assert captured["cfg"] == 6.5
+    assert captured["sampler_name"] == "euler"
+    assert "mask_image_ref" not in captured
+    assert "vae" not in captured
+
+
+def test_ai_agent_comfyui_write_tool_flattens_outpaint_args(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "write",
+            "ai_agent_allowed_tools": "write_comfyui_generate",
+        },
+    )
+    captured = {}
+
+    @app.route("/api/comfyui/models", methods=["GET"])
+    def fake_comfyui_models():
+        return _json_resp({"ok": True, "models": ["JANKUTrainedChenkinNoobai_v777.safetensors"]})
+
+    @app.route("/api/comfyui/generate", methods=["POST"])
+    def fake_comfyui_generate():
+        captured.update(request.get_json(silent=True) or {})
+        return _json_resp({"ok": True, "job": {"job_id": "job-outpaint-edit", "status": "queued"}})
+
+    response = app.test_client().post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_comfyui_generate",
+        "confirm": "EXECUTE",
+        "arguments": {
+            "prompt": "extend the same scene outward",
+            "mode": "outpainting",
+            "source_image_ref": {"filename": "scene.png", "subfolder": "", "type": "output"},
+            "outpaint": {"left": 128, "top": 64, "right": 128, "bottom": 64, "feathering": 48},
+            "confirm_billing": True,
+        },
+    })
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert captured["generation_mode"] == "outpaint"
+    assert captured["outpaint_left"] == 128
+    assert captured["outpaint_top"] == 64
+    assert captured["outpaint_right"] == 128
+    assert captured["outpaint_bottom"] == 64
+    assert captured["outpaint_feathering"] == 48
+
+
 def test_ai_agent_comfyui_write_tool_rejects_unknown_checkpoint_before_queue(tmp_path):
     db_path = tmp_path / "ai_agent_routes.db"
     _build_db(db_path)
@@ -1478,10 +1574,20 @@ def test_ai_agent_readonly_handles_missing_job_tables(tmp_path):
 
 class _FakeHermesResponse:
     def __init__(self, payload):
-        self._payload = payload
+        self._body = json.dumps(payload).encode("utf-8")
+        self._offset = 0
 
-    def read(self, _size=-1):
-        return json.dumps(self._payload).encode("utf-8")
+    def read(self, size=-1):
+        if self._offset >= len(self._body):
+            return b""
+        if size is None or int(size) < 0:
+            chunk = self._body[self._offset:]
+            self._offset = len(self._body)
+            return chunk
+        end = min(len(self._body), self._offset + int(size))
+        chunk = self._body[self._offset:end]
+        self._offset = end
+        return chunk
 
     def __enter__(self):
         return self
@@ -1538,6 +1644,7 @@ def test_ai_agent_routes_smoke_with_fake_hermes_endpoints(tmp_path, monkeypatch)
     models = app.test_client().get("/api/ai-agent/models")
     chat = app.test_client().post("/api/ai-agent/chat", json={
         "session_id": "smoke-1",
+        "model": "hermes-agent",
         "messages": [{"role": "user", "content": "幫我看一下下載有沒有在下載"}],
     })
     readonly = app.test_client().get("/api/ai-agent/readonly?scope=all&limit=5")

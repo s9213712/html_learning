@@ -59,7 +59,7 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert 'id="ai-agent-comfyui-vae"' in html
     assert 'id="ai-agent-comfyui-generate-btn"' in html
     assert 'id="s-module-ai-agent-min-role"' in html
-    _warn_if_asset_cache_version_changed(html, "/js/37-ai-agent.js", "20260623-ai-agent-download-gate-v1")
+    _warn_if_asset_cache_version_changed(html, "/js/37-ai-agent.js", "20260623-ai-agent-i2i-edit-v2")
     _warn_if_asset_cache_version_changed(html, "/js/90-bootstrap.js", "20260611-ai-agent-comfyui-write-tool")
 
     assert '"ai-agent": "feature_ai_agent_enabled"' in core_js
@@ -154,6 +154,16 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert "function aiAgentSelectedTextModel" in ai_agent_js
     assert "function aiAgentNormalizeReadonlyScope" in ai_agent_js
     assert "function aiAgentCleanComfyuiArgs" in ai_agent_js
+    assert "function aiAgentRecentImageRefs" in ai_agent_js
+    assert "recent_image_refs: aiAgentRecentImageRefs(8)" in ai_agent_js
+    assert "source_image_ref, mask_image_ref, denoise_strength" in ai_agent_js
+    assert "generation_mode=img2img" in ai_agent_js
+    assert "generation_mode=inpaint" in ai_agent_js
+    assert "generation_mode=outpaint" in ai_agent_js
+    assert "comfyui_generate 的 prompt 不可空白" in ai_agent_js
+    assert '["img2img", "inpaint", "outpaint", "upscale"].includes(generationMode)' in ai_agent_js
+    assert "若 inpaint 缺少可用 mask_image_ref，action=clarify" in ai_agent_js
+    assert "outpaint_left, outpaint_top, outpaint_right, outpaint_bottom, outpaint_feathering" in ai_agent_js
     assert "function aiAgentRememberComfyuiAttempt" in ai_agent_js
     assert "function aiAgentUpdateComfyuiAttemptFromJob" in ai_agent_js
     assert "function aiAgentLooksLikeComfyuiRecall" in ai_agent_js

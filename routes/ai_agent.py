@@ -58,7 +58,10 @@ AI_AGENT_WRITE_TOOL_SPECS = {
         "path_params": {},
         "body_fields": {
             "prompt", "negative_prompt", "model", "checkpoint", "checkpoint_name", "width", "height",
-            "steps", "cfg", "cfg_scale", "sampler", "scheduler", "seed", "batch_size",
+            "steps", "cfg", "cfg_scale", "sampler", "sampler_name", "scheduler", "seed", "batch_size",
+            "generation_mode", "source_image_ref", "source_image_ref_json", "mask_image_ref",
+            "mask_image_ref_json", "denoise_strength", "outpaint_left", "outpaint_top",
+            "outpaint_right", "outpaint_bottom", "outpaint_feathering",
             "workflow", "workflow_id", "official_workflow_id", "template_id", "lora",
             "loras", "vae", "vae_name", "timeout_seconds", "confirm_billing",
             "backend_url", "comfyui_backend_url",
@@ -1697,6 +1700,90 @@ def register_ai_agent_routes(app, deps):
         preview = "、".join(options[:8])
         return "", f"模型名稱「{requested}」不在 ComfyUI checkpoint 清單中。可用模型：{preview}", []
 
+    def _normalize_comfyui_generation_mode(value):
+        raw = str(value or "").strip().lower()
+        if not raw:
+            return ""
+        key = re.sub(r"[\s_-]+", "", raw)
+        aliases = {
+            "texttoimage": "txt2img",
+            "txt2img": "txt2img",
+            "t2i": "txt2img",
+            "文字生圖": "txt2img",
+            "imagetoimage": "img2img",
+            "img2img": "img2img",
+            "i2i": "img2img",
+            "style": "img2img",
+            "styletransfer": "img2img",
+            "restyle": "img2img",
+            "風格化": "img2img",
+            "改風格": "img2img",
+            "inpaint": "inpaint",
+            "inpainting": "inpaint",
+            "局部重繪": "inpaint",
+            "局部修改": "inpaint",
+            "outpaint": "outpaint",
+            "outpainting": "outpaint",
+            "外延": "outpaint",
+            "向外延展": "outpaint",
+            "upscale": "upscale",
+            "放大修復": "upscale",
+        }
+        return aliases.get(key, raw)
+
+    def _first_present_arg(args, names):
+        for name in names:
+            value = args.get(name)
+            if value is None:
+                continue
+            if isinstance(value, str) and not value.strip():
+                continue
+            return value
+        return None
+
+    def _normalize_comfyui_write_args(args):
+        normalized = dict(args or {})
+        mode = _first_present_arg(normalized, ("generation_mode", "mode", "edit_mode", "image_edit_mode", "task_mode"))
+        mode = _normalize_comfyui_generation_mode(mode)
+        if mode:
+            normalized["generation_mode"] = mode
+        if not normalized.get("cfg") and normalized.get("cfg_scale") is not None:
+            normalized["cfg"] = normalized.get("cfg_scale")
+        if not normalized.get("sampler_name") and normalized.get("sampler") is not None:
+            normalized["sampler_name"] = normalized.get("sampler")
+        source_ref = _first_present_arg(normalized, (
+            "source_image_ref", "source_image_ref_json", "image_ref", "source_ref",
+            "source_image", "input_image_ref", "previous_image_ref",
+        ))
+        if source_ref is not None:
+            normalized["source_image_ref"] = source_ref
+        mask_ref = _first_present_arg(normalized, (
+            "mask_image_ref", "mask_image_ref_json", "mask_ref", "mask_image",
+            "inpaint_mask_ref",
+        ))
+        if mask_ref is not None:
+            normalized["mask_image_ref"] = mask_ref
+        denoise = _first_present_arg(normalized, ("denoise_strength", "denoise", "strength"))
+        if denoise is not None:
+            normalized["denoise_strength"] = denoise
+        outpaint = normalized.get("outpaint")
+        if isinstance(outpaint, str):
+            try:
+                outpaint = json.loads(outpaint)
+            except Exception:
+                outpaint = None
+        if isinstance(outpaint, dict):
+            for key in ("left", "top", "right", "bottom", "feathering"):
+                field = f"outpaint_{key}"
+                if normalized.get(field) is None and outpaint.get(key) is not None:
+                    normalized[field] = outpaint.get(key)
+        expand = _first_present_arg(normalized, ("outpaint_pixels", "outpaint_expand", "expand_pixels"))
+        if expand is not None:
+            for field in ("outpaint_left", "outpaint_top", "outpaint_right", "outpaint_bottom"):
+                if normalized.get(field) is None:
+                    normalized[field] = expand
+        return normalized
+
     def _build_write_tool_request(tool_name, spec, args):
         args = dict(args or {})
         if tool_name in {"write_cloud_drive_remote_download", "write_remote_download_direct", "write_remote_download_bt"}:
@@ -1712,6 +1799,8 @@ def register_ai_agent_routes(app, deps):
             cloud_file_id = str(args.get("cloud_file_id") or "").strip()
             if cloud_file_id and not str(args.get("file_id") or args.get("storage_file_id") or "").strip():
                 args["file_id"] = cloud_file_id
+        if tool_name == "write_comfyui_generate":
+            args = _normalize_comfyui_write_args(args)
         missing = [
             key for key in sorted(spec.get("required") or [])
             if _is_missing_arg(args.get(key))
@@ -1764,6 +1853,8 @@ def register_ai_agent_routes(app, deps):
             fallback_model = str(body.get("checkpoint") or body.get("checkpoint_name") or "").strip()
             if fallback_model:
                 body["model"] = fallback_model
+        if tool_name == "write_comfyui_generate":
+            body = {key: value for key, value in body.items() if not _is_missing_arg(value)}
         if tool_name == "write_remote_download_direct":
             body["source_type"] = "direct"
         if tool_name == "write_cloud_drive_remote_download" and not str(body.get("source_type") or "").strip():

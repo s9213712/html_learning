@@ -609,7 +609,7 @@ function aiAgentRememberComfyuiSubmit(args = {}, job = {}) {
 function aiAgentCleanComfyuiArgs(args = {}) {
   const cleaned = { ...(args || {}) };
   const autoLike = /^(auto|automatic|default|none|null|undefined|自動|預設)$/i;
-  ["vae", "checkpoint", "sampler", "scheduler", "official_workflow_id"].forEach((key) => {
+  ["vae", "checkpoint", "sampler", "sampler_name", "scheduler", "official_workflow_id", "generation_mode"].forEach((key) => {
     const value = String(cleaned[key] || "").trim();
     if (!value || (key === "vae" && autoLike.test(value))) delete cleaned[key];
     else cleaned[key] = value;
@@ -618,6 +618,56 @@ function aiAgentCleanComfyuiArgs(args = {}) {
     if (cleaned[key] === "" || cleaned[key] === undefined || cleaned[key] === null) delete cleaned[key];
   });
   return cleaned;
+}
+
+function aiAgentNormalizeComfyuiGenerationMode(value = "") {
+  const raw = String(value || "").trim().toLowerCase();
+  if (!raw) return "";
+  const key = raw.replace(/[\s_-]+/g, "");
+  const aliases = {
+    texttoimage: "txt2img",
+    txt2img: "txt2img",
+    t2i: "txt2img",
+    imagetoimage: "img2img",
+    img2img: "img2img",
+    i2i: "img2img",
+    style: "img2img",
+    styletransfer: "img2img",
+    restyle: "img2img",
+    "風格化": "img2img",
+    "改風格": "img2img",
+    inpaint: "inpaint",
+    inpainting: "inpaint",
+    "局部重繪": "inpaint",
+    outpaint: "outpaint",
+    outpainting: "outpaint",
+    "外延": "outpaint",
+    "向外延展": "outpaint",
+    upscale: "upscale",
+  };
+  return aliases[key] || raw;
+}
+
+function aiAgentRecentImageRefs(limit = 8) {
+  const refs = [];
+  const seen = new Set();
+  AI_AGENT_STATE.messages.slice().reverse().forEach((message) => {
+    (Array.isArray(message.images) ? message.images : []).forEach((image) => {
+      const ref = image?.image_ref || null;
+      const filename = ref?.filename || image?.filename || "";
+      if (!ref || !filename) return;
+      const key = [ref.type || "", ref.subfolder || "", filename].join("|");
+      if (seen.has(key)) return;
+      seen.add(key);
+      refs.push({
+        filename,
+        prompt_id: String(image?.prompt_id || "").slice(0, 160),
+        mime_type: String(image?.mime_type || "").slice(0, 80),
+        image_ref: ref,
+      });
+    });
+  });
+  return refs.slice(0, limit);
 }
 
 function aiAgentRememberComfyuiAttempt(args = {}, patch = {}) {
@@ -692,13 +742,23 @@ function aiAgentPlannerContext(options = {}) {
     .map((job) => ({
       job_id: job.job_id || "",
       status: job.status || "",
+      generation_mode: job.args?.generation_mode || "txt2img",
       prompt: job.args?.prompt || "",
       negative_prompt: job.args?.negative_prompt || "",
+      source_image_ref: job.args?.source_image_ref || null,
+      mask_image_ref: job.args?.mask_image_ref || null,
       submitted_at: job.submittedAt || 0,
     }));
   const messages = AI_AGENT_STATE.messages.slice(-10).map((message) => ({
     role: message.role === "assistant" ? "assistant" : "user",
     content: String(message.content || "").slice(0, 1200),
+    images: Array.isArray(message.images)
+      ? message.images.slice(0, 4).map((image) => ({
+        filename: image?.image_ref?.filename || image?.filename || "",
+        prompt_id: String(image?.prompt_id || "").slice(0, 160),
+        image_ref: image?.image_ref || null,
+      })).filter((image) => image.image_ref && image.filename)
+      : [],
   }));
   const effectiveTools = Array.isArray(AI_AGENT_STATE.settings?.tools)
     ? AI_AGENT_STATE.settings.tools.map((tool) => ({
@@ -749,11 +809,13 @@ function aiAgentPlannerContext(options = {}) {
     ],
     effective_tools: effectiveTools,
     writable_tools: effectiveTools.filter((tool) => tool.write && (tool.can_execute_now || tool.can_request_elevation)).map((tool) => tool.name),
+    recent_image_refs: aiAgentRecentImageRefs(8),
     last_comfyui_args: aiAgentCurrentComfyuiArgs() || null,
     last_comfyui_job: AI_AGENT_STATE.lastComfyuiJob ? {
       job_id: AI_AGENT_STATE.lastComfyuiJob.job_id || "",
       status: AI_AGENT_STATE.lastComfyuiJob.status || "",
       progress: AI_AGENT_STATE.lastComfyuiJob.progress || {},
+      images: aiAgentComfyuiImagesFromJob(AI_AGENT_STATE.lastComfyuiJob),
     } : null,
     submitted_comfyui_jobs: submittedJobs,
     comfyui_attempt_history: (AI_AGENT_STATE.comfyuiAttemptHistory || []).slice(-6).map((item) => ({
@@ -761,8 +823,11 @@ function aiAgentPlannerContext(options = {}) {
       status: item.status,
       job_id: item.job_id || "",
       error: item.error || "",
+      generation_mode: item.args?.generation_mode || "txt2img",
       prompt: item.args?.prompt || "",
       negative_prompt: item.args?.negative_prompt || "",
+      source_image_ref: item.args?.source_image_ref || null,
+      mask_image_ref: item.args?.mask_image_ref || null,
       width: item.args?.width,
       height: item.args?.height,
       steps: item.args?.steps,
@@ -787,7 +852,7 @@ async function aiAgentPlanToolAction(userText, options = {}) {
     "可用 action：chat、clarify、readonly、comfyui_status、comfyui_generate、comfyui_rerun、write_tool、community_post_draft。",
     "JSON 欄位：action, confidence, reason, question, readonly_scope, merge_strategy, execute_write, tool, args。",
     "readonly_scope 必須從 context.readonly_tools 的 scope 中選最貼近使用者目的的一項；除非使用者明確要求全站總覽，否則不可使用 all。",
-    "args 對 comfyui_generate 可含：prompt, negative_prompt, width, height, steps, cfg_scale, batch_size, seed, checkpoint, vae, sampler, scheduler, official_workflow_id。",
+    "args 對 comfyui_generate 可含：prompt, negative_prompt, width, height, steps, cfg_scale, cfg, batch_size, seed, checkpoint, vae, sampler, sampler_name, scheduler, official_workflow_id, generation_mode, source_image_ref, mask_image_ref, denoise_strength, outpaint_left, outpaint_top, outpaint_right, outpaint_bottom, outpaint_feathering。",
     "args 對 write_tool 應依 context.effective_tools 的工具語意填入站內欄位；例如頭像工具可填 user_id, cloud_file_id, crop{x,y,width,height,rotation}, zoom, decision_reason。",
     "工具語意：readonly=讀取指定 readonly_scope 的站內唯讀資料；comfyui_status=讀取 ComfyUI 目前可用性與生圖進度；comfyui_generate=建立新的 ComfyUI 生圖任務；comfyui_rerun=沿用上一筆生圖參數並套用使用者修改；write_tool=執行 context.effective_tools 中的白名單站內工具；community_post_draft=只產生發文草稿，不直接發布。",
     "若 action=write_tool，tool 必須完全等於 context.effective_tools[].name，args 只能包含使用者明確提供或可從 recent_messages/站內上下文推得的站內欄位；不得產生 shell、SQL、外部檔案路徑或站外操作。",
@@ -795,6 +860,10 @@ async function aiAgentPlanToolAction(userText, options = {}) {
     "若使用者目的需要工具，但 effective_tools 或權限不足，仍可輸出該 action；前端會處理提權、拒絕或反問。",
     "若使用者目的不明或缺少必要資料，action=clarify 並用 question 提出一個具體反問。",
     "若使用者以短句詢問某件事是否開始、完成、跑出結果或目前進度，請先依 recent_messages 與 submitted_comfyui_jobs 判斷目標；若仍不確定，action=readonly 並 readonly_scope=all，讓前端回報真實可見任務狀態。",
+    "若使用者要求修改、重繪、風格化、套風格、以圖生圖或把上一張/剛剛那張圖再加工，action=comfyui_generate、execute_write=true，並用 context.recent_image_refs 或 last_comfyui_job.images 的 image_ref 填 source_image_ref；風格化/以圖生圖 generation_mode=img2img，局部重繪 generation_mode=inpaint 且需要 mask_image_ref，向外延展 generation_mode=outpaint 且填 outpaint_* 邊界。",
+    "comfyui_generate 的 prompt 不可空白；圖生圖/風格化時若使用者只描述修改方向，請把修改方向整理成可執行 prompt。",
+    "若 inpaint 缺少可用 mask_image_ref，action=clarify，question 只問使用者要提供 mask 或改用 img2img/outpaint；不要假裝能局部重繪。",
+    "若 outpaint 未指定方向或像素，可用 128px 與 feathering 48 作安全預設；若 style change 未指定 denoise_strength，可用 0.55-0.75。",
     "若 input_mode=image，請用語意判斷使用者是要圖片問答、圖片分析產 prompt，還是要求用附圖執行生圖；只有明確要求執行寫入的情況才可輸出 comfyui_generate 並設 execute_write=true。",
     "若 input_mode=image 且使用者明確要求用附圖執行生圖，即使未提供 prompt、尺寸或步數，也應輸出 comfyui_generate 並設 execute_write=true；前端會先用 vision 模型分析圖片並補齊安全預設參數。",
     "若 input_mode=image 且使用者意圖依上下文仍不明，請輸出 chat 或 clarify；不得設定 execute_write=true，也不得暗示已送出任何寫入工具。",
@@ -831,13 +900,24 @@ function aiAgentPlannerArgs(plan = {}, userText = "") {
     height: source.height,
     steps: source.steps,
     cfg_scale: source.cfg_scale ?? source.cfg,
+    cfg: source.cfg,
     batch_size: source.batch_size,
     seed: source.seed,
     checkpoint: source.checkpoint || source.model || "",
     vae: source.vae || "",
     sampler: source.sampler || "",
+    sampler_name: source.sampler_name || "",
     scheduler: source.scheduler || "",
     official_workflow_id: source.official_workflow_id || "",
+    generation_mode: source.generation_mode || source.mode || source.edit_mode || "",
+    source_image_ref: source.source_image_ref || source.source_image_ref_json || source.image_ref || source.source_ref || null,
+    mask_image_ref: source.mask_image_ref || source.mask_image_ref_json || source.mask_ref || null,
+    denoise_strength: source.denoise_strength ?? source.denoise ?? source.strength,
+    outpaint_left: source.outpaint_left ?? source.outpaint?.left,
+    outpaint_top: source.outpaint_top ?? source.outpaint?.top,
+    outpaint_right: source.outpaint_right ?? source.outpaint?.right,
+    outpaint_bottom: source.outpaint_bottom ?? source.outpaint?.bottom,
+    outpaint_feathering: source.outpaint_feathering ?? source.outpaint?.feathering,
   }, userText);
 }
 
@@ -853,13 +933,24 @@ function aiAgentPlannerRerunArgs(plan = {}, userText = "") {
     height: source.height,
     steps: source.steps,
     cfg_scale: source.cfg_scale ?? source.cfg,
+    cfg: source.cfg,
     batch_size: source.batch_size,
     seed: source.seed,
     checkpoint: aiAgentStripFieldValue(source.checkpoint || source.model || ""),
     vae: aiAgentStripFieldValue(source.vae || ""),
     sampler: aiAgentStripFieldValue(source.sampler || ""),
+    sampler_name: aiAgentStripFieldValue(source.sampler_name || ""),
     scheduler: aiAgentStripFieldValue(source.scheduler || ""),
     official_workflow_id: source.official_workflow_id || "",
+    generation_mode: aiAgentNormalizeComfyuiGenerationMode(source.generation_mode || source.mode || source.edit_mode || ""),
+    source_image_ref: source.source_image_ref || source.source_image_ref_json || source.image_ref || source.source_ref || null,
+    mask_image_ref: source.mask_image_ref || source.mask_image_ref_json || source.mask_ref || null,
+    denoise_strength: source.denoise_strength ?? source.denoise ?? source.strength,
+    outpaint_left: source.outpaint_left ?? source.outpaint?.left,
+    outpaint_top: source.outpaint_top ?? source.outpaint?.top,
+    outpaint_right: source.outpaint_right ?? source.outpaint?.right,
+    outpaint_bottom: source.outpaint_bottom ?? source.outpaint?.bottom,
+    outpaint_feathering: source.outpaint_feathering ?? source.outpaint?.feathering,
   };
   Object.keys(overrides).forEach((key) => {
     if (overrides[key] === "" || overrides[key] === undefined || overrides[key] === null) delete overrides[key];
@@ -1168,7 +1259,14 @@ function aiAgentExtractJsonObject(text) {
 
 function aiAgentNormalizeAnalysisArgs(parsed, userText) {
   const source = parsed?.arguments && typeof parsed.arguments === "object" ? parsed.arguments : parsed;
-  const prompt = aiAgentStripFieldValue(source?.prompt || source?.positive_prompt || source?.comfyui_prompt || "");
+  const generationMode = aiAgentNormalizeComfyuiGenerationMode(
+    source?.generation_mode || source?.mode || source?.edit_mode || source?.image_edit_mode || ""
+  );
+  const sourceImageRef = source?.source_image_ref || source?.source_image_ref_json || source?.image_ref || source?.source_ref || null;
+  let prompt = aiAgentStripFieldValue(source?.prompt || source?.positive_prompt || source?.comfyui_prompt || "");
+  if (!prompt && sourceImageRef && ["img2img", "inpaint", "outpaint", "upscale"].includes(generationMode)) {
+    prompt = aiAgentStripFieldValue(userText || "");
+  }
   if (!prompt) throw new Error("圖片分析沒有產生可用提示詞");
   const args = {
     prompt,
@@ -1177,12 +1275,24 @@ function aiAgentNormalizeAnalysisArgs(parsed, userText) {
     height: source?.height,
     steps: source?.steps,
     cfg_scale: source?.cfg_scale ?? source?.cfg,
+    cfg: source?.cfg,
     batch_size: source?.batch_size,
+    seed: source?.seed,
     checkpoint: aiAgentStripFieldValue(source?.checkpoint || source?.model || ""),
     vae: aiAgentStripFieldValue(source?.vae || ""),
     sampler: aiAgentStripFieldValue(source?.sampler || ""),
+    sampler_name: aiAgentStripFieldValue(source?.sampler_name || ""),
     scheduler: aiAgentStripFieldValue(source?.scheduler || ""),
     official_workflow_id: source?.official_workflow_id || "",
+    generation_mode: generationMode,
+    source_image_ref: sourceImageRef,
+    mask_image_ref: source?.mask_image_ref || source?.mask_image_ref_json || source?.mask_ref || null,
+    denoise_strength: source?.denoise_strength ?? source?.denoise ?? source?.strength,
+    outpaint_left: source?.outpaint_left ?? source?.outpaint?.left,
+    outpaint_top: source?.outpaint_top ?? source?.outpaint?.top,
+    outpaint_right: source?.outpaint_right ?? source?.outpaint?.right,
+    outpaint_bottom: source?.outpaint_bottom ?? source?.outpaint?.bottom,
+    outpaint_feathering: source?.outpaint_feathering ?? source?.outpaint?.feathering,
     confirm_billing: true,
     ...aiAgentParseComfyuiOptionOverrides(userText),
   };
@@ -1203,9 +1313,10 @@ async function aiAgentAnalyzeImageForComfyui(userText) {
     throw new Error("請從模型選單選擇可用模型後再做圖片分析。");
   }
   const analysisPrompt = [
-    "請先分析使用者附上的圖片，產生可用於 ComfyUI text-to-image 的提示詞。",
+    "請先分析使用者附上的圖片，依使用者語意產生可用於 ComfyUI 的生圖或圖生圖參數。",
     "請只輸出 JSON，不要 Markdown，不要表格，不要操作教學。",
-    "JSON 欄位：prompt, negative_prompt, width, height, steps, cfg_scale, checkpoint, vae, sampler, scheduler, official_workflow_id。",
+    "JSON 欄位：prompt, negative_prompt, width, height, steps, cfg_scale, checkpoint, vae, sampler, sampler_name, scheduler, official_workflow_id, generation_mode, denoise_strength。",
+    "若使用者要求改變附圖風格或以圖生圖，generation_mode=img2img；局部重繪需 mask 才能 inpaint，沒有 mask 時不要假裝已具備 mask；向外延展 generation_mode=outpaint。",
     "如果使用者文字指定尺寸、模型、CFG、VAE 或 SDXL T2I，請保留那些指定。",
     "checkpoint 只能填使用者明確提供的實際 checkpoint 名稱；如果只提到 SDXL、SDXL T2I 或泛稱，不要填 sdxl_base_1.0.ckpt，請省略 checkpoint。",
     `使用者需求：${userText || "參考圖片產生相似風格圖片"}`,
@@ -1244,9 +1355,10 @@ async function aiAgentAnalyzeTextForComfyui(userText) {
     throw new Error("請從模型選單選擇可用模型後再做生圖解析。");
   }
   const analysisPrompt = [
-    "請把使用者的自然語言生圖需求轉成 ComfyUI text-to-image write-tool 參數。",
+    "請把使用者的自然語言需求轉成 ComfyUI write-tool 參數，可支援 text-to-image、img2img、inpaint、outpaint。",
     "請只輸出 JSON，不要 Markdown，不要表格，不要操作教學。",
-    "JSON 欄位：prompt, negative_prompt, width, height, steps, cfg_scale, batch_size, seed, checkpoint, vae, sampler, scheduler, official_workflow_id。",
+    "JSON 欄位：prompt, negative_prompt, width, height, steps, cfg_scale, cfg, batch_size, seed, checkpoint, vae, sampler, sampler_name, scheduler, official_workflow_id, generation_mode, source_image_ref, mask_image_ref, denoise_strength, outpaint_left, outpaint_top, outpaint_right, outpaint_bottom, outpaint_feathering。",
+    "若使用者要求修改、重繪、風格化、以圖生圖或外延站內圖片，請保留 source_image_ref/mask_image_ref/outpaint/denoise 欄位；風格化 generation_mode=img2img。",
     "如果使用者提到 SDXL T2I、SDXL txt2img 或文字生圖，official_workflow_id 設為 origin_sdxl_txt2img。",
     "如果使用者指定模型、Checkpoint、VAE、尺寸、CFG、步數或張數，必須保留。",
     "checkpoint 只能填使用者明確提供的實際 checkpoint 名稱；如果只提到 SDXL、SDXL T2I 或泛稱，不要填 sdxl_base_1.0.ckpt，請省略 checkpoint。",
