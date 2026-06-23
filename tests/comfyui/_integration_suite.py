@@ -83,6 +83,7 @@ class FakeComfyUIClient:
     generated_count = 0
     generated_workflows = []
     uploaded_images = []
+    fetched_images = []
 
     def health_check(self, *, timeout=3):
         return {"ok": True, "system": {"os": "test"}}
@@ -292,6 +293,7 @@ class FakeComfyUIClient:
         }
 
     def fetch_image(self, image_ref):
+        FakeComfyUIClient.fetched_images.append(dict(image_ref or {}))
         return ComfyUIImage(
             filename=image_ref.get("filename") or "hackme_web_00001_.png",
             subfolder=image_ref.get("subfolder") or "",
@@ -1055,6 +1057,72 @@ def test_comfyui_img2img_controlnet_generate_uploads_assets_and_records_history(
     assert FakeComfyUIClient.last_params["seed_after_generate"] == "increment"
     assert FakeComfyUIClient.last_params["source_image_ref"]["filename"] == "source.png"
     assert FakeComfyUIClient.last_params["controlnet"]["image_ref"]["filename"] == "control.png"
+
+
+def test_comfyui_img2img_materializes_output_ref_before_generation(tmp_path):
+    db_path = tmp_path / "comfyui.db"
+    storage_root = tmp_path / "storage"
+    storage_root.mkdir()
+    _init_db(db_path)
+    FakeComfyUIClient.uploaded_images = []
+    FakeComfyUIClient.fetched_images = []
+    client = _build_app(db_path, storage_root).test_client()
+
+    original = client.post(
+        "/api/comfyui/generate",
+        json={
+            "generation_mode": "txt2img",
+            "model": "dream.safetensors",
+            "prompt": "source image",
+            "width": 512,
+            "height": 512,
+            "steps": 8,
+            "cfg": 6,
+            "sampler_name": "euler",
+            "scheduler": "normal",
+            "confirm_billing": True,
+        },
+    )
+    assert original.status_code == 200
+    original_body = _await_comfyui_result(client, original)
+    source_ref = original_body["image"]["image_ref"]
+    assert source_ref["type"] == "output"
+
+    FakeComfyUIClient.uploaded_images = []
+    FakeComfyUIClient.fetched_images = []
+    generated = client.post(
+        "/api/comfyui/generate",
+        json={
+            "generation_mode": "img2img",
+            "model": "dream.safetensors",
+            "prompt": "watercolor restyle",
+            "width": 512,
+            "height": 512,
+            "steps": 8,
+            "cfg": 6,
+            "sampler_name": "euler",
+            "scheduler": "normal",
+            "denoise_strength": 0.25,
+            "source_image_ref": source_ref,
+            "confirm_billing": True,
+        },
+    )
+    assert generated.status_code == 200, generated.get_json()
+    _await_comfyui_result(client, generated)
+
+    assert FakeComfyUIClient.fetched_images == [source_ref]
+    assert len(FakeComfyUIClient.uploaded_images) == 1
+    materialized_ref = FakeComfyUIClient.uploaded_images[0]["image_ref"]
+    assert materialized_ref["type"] == "input"
+    assert FakeComfyUIClient.last_params["generation_mode"] == "img2img"
+    assert FakeComfyUIClient.last_params["source_image_ref"] == materialized_ref
+
+    history = client.get("/api/comfyui/history")
+    assert history.status_code == 200
+    history_item = history.get_json()["history"][0]
+    assert history_item["generation_mode"] == "img2img"
+    assert history_item["input_assets"]["source_image_ref"] == materialized_ref
+    assert history_item["payload"]["source_image_ref"] == materialized_ref
 
 
 def test_comfyui_generate_rejects_controlnet_strength_out_of_range(tmp_path):

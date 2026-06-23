@@ -1494,6 +1494,43 @@ def register_comfyui_routes(app, deps):
             return None, None, "請求內容格式錯誤"
         return data, uploaded_assets, None
 
+    def _materialize_generation_image_ref(actor, active_client, image_ref, *, label):
+        normalized = _image_ref_payload(image_ref)
+        if not normalized:
+            return None
+        if str(normalized.get("type") or "output").strip().lower() == "input":
+            return normalized
+
+        conn = get_db()
+        try:
+            ref_row = _load_comfyui_image_ref_record(conn, actor=actor, image_ref=normalized)
+            conn.commit()
+        finally:
+            conn.close()
+        if not ref_row:
+            raise ComfyUIError(f"找不到可用的{label}圖片引用")
+
+        source_client = active_client
+        source_backend_url = str((ref_row or {}).get("backend_url") or "").strip()
+        if source_backend_url:
+            source_binding = _comfyui_binding(actor, backend_url=source_backend_url)
+            source_client = _client_for_url(source_binding.get("url"))
+        try:
+            fetched = source_client.fetch_image(normalized)
+            _assert_reasonable_image_size(fetched)
+            data = getattr(fetched, "data", b"") or b""
+            filename = getattr(fetched, "filename", "") or normalized.get("filename") or f"{label}.png"
+            return active_client.upload_image_bytes(
+                data,
+                filename,
+                image_type="input",
+                overwrite=False,
+            )
+        except ComfyUIError:
+            raise
+        except Exception as exc:
+            raise ComfyUIError(f"{label}圖片轉入 ComfyUI input 失敗：{exc}") from exc
+
     def _hydrate_generation_assets(actor, active_client, params, uploaded_assets):
         params = dict(params or {})
         uploaded_assets = dict(uploaded_assets or {})
@@ -1519,6 +1556,23 @@ def register_comfyui_routes(app, deps):
                 params["controlnet"] = control
             else:
                 params[params_key] = image_ref
+        for params_key, label in (
+            ("source_image_ref", "來源"),
+            ("mask_image_ref", "遮罩"),
+        ):
+            image_ref = params.get(params_key)
+            materialized_ref = _materialize_generation_image_ref(actor, active_client, image_ref, label=label)
+            if materialized_ref and materialized_ref != image_ref:
+                params[params_key] = materialized_ref
+                image_ref_records.append({"image_ref": materialized_ref, "prompt_id": ""})
+        control = params.get("controlnet") if isinstance(params.get("controlnet"), dict) else None
+        if control and isinstance(control.get("image_ref"), dict):
+            materialized_ref = _materialize_generation_image_ref(actor, active_client, control.get("image_ref"), label="控制")
+            if materialized_ref and materialized_ref != control.get("image_ref"):
+                control = dict(control)
+                control["image_ref"] = materialized_ref
+                params["controlnet"] = control
+                image_ref_records.append({"image_ref": materialized_ref, "prompt_id": ""})
         if image_ref_records:
             conn = get_db()
             try:

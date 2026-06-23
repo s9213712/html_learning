@@ -383,6 +383,18 @@ function aiAgentStripFieldValue(value) {
     .trim();
 }
 
+function aiAgentPromptFingerprint(value) {
+  return aiAgentStripFieldValue(value).replace(/\s+/g, " ").toLowerCase();
+}
+
+function aiAgentLooksLikeStaleImageEditPrompt(prompt, generationMode, sourceImageRef) {
+  if (!sourceImageRef || !["img2img", "inpaint", "outpaint", "upscale"].includes(generationMode)) return false;
+  const promptKey = aiAgentPromptFingerprint(prompt);
+  if (!promptKey) return false;
+  const lastKey = aiAgentPromptFingerprint(AI_AGENT_STATE.lastComfyuiArgs?.prompt || "");
+  return !!lastKey && promptKey === lastKey;
+}
+
 function aiAgentNormalizeUserText(value) {
   return String(value || "")
     .replace(/\\r\\n/g, "\n")
@@ -862,6 +874,7 @@ async function aiAgentPlanToolAction(userText, options = {}) {
     "若使用者以短句詢問某件事是否開始、完成、跑出結果或目前進度，請先依 recent_messages 與 submitted_comfyui_jobs 判斷目標；若仍不確定，action=readonly 並 readonly_scope=all，讓前端回報真實可見任務狀態。",
     "若使用者要求修改、重繪、風格化、套風格、以圖生圖或把上一張/剛剛那張圖再加工，action=comfyui_generate、execute_write=true，並用 context.recent_image_refs 或 last_comfyui_job.images 的 image_ref 填 source_image_ref；風格化/以圖生圖 generation_mode=img2img，局部重繪 generation_mode=inpaint 且需要 mask_image_ref，向外延展 generation_mode=outpaint 且填 outpaint_* 邊界。",
     "comfyui_generate 的 prompt 不可空白；圖生圖/風格化時若使用者只描述修改方向，請把修改方向整理成可執行 prompt。",
+    "圖生圖/風格化/外延/局部重繪時，prompt 必須描述本輪要修改的方向；不可只複製 context.last_comfyui_args.prompt，除非使用者明確要求完全沿用原 prompt。",
     "若 inpaint 缺少可用 mask_image_ref，action=clarify，question 只問使用者要提供 mask 或改用 img2img/outpaint；不要假裝能局部重繪。",
     "若 outpaint 未指定方向或像素，可用 128px 與 feathering 48 作安全預設；若 style change 未指定 denoise_strength，可用 0.55-0.75。",
     "若 input_mode=image，請用語意判斷使用者是要圖片問答、圖片分析產 prompt，還是要求用附圖執行生圖；只有明確要求執行寫入的情況才可輸出 comfyui_generate 並設 execute_write=true。",
@@ -1049,6 +1062,23 @@ async function aiAgentRunGenericWriteTool(plan, userText, input) {
     AI_AGENT_STATE.messages.push({ role: "assistant", content: `${aiAgentWriteToolResultSummary(toolName, json, elapsed)}${retryNote}` });
     renderAiAgentThread();
     setAiAgentMessage(json.ok && res.ok ? `${toolName} 已完成` : `${toolName} 失敗`, json.ok && res.ok ? "ok" : "err");
+    if (toolName === "write_comfyui_generate" && json.ok && res.ok) {
+      const job = aiAgentFindComfyuiJobPayload(json) || {};
+      const jobId = job.job_id || json.result?.job_id || json.payload?.job_id || json.job_id || "";
+      const initialStatus = job.status || "queued";
+      if (jobId) {
+        job.job_id = jobId;
+        job.status = initialStatus;
+        aiAgentRememberComfyuiSubmit(args, job);
+        AI_AGENT_STATE.messages.push({
+          role: "assistant",
+          content: `ComfyUI 產圖已送出，正在確認後端接收狀態。\n工具：write_comfyui_generate\nJob ID：${jobId}\n狀態：${initialStatus}${retryNote}`,
+        });
+        renderAiAgentThread();
+        setAiAgentMessage("ComfyUI 產圖已送出，正在確認狀態", "info");
+        aiAgentWatchComfyuiJob(jobId);
+      }
+    }
   } catch (err) {
     AI_AGENT_STATE.messages.push({ role: "assistant", content: `${toolName} 執行失敗：${err?.message || err}` });
     renderAiAgentThread();
@@ -1266,6 +1296,9 @@ function aiAgentNormalizeAnalysisArgs(parsed, userText) {
   let prompt = aiAgentStripFieldValue(source?.prompt || source?.positive_prompt || source?.comfyui_prompt || "");
   if (!prompt && sourceImageRef && ["img2img", "inpaint", "outpaint", "upscale"].includes(generationMode)) {
     prompt = aiAgentStripFieldValue(userText || "");
+  }
+  if (prompt && aiAgentLooksLikeStaleImageEditPrompt(prompt, generationMode, sourceImageRef)) {
+    prompt = aiAgentStripFieldValue(userText || prompt);
   }
   if (!prompt) throw new Error("圖片分析沒有產生可用提示詞");
   const args = {
