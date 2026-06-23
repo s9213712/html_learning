@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -128,6 +129,11 @@ def write_call_job_id(write_calls: list[dict[str, Any]]) -> str:
     return str(((result.get("job") or {}).get("job_id")) or "")
 
 
+def thread_job_id(text: str) -> str:
+    matches = re.findall(r"Job ID[:：]\s*([A-Za-z0-9_-]+)", text or "")
+    return matches[-1] if matches else ""
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", default="https://127.0.0.1:5000")
@@ -212,7 +218,7 @@ def main() -> int:
         thread_completed = "ComfyUI 產圖完成" in thread_tail and "輸出：" in thread_tail
         elapsed = round(time.perf_counter() - started, 3)
 
-        final_job_id = job_id or write_call_job_id(write_calls)
+        final_job_id = job_id or write_call_job_id(write_calls) or thread_job_id(thread_tail)
         screenshot = out_dir / "ai_agent_real_i2i_edit.png"
         page.screenshot(path=str(screenshot), full_page=True)
         report = {

@@ -12,8 +12,8 @@ Final evidence:
 - JSON: `/tmp/hackme_ai_agent_i2i_edit_context_20260623_live_5/report.json`
 - Screenshot: `/tmp/hackme_ai_agent_i2i_edit_context_20260623_live_5/ai_agent_i2i_edit_context.png`
 - Direct API real img2img job: `78b8cf8c5892589057a2c08e`, output `hackme_web_00066_.png`, history id `32`.
-- Frontend AI Agent real img2img report: `/tmp/hackme_ai_agent_real_i2i_edit_20260623_generic_watch_fix/report.json`
-- Frontend AI Agent real img2img screenshot: `/tmp/hackme_ai_agent_real_i2i_edit_20260623_generic_watch_fix/ai_agent_real_i2i_edit.png`
+- Frontend AI Agent real img2img report: `/tmp/hackme_ai_agent_real_i2i_edit_20260623_clean/report.json`
+- Frontend AI Agent real img2img screenshot: `/tmp/hackme_ai_agent_real_i2i_edit_20260623_clean/ai_agent_real_i2i_edit.png`
 - Probe: `scripts/testing/ai_agent_i2i_edit_context_probe.py`
 - Real execution probe: `scripts/testing/ai_agent_real_i2i_edit_probe.py`
 
@@ -31,8 +31,8 @@ Checks:
 - `inpaint_missing_mask_clarifies`: PASS
 - `no_browser_errors`: PASS
 - Real output-ref materialization: PASS. Output ref `hackme_web_00065_.png` was converted to input ref before ComfyUI `LoadImage`, then img2img completed.
-- Natural-language frontend real execution: PASS. AI Agent planned `img2img`, sent `write_comfyui_generate`, tracked progress to completion, and produced `hackme_web_00069_.png`.
-- Prompt rewrite quality: PASS after repair. The write payload used `prompt: "淡透明水彩風格, 保留原始構圖"` instead of blindly reusing the previous image prompt.
+- Natural-language frontend real execution: PASS. AI Agent planned `img2img`, sent `write_comfyui_generate`, tracked progress to completion, and produced `hackme_web_00071_.png`.
+- Prompt rewrite quality: PASS after repair. The write payload used `prompt: "淡透明水彩風格，保留構圖"` instead of blindly reusing the previous image prompt.
 
 Issues found and fixed:
 - AI Agent write-tool schema did not expose ComfyUI edit fields such as `generation_mode`, `source_image_ref`, `mask_image_ref`, `denoise_strength`, and `outpaint_*`.
