@@ -1758,6 +1758,55 @@ def register_ai_agent_routes(app, deps):
                 return False
         return None
 
+    _os_filesystem_path_re = re.compile(
+        r"(?<![\w.-])(?:~|/(?:home|root|etc|var|usr|tmp|proc|sys|dev|run|boot)(?:/|\b))",
+        re.IGNORECASE,
+    )
+    _os_filesystem_intent_re = re.compile(
+        r"(列出|有哪些檔案|哪些檔案|檔案清單|資料夾|家目錄|目錄內容|讀取|查看|打開|顯示|"
+        r"\bls\b|\bdir\b|\bcat\b|\bread\b|\bshow\b|\bopen\b|\blist(?:\s+(?:files|directory|folders?))?)",
+        re.IGNORECASE,
+    )
+
+    def _extract_ai_agent_user_text(data):
+        prompt = str(data.get("prompt") or "").strip()
+        if prompt:
+            return prompt
+        messages = data.get("messages")
+        if not isinstance(messages, list):
+            return ""
+        user_texts = []
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            role = str(message.get("role") or "").strip().lower()
+            content = message.get("content")
+            if isinstance(content, str):
+                text = content
+            elif isinstance(content, list):
+                parts = []
+                for item in content:
+                    if isinstance(item, dict):
+                        parts.append(str(item.get("text") or item.get("content") or ""))
+                    else:
+                        parts.append(str(item or ""))
+                text = "\n".join(part for part in parts if part)
+            else:
+                text = str(content or "")
+            if "\nuser=" in text:
+                text = text.rsplit("\nuser=", 1)[-1]
+            if role in {"user", ""} and text.strip():
+                user_texts.append(text.strip())
+        return "\n".join(user_texts[-3:])
+
+    def _ai_agent_boundary_block_reason(user_text):
+        text = str(user_text or "").strip()
+        if not text:
+            return ""
+        if _os_filesystem_path_re.search(text) and _os_filesystem_intent_re.search(text):
+            return "filesystem_scope"
+        return ""
+
     def _audit_agent_event(action, actor=None, *, success=True, detail=""):
         audit(
             action,
@@ -3140,6 +3189,15 @@ def register_ai_agent_routes(app, deps):
             return json_resp({"ok": False, "msg": "請求 JSON 格式錯誤"}), 400
         if not isinstance(data, dict):
             return json_resp({"ok": False, "msg": "請求內容格式錯誤"}), 400
+        boundary_reason = _ai_agent_boundary_block_reason(_extract_ai_agent_user_text(data))
+        if boundary_reason:
+            _audit_agent_event("AI_AGENT_BOUNDARY_BLOCK", actor, success=False, detail=boundary_reason)
+            return json_resp({
+                "ok": False,
+                "msg": "此要求會存取伺服器作業系統檔案系統，不屬於站內 AI Agent 工具範圍；請改用站內雲端硬碟、runtime 文件或已授權管理工具。",
+                "blocked_by": "server_policy",
+                "policy": boundary_reason,
+            }), 403
         settings = get_system_settings() or {}
         user_id = _actor_value(actor, "id", 0)
         session_id = str(data.get("session_id") or "").strip()[:120]
