@@ -5,6 +5,7 @@ from pathlib import Path
 
 from services.storage.remote_downloads import (
     RemoteDownloadError,
+    _directory_download_progress,
     _read_tail,
     download_magnet_with_aria2,
     download_remote_url,
@@ -24,6 +25,21 @@ def test_remote_download_log_tail_reads_only_tail_window(tmp_path):
 
     assert tail == "line-17\nline-18\nline-19"
     assert "line-0" not in tail
+
+
+def test_aria2_sparse_file_progress_uses_allocated_bytes(tmp_path):
+    target = tmp_path / "video.mkv"
+    with target.open("wb") as fh:
+        fh.seek((1024 * 1024 * 1024) - 1)
+        fh.write(b"\0")
+    target.with_name(target.name + ".aria2").write_bytes(b"aria2-control")
+
+    progress = _directory_download_progress(tmp_path)
+
+    if progress["loaded_bytes"] >= progress["total_bytes"]:
+        pytest.skip("filesystem does not expose sparse allocated blocks")
+    assert progress["total_bytes"] == 1024 * 1024 * 1024
+    assert progress["loaded_bytes"] < progress["total_bytes"]
 
 
 def test_magnet_download_reports_aria2_log_tail(monkeypatch):

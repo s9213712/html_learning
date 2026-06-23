@@ -3141,6 +3141,69 @@ def test_remote_download_magnet_prefers_transmission_backend(tmp_path, monkeypat
     assert ("torrent-remove", {"ids": [7], "delete-local-data": False}) in calls
 
 
+def test_remote_download_transmission_backend_resolves_magnet_metadata_with_aria2(tmp_path, monkeypatch):
+    from services.storage import remote_downloads
+
+    calls = []
+
+    class MetadataPopen:
+        def __init__(self, cmd, **kwargs):
+            self.cmd = cmd
+            self.returncode = 0
+            self.stdout = ""
+            self.stderr = ""
+            target = Path(cmd[cmd.index("--dir") + 1]) / "payload.torrent"
+            target.write_bytes(b"torrent-metainfo")
+
+        def poll(self):
+            return self.returncode
+
+        def communicate(self, timeout=None):
+            return "", ""
+
+    def fake_rpc(method, arguments=None, **kwargs):
+        arguments = arguments or {}
+        calls.append((method, arguments))
+        if method == "torrent-add":
+            assert "metainfo" in arguments
+            assert "filename" not in arguments
+            target = Path(arguments["download-dir"]) / "movie.mp4"
+            target.write_bytes(b"video")
+            return {"torrent-added": {"id": 8, "name": "movie.mp4"}}
+        if method == "torrent-get":
+            return {
+                "torrents": [{
+                    "id": 8,
+                    "name": "movie.mp4",
+                    "percentDone": 1,
+                    "totalSize": 5,
+                    "downloadedEver": 5,
+                    "rateDownload": 0,
+                    "error": 0,
+                    "errorString": "",
+                    "files": [],
+                }]
+            }
+        if method in {"torrent-remove", "torrent-set"}:
+            return {}
+        raise AssertionError(method)
+
+    monkeypatch.setenv("HACKME_BT_BACKEND", "transmission")
+    monkeypatch.setattr(remote_downloads, "_transmission_rpc_call", fake_rpc)
+    monkeypatch.setattr(remote_downloads, "_bt_progress_interval_seconds", lambda: 0)
+    monkeypatch.setattr(remote_downloads.shutil, "which", lambda name: "/usr/bin/aria2c")
+    monkeypatch.setattr(remote_downloads.subprocess, "Popen", MetadataPopen)
+
+    downloaded = remote_downloads.download_magnet_with_aria2(
+        "magnet:?xt=urn:btih:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        timeout_seconds=5,
+    )
+
+    assert downloaded.filename == "movie.mp4"
+    assert Path(downloaded.path).read_bytes() == b"video"
+    assert ("torrent-remove", {"ids": [8], "delete-local-data": False}) in calls
+
+
 def test_remote_download_transmission_stages_global_incomplete_file(tmp_path, monkeypatch):
     from services.storage import remote_downloads
 

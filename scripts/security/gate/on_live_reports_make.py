@@ -532,7 +532,7 @@ def _functional_report(out_root: Path, raw_dir: Path, args, signer: PayloadSigne
             str(report_root),
             "--core-only",
         ],
-        env={"GO_LIVE_CORE_ONLY": "1"},
+        env={"GO_LIVE_CORE_ONLY": "1", "START_TIMEOUT": "180"},
         timeout=args.functional_timeout,
     )
     latest = _find_latest_paths(report_root, "functional_*")

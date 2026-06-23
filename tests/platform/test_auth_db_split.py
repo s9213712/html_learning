@@ -9,7 +9,11 @@ from routes.public import register_public_routes
 from services.security.captcha import create_captcha_challenge
 from services.server.database import get_auth_db
 from services.points_chain import BIRTHDAY_GIFT_POINTS, PointsLedgerService
-from services.storage.quota_purchases import BIRTHDAY_STORAGE_GIFT_BYTES, active_storage_quota_purchases
+from services.storage.quota_purchases import (
+    BIRTHDAY_STORAGE_GIFT_BYTES,
+    BIRTHDAY_STORAGE_GIFT_ITEM_KEY,
+    active_storage_quota_purchases,
+)
 from services.users import auth as auth_service
 
 
@@ -436,7 +440,7 @@ def test_public_login_awards_birthday_gift_once_for_current_year(tmp_path):
     finally:
         conn.close()
     assert len(purchases) == 1
-    assert purchases[0]["item_key"] == "birthday_storage_1gb_30d"
+    assert purchases[0]["item_key"] == BIRTHDAY_STORAGE_GIFT_ITEM_KEY
     assert purchases[0]["purchased_bytes"] == BIRTHDAY_STORAGE_GIFT_BYTES
 
 

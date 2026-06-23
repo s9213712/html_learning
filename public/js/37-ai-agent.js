@@ -932,6 +932,7 @@ async function aiAgentPlanToolAction(userText, options = {}) {
     "工具語意：readonly=讀取指定 readonly_scope 的站內唯讀資料；comfyui_status=讀取 ComfyUI 目前可用性與生圖進度；comfyui_generate=建立新的 ComfyUI 生圖任務；comfyui_rerun=沿用上一筆生圖參數並套用使用者修改；write_tool=執行 context.effective_tools 中的白名單站內工具；community_post_draft=只產生發文草稿，不直接發布。",
     "若 action=write_tool，tool 必須完全等於 context.effective_tools[].name，args 只能包含使用者明確提供或可從 recent_messages/站內上下文推得的站內欄位；不得產生 shell、SQL、外部檔案路徑或站外操作。",
     "站內所有功能需優先從 context.effective_tools 的 domain/label/description/schema 語意選 tool；不要用固定 if/else 或關鍵字表假裝理解。",
+    "若使用者要求「執行上線前檢查」、「完成上線流程」、「找上線失敗原因」、「直到成功轉上線/production」或類似目的，且 context.effective_tools 有 write_launch_preflight_execute，請輸出 action=write_tool、tool=write_launch_preflight_execute、execute_write=true、args={target_mode:'production', auto_switch:true, force_audit:true, confirm:'GO_LIVE'}；不得只選 readonly，也不得因包含多個檢查步驟而 clarify。",
     "若 schema.required 缺少且無法從上下文推得，action=clarify；若只缺 optional/body_fields，不得反問，應照可用資料輸出 plan。",
     "若 action=write_tool 且使用者明確要求建立、更新、刪除、執行、下載、轉帳、交易或治理處置，execute_write 必須是 true；只有使用者要草稿、詢問、資料不足或權限不足時才可為 false。",
     "若使用者目的需要工具，但 effective_tools 或權限不足，仍可輸出該 action；前端會處理提權、拒絕或反問。",

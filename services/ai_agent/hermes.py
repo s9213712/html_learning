@@ -394,6 +394,12 @@ AI_AGENT_TOOL_BLUEPRINT = {
         "min_role": "super_admin",
         "data_scope": "write_tool:launch_check",
     },
+    "write_launch_preflight_execute": {
+        "label": "執行上線前檢查與切換",
+        "description": "root 專用白名單工具：執行上線前 requirements、log chain、AI audit scan，整理阻塞原因，gate 通過時切換 production。",
+        "min_role": "super_admin",
+        "data_scope": "write_tool:launch_check",
+    },
     "write_launch_logs_verify": {
         "label": "上線 log 鏈驗證",
         "description": "root 專用白名單工具：驗證 server-mode log chain。",

@@ -23,6 +23,18 @@ from services.security.upload_security import safe_public_filename
 
 MAX_BDECODE_DEPTH = 64
 BT_DEFAULT_MAX_RUNTIME_SECONDS = 24 * 3600
+PUBLIC_BT_TRACKERS = [
+    "udp://tracker.opentrackr.org:1337/announce",
+    "udp://open.stealth.si:80/announce",
+    "udp://tracker.openbittorrent.com:6969/announce",
+    "udp://tracker.torrent.eu.org:451/announce",
+    "udp://explodie.org:6969/announce",
+    "udp://tracker.dler.org:6969/announce",
+    "udp://exodus.desync.com:6969/announce",
+    "udp://open.demonii.com:1337/announce",
+    "udp://tracker-udp.gbitt.info:80/announce",
+    "udp://tracker.moeking.me:6969/announce",
+]
 
 
 class RemoteDownloadError(RuntimeError):
@@ -430,10 +442,39 @@ def _directory_downloaded_bytes(path):
         if not item.is_file() or item.name == "aria2.log":
             continue
         try:
-            total += item.stat().st_size
+            stat = item.stat()
+            total += stat.st_size
         except OSError:
             pass
     return total
+
+
+def _file_allocated_bytes(stat):
+    blocks = int(getattr(stat, "st_blocks", 0) or 0)
+    if blocks > 0:
+        return blocks * 512
+    return int(getattr(stat, "st_size", 0) or 0)
+
+
+def _directory_download_progress(path):
+    loaded = 0
+    total = 0
+    root = Path(path)
+    for item in root.rglob("*"):
+        if not item.is_file() or item.name == "aria2.log" or item.name.endswith(".aria2"):
+            continue
+        try:
+            stat = item.stat()
+        except OSError:
+            continue
+        logical_size = int(stat.st_size or 0)
+        total += logical_size
+        companion = item.with_name(item.name + ".aria2")
+        if companion.exists():
+            loaded += min(logical_size, _file_allocated_bytes(stat))
+        else:
+            loaded += logical_size
+    return {"loaded_bytes": loaded, "total_bytes": total or None}
 
 
 def _http_response_once(url, *, timeout_seconds=60):
@@ -621,6 +662,29 @@ def _transmission_failure_message(detail):
     return f"BT/magnet 下載失敗：Transmission：{text}"
 
 
+def _magnet_has_trackers(source):
+    parsed = urllib.parse.urlparse(str(source or ""))
+    if parsed.scheme.lower() != "magnet":
+        return False
+    params = urllib.parse.parse_qs(parsed.query)
+    return any(str(item or "").strip() for item in params.get("tr", []))
+
+
+def _supplement_transmission_magnet_trackers(torrent_id, source):
+    if torrent_id is None or _magnet_has_trackers(source):
+        return
+    try:
+        _transmission_rpc_call(
+            "torrent-set",
+            {"ids": [torrent_id], "trackerAdd": PUBLIC_BT_TRACKERS},
+            timeout_seconds=10,
+        )
+        _transmission_rpc_call("torrent-reannounce", {"ids": [torrent_id]}, timeout_seconds=10)
+    except Exception:
+        # Tracker supplementation is best-effort; DHT/PEX may still succeed.
+        return
+
+
 def _torrent_files_from_transmission(tmpdir):
     files = []
     root = Path(tmpdir)
@@ -708,7 +772,55 @@ def _stage_transmission_completed_files(candidates, tmpdir):
     return staged
 
 
-def _download_bt_with_transmission(source, *, source_label="BT/magnet", source_is_torrent_file=False, timeout_seconds=300, max_bytes=None, progress_callback=None, rate_limit_kb_per_sec=None, cancel_check=None, owner_user_id=None, task_id=None):
+def _resolve_magnet_metadata_with_aria2(source, *, timeout_seconds=300, cancel_check=None, owner_user_id=None, task_id=None):
+    if not str(source or "").startswith("magnet:?"):
+        return None
+    aria2c = shutil.which("aria2c")
+    if not aria2c:
+        return None
+    tmpdir = _make_bt_tempdir("hackme_bt_metadata_", owner_user_id=owner_user_id, task_id=task_id)
+    try:
+        metadata_timeout = max(30, min(600, _positive_int(os.environ.get("HACKME_BT_METADATA_TIMEOUT_SECONDS"), min(int(timeout_seconds or 300), 300))))
+        cmd = [
+            aria2c,
+            "--dir", tmpdir,
+            "--bt-metadata-only=true",
+            "--bt-save-metadata=true",
+            f"--bt-stop-timeout={min(metadata_timeout, 300)}",
+            "--bt-enable-lpd=false",
+            "--enable-dht=true",
+            "--enable-peer-exchange=true",
+            f"--bt-tracker={','.join(PUBLIC_BT_TRACKERS)}",
+            "--summary-interval=0",
+            "--console-log-level=warn",
+            source,
+        ]
+        _check_remote_download_control(cancel_check)
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        started = time.monotonic()
+        while proc.poll() is None:
+            _check_remote_download_control(cancel_check)
+            if time.monotonic() - started > metadata_timeout:
+                _terminate_child_process(proc)
+                return None
+            time.sleep(0.5)
+        stdout, stderr = proc.communicate()
+        if proc.returncode != 0:
+            return None
+        torrent_files = sorted(Path(tmpdir).glob("*.torrent"), key=lambda path: path.stat().st_mtime, reverse=True)
+        if not torrent_files:
+            return None
+        with open(torrent_files[0], "rb") as fh:
+            return fh.read()
+    except (RemoteDownloadCancelled, RemoteDownloadPaused):
+        raise
+    except Exception:
+        return None
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def _download_bt_with_transmission(source, *, source_label="BT/magnet", source_is_torrent_file=False, resolve_magnet_metadata=False, timeout_seconds=300, max_bytes=None, progress_callback=None, rate_limit_kb_per_sec=None, cancel_check=None, owner_user_id=None, task_id=None):
     tmpdir = _make_bt_tempdir("hackme_bt_transmission_", owner_user_id=owner_user_id, task_id=task_id)
     torrent_id = None
     idle_timeout_seconds = _bt_idle_timeout_seconds(timeout_seconds)
@@ -725,7 +837,19 @@ def _download_bt_with_transmission(source, *, source_label="BT/magnet", source_i
         if session.get("incomplete-dir-enabled") and session.get("incomplete-dir"):
             incomplete_dir = str(session.get("incomplete-dir"))
         add_args = {"download-dir": tmpdir, "paused": False}
-        if source_is_torrent_file:
+        magnet_metainfo = None
+        if resolve_magnet_metadata and not source_is_torrent_file and str(source or "").startswith("magnet:?"):
+            _emit_progress(progress_callback, phase="metadata", filename=source_label, loaded_bytes=0, total_bytes=None, speed_bytes_per_sec=0)
+            magnet_metainfo = _resolve_magnet_metadata_with_aria2(
+                source,
+                timeout_seconds=timeout_seconds,
+                cancel_check=cancel_check,
+                owner_user_id=owner_user_id,
+                task_id=task_id,
+            )
+        if magnet_metainfo:
+            add_args["metainfo"] = base64.b64encode(magnet_metainfo).decode("ascii")
+        elif source_is_torrent_file:
             with open(source, "rb") as fh:
                 add_args["metainfo"] = base64.b64encode(fh.read()).decode("ascii")
         else:
@@ -735,6 +859,8 @@ def _download_bt_with_transmission(source, *, source_label="BT/magnet", source_i
         torrent_id = torrent.get("id")
         if torrent_id is None:
             raise RemoteDownloadError("Transmission 未回傳 torrent id")
+        if not source_is_torrent_file:
+            _supplement_transmission_magnet_trackers(torrent_id, source)
         if rate_limit_kb_per_sec:
             _transmission_rpc_call(
                 "torrent-set",
@@ -746,7 +872,7 @@ def _download_bt_with_transmission(source, *, source_label="BT/magnet", source_i
         last_progress_ts = started
         last_activity_bytes = 0
         last_activity_ts = started
-        _emit_progress(progress_callback, phase="downloading", filename=source_label, loaded_bytes=0, total_bytes=max_bytes, speed_bytes_per_sec=0)
+        _emit_progress(progress_callback, phase="downloading", filename=source_label, loaded_bytes=0, total_bytes=None, speed_bytes_per_sec=0)
         while True:
             try:
                 _check_remote_download_control(cancel_check)
@@ -851,6 +977,7 @@ def _download_bt_with_preferred_backend(source, *, source_label="BT/magnet", sou
                 source,
                 source_label=source_label,
                 source_is_torrent_file=source_is_torrent_file,
+                resolve_magnet_metadata=backend == "transmission",
                 timeout_seconds=timeout_seconds,
                 max_bytes=max_bytes,
                 progress_callback=progress_callback,
@@ -941,14 +1068,8 @@ def _download_bt_with_aria2(source, *, source_label="BT/magnet", timeout_seconds
     idle_timeout_seconds = _bt_idle_timeout_seconds(timeout_seconds)
     absolute_timeout_seconds = _bt_absolute_timeout_seconds()
     progress_interval_seconds = _bt_progress_interval_seconds()
-    # Public trackers to supplement DHT for better magnet-link peer discovery
-    _PUBLIC_TRACKERS = ",".join([
-        "udp://tracker.opentrackr.org:1337/announce",
-        "udp://open.demonii.com:1337/announce",
-        "udp://tracker.openbittorrent.com:6969/announce",
-        "udp://exodus.desync.com:6969/announce",
-        "udp://tracker.torrent.eu.org:451/announce",
-    ])
+    # Public trackers to supplement DHT for better magnet-link peer discovery.
+    public_trackers = ",".join(PUBLIC_BT_TRACKERS)
     cmd = [
         aria2c,
         "--dir", tmpdir,
@@ -959,7 +1080,7 @@ def _download_bt_with_aria2(source, *, source_label="BT/magnet", timeout_seconds
         "--bt-enable-lpd=false",
         "--enable-dht=true",
         "--enable-peer-exchange=true",
-        f"--bt-tracker={_PUBLIC_TRACKERS}",
+        f"--bt-tracker={public_trackers}",
         "--max-tries=2",
         "--max-file-not-found=2",
         "--file-allocation=none",
@@ -991,7 +1112,9 @@ def _download_bt_with_aria2(source, *, source_label="BT/magnet", timeout_seconds
                 _terminate_child_process(proc)
                 raise
             now_ts = time.monotonic()
-            total_downloaded = _directory_downloaded_bytes(tmpdir)
+            progress = _directory_download_progress(tmpdir)
+            total_downloaded = int(progress.get("loaded_bytes") or 0)
+            total_bytes = progress.get("total_bytes")
             if total_downloaded > last_activity_bytes:
                 last_activity_bytes = total_downloaded
                 last_activity_ts = now_ts
@@ -1004,12 +1127,12 @@ def _download_bt_with_aria2(source, *, source_label="BT/magnet", timeout_seconds
                 proc.communicate(timeout=5)
                 raise RemoteDownloadError(f"BT 下載停滯逾時：已 {idle_timeout_seconds} 秒沒有下載進度。請確認做種/節點、tracker、DHT 與防火牆狀態。")
             if max_bytes is not None:
-                if total_downloaded > int(max_bytes):
+                if total_downloaded > int(max_bytes) or (total_bytes is not None and int(total_bytes) > int(max_bytes)):
                     proc.kill()
                     proc.communicate(timeout=5)
                     raise RemoteDownloadError("BT 下載內容超過容量限制")
             speed = _progress_speed_bytes_per_sec(total_downloaded, last_progress_bytes, now_ts, last_progress_ts)
-            _emit_progress(progress_callback, phase="downloading", filename=source_label, loaded_bytes=total_downloaded, total_bytes=int(max_bytes) if max_bytes is not None else None, speed_bytes_per_sec=speed)
+            _emit_progress(progress_callback, phase="downloading", filename=source_label, loaded_bytes=total_downloaded, total_bytes=total_bytes, speed_bytes_per_sec=speed)
             last_progress_bytes = total_downloaded
             last_progress_ts = now_ts
             time.sleep(progress_interval_seconds)

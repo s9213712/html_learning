@@ -35,6 +35,7 @@ AUTH_FAST_LANE_PATHS = {
     "/api/login",
     "/api/me",
     "/api/site-config",
+    "/api/captcha/challenge",
 }
 
 BOOTSTRAP_FAST_LANE_PATHS = {

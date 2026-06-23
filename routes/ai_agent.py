@@ -153,6 +153,15 @@ AI_AGENT_WRITE_TOOL_SPECS = {
         "required": set(),
         "write": False,
     },
+    "write_launch_preflight_execute": {
+        "label": "執行上線前檢查與切換",
+        "description": "執行上線前 requirements、log chain、AI audit scan，整理阻塞原因；gate 通過時可切換 production。",
+        "method": "DIRECT",
+        "path_params": {},
+        "body_fields": {"target_mode", "mode", "auto_switch", "confirm", "reason", "force_audit"},
+        "required": set(),
+        "write": True,
+    },
     "write_launch_logs_verify": {
         "label": "上線 log 鏈驗證",
         "description": "驗證 server-mode log chain。",
@@ -2545,6 +2554,9 @@ def register_ai_agent_routes(app, deps):
         csrf = request.headers.get("X-CSRF-Token") or request.headers.get("X-CSRFToken") or request.cookies.get("csrf_token") or ""
         if csrf:
             headers["X-CSRF-Token"] = csrf
+        user_agent = request.headers.get("User-Agent") or ""
+        if user_agent:
+            headers["User-Agent"] = user_agent
         with app.test_client() as client:
             for name, value in request.cookies.items():
                 client.set_cookie(str(name), str(value))
@@ -2559,6 +2571,165 @@ def register_ai_agent_routes(app, deps):
         if payload is None:
             payload = {"raw": response.get_data(as_text=True)[:4000]}
         return response.status_code, payload
+
+    def _launch_step_ok(status_code, payload):
+        if not (200 <= int(status_code or 500) < 400):
+            return False
+        if isinstance(payload, dict) and payload.get("ok") is False:
+            return False
+        return True
+
+    def _launch_requirement_blockers(payload):
+        if not isinstance(payload, dict):
+            return ["requirements payload 格式錯誤"]
+        blockers = []
+        missing = list(payload.get("missing") or [])
+        failed = list(payload.get("failed") or [])
+        if missing:
+            blockers.append(f"缺少 production gate 報告：{', '.join(str(item) for item in missing)}")
+        if failed:
+            blockers.append(f"production gate 報告未通過：{', '.join(str(item) for item in failed)}")
+        reports = payload.get("reports") if isinstance(payload.get("reports"), dict) else {}
+        for report_type in failed:
+            row = reports.get(report_type) if isinstance(reports, dict) else None
+            if isinstance(row, dict):
+                details = []
+                if not bool(row.get("pass")):
+                    details.append("test_result 不是 pass")
+                if int(row.get("critical_findings_count") or 0) > 0:
+                    details.append(f"critical={int(row.get('critical_findings_count') or 0)}")
+                if int(row.get("high_findings_count") or 0) > 0:
+                    details.append(f"high={int(row.get('high_findings_count') or 0)}")
+                if not row.get("report_hash"):
+                    details.append("缺 report_hash")
+                if str(row.get("trust_level") or "").strip() != "verified":
+                    details.append("trust_level 不是 verified")
+                if not bool(row.get("signature_valid")):
+                    details.append("signature 無效")
+                if not bool(row.get("target_match")):
+                    details.append("target 不符合目前版本/模式")
+                if details:
+                    blockers.append(f"{report_type}: {', '.join(details)}")
+        if payload.get("ok") is False and not blockers:
+            blockers.append(str(payload.get("msg") or "production requirements 未通過"))
+        return blockers
+
+    def _launch_preflight_summary(requirements_payload, logs_payload, audit_payload, switch_payload=None):
+        blockers = []
+        blockers.extend(_launch_requirement_blockers(requirements_payload))
+        if isinstance(logs_payload, dict) and logs_payload.get("ok") is False:
+            blockers.append(str(logs_payload.get("msg") or "server-mode log chain 驗證失敗"))
+        if isinstance(audit_payload, dict):
+            scan = audit_payload.get("scan") if "scan" in audit_payload else audit_payload
+            if isinstance(scan, dict):
+                summary = scan.get("summary") if isinstance(scan.get("summary"), dict) else {}
+                status = str(summary.get("status") or scan.get("status") or "").strip().lower()
+                anomalies = int(summary.get("anomaly_count") or 0)
+                if status in {"critical", "alert", "failed", "error"}:
+                    blockers.append(f"AI audit scan 狀態異常：{status}")
+                elif anomalies > 0:
+                    blockers.append(f"AI audit scan 發現異常：{anomalies}")
+        if isinstance(switch_payload, dict) and switch_payload.get("ok") is False:
+            blockers.append(str(switch_payload.get("msg") or "server mode 切換失敗"))
+        return blockers
+
+    def _execute_launch_preflight(actor, args, settings):
+        target_mode = str(args.get("target_mode") or args.get("mode") or "production").strip().lower()
+        if target_mode in {"prod", "online", "上線", "正式", "go_live", "golive"}:
+            target_mode = "production"
+        if target_mode != "production":
+            return 400, {
+                "ok": False,
+                "msg": "目前自動上線流程只支援 target_mode=production",
+                "target_mode": target_mode,
+            }
+        auto_switch = args.get("auto_switch")
+        if auto_switch is None:
+            auto_switch = True
+        auto_switch = _parse_bool(auto_switch) is not False
+        force_audit = _parse_bool(args.get("force_audit")) is not False
+        reason = str(args.get("reason") or "AI Agent launch preflight").strip()[:300]
+
+        steps = []
+        req_status, req_payload = _dispatch_internal_api("GET", "/api/root/server-mode/requirements", None)
+        steps.append({
+            "name": "requirements_gate",
+            "status": req_status,
+            "ok": _launch_step_ok(req_status, req_payload),
+            "result": req_payload,
+        })
+        logs_status, logs_payload = _dispatch_internal_api("GET", "/api/root/server-mode/logs/verify", None)
+        steps.append({
+            "name": "log_chain_verify",
+            "status": logs_status,
+            "ok": _launch_step_ok(logs_status, logs_payload),
+            "result": logs_payload,
+        })
+        audit_payload = run_ai_agent_audit_scan(
+            settings,
+            get_db=get_db,
+            get_audit_db=get_audit_db,
+            actor=actor,
+            force=bool(force_audit),
+            get_client_ip=get_client_ip,
+            get_ua=get_ua,
+            audit=audit,
+        )
+        steps.append({
+            "name": "ai_agent_audit_scan",
+            "status": 200,
+            "ok": True,
+            "result": audit_payload,
+        })
+
+        blockers = _launch_preflight_summary(req_payload, logs_payload, audit_payload)
+        switch_payload = None
+        switch_status = None
+        if auto_switch and not blockers:
+            confirm = str(args.get("confirm") or "GO_LIVE").strip()
+            switch_status, switch_payload = _dispatch_internal_api("POST", "/api/root/server-mode/switch", {
+                "mode": "production",
+                "confirm": confirm,
+                "reason": reason,
+            })
+            steps.append({
+                "name": "switch_production",
+                "status": switch_status,
+                "ok": _launch_step_ok(switch_status, switch_payload),
+                "result": switch_payload,
+            })
+            blockers = _launch_preflight_summary(req_payload, logs_payload, audit_payload, switch_payload)
+        elif auto_switch:
+            steps.append({
+                "name": "switch_production",
+                "status": 0,
+                "ok": False,
+                "skipped": True,
+                "result": {
+                    "ok": False,
+                    "msg": "前置檢查未通過，未切換 production",
+                },
+            })
+
+        final_status, final_mode_payload = _dispatch_internal_api("GET", "/api/root/server-mode", None)
+        final_mode = ""
+        if isinstance(final_mode_payload, dict):
+            final_mode = str(final_mode_payload.get("mode") or "")
+        completed = final_mode == "production" and not blockers
+        return 200, {
+            "ok": True,
+            "completed": completed,
+            "target_mode": "production",
+            "final_mode": final_mode,
+            "auto_switch": bool(auto_switch),
+            "blockers": blockers,
+            "steps": steps,
+            "final_status": {
+                "status": final_status,
+                "result": final_mode_payload,
+            },
+            "msg": "已成功切換 production" if completed else "上線流程已執行，但尚未達成 production；請依 blockers 修正後重跑",
+        }
 
     def _dispatch_internal_multipart(path, data):
         headers = {}
@@ -2899,6 +3070,8 @@ def register_ai_agent_routes(app, deps):
                         audit=audit,
                     )
                     payload = {"ok": True, "scan": scan}
+                elif tool_name == "write_launch_preflight_execute":
+                    status_code, payload = _execute_launch_preflight(actor, args, settings)
                 elif tool_name == "write_share_create":
                     status_code, payload = _execute_share_create(actor, args)
                 elif tool_name == "write_subtitle_upload":

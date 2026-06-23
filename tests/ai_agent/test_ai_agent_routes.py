@@ -636,6 +636,100 @@ def test_ai_agent_write_tool_execute_dispatches_allowlisted_read_tool(tmp_path):
     assert payload["result"]["session_cookie_seen"] is True
 
 
+def test_ai_agent_write_tool_internal_dispatch_preserves_browser_user_agent(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={"ai_agent_allowed_tools": "write_launch_requirements_check"},
+    )
+
+    @app.route("/api/root/server-mode/requirements", methods=["GET"])
+    def fake_requirements_with_ua():
+        return _json_resp({
+            "ok": True,
+            "user_agent": request.headers.get("User-Agent", ""),
+        })
+
+    response = app.test_client().post(
+        "/api/ai-agent/write-tools/execute",
+        json={
+            "tool": "write_launch_requirements_check",
+            "arguments": {},
+        },
+        headers={"User-Agent": "Mozilla/5.0 BrowserOnlyRegression"},
+    )
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert payload["result"]["user_agent"] == "Mozilla/5.0 BrowserOnlyRegression"
+
+
+def test_ai_agent_launch_preflight_executes_checks_audit_and_switch(monkeypatch, tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "write",
+            "ai_agent_allowed_tools": "write_launch_preflight_execute",
+        },
+    )
+    calls = []
+
+    @app.route("/api/root/server-mode/requirements", methods=["GET"])
+    def fake_requirements():
+        calls.append("requirements")
+        return _json_resp({"ok": True, "missing": [], "failed": [], "reports": {}})
+
+    @app.route("/api/root/server-mode/logs/verify", methods=["GET"])
+    def fake_logs_verify():
+        calls.append("logs_verify")
+        return _json_resp({"ok": True, "chain": {"ok": True}})
+
+    @app.route("/api/root/server-mode/switch", methods=["POST"])
+    def fake_switch():
+        calls.append("switch")
+        data = request.get_json(silent=True) or {}
+        assert data["mode"] == "production"
+        assert data["confirm"] == "GO_LIVE"
+        return _json_resp({"ok": True, "mode": {"current_mode": "production"}})
+
+    @app.route("/api/root/server-mode", methods=["GET"])
+    def fake_server_mode():
+        calls.append("server_mode")
+        return _json_resp({"ok": True, "mode": "production"})
+
+    def fake_audit_scan(*args, **kwargs):
+        calls.append("audit_scan")
+        return {"summary": {"status": "ok", "anomaly_count": 0}}
+
+    monkeypatch.setattr("routes.ai_agent.run_ai_agent_audit_scan", fake_audit_scan)
+
+    response = app.test_client().post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_launch_preflight_execute",
+        "confirm": "EXECUTE",
+        "arguments": {
+            "target_mode": "production",
+            "auto_switch": True,
+            "force_audit": True,
+            "confirm": "GO_LIVE",
+        },
+    })
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert payload["tool"] == "write_launch_preflight_execute"
+    assert payload["result"]["completed"] is True
+    assert payload["result"]["final_mode"] == "production"
+    assert payload["result"]["blockers"] == []
+    assert calls == ["requirements", "logs_verify", "audit_scan", "switch", "server_mode"]
+
+
 def test_ai_agent_expanded_write_tool_dispatches_json_route(tmp_path):
     db_path = tmp_path / "ai_agent_routes.db"
     _build_db(db_path)

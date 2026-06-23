@@ -137,11 +137,14 @@ def register_file_remote_download_routes(app, ctx):
         if not task_dir or not task_dir.exists() or not task_dir.is_dir():
             return None
         candidates = []
+        exact_candidates = []
         for path in task_dir.rglob("*"):
             if not path.is_file():
                 continue
             name = path.name.lower()
             if name.endswith((".part", ".tmp", ".aria2")):
+                continue
+            if path.with_name(path.name + ".aria2").exists():
                 continue
             try:
                 size = path.stat().st_size
@@ -149,13 +152,14 @@ def register_file_remote_download_routes(app, ctx):
                 continue
             if size <= 0:
                 continue
-            if expected_size and int(expected_size or 0) > 0 and size != int(expected_size):
-                continue
             candidates.append((size, path))
+            if expected_size and int(expected_size or 0) > 0 and size == int(expected_size):
+                exact_candidates.append((size, path))
         if not candidates:
             return None
-        candidates.sort(key=lambda item: item[0], reverse=True)
-        return candidates[0][1]
+        pool = exact_candidates or candidates
+        pool.sort(key=lambda item: item[0], reverse=True)
+        return pool[0][1]
 
     def _task_recoverable_from_job(job, metadata=None):
         metadata = metadata if isinstance(metadata, dict) else _json_dict((job or {}).get("metadata_json"))
