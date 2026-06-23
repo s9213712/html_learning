@@ -1758,8 +1758,9 @@ def register_ai_agent_routes(app, deps):
                 return False
         return None
 
-    _os_filesystem_path_re = re.compile(
-        r"(?<![\w.-])(?:~|/(?:home|root|etc|var|usr|tmp|proc|sys|dev|run|boot)(?:/|\b))",
+    _os_filesystem_path_token_re = re.compile(
+        r"(?<![\w.-])(?:~|/(?:home|root|etc|var|usr|tmp|proc|sys|dev|run|boot)"
+        r"(?:/[^\s`'\"，,。；;:<>)]*)?)",
         re.IGNORECASE,
     )
     _os_filesystem_intent_re = re.compile(
@@ -1767,6 +1768,17 @@ def register_ai_agent_routes(app, deps):
         r"\bls\b|\bdir\b|\bcat\b|\bread\b|\bshow\b|\bopen\b|\blist(?:\s+(?:files|directory|folders?))?)",
         re.IGNORECASE,
     )
+    _os_filesystem_mutation_intent_re = re.compile(
+        r"(修改|改寫|覆寫|寫入|建立|新增|刪除|移除|清空|重命名|搬移|替換|patch|套用|編輯|"
+        r"\bwrite\b|\bedit\b|\bmodify\b|\bdelete\b|\bremove\b|\bcreate\b|\boverwrite\b|"
+        r"\btruncate\b|\brename\b|\bmove\b|\bpatch\b|\breplace\b)",
+        re.IGNORECASE,
+    )
+    _write_tool_path_arg_names = {
+        "path", "file_path", "filepath", "target_path", "source_path", "destination_path",
+        "output_path", "input_path", "directory", "dir", "folder", "storage_path",
+        "local_path", "server_path", "repo_path",
+    }
 
     def _extract_ai_agent_user_text(data):
         prompt = str(data.get("prompt") or "").strip()
@@ -1799,12 +1811,71 @@ def register_ai_agent_routes(app, deps):
                 user_texts.append(text.strip())
         return "\n".join(user_texts[-3:])
 
+    def _ai_agent_runtime_roots():
+        candidates = []
+        env_runtime = str(os.environ.get("HACKME_RUNTIME_DIR") or "").strip()
+        if env_runtime:
+            candidates.append(env_runtime)
+        repo_runtime = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "runtime"))
+        candidates.append(repo_runtime)
+        cwd_runtime = os.path.abspath(os.path.join(os.getcwd(), "runtime"))
+        candidates.append(cwd_runtime)
+        roots = []
+        seen = set()
+        for item in candidates:
+            try:
+                normalized = os.path.abspath(os.path.expanduser(str(item or "")))
+            except Exception:
+                continue
+            if normalized and normalized not in seen:
+                roots.append(normalized)
+                seen.add(normalized)
+        return roots
+
+    def _ai_agent_path_is_allowed_runtime(path_text):
+        raw = str(path_text or "").strip()
+        if not raw:
+            return False
+        try:
+            normalized = os.path.abspath(os.path.expanduser(raw))
+        except Exception:
+            return False
+        for root in _ai_agent_runtime_roots():
+            if normalized == root or normalized.startswith(root.rstrip(os.sep) + os.sep):
+                return True
+        parts = [part for part in normalized.split(os.sep) if part]
+        return normalized.startswith("/tmp/hackme") and "runtime" in parts
+
+    def _ai_agent_os_paths_outside_runtime(text):
+        paths = []
+        for match in _os_filesystem_path_token_re.finditer(str(text or "")):
+            token = match.group(0).rstrip(".")
+            if token and not _ai_agent_path_is_allowed_runtime(token):
+                paths.append(token)
+        return paths
+
     def _ai_agent_boundary_block_reason(user_text):
         text = str(user_text or "").strip()
         if not text:
             return ""
-        if _os_filesystem_path_re.search(text) and _os_filesystem_intent_re.search(text):
+        outside_runtime_paths = _ai_agent_os_paths_outside_runtime(text)
+        if outside_runtime_paths and _os_filesystem_mutation_intent_re.search(text):
+            return "server_filesystem_mutation"
+        if outside_runtime_paths and _os_filesystem_intent_re.search(text):
             return "filesystem_scope"
+        return ""
+
+    def _ai_agent_write_tool_boundary_block_reason(tool_name, args):
+        if not isinstance(args, dict):
+            return ""
+        for key, value in args.items():
+            key_name = str(key or "").strip().lower()
+            if key_name not in _write_tool_path_arg_names:
+                continue
+            if isinstance(value, (dict, list, tuple)):
+                continue
+            if _ai_agent_os_paths_outside_runtime(str(value or "")):
+                return f"server_filesystem_arg:{tool_name}:{key_name}"
         return ""
 
     def _audit_agent_event(action, actor=None, *, success=True, detail=""):
@@ -2781,6 +2852,15 @@ def register_ai_agent_routes(app, deps):
         if not isinstance(args, dict):
             _audit_agent_event("AI_AGENT_WRITE_TOOL", actor, success=False, detail=f"tool={tool_name},error=arguments_not_object")
             return json_resp({"ok": False, "msg": "arguments 必須是物件"}), 400
+        boundary_reason = _ai_agent_write_tool_boundary_block_reason(tool_name, args)
+        if boundary_reason:
+            _audit_agent_event("AI_AGENT_BOUNDARY_BLOCK", actor, success=False, detail=boundary_reason)
+            return json_resp({
+                "ok": False,
+                "msg": "AI Agent write-tools 不可修改伺服器本體檔案；允許範圍僅限站內 runtime、資料庫與雲端硬碟管理位置。",
+                "blocked_by": "server_policy",
+                "policy": "server_filesystem_mutation",
+            }), 403
 
         settings = get_system_settings() or {}
         effective_names = _write_tool_effective_names(settings, actor)

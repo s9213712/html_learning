@@ -1945,6 +1945,112 @@ def test_ai_agent_chat_blocks_planner_wrapped_os_filesystem_listing_before_llm(t
     assert payload["policy"] == "filesystem_scope"
 
 
+def test_ai_agent_chat_blocks_server_filesystem_mutation_before_llm(tmp_path, monkeypatch):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    audit_events = []
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "super_admin"},
+        settings={
+            "module_ai_agent_min_role": "user",
+            "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
+        },
+        audit_events=audit_events,
+    )
+
+    def fake_chat(*_args, **_kwargs):
+        raise AssertionError("server filesystem mutation should not reach LLM backend")
+
+    monkeypatch.setattr("routes.ai_agent.ai_agent_chat", fake_chat)
+
+    response = app.test_client().post("/api/ai-agent/chat", json={
+        "session_id": "fs-mutation",
+        "messages": [{
+            "role": "user",
+            "content": "幫我直接修改 /home/s92137/hackme_web_05_AI_Agent/server.py，把 debug 打開。",
+        }],
+    })
+    payload = response.get_json()
+
+    assert response.status_code == 403
+    assert payload["ok"] is False
+    assert payload["blocked_by"] == "server_policy"
+    assert payload["policy"] == "server_filesystem_mutation"
+    assert any(
+        event["args"][0] == "AI_AGENT_BOUNDARY_BLOCK"
+        and event["kwargs"].get("detail") == "server_filesystem_mutation"
+        for event in audit_events
+    )
+
+
+def test_ai_agent_chat_allows_runtime_filesystem_request_to_reach_llm(tmp_path, monkeypatch):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(db_path, {"id": 1, "username": "root", "role": "super_admin"}, settings={
+        "module_ai_agent_min_role": "user",
+        "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
+    })
+
+    calls = []
+
+    def fake_chat(settings, *, messages=None, prompt="", image_data_url="", model="", session_key="", actor=None):
+        calls.append(messages)
+        return {"content": "runtime ok", "model": "test-agent", "usage": {}}
+
+    monkeypatch.setattr("routes.ai_agent.ai_agent_chat", fake_chat)
+
+    response = app.test_client().post("/api/ai-agent/chat", json={
+        "session_id": "runtime-mutation",
+        "messages": [{
+            "role": "user",
+            "content": "請檢查並更新 /tmp/hackme_web_dev_example/runtime/logs/test.log 的 runtime 測試紀錄。",
+        }],
+    })
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert payload["message"]["content"] == "runtime ok"
+    assert calls
+
+
+def test_ai_agent_write_tool_blocks_server_filesystem_path_args(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    audit_events = []
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "super_admin"},
+        settings={
+            "module_ai_agent_min_role": "user",
+            "ai_agent_operation_mode": "write",
+            "ai_agent_allowed_write_tools": "write_server_restart",
+        },
+        audit_events=audit_events,
+    )
+
+    response = app.test_client().post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_server_restart",
+        "arguments": {
+            "reason": "test",
+            "path": "/home/s92137/hackme_web_05_AI_Agent/server.py",
+        },
+        "confirm": "EXECUTE",
+    })
+    payload = response.get_json()
+
+    assert response.status_code == 403
+    assert payload["ok"] is False
+    assert payload["blocked_by"] == "server_policy"
+    assert payload["policy"] == "server_filesystem_mutation"
+    assert any(
+        event["args"][0] == "AI_AGENT_BOUNDARY_BLOCK"
+        and "server_filesystem_arg:write_server_restart:path" in event["kwargs"].get("detail", "")
+        for event in audit_events
+    )
+
+
 def test_ai_agent_chat_rejects_mock_reply(tmp_path, monkeypatch):
     db_path = tmp_path / "ai_agent_routes.db"
     _build_db(db_path)
