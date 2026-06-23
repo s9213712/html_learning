@@ -747,6 +747,78 @@ function aiAgentMarkComfyuiAttemptError(jobId = "", error = "") {
   item.updatedAt = Date.now();
 }
 
+function aiAgentToolDomain(tool = {}) {
+  const scope = String(tool.data_scope || "").trim();
+  if (scope.startsWith("write_tool:")) return scope.split(":").slice(1).join(":") || "general";
+  const name = String(tool.name || "").trim();
+  if (name === "audit_scan") return "audit";
+  const parts = name.split("_");
+  if (parts[0] === "write" && parts[1]) return parts[1];
+  return tool.domain || "general";
+}
+
+function aiAgentWriteToolSpecMap() {
+  const map = new Map();
+  const catalog = Array.isArray(AI_AGENT_STATE.writeToolCatalog) ? AI_AGENT_STATE.writeToolCatalog : [];
+  catalog.forEach((spec) => {
+    const name = String(spec?.name || "").trim();
+    if (name) map.set(name, spec);
+  });
+  return map;
+}
+
+function aiAgentPlannerToolSchemas() {
+  const merged = new Map();
+  const settingsTools = Array.isArray(AI_AGENT_STATE.settings?.tools) ? AI_AGENT_STATE.settings.tools : [];
+  settingsTools.forEach((tool) => {
+    const name = String(tool?.name || "").trim();
+    if (!name) return;
+    merged.set(name, {
+      name,
+      label: tool.label || name,
+      description: tool.description || "",
+      data_scope: tool.data_scope || "",
+      arg_hint: tool.arg_hint || "",
+      write: !!tool.write,
+    });
+  });
+  aiAgentWriteToolSpecMap().forEach((spec, name) => {
+    if (!aiAgentHasEffectiveTool(name)) return;
+    const prior = merged.get(name) || { name };
+    merged.set(name, {
+      ...prior,
+      ...spec,
+      name,
+      label: spec.label || prior.label || name,
+      description: spec.description || prior.description || "",
+      data_scope: spec.data_scope || prior.data_scope || "",
+      arg_hint: spec.arg_hint || prior.arg_hint || "",
+      write: !!spec.write,
+    });
+  });
+  return Array.from(merged.values()).map((tool) => {
+    const name = String(tool.name || "").trim();
+    return {
+      name,
+      label: tool.label || name,
+      description: tool.description || "",
+      data_scope: tool.data_scope || "",
+      domain: aiAgentToolDomain(tool),
+      method: tool.method || "",
+      required: Array.isArray(tool.required) ? tool.required : [],
+      path_params: Array.isArray(tool.path_params) ? tool.path_params : [],
+      body_fields: Array.isArray(tool.body_fields) ? tool.body_fields : [],
+      query_fields: Array.isArray(tool.query_fields) ? tool.query_fields : [],
+      arg_hint: tool.arg_hint || "",
+      write: !!tool.write,
+      requires_confirm: !!tool.requires_confirm,
+      available: aiAgentHasEffectiveTool(name),
+      can_execute_now: name ? aiAgentCanRunWriteTool(name) : false,
+      can_request_elevation: name ? aiAgentCanRequestWriteElevation(name) : false,
+    };
+  });
+}
+
 function aiAgentPlannerContext(options = {}) {
   const submittedJobs = Object.values(AI_AGENT_STATE.comfyuiSubmittedJobs || {})
     .sort((a, b) => Number(b.submittedAt || 0) - Number(a.submittedAt || 0))
@@ -772,18 +844,7 @@ function aiAgentPlannerContext(options = {}) {
       })).filter((image) => image.image_ref && image.filename)
       : [],
   }));
-  const effectiveTools = Array.isArray(AI_AGENT_STATE.settings?.tools)
-    ? AI_AGENT_STATE.settings.tools.map((tool) => ({
-      name: tool.name || "",
-      label: tool.label || "",
-      description: tool.description || "",
-      data_scope: tool.data_scope || "",
-      write: !!tool.write,
-      available: aiAgentHasEffectiveTool(tool.name || ""),
-      can_execute_now: tool.name ? aiAgentCanRunWriteTool(tool.name) : false,
-      can_request_elevation: tool.name ? aiAgentCanRequestWriteElevation(tool.name) : false,
-    }))
-    : [];
+  const effectiveTools = aiAgentPlannerToolSchemas();
   return {
     input_mode: options.mode || "text",
     has_image: !!options.hasImage,
@@ -865,9 +926,13 @@ async function aiAgentPlanToolAction(userText, options = {}) {
     "JSON 欄位：action, confidence, reason, question, readonly_scope, merge_strategy, execute_write, tool, args。",
     "readonly_scope 必須從 context.readonly_tools 的 scope 中選最貼近使用者目的的一項；除非使用者明確要求全站總覽，否則不可使用 all。",
     "args 對 comfyui_generate 可含：prompt, negative_prompt, width, height, steps, cfg_scale, cfg, batch_size, seed, checkpoint, vae, sampler, sampler_name, scheduler, official_workflow_id, generation_mode, source_image_ref, mask_image_ref, denoise_strength, outpaint_left, outpaint_top, outpaint_right, outpaint_bottom, outpaint_feathering。",
+    "context.effective_tools[] 會提供每個站內工具的 domain, label, description, method, required, path_params, body_fields, query_fields, arg_hint；請依 schema 選工具與參數。",
+    "args 對 write_tool 必須只使用 context.effective_tools 中該工具 schema 的 required/path_params/body_fields/query_fields canonical 欄位；不得創造未列出的欄位，除非 arg_hint 明確要求同義詞轉換。",
     "args 對 write_tool 應依 context.effective_tools 的工具語意填入站內欄位；例如頭像工具可填 user_id, cloud_file_id, crop{x,y,width,height,rotation}, zoom, decision_reason。",
     "工具語意：readonly=讀取指定 readonly_scope 的站內唯讀資料；comfyui_status=讀取 ComfyUI 目前可用性與生圖進度；comfyui_generate=建立新的 ComfyUI 生圖任務；comfyui_rerun=沿用上一筆生圖參數並套用使用者修改；write_tool=執行 context.effective_tools 中的白名單站內工具；community_post_draft=只產生發文草稿，不直接發布。",
     "若 action=write_tool，tool 必須完全等於 context.effective_tools[].name，args 只能包含使用者明確提供或可從 recent_messages/站內上下文推得的站內欄位；不得產生 shell、SQL、外部檔案路徑或站外操作。",
+    "站內所有功能需優先從 context.effective_tools 的 domain/label/description/schema 語意選 tool；不要用固定 if/else 或關鍵字表假裝理解。",
+    "若 schema.required 缺少且無法從上下文推得，action=clarify；若只缺 optional/body_fields，不得反問，應照可用資料輸出 plan。",
     "若 action=write_tool 且使用者明確要求建立、更新、刪除、執行、下載、轉帳、交易或治理處置，execute_write 必須是 true；只有使用者要草稿、詢問、資料不足或權限不足時才可為 false。",
     "若使用者目的需要工具，但 effective_tools 或權限不足，仍可輸出該 action；前端會處理提權、拒絕或反問。",
     "若使用者目的不明或缺少必要資料，action=clarify 並用 question 提出一個具體反問。",
@@ -2954,6 +3019,11 @@ async function sendAiAgentMessage() {
   if (aiAgentShouldUseToolPlanner(plannerText)) {
     if (!AI_AGENT_STATE.loaded && typeof loadAiAgentStatus === "function") {
       await loadAiAgentStatus({ force: true }).catch(() => undefined);
+    }
+    if (AI_AGENT_STATE.actor?.role === "super_admin"
+      && (!Array.isArray(AI_AGENT_STATE.writeToolCatalog) || !AI_AGENT_STATE.writeToolCatalog.length)
+      && typeof loadAiAgentWriteToolCatalog === "function") {
+      await loadAiAgentWriteToolCatalog({ force: false }).catch(() => undefined);
     }
     const sendBtn = $("ai-agent-send-btn");
     AI_AGENT_STATE.sending = true;

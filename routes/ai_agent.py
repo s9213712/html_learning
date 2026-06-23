@@ -12,6 +12,8 @@ from flask import request
 
 from services.ai_agent.hermes import (
     AiAgentError,
+    AI_AGENT_TOOL_ARGUMENT_HINTS,
+    AI_AGENT_TOOL_BLUEPRINT,
     ai_agent_capabilities,
     ai_agent_chat,
     ai_agent_health,
@@ -795,6 +797,470 @@ AI_AGENT_WRITE_TOOL_SPECS = {
 }
 
 
+AI_AGENT_WRITE_TOOL_SPECS.update({
+    "write_chat_create_room": {
+        "label": "建立聊天室",
+        "description": "建立站內聊天室，可設定隱私、匿名與初始成員。",
+        "method": "POST",
+        "path": "/api/chat/rooms",
+        "path_params": {},
+        "body_fields": {"name", "target_user", "allow_anonymous", "anonymous", "anonymous_enabled", "join_password", "invite_usernames"},
+        "required": set(),
+        "write": True,
+    },
+    "write_chat_join_room": {
+        "label": "加入聊天室",
+        "description": "加入指定聊天室。",
+        "method": "POST",
+        "path": "/api/chat/rooms/{room_id}/join",
+        "path_params": {"room_id": "positive_int"},
+        "body_fields": {"password", "use_anonymous", "anonymous_name"},
+        "required": {"room_id"},
+        "write": True,
+    },
+    "write_chat_invite": {
+        "label": "邀請聊天室成員",
+        "description": "邀請站內會員加入指定聊天室。",
+        "method": "POST",
+        "path": "/api/chat/rooms/{room_id}/invites",
+        "path_params": {"room_id": "positive_int"},
+        "body_fields": {"username", "usernames", "user_id", "message"},
+        "required": {"room_id"},
+        "write": True,
+    },
+    "write_chat_send_message": {
+        "label": "送出聊天室訊息",
+        "description": "在指定聊天室送出訊息。",
+        "method": "POST",
+        "path": "/api/chat/rooms/{room_id}/messages",
+        "path_params": {"room_id": "positive_int"},
+        "body_fields": {"content", "attachments", "reply_to_message_id"},
+        "required": {"room_id", "content"},
+        "write": True,
+    },
+    "write_chat_edit_message": {
+        "label": "編輯聊天室訊息",
+        "description": "編輯站內聊天室訊息。",
+        "method": "PUT",
+        "path": "/api/chat/messages/{message_id}",
+        "path_params": {"message_id": "positive_int"},
+        "body_fields": {"content"},
+        "required": {"message_id", "content"},
+        "write": True,
+    },
+    "write_chat_delete_message": {
+        "label": "刪除聊天室訊息",
+        "description": "刪除站內聊天室訊息。",
+        "method": "DELETE",
+        "path": "/api/chat/messages/{message_id}",
+        "path_params": {"message_id": "positive_int"},
+        "body_fields": set(),
+        "required": {"message_id"},
+        "write": True,
+    },
+    "write_chat_friend_request": {
+        "label": "送出好友邀請",
+        "description": "向站內會員送出好友邀請。",
+        "method": "POST",
+        "path": "/api/chat/friends/requests",
+        "path_params": {},
+        "body_fields": {"username", "target_user_id", "message"},
+        "required": {"username"},
+        "write": True,
+    },
+    "write_chat_friend_decide": {
+        "label": "處理好友邀請",
+        "description": "接受或拒絕好友邀請。",
+        "method": "POST",
+        "path": "/api/chat/friends/requests/{request_id}/{decision}",
+        "path_params": {"request_id": "positive_int", "decision": "safe_id"},
+        "body_fields": {"reason"},
+        "required": {"request_id", "decision"},
+        "write": True,
+    },
+    "write_appeal_create": {
+        "label": "建立申訴",
+        "description": "提交站內申訴或覆核請求。",
+        "method": "POST",
+        "path": "/api/appeals",
+        "path_params": {},
+        "body_fields": {"appeal_type", "subject", "content", "target_type", "target_id", "evidence"},
+        "required": {"subject", "content"},
+        "write": True,
+    },
+    "write_appeal_review": {
+        "label": "審核申訴",
+        "description": "root/管理員審核申訴並記錄處置。",
+        "method": "POST",
+        "path": "/api/admin/appeals/{appeal_id}/review",
+        "path_params": {"appeal_id": "positive_int"},
+        "body_fields": {"action", "note", "reward_points"},
+        "required": {"appeal_id", "action"},
+        "write": True,
+    },
+    "write_notification_send": {
+        "label": "發送站內通知",
+        "description": "向站內使用者或群組發送通知。",
+        "method": "POST",
+        "path": "/api/admin/notifications/send",
+        "path_params": {},
+        "body_fields": {"user_id", "user_ids", "target_user_id", "title", "body", "type", "link"},
+        "required": {"title", "body"},
+        "write": True,
+    },
+    "write_report_claim": {
+        "label": "認領檢舉案件",
+        "description": "認領站內檢舉案件。",
+        "method": "POST",
+        "path": "/api/admin/reports/{report_id}/claim",
+        "path_params": {"report_id": "positive_int"},
+        "body_fields": set(),
+        "required": {"report_id"},
+        "write": True,
+    },
+    "write_report_resolve": {
+        "label": "結案檢舉案件",
+        "description": "結案站內檢舉案件並記錄結果。",
+        "method": "POST",
+        "path": "/api/admin/reports/{report_id}/resolve",
+        "path_params": {"report_id": "positive_int"},
+        "body_fields": {"resolution", "review_note", "action", "reward_points"},
+        "required": {"report_id", "resolution"},
+        "write": True,
+    },
+    "write_user_review_registration": {
+        "label": "審核會員註冊",
+        "description": "審核待審會員註冊。",
+        "method": "POST",
+        "path": "/api/admin/users/{user_id}/review-registration",
+        "path_params": {"user_id": "positive_int"},
+        "body_fields": {"decision", "review_note"},
+        "required": {"user_id", "decision"},
+        "write": True,
+    },
+    "write_user_block": {
+        "label": "封鎖或解除會員",
+        "description": "封鎖、停權或解除會員限制。",
+        "method": "POST",
+        "path": "/api/admin/users/{user_id}/block",
+        "path_params": {"user_id": "positive_int"},
+        "body_fields": {"blocked", "duration_minutes", "reason"},
+        "required": {"user_id"},
+        "write": True,
+    },
+    "write_user_add_violation": {
+        "label": "新增會員違規",
+        "description": "對會員新增違規點數或紀錄。",
+        "method": "POST",
+        "path": "/api/admin/users/{user_id}/violation",
+        "path_params": {"user_id": "positive_int"},
+        "body_fields": {"reason", "points", "severity"},
+        "required": {"user_id", "reason"},
+        "write": True,
+    },
+    "write_user_reset_violations": {
+        "label": "重置會員違規",
+        "description": "重置指定會員違規紀錄。",
+        "method": "POST",
+        "path": "/api/admin/users/{user_id}/reset-violations",
+        "path_params": {"user_id": "positive_int"},
+        "body_fields": {"reason"},
+        "required": {"user_id"},
+        "write": True,
+    },
+    "write_moderation_note": {
+        "label": "新增會員管理備註",
+        "description": "新增站內會員管理備註。",
+        "method": "POST",
+        "path": "/api/admin/mod-notes/{user_id}",
+        "path_params": {"user_id": "positive_int"},
+        "body_fields": {"note", "severity", "visibility"},
+        "required": {"user_id", "note"},
+        "write": True,
+    },
+    "write_moderation_proposal_create": {
+        "label": "建立治理處分提案",
+        "description": "建立會員治理、處分或管理提案。",
+        "method": "POST",
+        "path": "/api/admin/moderation/proposals",
+        "path_params": {},
+        "body_fields": {"target_user_id", "action", "reason", "evidence", "duration_minutes", "points"},
+        "required": {"target_user_id", "action", "reason"},
+        "write": True,
+    },
+    "write_moderation_proposal_vote": {
+        "label": "投票治理處分提案",
+        "description": "對會員治理提案投票。",
+        "method": "POST",
+        "path": "/api/admin/moderation/proposals/{proposal_id}/vote",
+        "path_params": {"proposal_id": "positive_int"},
+        "body_fields": {"vote", "reason"},
+        "required": {"proposal_id", "vote"},
+        "write": True,
+    },
+    "write_moderation_proposal_execute": {
+        "label": "執行治理處分提案",
+        "description": "執行已通過的會員治理提案。",
+        "method": "POST",
+        "path": "/api/admin/moderation/proposals/{proposal_id}/execute",
+        "path_params": {"proposal_id": "positive_int"},
+        "body_fields": {"reason"},
+        "required": {"proposal_id"},
+        "write": True,
+    },
+    "write_moderation_proposal_override": {
+        "label": "root 覆寫治理提案",
+        "description": "root 覆寫會員治理提案決策。",
+        "method": "POST",
+        "path": "/api/root/moderation/proposals/{proposal_id}/override",
+        "path_params": {"proposal_id": "positive_int"},
+        "body_fields": {"decision", "reason"},
+        "required": {"proposal_id", "decision", "reason"},
+        "write": True,
+    },
+    "write_storage_quota_override": {
+        "label": "設定雲端容量覆寫",
+        "description": "root 設定指定會員雲端硬碟容量覆寫。",
+        "method": "PUT",
+        "path": "/api/root/storage/users/{user_id}/quota-override",
+        "path_params": {"user_id": "positive_int"},
+        "body_fields": {"quota_mb", "max_file_size_mb", "upload_rate_limit_per_day", "can_upload", "enabled", "reason"},
+        "required": {"user_id", "reason"},
+        "write": True,
+    },
+    "write_storage_quota_override_clear": {
+        "label": "清除雲端容量覆寫",
+        "description": "root 清除指定會員雲端硬碟容量覆寫。",
+        "method": "DELETE",
+        "path": "/api/root/storage/users/{user_id}/quota-override",
+        "path_params": {"user_id": "positive_int"},
+        "body_fields": {"reason"},
+        "required": {"user_id"},
+        "write": True,
+    },
+    "write_storage_sync_quota": {
+        "label": "同步雲端容量",
+        "description": "執行雲端硬碟容量同步或 dry-run。",
+        "method": "POST",
+        "path": "/api/admin/storage/sync-quota",
+        "path_params": {},
+        "body_fields": {"user_id", "dry_run", "reason"},
+        "required": set(),
+        "write": True,
+    },
+    "write_storage_trash_purge": {
+        "label": "清理雲端垃圾桶",
+        "description": "執行雲端硬碟垃圾桶清理。",
+        "method": "POST",
+        "path": "/api/admin/storage/trash/purge",
+        "path_params": {},
+        "body_fields": {"older_than_days", "confirm", "reason"},
+        "required": set(),
+        "write": True,
+    },
+    "write_storage_maintenance": {
+        "label": "執行雲端維護",
+        "description": "執行雲端硬碟維護動作。",
+        "method": "POST",
+        "path": "/api/admin/storage/maintenance",
+        "path_params": {},
+        "body_fields": {"action", "dry_run", "reason"},
+        "required": {"action"},
+        "write": True,
+    },
+    "write_cloud_drive_text_update": {
+        "label": "更新雲端文字檔",
+        "description": "更新雲端硬碟文字檔內容。",
+        "method": "PUT",
+        "path": "/api/cloud-drive/files/{file_id}/text",
+        "path_params": {"file_id": "safe_id"},
+        "body_fields": {"content"},
+        "required": {"file_id", "content"},
+        "write": True,
+    },
+    "write_comfyui_start": {
+        "label": "啟動 ComfyUI 連線",
+        "description": "啟動或切換 ComfyUI 站內連線模式。",
+        "method": "POST",
+        "path": "/api/comfyui/start",
+        "path_params": {},
+        "body_fields": {"backend_url", "mode", "reason"},
+        "required": set(),
+        "write": True,
+    },
+    "write_comfyui_stop": {
+        "label": "停止 ComfyUI",
+        "description": "root 停止站內 ComfyUI 後端流程。",
+        "method": "POST",
+        "path": "/api/root/comfyui/stop",
+        "path_params": {},
+        "body_fields": {"reason"},
+        "required": set(),
+        "write": True,
+    },
+    "write_comfyui_interrupt": {
+        "label": "中斷 ComfyUI 任務",
+        "description": "中斷目前 ComfyUI 執行中的任務。",
+        "method": "POST",
+        "path": "/api/comfyui/interrupt",
+        "path_params": {},
+        "body_fields": {"reason"},
+        "required": set(),
+        "write": True,
+    },
+    "write_comfyui_save_image": {
+        "label": "保存 ComfyUI 圖片",
+        "description": "把 ComfyUI 產物保存到站內雲端硬碟。",
+        "method": "POST",
+        "path": "/api/comfyui/save",
+        "path_params": {},
+        "body_fields": {"job_id", "history_id", "filename", "target_folder"},
+        "required": set(),
+        "write": True,
+    },
+    "write_comfyui_share_image": {
+        "label": "分享 ComfyUI 圖片",
+        "description": "建立 ComfyUI 產圖分享。",
+        "method": "POST",
+        "path": "/api/comfyui/share",
+        "path_params": {},
+        "body_fields": {"job_id", "history_id", "filename", "scope", "share_password", "expires_at"},
+        "required": set(),
+        "write": True,
+    },
+    "write_comfyui_favorite_image": {
+        "label": "收藏 ComfyUI 圖片",
+        "description": "將 ComfyUI 產圖加入收藏。",
+        "method": "POST",
+        "path": "/api/comfyui/image-favorites",
+        "path_params": {},
+        "body_fields": {"image_ref", "job_id", "history_id", "filename", "note", "tags"},
+        "required": set(),
+        "write": True,
+    },
+    "write_comfyui_delete_favorite": {
+        "label": "刪除 ComfyUI 收藏",
+        "description": "刪除 ComfyUI 圖片收藏。",
+        "method": "DELETE",
+        "path": "/api/comfyui/image-favorites/{favorite_id}",
+        "path_params": {"favorite_id": "positive_int"},
+        "body_fields": set(),
+        "required": {"favorite_id"},
+        "write": True,
+    },
+    "write_comfyui_workflow_run": {
+        "label": "執行 ComfyUI workflow",
+        "description": "執行已儲存的 ComfyUI workflow preset。",
+        "method": "POST",
+        "path": "/api/comfyui/workflows/{preset_id}/run",
+        "path_params": {"preset_id": "positive_int"},
+        "body_fields": {"inputs", "parameters", "confirm_billing"},
+        "required": {"preset_id"},
+        "write": True,
+    },
+    "write_comfyui_workflow_import": {
+        "label": "匯入 ComfyUI workflow",
+        "description": "匯入 ComfyUI workflow preset。",
+        "method": "POST",
+        "path": "/api/comfyui/workflows/import",
+        "path_params": {},
+        "body_fields": {"name", "description", "workflow", "layout", "metadata"},
+        "required": {"name", "workflow"},
+        "write": True,
+    },
+    "write_comfyui_workflow_update": {
+        "label": "更新 ComfyUI workflow",
+        "description": "更新 ComfyUI workflow preset。",
+        "method": "PUT",
+        "path": "/api/comfyui/workflows/{preset_id}",
+        "path_params": {"preset_id": "positive_int"},
+        "body_fields": {"name", "description", "workflow", "layout", "metadata"},
+        "required": {"preset_id"},
+        "write": True,
+    },
+    "write_comfyui_workflow_delete": {
+        "label": "刪除 ComfyUI workflow",
+        "description": "刪除 ComfyUI workflow preset。",
+        "method": "DELETE",
+        "path": "/api/comfyui/workflows/{preset_id}",
+        "path_params": {"preset_id": "positive_int"},
+        "body_fields": set(),
+        "required": {"preset_id"},
+        "write": True,
+    },
+    "write_comfyui_civitai_inspect": {
+        "label": "檢查 Civitai 模型",
+        "description": "root 檢查 Civitai 模型資訊。",
+        "method": "POST",
+        "path": "/api/root/comfyui/civitai/inspect",
+        "path_params": {},
+        "body_fields": {"url", "model_url", "version_id"},
+        "required": set(),
+        "write": True,
+    },
+    "write_comfyui_civitai_search": {
+        "label": "搜尋 Civitai 模型",
+        "description": "root 搜尋 Civitai 模型。",
+        "method": "POST",
+        "path": "/api/root/comfyui/civitai/search",
+        "path_params": {},
+        "body_fields": {"query", "model_type", "limit", "nsfw"},
+        "required": {"query"},
+        "write": True,
+    },
+    "write_comfyui_civitai_download": {
+        "label": "下載 Civitai 模型",
+        "description": "root 下載 Civitai 模型到站內 ComfyUI 模型目錄。",
+        "method": "POST",
+        "path": "/api/root/comfyui/civitai/download",
+        "path_params": {},
+        "body_fields": {"url", "download_url", "model_id", "version_id", "target_type", "filename"},
+        "required": set(),
+        "write": True,
+    },
+    "write_security_test_pentest": {
+        "label": "執行安全滲透測試",
+        "description": "root 執行站內安全滲透測試任務。",
+        "method": "POST",
+        "path": "/api/root/security-tests/pentest",
+        "path_params": {},
+        "body_fields": {"target", "profile", "tool_timeout_seconds", "reason"},
+        "required": set(),
+        "write": True,
+    },
+    "write_security_test_functional": {
+        "label": "執行功能安全測試",
+        "description": "root 執行站內功能安全測試任務。",
+        "method": "POST",
+        "path": "/api/root/security-tests/functional",
+        "path_params": {},
+        "body_fields": {"profile", "tool_timeout_seconds", "reason"},
+        "required": set(),
+        "write": True,
+    },
+    "write_security_test_privilege": {
+        "label": "執行權限安全測試",
+        "description": "root 執行站內權限安全測試任務。",
+        "method": "POST",
+        "path": "/api/root/security-tests/privilege",
+        "path_params": {},
+        "body_fields": {"profile", "tool_timeout_seconds", "reason"},
+        "required": set(),
+        "write": True,
+    },
+    "write_security_test_stress": {
+        "label": "執行安全壓力測試",
+        "description": "root 執行站內安全壓力測試任務。",
+        "method": "POST",
+        "path": "/api/root/security-tests/stress",
+        "path_params": {},
+        "body_fields": {"profile", "concurrency", "duration_seconds", "tool_timeout_seconds", "reason"},
+        "required": set(),
+        "write": True,
+    },
+})
+
+
 def _actor_value(actor, key, default=None):
     if not actor:
         return default
@@ -1302,11 +1768,28 @@ def register_ai_agent_routes(app, deps):
             detail=str(detail or "")[:500],
         )
 
+    def _write_tool_domain(name, spec):
+        blueprint = AI_AGENT_TOOL_BLUEPRINT.get(name) or {}
+        scope = str(blueprint.get("data_scope") or "").strip()
+        if scope.startswith("write_tool:"):
+            return scope.split(":", 1)[1] or "general"
+        if name == "audit_scan":
+            return "audit"
+        if name.startswith("write_"):
+            parts = name.split("_")
+            if len(parts) >= 2 and parts[1]:
+                return parts[1]
+        return "general"
+
     def _write_tool_public_spec(name, spec):
+        blueprint = AI_AGENT_TOOL_BLUEPRINT.get(name) or {}
         return {
             "name": name,
             "label": spec.get("label") or name,
             "description": spec.get("description") or "",
+            "data_scope": blueprint.get("data_scope") or "",
+            "domain": _write_tool_domain(name, spec),
+            "arg_hint": AI_AGENT_TOOL_ARGUMENT_HINTS.get(name, ""),
             "method": spec.get("method") if spec.get("method") != "DIRECT" else "POST",
             "required": sorted(spec.get("required") or []),
             "path_params": sorted((spec.get("path_params") or {}).keys()),
@@ -1786,6 +2269,43 @@ def register_ai_agent_routes(app, deps):
 
     def _build_write_tool_request(tool_name, spec, args):
         args = dict(args or {})
+        if tool_name == "write_chat_create_room":
+            if _is_missing_arg(args.get("join_password")) and not _is_missing_arg(args.get("password")):
+                args["join_password"] = args.get("password")
+            if _is_missing_arg(args.get("target_user")) and not _is_missing_arg(args.get("target_username")):
+                args["target_user"] = args.get("target_username")
+        if tool_name == "write_chat_send_message" and _is_missing_arg(args.get("content")) and not _is_missing_arg(args.get("message")):
+            args["content"] = args.get("message")
+        if tool_name == "write_chat_friend_request" and _is_missing_arg(args.get("username")):
+            for alias in ("target_username", "target", "friend_username"):
+                if not _is_missing_arg(args.get(alias)):
+                    args["username"] = args.get(alias)
+                    break
+        if tool_name == "write_notification_send":
+            if _is_missing_arg(args.get("body")):
+                for alias in ("message", "content"):
+                    if not _is_missing_arg(args.get(alias)):
+                        args["body"] = args.get(alias)
+                        break
+            if _is_missing_arg(args.get("user_id")) and not _is_missing_arg(args.get("target_user_id")):
+                args["user_id"] = args.get("target_user_id")
+        if tool_name == "write_appeal_review":
+            if _is_missing_arg(args.get("action")) and not _is_missing_arg(args.get("decision")):
+                args["action"] = args.get("decision")
+            if _is_missing_arg(args.get("note")) and not _is_missing_arg(args.get("review_note")):
+                args["note"] = args.get("review_note")
+        if tool_name == "write_appeal_create" and _is_missing_arg(args.get("content")) and not _is_missing_arg(args.get("message")):
+            args["content"] = args.get("message")
+        if tool_name == "write_storage_quota_override" and _is_missing_arg(args.get("quota_bytes")) and not _is_missing_arg(args.get("quota_mb")):
+            try:
+                args["quota_bytes"] = int(float(args.get("quota_mb")) * 1024 * 1024)
+            except Exception:
+                pass
+        if tool_name == "write_cloud_drive_text_update" and _is_missing_arg(args.get("content")) and not _is_missing_arg(args.get("text")):
+            args["content"] = args.get("text")
+        if tool_name in {"write_comfyui_civitai_inspect", "write_comfyui_civitai_download"}:
+            if _is_missing_arg(args.get("url")) and not _is_missing_arg(args.get("model_url")):
+                args["url"] = args.get("model_url")
         if tool_name in {"write_cloud_drive_remote_download", "write_remote_download_direct", "write_remote_download_bt"}:
             for alias in ("url", "download_url", "source_url", "magnet_uri", "magnet", "torrent_url"):
                 value = str(args.get(alias) or "").strip()

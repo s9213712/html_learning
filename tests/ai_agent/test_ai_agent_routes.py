@@ -7,7 +7,7 @@ from urllib import request as urllib_request
 
 from cryptography.fernet import Fernet
 from flask import Flask, jsonify, make_response, request
-from services.ai_agent.hermes import AiAgentError, clear_ai_agent_audit_scan_state
+from services.ai_agent.hermes import AiAgentError, AI_AGENT_TOOL_BLUEPRINT, clear_ai_agent_audit_scan_state
 
 from routes.ai_agent import register_ai_agent_routes
 from routes.ai_agent import AI_AGENT_WRITE_TOOL_SPECS
@@ -256,6 +256,12 @@ def test_ai_agent_write_tools_can_return_full_catalog_for_root_selector(tmp_path
     assert payload["allowed_tools"] == "write_community_create_thread"
     assert [tool["name"] for tool in payload["tools"]] == ["write_community_create_thread"]
     assert {tool["name"] for tool in payload["catalog_tools"]} == set(AI_AGENT_WRITE_TOOL_SPECS)
+    thread_tool = next(tool for tool in payload["catalog_tools"] if tool["name"] == "write_community_create_thread")
+    assert thread_tool["domain"] == "community"
+    assert thread_tool["data_scope"] == "write_tool:community"
+    assert "board_id" in thread_tool["required"]
+    assert "title" in thread_tool["body_fields"]
+    assert "canonical args" in thread_tool["arg_hint"]
 
 
 def test_ai_agent_write_tools_none_sentinel_disables_all_tools(tmp_path):
@@ -362,7 +368,10 @@ def test_ai_agent_write_tools_include_expanded_capability_domains(tmp_path):
             "write_trading_place_order,write_remote_download_direct,write_cloud_drive_create_text,"
             "write_share_create,write_album_create,write_video_publish,write_transcode_hls,"
             "write_subtitle_upload,write_community_post_penalty,write_points_governance_execute,"
-            "write_points_wallet_transfer,write_member_set_avatar_from_cloud,write_server_restart,write_incident_enter"
+            "write_points_wallet_transfer,write_member_set_avatar_from_cloud,write_server_restart,write_incident_enter,"
+            "write_chat_create_room,write_appeal_review,write_notification_send,write_report_resolve,"
+            "write_moderation_proposal_create,write_storage_quota_override,write_cloud_drive_text_update,"
+            "write_comfyui_start,write_comfyui_workflow_run,write_comfyui_civitai_search,write_security_test_stress"
         ),
     }
     app = _build_app(db_path, {"id": 1, "username": "root", "role": "user"}, settings=settings)
@@ -374,6 +383,14 @@ def test_ai_agent_write_tools_include_expanded_capability_domains(tmp_path):
     assert response.status_code == 200
     assert set(names) == set(settings["ai_agent_allowed_tools"].split(","))
     assert all(tool["requires_confirm"] for tool in payload["tools"])
+    domains = {tool["name"]: tool["domain"] for tool in payload["tools"]}
+    assert domains["write_chat_create_room"] == "chat"
+    assert domains["write_storage_quota_override"] == "storage"
+    assert domains["write_security_test_stress"] == "security"
+
+
+def test_ai_agent_write_tool_specs_stay_in_blueprint():
+    assert set(AI_AGENT_WRITE_TOOL_SPECS).issubset(set(AI_AGENT_TOOL_BLUEPRINT))
 
 
 def test_ai_agent_all_write_tool_names_are_recognized_when_allowed(tmp_path):

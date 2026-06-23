@@ -100,6 +100,11 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert "aiAgentPlanToolAction(plannerText" in ai_agent_js
     assert "aiAgentExecuteToolPlan(plan, plannerText" in ai_agent_js
     assert "write_tool=執行 context.effective_tools" in ai_agent_js
+    assert "function aiAgentPlannerToolSchemas" in ai_agent_js
+    assert "function aiAgentWriteToolSpecMap" in ai_agent_js
+    assert "domain: aiAgentToolDomain(tool)" in ai_agent_js
+    assert "required: Array.isArray(tool.required)" in ai_agent_js
+    assert "body_fields: Array.isArray(tool.body_fields)" in ai_agent_js
     assert "async function aiAgentRunGenericWriteTool" in ai_agent_js
     assert "async function aiAgentPostWriteToolExecute" in ai_agent_js
     assert "function aiAgentServerBusyDelayMs" in ai_agent_js
@@ -187,6 +192,10 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert "若 input_mode=image，請用語意判斷使用者是要圖片問答、圖片分析產 prompt，還是要求用附圖執行生圖" in ai_agent_js
     assert "若 input_mode=image 且使用者意圖依上下文仍不明，請輸出 chat 或 clarify；不得設定 execute_write=true" in ai_agent_js
     assert "若 action=write_tool 且使用者明確要求建立、更新、刪除、執行、下載、轉帳、交易或治理處置，execute_write 必須是 true" in ai_agent_js
+    assert "context.effective_tools[] 會提供每個站內工具的 domain, label, description, method, required, path_params, body_fields, query_fields, arg_hint" in ai_agent_js
+    assert "args 對 write_tool 必須只使用 context.effective_tools 中該工具 schema 的 required/path_params/body_fields/query_fields canonical 欄位" in ai_agent_js
+    assert "站內所有功能需優先從 context.effective_tools 的 domain/label/description/schema 語意選 tool" in ai_agent_js
+    assert "若 schema.required 缺少且無法從上下文推得，action=clarify" in ai_agent_js
     assert "未確認寫入，已停止執行" in ai_agent_js
     assert "規劃結果未確認這是可執行寫入，所以沒有執行" in ai_agent_js
     assert "action=readonly 並 readonly_scope=all" in ai_agent_js
@@ -230,6 +239,7 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert 'ai-agent-tool-selector' in html
     assert 'ai-agent-tool-selector-list' in html
     assert 'include_all=1' in ai_agent_js
+    assert 'await loadAiAgentWriteToolCatalog({ force: false }).catch(() => undefined);' in ai_agent_js
     assert 'ai_agent_allowed_tools: allowedTools' in ai_agent_js
     assert '"__none__"' in ai_agent_js
     assert 'setAiAgentToolSelection("comfyui")' in ai_agent_js
