@@ -176,7 +176,11 @@ def test_integrity_report_refreshes_csrf_before_mutating_calls():
 def test_docs_and_frontend_expose_the_same_canonical_production_gate_paths():
     qa_docs = (ROOT / "docs" / "11_QA_TESTING.md").read_text(encoding="utf-8")
     prod_docs = (ROOT / "docs" / "02_DEPLOY_PRODUCTION.md").read_text(encoding="utf-8")
-    admin_js = (ROOT / "public" / "js" / "50-admin.js").read_text(encoding="utf-8")
+    admin_js = (
+        (ROOT / "public" / "js" / "50-admin.js").read_text(encoding="utf-8")
+        + "\n"
+        + (ROOT / "public" / "js" / "51-admin-server-mode-launch-check.js").read_text(encoding="utf-8")
+    )
 
     assert "python3 scripts/security/gate/on_live_reports_make.py --base-url https://127.0.0.1:5000 --root-password '<ROOT_PASSWORD>'" in qa_docs
     assert "python3 scripts/security/gate/on_live_reports_make.py --base-url https://<host> --root-password '<ROOT_PASSWORD>'" in prod_docs

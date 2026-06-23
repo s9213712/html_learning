@@ -37,6 +37,7 @@ scripts.
 | `pytest` | `scripts/on_live_reports/pytest.py` and `scripts/testing/pytest_in_tmp.sh` | QA | Run the selected pytest suite in an isolated copy. | `runtime/reports/security/production_gate/pytest_*` or pytest output captured by the caller | Unit/integration regression exists in the selected suite; scope depends on selected tests. |
 | `points_chain_consistency` | `scripts/on_live_reports/points_chain_consistency.py` | PointsChain / Ledger | Validate wallet, ledger, hash-chain, and consistency invariants. | `runtime/reports/security/production_gate/points_chain_consistency_*` | Ledger/economy state cannot be trusted. |
 | `on_live_reports_make` | `scripts/on_live_reports/on_live_reports_make.py` -> `scripts/security/gate/on_live_reports_make.py` | Release / Security | Orchestrate and verify the production gate report set. | `runtime/reports/security/production_gate/on_live_reports_make_*` | Gate evidence is missing, stale, fake, or failed; production unlock must be blocked. |
+| `ai_agent_boundary` | `scripts/on_live_reports/ai_agent_boundary.py` | AI Agent / Security | Validate deterministic AI Agent write-tool, lockdown, launch-preflight, and server-filesystem boundary regressions without calling an LLM. | `runtime/reports/security/production_gate/ai_agent_boundary_*` | AI Agent can expose or execute tools outside the approved station boundary, or the launch-preflight tool regressed. |
 
 ## Direct QA And Security Entrypoints
 
@@ -64,6 +65,7 @@ scripts.
 | `scripts/security/server_mode/server_mode_v2_phase_5b_acceptance.sh` | Server-mode acceptance | Server Mode / QA | Run phase 5b acceptance checks for Server Mode v2. | Caller output | Acceptance criteria for the phase are not met. |
 | `scripts/security/server_mode/server_mode_v2_token_smoke.py` | Token smoke | Server Mode / Auth | Validate tester-token behavior. | Caller output | Token issuance or enforcement regressed. |
 | `scripts/testing/pytest_in_tmp.sh` | Pytest wrapper | QA | Run pytest against a `/tmp` copy to avoid repo pollution. | Pytest output; optional caller artifact | Selected pytest suite failed. |
+| `scripts/testing/transmission_copy_monitor.py` | Download ops probe | Storage / Remote Download | Monitor one Transmission torrent by id and copy the finished payload to an operator-selected destination, emitting JSON progress and size verification. | Console JSON progress/copy result | Transmission RPC monitoring or post-download copy verification failed. |
 
 ## Non-Gate Maintained Tooling
 

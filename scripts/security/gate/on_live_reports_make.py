@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the 13 production-gate reports in one pass.
+"""Generate the production-gate reports in one pass.
 
 This wrapper keeps two layers of output:
 
@@ -67,6 +67,16 @@ GO_LIVE_CORE_PYTEST_ARGS = GO_LIVE_CORE_PYTEST_TARGETS + [
     "-k",
     "not live_price_provider_blocks_market_order_when_binance_is_down and "
     "not live_price_provider_blocks_market_order_when_public_fallback_chain_is_unhealthy",
+]
+
+AI_AGENT_BOUNDARY_PYTEST_TARGETS = [
+    "tests/ai_agent/test_ai_agent_routes.py::test_ai_agent_write_tools_root_only_and_lists_allowed_tools",
+    "tests/ai_agent/test_ai_agent_routes.py::test_ai_agent_write_tools_lockdown_blocks_list_and_execute",
+    "tests/ai_agent/test_ai_agent_routes.py::test_ai_agent_write_tool_execute_requires_write_mode_for_mutation",
+    "tests/ai_agent/test_ai_agent_routes.py::test_ai_agent_launch_preflight_executes_checks_audit_and_switch",
+    "tests/ai_agent/test_ai_agent_routes.py::test_ai_agent_chat_blocks_os_filesystem_listing_before_llm",
+    "tests/ai_agent/test_ai_agent_routes.py::test_ai_agent_chat_blocks_server_filesystem_mutation_before_llm",
+    "tests/ai_agent/test_ai_agent_routes.py::test_ai_agent_write_tool_blocks_server_filesystem_path_args",
 ]
 
 GO_LIVE_CORE_PENTEST_CHECKS = ",".join(
@@ -873,7 +883,7 @@ def _upload_payloads(client: LiveClient, payload_paths: list[Path]) -> list[dict
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Generate all 13 production-gate reports and stage upload-ready payloads under runtime/reports/security/production_gate.")
+    parser = argparse.ArgumentParser(description="Generate all production-gate reports and stage upload-ready payloads under runtime/reports/security/production_gate.")
     parser.add_argument("--base-url", default="", help="Live base URL for root-only and live-target checks. Default: auto-detect 127.0.0.1:5000 via https/http.")
     parser.add_argument("--root-username", default=os.environ.get("ROOT_USERNAME", "root"))
     parser.add_argument("--root-password", default=os.environ.get("ROOT_PASSWORD", ""))
@@ -953,6 +963,7 @@ def main() -> int:
     payloads["snapshot_restore"] = _pytest_report(out_root, raw_dir, "snapshot_restore", ["tests/snapshots/test_snapshots.py"], timeout=args.pytest_timeout, signer=signer, meta=meta)
     payloads["points_chain_consistency"] = _pytest_report(out_root, raw_dir, "points_chain_consistency", ["tests/points/test_points_chain.py"], timeout=args.pytest_timeout, signer=signer, meta=meta)
     payloads["cloud_drive_quota_permission"] = _pytest_report(out_root, raw_dir, "cloud_drive_quota_permission", ["tests/storage/test_cloud_drive_attachments.py", "tests/storage/test_storage_albums_schema.py"], timeout=args.pytest_timeout, signer=signer, meta=meta)
+    payloads["ai_agent_boundary"] = _pytest_report(out_root, raw_dir, "ai_agent_boundary", AI_AGENT_BOUNDARY_PYTEST_TARGETS, timeout=args.pytest_timeout, signer=signer, meta=meta)
 
     missing = [name for name in PRODUCTION_REQUIRED_REPORT_TYPES if name not in payloads]
     if missing:

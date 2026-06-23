@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the 13 real production-gate generators with per-report live evidence."""
+"""Run the real production-gate generators with per-report live evidence."""
 
 from __future__ import annotations
 
@@ -91,6 +91,7 @@ def _report_label(report_type: str) -> str:
         "snapshot_restore": "snapshot boundary",
         "points_chain_consistency": "points-chain consistency",
         "cloud_drive_quota_permission": "cloud-drive quota/permission",
+        "ai_agent_boundary": "AI Agent boundary",
     }
     return labels.get(report_type, report_type.replace("_", " "))
 
@@ -711,11 +712,20 @@ def _generator_map():
             signer=signer,
             meta=meta,
         ),
+        "ai_agent_boundary": lambda payload_root, raw_root, args, signer, meta, client: gate_helpers._pytest_report(  # noqa: SLF001
+            payload_root,
+            raw_root,
+            "ai_agent_boundary",
+            gate_helpers.AI_AGENT_BOUNDARY_PYTEST_TARGETS,
+            timeout=args.pytest_timeout,
+            signer=signer,
+            meta=meta,
+        ),
     }
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run the 13 real production-gate generators with per-report live evidence.")
+    parser = argparse.ArgumentParser(description="Run the real production-gate generators with per-report live evidence.")
     parser.add_argument("--base-url", default="https://127.0.0.1:5000")
     parser.add_argument("--runtime-dir", required=True)
     parser.add_argument("--git-repo-dir", required=True, help="Real git repo used by the live server for current target detection.")

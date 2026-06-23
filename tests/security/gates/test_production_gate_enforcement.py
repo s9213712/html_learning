@@ -1,19 +1,19 @@
 """Locks the production-gate enforcement contract.
 
 Existing tests/test_snapshots.py covers the happy path
-(13 reports passing -> switch succeeds) and the empty-DB blocked
+(all required reports passing -> switch succeeds) and the empty-DB blocked
 path. This file adds the granular regression cases the launch-check
 UI promises to surface:
 
 1. Wrong confirm phrase -> blocked
-2. 0 / 13 reports -> blocked
-3. 12 / 13 reports (one missing) -> blocked, response lists the
+2. 0 / required reports -> blocked
+3. one missing report -> blocked, response lists the
    missing report
-4. 13 / 13 inserted but ONE has critical_findings_count > 0 -> blocked
-5. 13 / 13 inserted but ONE has high_findings_count > 0 -> blocked
-6. 13 / 13 inserted but ONE has empty report_hash -> blocked
-7. 13 / 13 inserted but ONE has pass=False -> blocked
-8. 13 / 13 perfect -> mode actually switches to production
+4. all inserted but ONE has critical_findings_count > 0 -> blocked
+5. all inserted but ONE has high_findings_count > 0 -> blocked
+6. all inserted but ONE has empty report_hash -> blocked
+7. all inserted but ONE has pass=False -> blocked
+8. all required reports perfect -> mode actually switches to production
 
 If any of these regress, an operator could push to production with
 unverified or actively-failing reports — exactly the contamination
@@ -191,12 +191,12 @@ def test_gate_blocks_when_no_reports(tmp_path):
     assert set(requirements.get("missing", [])) == set(PRODUCTION_REQUIRED_REPORT_TYPES)
 
 
-# ── #3 12 / 13 (one missing) ─────────────────────────────────────────
+# ── #3 one missing report ────────────────────────────────────────────
 
 
 def test_gate_blocks_when_one_report_missing(tmp_path):
     mode, _, db_path = _build_runtime(tmp_path)
-    # Insert 12 of the 13 — drop the first one.
+    # Insert every required report except the first one.
     skipped = PRODUCTION_REQUIRED_REPORT_TYPES[0]
     for rt in PRODUCTION_REQUIRED_REPORT_TYPES[1:]:
         _insert_report(db_path, rt)
@@ -282,10 +282,10 @@ def test_gate_blocks_when_one_report_has_pass_false(tmp_path):
     assert bad_one in requirements.get("failed", []), requirements
 
 
-# ── #8 13 / 13 perfect -> switch succeeds ─────────────────────────────
+# ── #8 all required reports perfect -> switch succeeds ───────────────
 
 
-def test_gate_allows_switch_when_all_13_pass(tmp_path):
+def test_gate_allows_switch_when_all_required_reports_pass(tmp_path):
     mode, _, db_path = _build_runtime(tmp_path)
     _insert_all_passing(db_path)
     actor = {"id": 1, "username": "root"}

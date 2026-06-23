@@ -292,7 +292,7 @@ PYTHONPATH=. scripts/security/pentest/run_pentest.sh \
   --only whole-site-production-gate
 ```
 
-如果你要一次產出 production gate 要求的 13 份報告，可直接用：
+如果你要一次產出 production gate 要求的完整 required report set，可直接用：
 
 ```bash
 python3 scripts/security/gate/on_live_reports_make.py --base-url https://<host> --root-password '<ROOT_PASSWORD>'
@@ -301,8 +301,8 @@ python3 scripts/security/gate/on_live_reports_make.py --base-url https://<host> 
 這會把 raw outputs 放進 `runtime/reports/security/production_gate/runs/<RUN_ID>/`，
 並把上傳用的穩定 payload 放在 `runtime/reports/security/production_gate/`。
 
-13 份 production gate 報告的對照表、固定 pytest 測項數與預設報告落點，統一放在
-[11_QA_TESTING.md](11_QA_TESTING.md) 的「Production Gate 13 份報告對照表」。
+production gate 報告對照表、固定 pytest 測項數與預設報告落點，統一放在
+[11_QA_TESTING.md](11_QA_TESTING.md) 的「Production Gate 報告對照表」。
 部署者上線前若要確認報告應該生成在哪裡、哪些是動態腳本、哪些是固定 pytest
 回歸，請以那張表為準。
 

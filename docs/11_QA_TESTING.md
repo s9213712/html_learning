@@ -196,9 +196,10 @@ PYTHONPATH=. python3 scripts/trading/probes/backtest_20000_probe.py --include-ro
   是交易系統專用的固定回歸清單；只要改到 backtest / workflow / grid / DCA / liquidation /
   融合價格，就不能只跑 `test_trading_engine.py` 或歷史回測。
 
-### Production Gate 13 份報告對照表
+### Production Gate 報告對照表
 
-這 13 份報告是 production gate 的 source of truth。
+`services/snapshots/schema.py::PRODUCTION_REQUIRED_REPORT_TYPES` 是 production gate 的 source of truth。
+截至 2026-06-23，required report set 為 14 份。
 欄位說明：
 
 - `使用腳本 / 驗證面`：產生或驗證該報告的主要入口。
@@ -214,13 +215,13 @@ PYTHONPATH=. python3 scripts/trading/probes/backtest_20000_probe.py --include-ro
 - unsigned、invalid JSON、`report_type` mismatch、replay 舊 commit 等檔案只能在後台顯示 warning，
   不可讓 production gate 亮綠。
 - production gate 的 live 驗收至少要再補一條：
-  **13 份 verified 但 old/fake `target_commit` 的 reports 不得解鎖 production。**
+  **完整 required report set verified 但 old/fake `target_commit` 的 reports 不得解鎖 production。**
   這條不可只靠 `tests/snapshots/test_snapshots.py`；必須對隔離 `/tmp` server 實際呼叫：
   - `GET /api/root/server-mode/requirements`
   - `POST /api/root/production/enter`
   並確認回應 reason 含 `target_commit_mismatch`。
 
-若要一次生成這 13 份報告，使用：
+若要一次生成完整 required report set，使用：
 
 ```bash
 python3 scripts/security/gate/on_live_reports_make.py --base-url https://127.0.0.1:5000 --root-password '<ROOT_PASSWORD>'
@@ -236,7 +237,7 @@ python3 scripts/on_live_reports/on_live_reports_make.py --base-url ... --root-pa
 python3 scripts/on_live_reports/clean_smoke.py
 python3 scripts/on_live_reports/permission.py
 python3 scripts/on_live_reports/snapshot_restore.py
-# ... 共 13 個 entry
+# ... 每個 required report type 都有一個 entry
 ```
 
 它會把 raw artifacts 放到：
@@ -254,18 +255,18 @@ python3 scripts/on_live_reports/snapshot_restore.py
 其中至少保存：
 
 - current target context
-- old-commit verified 13 份 scenario JSON
-- current-commit verified 13 份 scenario JSON
+- old-commit verified required-report scenario JSON
+- current-commit verified required-report scenario JSON
 - production enter response
 - final mode response
 
 若要把整條 happy-path 補齊，而不只驗 `target_commit mismatch`，至少再多做這 6 步：
 
-1. 先寫入 13 份 **signed + target 一致** 的
+1. 先寫入完整 required report set **signed + target 一致** 的
    `runtime/reports/security/production_gate/<report_type>_report.json`，
    再呼叫 `GET /api/root/server-mode/requirements`，確認 **只靠 filesystem
    auto-detect 就能 `ok=true`**。
-2. 把同一批 13 份 payload 上傳到 `/api/root/production-report/upload`，再確認
+2. 把同一批 payload 上傳到 `/api/root/production-report/upload`，再確認
    `requirements ok=true`。
 3. 故意把其中一份 canonical filesystem report 改成 invalid JSON，再呼叫
    `GET /api/root/server-mode/requirements`，確認 **仍是 `ok=true`**，
@@ -308,7 +309,7 @@ python3 scripts/on_live_reports/snapshot_restore.py
   5. 重新上傳 `integrity_guard` report
   6. 再做 final requirements / `GO_LIVE`
 
-換句話說，full-generator 驗收不是只看 13 份 raw reports，有改過隔離副本本身時，
+換句話說，full-generator 驗收不是只看 raw reports，有改過隔離副本本身時，
 `integrity_guard` 的 finding review 也是正式流程的一部分。
 
 | report_type | 使用腳本 / 驗證面 | 測試筆數 | 預設放置位置 |
@@ -326,10 +327,11 @@ python3 scripts/on_live_reports/snapshot_restore.py
 | `snapshot_restore` | `scripts/testing/pytest_in_tmp.sh -q tests/snapshots/test_snapshots.py` + 手動 snapshot integrity / restore-boundary verify；PointsChain ledger backup/restore 必須維持停用 | 固定 40 | `runtime/reports/security/production_gate/snapshot_restore_report.json` |
 | `points_chain_consistency` | `scripts/testing/pytest_in_tmp.sh -q tests/points/test_points_chain.py` + `services/points_chain.verify_chain()` | 固定 27 | `runtime/reports/security/production_gate/points_chain_consistency_report.json` |
 | `cloud_drive_quota_permission` | `scripts/testing/pytest_in_tmp.sh -q tests/storage/test_cloud_drive_attachments.py tests/storage/test_storage_albums_schema.py` | 固定 55 | `runtime/reports/security/production_gate/cloud_drive_quota_permission_report.json` |
+| `ai_agent_boundary` | `scripts/on_live_reports/ai_agent_boundary.py`，跑 deterministic AI Agent write-tool / lockdown / server-filesystem boundary pytest；不呼叫 LLM | 固定 7 | `runtime/reports/security/production_gate/ai_agent_boundary_report.json` |
 
 補充：
 
-- `pytest` / `log_chain_verify` / `snapshot_restore` / `points_chain_consistency` / `cloud_drive_quota_permission`
+- `pytest` / `log_chain_verify` / `snapshot_restore` / `points_chain_consistency` / `cloud_drive_quota_permission` / `ai_agent_boundary`
   這幾類若不是由單一腳本直接產生檔案，仍應把最後簽署/上傳前的 raw report staging 到
   `runtime/reports/security/production_gate/`，不要散落在 repo root。
 - `artifacts/` 與 `runtime/reports/` 都是可再生測試輸出，預設不進 git；需要長期保留的結論請整理到
@@ -339,7 +341,7 @@ python3 scripts/on_live_reports/snapshot_restore.py
 - `on_live_reports_make.py` 會額外生成：
   - `runtime/reports/security/production_gate/on_live_reports_make_<RUN_ID>.json`
   - `runtime/reports/security/production_gate/on_live_reports_make_<RUN_ID>.md`
-  這兩份是本次整批產製的總結，不是 13 份 required report 之一。
+  這兩份是本次整批產製的總結，不是 required report 之一。
 - 若 production profile 內的某些鍵（例如 `allow_register`、`captcha_mode`、
   `production_single_*`）沒有出現在 `security-center` payload，請直接查
   runtime DB 的 `system_settings` 補核對，不要把「payload 沒帶出來」誤判成

@@ -17,7 +17,7 @@ for one-off experiments.
 - [testing/pytest_in_tmp.sh](testing/pytest_in_tmp.sh)
   Canonical pytest entrypoint. Tests must run against a `/tmp` repo copy.
 - [security/gate/on_live_reports_make.py](security/gate/on_live_reports_make.py)
-  Canonical 13-report production-gate orchestrator.
+  Canonical production-gate required-report orchestrator.
 - [prepush/pre_push_checks.py](prepush/pre_push_checks.py)
   Canonical local validation entrypoint.
 - [admin/root_recovery.py](admin/root_recovery.py)
@@ -154,11 +154,11 @@ When changing production-gate logic, do not stop at unit tests.
 
 At minimum, QA must run:
 
-1. `scripts/security/gate/on_live_reports_make.py` or the equivalent 13-report
+1. `scripts/security/gate/on_live_reports_make.py` or the equivalent required-report
    generation flow against an isolated `/tmp` server.
 2. A live regression proving:
-   - 13 verified `old/fake target_commit` reports **cannot** unlock production
-   - 13 verified `current target_commit` reports **can** unlock production
+   - verified `old/fake target_commit` required reports **cannot** unlock production
+   - verified `current target_commit` required reports **can** unlock production
 
 If you launch the isolated server with [test_for_develop.sh](../test_for_develop.sh),
 `HTML_LEARNING_GIT_REPO_DIR` must still point at a real git repo with `.git`;

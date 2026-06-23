@@ -1497,6 +1497,59 @@ def test_runtime_reset_creates_pre_reset_snapshot_and_clears_runtime_tables_and_
     assert any(call[0][0] == "SYSTEM_RUNTIME_RESET" for call in audit_log)
 
 
+def test_runtime_reset_clears_expanded_feature_runtime_tables(tmp_path):
+    audit_log = []
+    service, db_path, _uploads = _service(tmp_path, audit_log)
+    runtime_tables = [
+        "ai_agent_conversations",
+        "cloud_resumable_upload_sessions",
+        "comfyui_generation_jobs",
+        "comfyui_generation_history",
+        "comfyui_workflow_runs",
+        "comfyui_workflow_presets",
+        "job_center_jobs",
+        "job_center_events",
+        "media_stream_jobs",
+        "media_stream_variants",
+        "video_share_links",
+        "album_share_links",
+        "chat_rooms",
+        "chat_room_members",
+        "forum_post_reports",
+        "game_matches",
+        "game_multiplayer_events",
+        "share_access_events",
+        "storage_quota_purchases",
+        "trading_bot_audit_runs",
+        "trading_grid_bots",
+        "trading_grid_orders",
+        "trading_operation_idempotency",
+    ]
+    conn = _db(db_path)
+    for table in runtime_tables:
+        conn.execute(f"CREATE TABLE {table} (id INTEGER PRIMARY KEY, marker TEXT)")
+        conn.execute(f"INSERT INTO {table} (marker) VALUES ('dirty')")
+    conn.commit()
+    conn.close()
+
+    result = service.reset_runtime_state(
+        actor={"id": 1, "username": "root"},
+        confirm="RESET_RUNTIME_STATE",
+        reason="expanded feature cleanup",
+    )
+
+    assert result["ok"] is True
+    for table in runtime_tables:
+        assert table in result["cleared_tables"]
+    conn = _db(db_path)
+    try:
+        for table in runtime_tables:
+            count = conn.execute(f"SELECT COUNT(*) AS c FROM {table}").fetchone()["c"]
+            assert count == 0, table
+    finally:
+        conn.close()
+
+
 def test_runtime_reset_removes_generated_secret_and_tls_files(tmp_path):
     audit_log = []
     base = tmp_path / "app"

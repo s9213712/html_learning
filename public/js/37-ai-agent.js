@@ -1450,6 +1450,9 @@ async function aiAgentAnalyzeImageForComfyui(userText) {
 async function aiAgentAnalyzeTextForComfyui(userText) {
   const selectedModel = aiAgentSelectedTextModel();
   const selectableModels = aiAgentSelectableModels();
+  if (!selectedModel) {
+    throw new Error("目前沒有可用的文字模型。請確認 AI Agent 後端 /models 有回傳可用模型後再試。");
+  }
   if (selectableModels.length && (!selectedModel || !selectableModels.includes(selectedModel))) {
     throw new Error("請從模型選單選擇可用模型後再做生圖解析。");
   }
@@ -2347,8 +2350,8 @@ function renderAiAgentStatus(json) {
   if (tasks.troubleshoot) taskLines.push("生圖/下載排錯");
   if (tasks.prompt) taskLines.push("提示詞與參數");
   if ($("ai-agent-tasks-state")) $("ai-agent-tasks-state").textContent = taskLines.length ? taskLines.join("、") : "未啟用";
-  if ($("ai-agent-model-state")) $("ai-agent-model-state").textContent = `模型：${settings.model || "-"}`;
   syncAiAgentModelSelect();
+  updateAiAgentModelStateLabel();
   if ($("ai-agent-safety-boundaries")) {
     const rules = Array.isArray(settings.safety_boundaries) ? settings.safety_boundaries : [];
     $("ai-agent-safety-boundaries").innerHTML = rules.length
@@ -2465,11 +2468,6 @@ function aiAgentSelectableModels() {
   (AI_AGENT_STATE.modelIds || []).forEach((id) => {
     if (id && !modelIds.includes(id)) modelIds.push(id);
   });
-  allowedModels.forEach((id) => {
-    if (id && !modelIds.includes(id)) modelIds.unshift(id);
-  });
-  const configured = AI_AGENT_STATE.settings?.model || "";
-  if (configured && !modelIds.includes(configured)) modelIds.unshift(configured);
   return modelIds.filter((id) => {
     if (AI_AGENT_STATE.unavailableModelIds?.has(id)) return false;
     return !allowedModels.length || allowedModels.includes(id);
@@ -2480,16 +2478,15 @@ function aiAgentSelectedTextModel() {
   const select = $("ai-agent-model");
   const options = aiAgentSelectableModels();
   const selected = (select?.value || "").trim();
-  const configured = AI_AGENT_STATE.settings?.model || "";
   let chosen = selected;
   if (options.length) {
     if (!chosen || !options.includes(chosen)) {
-      chosen = options.includes(configured) ? configured : options[0];
+      chosen = options[0];
     }
     if (select && chosen && select.value !== chosen) select.value = chosen;
     return chosen;
   }
-  return chosen || configured || "";
+  return "";
 }
 
 function aiAgentVisionModel() {
@@ -2502,6 +2499,20 @@ function aiAgentVisionModel() {
     return vision;
   }
   return "";
+}
+
+function updateAiAgentModelStateLabel() {
+  const host = $("ai-agent-model-state");
+  if (!host) return;
+  const options = aiAgentSelectableModels();
+  const selected = ($("ai-agent-model")?.value || "").trim();
+  if (options.length) {
+    host.textContent = `模型：${options.includes(selected) ? selected : options[0]}`;
+    return;
+  }
+  host.textContent = (AI_AGENT_STATE.modelIds || []).length
+    ? "模型：沒有符合允許清單的可用模型"
+    : "模型：尚未取得 /models 清單";
 }
 
 function aiAgentImageAnalysisError(json = {}, status = 0) {
@@ -2716,17 +2727,18 @@ function syncAiAgentModelSelect() {
   const previous = select.value;
   const options = aiAgentSelectableModels();
   if (!options.length) {
-    const fallback = AI_AGENT_STATE.settings?.model || "";
-    select.innerHTML = `<option value="${sanitize(fallback)}">${sanitize(fallback || "尚未取得模型")}</option>`;
-    select.disabled = !fallback;
+    const configured = String(AI_AGENT_STATE.settings?.model || "").trim();
+    select.innerHTML = `<option value="">${sanitize(configured ? "設定模型不在目前 /models 清單" : "尚未取得模型")}</option>`;
+    select.disabled = true;
+    updateAiAgentModelStateLabel();
     return;
   }
   select.disabled = false;
   select.innerHTML = options.map((id) => `<option value="${sanitize(id)}">${sanitize(id)}</option>`).join("");
-  const configured = AI_AGENT_STATE.settings?.model || "";
   select.value = previous && options.includes(previous)
     ? previous
-    : (configured && options.includes(configured) ? configured : options[0]);
+    : options[0];
+  updateAiAgentModelStateLabel();
 }
 
 function renderAiAgentModels(modelsPayload) {
@@ -2740,9 +2752,6 @@ function renderAiAgentModels(modelsPayload) {
     if (id && !modelIds.includes(id)) modelIds.push(id);
   });
   AI_AGENT_STATE.modelIds = modelIds.slice();
-  allowedModels.forEach((id) => {
-    if (id && !modelIds.includes(id)) modelIds.unshift(id);
-  });
   syncAiAgentModelSelect();
   if (!modelIds.length) {
     host.innerHTML = '<div class="drive-empty">尚未取得模型清單</div>';
@@ -3068,6 +3077,12 @@ async function sendAiAgentMessage() {
     AI_AGENT_STATE.sending = false;
     if (sendBtn) sendBtn.disabled = false;
     setAiAgentMessage("目前沒有可用的圖片理解模型。請在 AI Agent 模型允許清單加入 /models 回傳且支援圖片的模型後再試。", "err");
+    return;
+  }
+  if (mode !== "image" && !selectedModel) {
+    AI_AGENT_STATE.sending = false;
+    if (sendBtn) sendBtn.disabled = false;
+    setAiAgentMessage("目前沒有可用的文字模型。請確認 AI Agent 後端 /models 有回傳可用模型後再試。", "err");
     return;
   }
   if (selectableModels.length && (!selectedModel || !selectableModels.includes(selectedModel))) {

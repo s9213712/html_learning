@@ -1,6 +1,6 @@
 # scripts/on_live_reports/
 
-Shortcut directory for the **13 production-gate reports** described in
+Shortcut directory for the production-gate reports described in
 [docs/11_QA_TESTING.md](../../docs/11_QA_TESTING.md). Each report type maps to
 one Python entry point here so an operator can run any single report from a
 predictable path:
@@ -28,10 +28,11 @@ relevant API, or compose multiple sub-drivers.
 | `snapshot_restore` | `snapshot_restore.py` (wrapper) | `tests/snapshots/test_snapshots.py` boundary checks; PointsChain ledger backup/restore must stay disabled |
 | `points_chain_consistency` | `points_chain_consistency.py` (wrapper) | `tests/points/test_points_chain.py` |
 | `cloud_drive_quota_permission` | `cloud_drive_quota_permission.py` (wrapper) | `tests/storage/test_cloud_drive_attachments.py` + `tests/storage/test_storage_albums_schema.py` |
+| `ai_agent_boundary` | `ai_agent_boundary.py` (wrapper) | deterministic `tests/ai_agent/test_ai_agent_routes.py` boundary regressions; no LLM call |
 
 ## One-shot orchestrator
 
-To produce all 13 reports in one run (recommended for a full production gate):
+To produce all reports in one run (recommended for a full production gate):
 
 ```bash
 python3 scripts/on_live_reports/on_live_reports_make.py \
@@ -50,7 +51,7 @@ sufficient. You must also prove the live server rejects:
 - `report_type` mismatch
 - verified reports whose `target_commit` is old/fake
 
-and only accepts the full 13-report set when all reports are verified and match
+and only accepts the full required-report set when all reports are verified and match
 the live server's current `target_commit`.
 
 ## Notes

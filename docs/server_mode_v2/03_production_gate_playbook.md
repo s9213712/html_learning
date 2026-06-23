@@ -1,9 +1,9 @@
-# Production Gate Playbook — 13 份必過 Reports
+# Production Gate Playbook — Required Reports
 
-> **目的**：要把 server 切到 `production`，必須先有 13 份「最新通過」的 report 上傳並通過驗證。
+> **目的**：要把 server 切到 `production`，必須先有完整 required report set 的「最新通過」report 上傳並通過驗證。
 > 本檔給操作者一張 step-by-step 對照表：每份 report 是什麼、怎麼產、怎麼上傳、怎麼驗 status、失敗怎麼辦。
 >
-> **依據**：[`SERVER_MODE_V2_PROFILE_MATRIX.md §Production Gate Reports`](SERVER_MODE_V2_PROFILE_MATRIX.md#production-gate-reports) + `services/snapshots/schema.py:35-49 PRODUCTION_REQUIRED_REPORT_TYPES`。
+> **依據**：[`SERVER_MODE_V2_PROFILE_MATRIX.md §Production Gate Reports`](SERVER_MODE_V2_PROFILE_MATRIX.md#production-gate-reports) + `services/snapshots/schema.py::PRODUCTION_REQUIRED_REPORT_TYPES`。截至 2026-06-23，required set 為 14 份。
 
 ---
 
@@ -13,7 +13,7 @@
 
 | 必填欄位 | 規則 |
 |---|---|
-| `report_type` | 必須 ∈ §1 13 個白名單 |
+| `report_type` | 必須 ∈ §1 required report 白名單 |
 | `raw_report` | 原始報告 JSON；伺服器會對它做 canonical JSON 後重算 hash |
 | `report_hash` | 格式 `sha256:<64 hex>`，且必須等於 `sha256(canonical_json(raw_report))` |
 | `target_commit` | 受測 commit hash（git log 得） |
@@ -33,16 +33,16 @@
 **Filesystem auto-detect 不是信任來源**：`runtime/reports/security/production_gate/*.json` 只作為後台頁面與 API 的輔助顯示來源。這些檔案預設 `trust_level=unverified`；只有 `_verify_production_report_signature()` 驗證成功，且 `target_commit` / `target_branch` / `server_mode` 與當前 runtime 完全一致時，才會升級成 `verified` 並真正滿足 production gate。
 **舊檔 / 偽造檔警告**：unsigned、invalid JSON、`report_type` mismatch、replay 舊 commit、target 不一致等 filesystem 報告都只應顯示 warning，不能覆蓋資料庫裡已驗證的 report，也不能放行 production。
 
-**Commit 對齊**：13 份 report 的 `target_commit` 必須**全部相同**才算「對同一個 commit 都通過」。任一份 commit hash 不一致 → 視為過期，重跑該份。
+**Commit 對齊**：required report set 的 `target_commit` 必須**全部相同**才算「對同一個 commit 都通過」。任一份 commit hash 不一致 → 視為過期，重跑該份。
 
 **Live regression 必測**：不能只靠單元測試確認 target 規則。至少要在隔離
 `/tmp` runtime 實測一次：
 
-1. 製造 13 份 `verified` 但 `target_commit=old/fake` 的 reports。
+1. 製造完整 required report set `verified` 但 `target_commit=old/fake` 的 reports。
 2. 驗 `GET /api/root/server-mode/requirements` 仍然 `ok=false`。
 3. 驗 `POST /api/root/production/enter` 被擋下，且 warning / reason 明確顯示
    `target_commit_mismatch`。
-4. 再製造 13 份 `verified + current target_commit` 的 reports，確認
+4. 再製造完整 required report set `verified + current target_commit` 的 reports，確認
    `requirements ok=true` 且 `production enter` 成功。
 
 實際已跑過的 live 範例見：
@@ -50,7 +50,7 @@
 
 ---
 
-## 1. 13 份 Report 對照表
+## 1. Required Report 對照表
 
 | # | report_type | 用途 | Generator | 預期 artifact |
 |---|---|---|---|---|
@@ -67,8 +67,9 @@
 | 11 | `snapshot_restore` | snapshot/restore regression | `tests/snapshots/test_snapshots.py` 全綠 + 手動跑 1 次 create→restore→verify | JSON 結果檔 |
 | 12 | `points_chain_consistency` | PointsChain 一致性 | `tests/points/test_points_chain.py` + `services/points_chain.verify_chain()` | JSON 結果檔 |
 | 13 | `cloud_drive_quota_permission` | Cloud Drive quota & 權限 | `tests/storage/test_cloud_drive_attachments.py` + `tests/storage/test_storage_albums_schema.py` | JSON 結果檔 |
+| 14 | `ai_agent_boundary` | AI Agent tool / filesystem / launch-preflight 邊界 | `scripts/on_live_reports/ai_agent_boundary.py`；不呼叫 LLM | JSON 結果檔 |
 
-> **附註**：1–6 號是 Server Mode v2 phase 2 cut 才加的「平台層」報告；7–13 號是更早的 functional / security domain 報告。
+> **附註**：1–6 號是 Server Mode v2 phase 2 cut 才加的「平台層」報告；7–13 號是更早的 functional / security domain 報告；14 號是 AI Agent 寫工具與站內邊界擴張後新增的 deterministic gate。
 
 ---
 
@@ -148,12 +149,12 @@ curl -sk -b jar -H "Content-Type: application/json" -H "X-CSRF-Token: $csrf" \
 curl -sk -b jar "$BASE_URL/api/root/production-report/status" | jq
 ```
 
-回傳會列出 13 個 type 中各自是否「最新通過」。任一 type `latest_passing == false` → 必須補。
+回傳會列出 required report type 中各自是否「最新通過」。任一 type `latest_passing == false` → 必須補。
 
 ```json
 {
   "ok": true,
-  "required": ["clean_smoke", "adversarial", ..., "cloud_drive_quota_permission"],
+  "required": ["clean_smoke", "adversarial", ..., "ai_agent_boundary"],
   "status": {
     "clean_smoke": {"latest_passing": true, "latest_report_id": "prodrep_..."},
     "adversarial": {"latest_passing": false, "reason": "no report uploaded yet"},
@@ -163,7 +164,7 @@ curl -sk -b jar "$BASE_URL/api/root/production-report/status" | jq
 }
 ```
 
-### 3.4 13 份全綠後才能 enter production
+### 3.4 Required set 全綠後才能 enter production
 
 ```bash
 csrf=$(curl -sk -c jar -b jar "$BASE_URL/api/csrf-token" | jq -re '.csrf_token')
@@ -177,7 +178,7 @@ curl -sk -b jar -H "Content-Type: application/json" -H "X-CSRF-Token: $csrf" \
 ## 4. 失敗排錯
 
 ### 4.1 「report_type 不在 production gate 清單」
-typo；確認名稱在 §1 13 個之一。
+typo；確認名稱在 §1 required report set 之一。
 
 ### 4.2 「report_hash 必須是 sha256:<64 hex>」
 格式：`sha256:` + `64 hex chars`，缺一不可。
@@ -195,8 +196,8 @@ report 內部如果還有 critical 或 high finding（`*_findings_count > 0` 或
 - 沒改 → 直接複用既有 report；不需重上傳
 - 想強制重新上傳 → 重新跑 generator 拿到新的 hash
 
-### 4.6 13 份中部分 commit 不一致
-全部 13 份的 `target_commit` 應該是同一個。最常見原因：commit 動了之後沒重跑全套；補跑該份就好。
+### 4.6 required set 中部分 commit 不一致
+全部 required reports 的 `target_commit` 應該是同一個。最常見原因：commit 動了之後沒重跑全套；補跑該份就好。
 查方法：
 
 ```bash
@@ -227,130 +228,40 @@ curl -sk -b jar -H "Content-Type: application/json" -H "X-CSRF-Token: $csrf" \
 
 ---
 
-## 5. 完整 13-Report 跑表（範本 / 一鍵腳本骨架）
+## 5. 完整 required-report 跑表
 
-> **真實 orchestrator**：`scripts/security/gate/full_generator_live_validate.py`
-> 跑完 13 份 generator 並把每份 report 串到 `/api/root/production-report/upload`，附 per-report live evidence。
->
-> 範例：
-> ```bash
-> python3 scripts/security/gate/full_generator_live_validate.py \
->   --base-url https://127.0.0.1:5000 \
->   --runtime-dir /tmp/hackme_prodgate_runtime \
->   --git-repo-dir "$(pwd)" \
->   --root-password "$ROOT_PASSWORD" \
->   --i-own-this-target
-> ```
-> 必填：`--runtime-dir`、`--git-repo-dir`（必須是有 `.git` 的真 repo，不是 `/tmp` copy）、`--root-password`、`--i-own-this-target`（明確聲明知道是會打活站的測試）。
-> 其他可調 timeout 見 `--help`。實際驗收紀錄見 [04_production_gate_validation_report.md](./04_production_gate_validation_report.md)。
-
-下面是給操作者抄的骨架。實際 generator 命令依各 script 的 CLI 而定；這裡只是一個 orchestrator 草稿（**不要視為現成腳本**，只是流程示意）：
+建議使用真實 orchestrator，而不是手抄舊骨架：
 
 ```bash
-#!/usr/bin/env bash
-set -euo pipefail
-BASE_URL="${BASE_URL:-https://127.0.0.1:5000}"
-COMMIT="${COMMIT:?need git commit hash}"
-BRANCH="${BRANCH:-03b.strategy_workflow}"
-MODE="${MODE:-dev_ready}"
-TESTER="${TESTER:-claude-acc-$(date +%Y%m%d)}"
-ARTIFACTS=/tmp/prodrep_$COMMIT
-mkdir -p "$ARTIFACTS"
-
-step() {
-  local rtype="$1"; shift
-  local artifact="$ARTIFACTS/${rtype}.json"
-  echo "=== $rtype ==="
-  "$@" --out "$artifact"     # generator should accept --out
-  hash=$(sha256sum "$artifact" | awk '{print $1}')
-  sig=$(openssl dgst -sha256 -hmac "$REPORT_SIGN_KEY" "$artifact" | awk '{print $2}')
-  csrf=$(curl -sk -c /tmp/_jar -b /tmp/_jar "$BASE_URL/api/csrf-token" | jq -re '.csrf_token')
-  curl -sk -b /tmp/_jar -H "Content-Type: application/json" -H "X-CSRF-Token: $csrf" \
-    -X POST "$BASE_URL/api/root/production-report/upload" \
-    -d "$(jq -n \
-      --arg rt "$rtype" --arg rh "sha256:$hash" \
-      --arg tc "$COMMIT" --arg tb "$BRANCH" \
-      --arg sm "$MODE" --arg ts "$TESTER" \
-      --arg sig "hmac_sha256:$sig" --arg c "$csrf" \
-      '{report_type:$rt, report_hash:$rh,
-        target_commit:$tc, target_branch:$tb,
-        server_mode:$sm, test_result:"pass", passed:true,
-        critical_findings_count:0, high_findings_count:0,
-        unresolved_findings:[],
-        tester:$ts, signature:$sig, csrf_token:$c}')"
-  echo
-}
-
-step clean_smoke    python3 scripts/security/server_mode/server_mode_v2_clean_smoke.py
-step adversarial    python3 scripts/security/server_mode/server_mode_v2_adversarial.py
-step redteam_l2     python3 scripts/security/server_mode/server_mode_v2_redteam_l2.py
-step pytest         scripts/testing/pytest_in_tmp.sh -q tests
-step log_chain_verify  GET /api/root/server-mode/logs/verify
-step integrity_guard   POST /api/root/integrity/rescan + GET /api/root/integrity/report
-step stress         python3 scripts/security/pentest/stress_test.py
-step permission     python3 scripts/security/pentest/functional_permission_pentest.py
-step functional     bash    scripts/security/pentest/run_functional_smoke.sh
-step pentest        bash    scripts/security/pentest/run_pentest.sh
-step snapshot_restore  scripts/testing/pytest_in_tmp.sh -q tests/snapshots/test_snapshots.py
-step points_chain_consistency scripts/testing/pytest_in_tmp.sh -q tests/points/test_points_chain.py
-step cloud_drive_quota_permission scripts/testing/pytest_in_tmp.sh -q tests/storage/test_cloud_drive_attachments.py tests/storage/test_storage_albums_schema.py
-
-# Final verify
-curl -sk -b /tmp/_jar "$BASE_URL/api/root/production-report/status" | jq
+python3 scripts/security/gate/on_live_reports_make.py \
+  --base-url https://127.0.0.1:5000 \
+  --root-password "$ROOT_PASSWORD"
 ```
 
-> **注意**：上面骨架引用的 `security/wrappers/*` **是建議命名**，目前**未必所有腳本都已存在**。有 4 份（log_chain_verify / integrity_guard / snapshot_restore / points_chain_consistency / cloud_drive_quota_permission / pytest）需要包成 generator wrapper（產符合 §2 schema 的 JSON）。建議下一輪 dev sprint 補完。
+穩定捷徑是：
 
----
+```bash
+python3 scripts/on_live_reports/on_live_reports_make.py \
+  --base-url https://127.0.0.1:5000 \
+  --root-password "$ROOT_PASSWORD"
+```
 
-## 6. Status 表（你目前可以做什麼）
+所有單項 wrapper 登錄在 `scripts/INDEX.md`，列表在 `scripts/on_live_reports/README.md`。需要單獨重跑某份時，用：
 
-| 名稱 | Generator 是否就緒 | 你需要做的 |
-|---|---|---|
-| `clean_smoke` | ✅ `scripts/security/server_mode/server_mode_v2_clean_smoke.py` | 確認它的 `--out` flag 行為，產 JSON |
-| `adversarial` | ✅ `scripts/security/server_mode/server_mode_v2_adversarial.py` | 同上 |
-| `redteam_l2` | ✅ `scripts/security/server_mode/server_mode_v2_redteam_l2.py` | 同上 |
-| `pytest` | 🟡 沒有 wrapper | 寫一個 wrapper 跑 `pytest --json-report` 或自己 parse junit XML，產 JSON 符合 §2 schema |
-| `log_chain_verify` | 🟡 沒有 wrapper | 寫 wrapper 對 `mode_switch_logs` 跑 hash chain replay |
-| `integrity_guard` | 🟡 沒有 wrapper | 寫 wrapper call IntegrityGuard.run_self_check |
-| `stress` | ✅ `scripts/security/pentest/stress_test.py` | 確認其 output 符合 §2 schema |
-| `permission` | ✅ `scripts/security/pentest/functional_permission_pentest.py` | 同上 |
-| `functional` | ✅ `scripts/security/pentest/run_functional_smoke.sh` | 同上 |
-| `pentest` | ✅ `scripts/security/pentest/run_pentest.sh` | 同上 |
-| `snapshot_restore` | 🟡 沒有 wrapper | 寫 wrapper 跑 create → restore → verify |
-| `points_chain_consistency` | 🟡 沒有 wrapper | 寫 wrapper call `points_chain.verify_chain()` |
-| `cloud_drive_quota_permission` | 🟡 沒有 wrapper | 寫 wrapper 跑 quota + permission 對核 |
+```bash
+python3 scripts/on_live_reports/ai_agent_boundary.py
+```
 
-**目前缺 6 個 wrapper**（pytest / log_chain_verify / integrity_guard / snapshot_restore / points_chain_consistency / cloud_drive_quota_permission）。
-
-**建議補法**（不阻擋日常 dev，但 production 上線前必補）：
-1. 在 `security/wrappers/` 下放 6 個 small Python script，每個 ~30 行
-2. 各 script 支援 `--out <path.json>` 並按 §2 schema 寫
-3. 補完後跑一次本檔 §5 orchestrator 看 13 份是否全綠
-
----
-
-## 7. 實際行動指南（你現在可以做）
-
-如果你想**今天就嘗試**過 production gate，分三步：
+## 6. 實際行動指南
 
 1. **先看當前狀態**：
    ```bash
    curl -sk -b jar "$BASE_URL/api/root/production-report/status" | jq
    ```
-   會列出 13 個 type 各自最新狀態。
-
-2. **跑既有 7 個 generator**（已存在的 script）：
-   - clean_smoke / adversarial / redteam_l2
-   - stress / permission / functional / pentest
-   逐一跑、產 JSON、上傳。
-
-3. **補 6 個缺的 wrapper**（log_chain_verify / integrity_guard / pytest / snapshot_restore / points_chain_consistency / cloud_drive_quota_permission）：
-   - 這些 reuse 既有 service code（IntegrityGuard、points_chain.verify_chain、ServerModeService.restore_snapshot 等），只是包成 CLI wrapper
-   - 每個 ~30 行 Python，可以用 1 個 sprint 補完
-   - 建議先跑一份 pytest → json，因為 pytest 必過是基線
-
-完成後，13 份 status 全綠 + `ready_for_production = true`，再 `POST /api/root/production/enter`，confirm phrase = `GO_LIVE`。
+   會列出 required report type 各自最新狀態。
+2. 跑 `scripts/on_live_reports/on_live_reports_make.py` 產生完整 required set。
+3. 若有 report fail，修正對應 domain 後只重跑該 wrapper，再重新跑 requirements。
+4. 完整 set 全綠 + `ready_for_production = true` 後，再 `POST /api/root/production/enter`，confirm phrase = `GO_LIVE`。
 
 ---
 

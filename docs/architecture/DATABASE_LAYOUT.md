@@ -290,9 +290,9 @@ service ownership 固定，再評估是否把高寫入熱區拆成新的 DB。
   可在隔離 `/tmp` runtime 下連續執行，不再因 request-path schema ensure 而自鎖。
 - `control.db` 內的 verified production reports 才是 gate 權威來源；
   filesystem auto-detect 只輔助顯示，不可單獨放行。
-- verified 但 `target_commit=old/fake` 的 13 份報告，live server 會回
+- verified 但 `target_commit=old/fake` 的 required report set，live server 會回
   `target_commit_mismatch` 並拒絕進入 production。
-- 只有 13 份 verified 且 `target_commit / target_branch / server_mode` 全匹配時，
+- 只有完整 required report set verified 且 `target_commit / target_branch / server_mode` 全匹配時，
   live `production enter` 才會成功。
 
 完整流程與證據請看：

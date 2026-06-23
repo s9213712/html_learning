@@ -264,7 +264,7 @@ user may need one or both depending on whether the task is simply entering
   必須指向真實 git repo，而不是沒有 `.git` 的 `/tmp` copy；否則 live target commit
   會變空值，舊 commit 驗證將失真。
 - 正式 QA / pre-push / production-gate 驗收必須至少包含一個 live regression：
-  **13 份 verified 但 old/fake `target_commit` 的 reports 不得解鎖 production。**
+  **完整 required report set verified 但 old/fake `target_commit` 的 reports 不得解鎖 production。**
 
 ## Tester APIs
 

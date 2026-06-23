@@ -24,6 +24,7 @@ def test_qa_governance_docs_register_gate_scripts_and_validation_vocabulary():
         "snapshot_restore",
         "pytest",
         "points_chain_consistency",
+        "ai_agent_boundary",
         "on_live_reports_make",
     ):
         assert f"`{report_type}`" in index

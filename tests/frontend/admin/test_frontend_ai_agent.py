@@ -59,7 +59,7 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert 'id="ai-agent-comfyui-vae"' in html
     assert 'id="ai-agent-comfyui-generate-btn"' in html
     assert 'id="s-module-ai-agent-min-role"' in html
-    _warn_if_asset_cache_version_changed(html, "/js/37-ai-agent.js", "20260623-ai-agent-i2i-edit-v3")
+    _warn_if_asset_cache_version_changed(html, "/js/37-ai-agent.js", "20260623-ai-agent-live-models-v1")
     _warn_if_asset_cache_version_changed(html, "/js/90-bootstrap.js", "20260611-ai-agent-comfyui-write-tool")
 
     assert '"ai-agent": "feature_ai_agent_enabled"' in core_js
@@ -118,9 +118,17 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert "function aiAgentComfyuiTextHasSubject" in ai_agent_js
     assert "不會自行沿用前文、記憶或模型猜提示詞" in ai_agent_js
     assert "function aiAgentVisionModel" in ai_agent_js
+    assert "function updateAiAgentModelStateLabel" in ai_agent_js
     assert "async function aiAgentRefreshModelState" in ai_agent_js
     assert 'const statusRes = await apiFetch(API + "/ai-agent/status"' in ai_agent_js
     assert 'const modelsRes = await apiFetch(API + "/ai-agent/models"' in ai_agent_js
+    assert "設定模型不在目前 /models 清單" in ai_agent_js
+    assert "模型：沒有符合允許清單的可用模型" in ai_agent_js
+    assert "模型：尚未取得 /models 清單" in ai_agent_js
+    assert "目前沒有可用的文字模型。請確認 AI Agent 後端 /models 有回傳可用模型後再試。" in ai_agent_js
+    assert "模型：${settings.model" not in ai_agent_js
+    assert "if (id && !modelIds.includes(id)) modelIds.unshift(id)" not in ai_agent_js
+    assert 'select.innerHTML = `<option value="${sanitize(fallback)}"' not in ai_agent_js
     assert "await aiAgentRefreshModelState();" in ai_agent_js
     assert "unavailableModelIds: new Set()" in ai_agent_js
     assert "AI_AGENT_STATE.unavailableModelIds?.has(id)" in ai_agent_js
