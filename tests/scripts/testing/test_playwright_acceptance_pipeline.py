@@ -50,7 +50,9 @@ def test_platform_health_filters_expected_offline_browser_http_failures():
     assert ignored_browser_error("503 https://127.0.0.1:40341/api/trading/btc-signal?market=BTC%2FUSDT")
     assert ignored_browser_error("503 https://127.0.0.1:40341/api/trading/grid-bots")
     assert ignored_browser_error("503 https://127.0.0.1:40341/api/root/trading/sitewide/pools")
+    assert ignored_browser_error("503 https://127.0.0.1:40341/api/videos/1/realtime-proxy")
     assert ignored_browser_error("Failed to load resource: the server responded with a status of 503")
+    assert not ignored_browser_error("503 https://127.0.0.1:40341/api/videos/1")
     assert not ignored_browser_error("500 https://127.0.0.1:40341/api/storage/files")
 
 

@@ -55,46 +55,11 @@ from scripts.testing.playwright_deep_site_check import (  # noqa: E402
     wait_for_auth_app,
     wait_for_server,
 )
+from scripts.testing.browser_error_filters import ignored_browser_error  # noqa: E402
 from services.job_center import create_job, update_job  # noqa: E402
 from services.media.videos import ensure_video_schema  # noqa: E402
 from services.storage.catalog import ensure_storage_album_schema  # noqa: E402
 from services.system.notifications import create_notification, ensure_notifications_schema  # noqa: E402
-
-
-EXPECTED_BROWSER_HTTP_FAILURE_PATHS = (
-    "/api/admin/trading/report",
-    "/api/comfyui/generate",
-    "/api/points/explorer/fee-estimate",
-    "/api/root/trading/sitewide/user-positions",
-    "/api/trading/asset-overview",
-    "/api/trading/bot-competition",
-    "/api/trading/btc-signal",
-    "/api/trading/dashboard",
-    "/api/trading/live-price",
-    "/api/trading/reference-prices",
-)
-
-
-def ignored_browser_error(compact: str) -> bool:
-    text = str(compact or "")
-    if "phase15 forced failure" in text:
-        return True
-    if "Failed to load resource: the server responded with a status of 503" in text:
-        return True
-    if "Failed to load resource: the server responded with a status of 404" in text:
-        return True
-    if text.startswith(("503 ", "404 ")) and any(
-        namespace in text
-        for namespace in (
-            "/api/admin/trading/",
-            "/api/root/trading/",
-            "/api/trading/",
-        )
-    ):
-        return True
-    if text.startswith(("503 ", "404 ")) and any(path in text for path in EXPECTED_BROWSER_HTTP_FAILURE_PATHS):
-        return True
-    return False
 
 
 def now_text() -> str:
