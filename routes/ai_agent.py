@@ -2691,6 +2691,17 @@ def register_ai_agent_routes(app, deps):
                 "preserve the same face identity, dark blue hair color, single ponytail, festival hair accessories, anime style, and the busy night street background; "
                 "keep both feet visible inside the frame; avoid extra fingers, missing fingers, broken hands, impossible body proportions, body or clothing penetration, cropped feet, text, watermark, and extra people."
             )
+        if "新增第二位" in text or "第二位清楚" in text or "second" in lower:
+            return (
+                "create a new full separate second anime girl friend occupying the viewer-right third of the image, standing slightly behind the original girl; "
+                "make enough visible space for the new character and slightly shift or scale the original girl only if needed, instead of ignoring the added person; "
+                "the second girl must be visibly present from head to at least upper body, not just a shadow or background pedestrian; "
+                "make the interaction clear: the second girl gently places one hand on the original girl's shoulder, both girls look toward the camera and smile; "
+                "make the new girl match the original scene and costume context, especially if the original scene uses a festival kimono/yukata or other traditional outfit; "
+                "give the new girl a coordinated festival yukata/kimono and compatible accessories instead of modern casual clothes unless the user explicitly asks for contrast; "
+                "preserve the original girl identity, face, hairstyle, clothing, hands, pose, lighting, background, and overall scene as much as possible; "
+                "do not replace the original girl, do not merge bodies or faces, do not create two heads on one body, and do not let the interaction hand penetrate the shoulder, body, or clothing or cover either face."
+            )
         if "水手服" in text or "sailor collar" in lower:
             return (
                 "change only the visible outfit to a Japanese sailor uniform with a navy sailor collar, "
@@ -2720,11 +2731,6 @@ def register_ai_agent_routes(app, deps):
             return (
                 "change only the visible outfit to a cute little-devil cosplay costume with dark dress, red ribbon accents, "
                 "and small devil-horn hair accessories; preserve face, expression, main hairstyle, hands, pose, body, and background."
-            )
-        if "新增第二位" in text or "第二位清楚" in text or "second" in lower:
-            return (
-                "add a second clearly visible anime girl friend standing slightly behind on the right side; "
-                "preserve the original girl, her face, hair, outfit, hands, pose, body, and the overall scene."
             )
         wants_open_arms = (
             "張開雙臂" in text

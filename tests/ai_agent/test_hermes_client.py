@@ -69,6 +69,10 @@ def test_ai_agent_comfyui_hint_requires_structured_qwen_edit_instruction():
     assert "短英文直接編輯命令" in hint
     assert "prompt 只放 style/preservation context" in hint
     assert "不得把整段中文自然語言任務" in hint
+    assert "不得刪減使用者明確指定的互動" in hint
+    assert "hand on shoulder" in hint
+    assert "場景服裝語境" in hint
+    assert "festival kimono/yukata" in hint
 
 
 def test_ai_agent_base_url_rejects_credentials_query_and_fragment():

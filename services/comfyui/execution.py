@@ -717,6 +717,46 @@ def _fetch_output_with_retries(fetcher, file_ref, *, error_cls, progress_callbac
     raise last_exc
 
 
+def _output_refs_without_preview_data(output_refs, *, prompt_id, fetch_error):
+    image_refs = list(output_refs.get("images") or [])
+    media_refs = {key: list(output_refs.get(key) or []) for key in ("videos", "audio", "other")}
+    warning = str(fetch_error or "ComfyUI output preview fetch failed")[:500]
+    primary_ref = image_refs[0] if image_refs else next(item for values in media_refs.values() for item in values)
+    return {
+        "prompt_id": prompt_id,
+        "image_ref": primary_ref,
+        "mime_type": "image/png" if image_refs else _output_ref_mime_type(primary_ref, bucket="other"),
+        "data": b"",
+        "preview_warning": warning,
+        "output_fetch_failed": True,
+        "images": [
+            {
+                "image_ref": image_ref,
+                "mime_type": "image/png",
+                "data": b"",
+                "size_bytes": 0,
+                "output_node_id": image_ref.get("output_node_id") or "",
+                "output_label": image_ref.get("output_label") or "",
+                "preview_warning": warning,
+            }
+            for image_ref in image_refs
+        ],
+        "media": {
+            key: [
+                {
+                    "file_ref": file_ref,
+                    "mime_type": _output_ref_mime_type(file_ref, bucket=key),
+                    "data": b"",
+                    "size_bytes": 0,
+                    "preview_warning": warning,
+                }
+                for file_ref in values
+            ]
+            for key, values in media_refs.items()
+        },
+    }
+
+
 def generate_from_workflow(
     client,
     workflow,
@@ -820,29 +860,44 @@ def generate_from_workflow(
             },
         }
     image_refs = list(output_refs.get("images") or [])
-    images = [
-        _fetch_output_with_retries(
-            image_fetcher,
-            image_ref,
-            error_cls=error_cls,
-            progress_callback=progress_callback,
-            label="圖片",
-        )
-        for image_ref in image_refs
-    ]
-    media_outputs = {}
-    for media_key in ("videos", "audio", "other"):
-        fetcher = getattr(client, "fetch_file", None) or image_fetcher
-        media_outputs[media_key] = [
+    media_refs = {key: list(output_refs.get(key) or []) for key in ("videos", "audio", "other")}
+    try:
+        images = [
             _fetch_output_with_retries(
-                fetcher,
-                file_ref,
+                image_fetcher,
+                image_ref,
                 error_cls=error_cls,
                 progress_callback=progress_callback,
-                label="媒體輸出",
+                label="圖片",
             )
-            for file_ref in output_refs.get(media_key) or []
+            for image_ref in image_refs
         ]
+        media_outputs = {}
+        for media_key in ("videos", "audio", "other"):
+            fetcher = getattr(client, "fetch_file", None) or image_fetcher
+            media_outputs[media_key] = [
+                _fetch_output_with_retries(
+                    fetcher,
+                    file_ref,
+                    error_cls=error_cls,
+                    progress_callback=progress_callback,
+                    label="媒體輸出",
+                )
+                for file_ref in media_refs.get(media_key) or []
+            ]
+    except error_cls as exc:
+        if not image_refs and not any(media_refs.values()):
+            raise
+        emit_progress(progress_callback, {
+            "phase": "completed",
+            "percent": 100,
+            "completed": True,
+            "backend_unresponsive": True,
+            "preview_warning": str(exc)[:240],
+            "detail": "ComfyUI 已完成生成，但預覽檔讀取暫時失敗；已保留輸出檔引用，可稍後重新載入預覽。",
+            "updated_at": time.time(),
+        })
+        return _output_refs_without_preview_data(output_refs, prompt_id=prompt_id, fetch_error=exc)
     if not images and not any(media_outputs.values()):
         raise error_cls("ComfyUI 沒有回傳可用輸出檔")
     primary = images[0] if images else next(item for values in media_outputs.values() for item in values)

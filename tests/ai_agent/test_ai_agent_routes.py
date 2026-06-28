@@ -1696,9 +1696,17 @@ def test_ai_agent_comfyui_write_tool_extracts_inline_qwen_edit_instruction(tmp_p
         ),
         (
             "在原本女孩旁邊新增第二位清楚可見的 anime girl friend，站在畫面右側稍後方；"
-            "保留原本女孩的臉、髮型、衣服、手勢、身體姿勢與背景。提示詞基礎：by ogipote, anime style, 1girl。",
-            "add a second clearly visible anime girl friend",
-            "preserve the original girl",
+            "第二位女孩把手輕放在原本女孩肩上，兩人看鏡頭微笑；"
+            "保留原本女孩的臉、髮型、衣服、手勢、身體姿勢與背景，避免融合與穿模。提示詞基礎：by ogipote, anime style, 1girl。",
+            "create a new full separate second anime girl friend",
+            "coordinated festival yukata/kimono",
+        ),
+        (
+            "新增第二位清楚可見的 anime girl friend，站在畫面右側稍後方；"
+            "原圖是日式祭典街景與 kimono/yukata 語境，所以第二位也要穿協調的 festival yukata/kimono，"
+            "不能穿現代 T-shirt、短裙或校服；兩人看鏡頭微笑，手輕放肩膀。",
+            "create a new full separate second anime girl friend",
+            "instead of modern casual clothes",
         ),
         (
             "把背景改成黃昏城市屋頂，不要改人物臉、髮型、衣服或姿勢。提示詞基礎：by ogipote, anime style, 1girl。",

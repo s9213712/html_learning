@@ -515,8 +515,23 @@ def login(page, base_url: str, username: str, password: str) -> None:
 
 def open_ai_agent(page, base_url: str) -> None:
     page.goto(base_url + "/", wait_until="domcontentloaded")
-    page.locator("#tab-module-ai-agent").wait_for(state="visible", timeout=20_000)
-    page.click("#tab-module-ai-agent")
+    page.wait_for_function(
+        """() => (
+          typeof switchModuleTab === "function"
+          && typeof currentUser !== "undefined"
+          && !!currentUser
+          && typeof canAccessModule === "function"
+          && canAccessModule("ai-agent")
+          && document.querySelector("#ai-agent-input")
+        )""",
+        timeout=20_000,
+    )
+    page.evaluate(
+        """() => {
+          if (typeof syncSidebarMenuVisibility === "function") syncSidebarMenuVisibility();
+          switchModuleTab("ai-agent");
+        }"""
+    )
     page.locator("#module-ai-agent.active").wait_for(state="visible", timeout=15_000)
     page.locator("#ai-agent-input").wait_for(state="visible", timeout=15_000)
 

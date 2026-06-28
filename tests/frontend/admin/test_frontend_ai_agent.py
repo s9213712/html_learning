@@ -59,7 +59,7 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert 'id="ai-agent-comfyui-vae"' in html
     assert 'id="ai-agent-comfyui-generate-btn"' in html
     assert 'id="s-module-ai-agent-min-role"' in html
-    _warn_if_asset_cache_version_changed(html, "/js/37-ai-agent.js", "20260625-ai-agent-sdxl-inpaint-default")
+    _warn_if_asset_cache_version_changed(html, "/js/37-ai-agent.js", "20260628-ai-agent-i2i-interaction-preserve")
     _warn_if_asset_cache_version_changed(html, "/js/90-bootstrap.js", "20260611-ai-agent-comfyui-write-tool")
 
     assert '"ai-agent": "feature_ai_agent_enabled"' in core_js
@@ -196,6 +196,10 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert "Qwen Image Edit / origin_qwen_image_edit_2509 時，edit_instruction 必須是短英文直接編輯命令" in ai_agent_js
     assert "prompt 只放 style/preservation context" in ai_agent_js
     assert "不得把整段中文自然語言任務" in ai_agent_js
+    assert "Qwen Image Edit 的複合人物/物件任務不可刪減" in ai_agent_js
+    assert "hand on shoulder" in ai_agent_js
+    assert "場景服裝語境" in ai_agent_js
+    assert "festival kimono/yukata" in ai_agent_js
     assert "generation_mode=img2img" in ai_agent_js
     assert "generation_mode=inpaint" in ai_agent_js
     assert "generation_mode=outpaint" in ai_agent_js

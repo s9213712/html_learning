@@ -500,6 +500,46 @@ def test_generate_from_workflow_retries_transient_output_fetch(monkeypatch):
     assert any(event.get("phase") == "fetching_output" for event in progress_events)
 
 
+def test_generate_from_workflow_keeps_success_when_preview_fetch_times_out(monkeypatch):
+    progress_events = []
+
+    class ReadyClient:
+        timeout = 1
+
+        def _json_request(self, path, *, method="GET", payload=None, timeout=None):
+            if path == "/prompt":
+                return {"prompt_id": "prompt-preview-timeout"}
+            assert path == "/history/prompt-preview-timeout"
+            return {
+                "prompt-preview-timeout": {
+                    "status": {"completed": True, "status_str": "success"},
+                    "outputs": {"9": {"images": [{"filename": "done.png", "subfolder": "", "type": "output"}]}},
+                }
+            }
+
+    def timeout_fetcher(_image_ref):
+        raise RuntimeError("ComfyUI 圖片讀取逾時")
+
+    monkeypatch.setattr(comfy_execution.time, "sleep", lambda _seconds: None)
+
+    result = comfy_execution.generate_from_workflow(
+        ReadyClient(),
+        {"3": {"class_type": "KSampler", "inputs": {}}},
+        timeout_seconds=10,
+        expected_count=1,
+        progress_callback=progress_events.append,
+        error_cls=RuntimeError,
+        image_fetcher=timeout_fetcher,
+    )
+
+    assert result["prompt_id"] == "prompt-preview-timeout"
+    assert result["image_ref"] == {"filename": "done.png", "subfolder": "", "type": "output"}
+    assert result["output_fetch_failed"] is True
+    assert "圖片讀取逾時" in result["preview_warning"]
+    assert result["images"][0]["data"] == b""
+    assert any(event.get("phase") == "completed" and event.get("preview_warning") for event in progress_events)
+
+
 def test_generate_from_workflow_can_skip_output_fetching(monkeypatch):
     class ReadyClient:
         timeout = 1
