@@ -30,6 +30,8 @@ import chess
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
+from scripts.testing.browser_error_filters import ignored_browser_error
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ROOT_PASSWORD = "RootDeep123!"
@@ -2022,6 +2024,8 @@ def main() -> int:
 
             def record_browser_error(kind: str, text: str) -> None:
                 compact = text.replace("\n", " ")[:500]
+                if ignored_browser_error(compact):
+                    return
                 key = f"{kind}:{compact}"
                 if key in seen_browser_errors or len(browser_errors) >= 80:
                     return
