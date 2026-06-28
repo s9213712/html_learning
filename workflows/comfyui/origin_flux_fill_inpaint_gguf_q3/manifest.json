@@ -1,0 +1,366 @@
+{
+  "conversion": {
+    "allowlist_message": "",
+    "allowlist_status": "allowlisted",
+    "class_count": 13,
+    "denied_classes": [],
+    "node_count": 13,
+    "source_format": "ui_graph",
+    "source_path": "image/edit/flux_fill_inpaint_example.json",
+    "structural_status": "pass",
+    "unknown_classes": []
+  },
+  "default_params": {
+    "batch_size": 1,
+    "cfg": 1,
+    "checkpoint": "",
+    "clip": "clip_l.safetensors",
+    "controlnet": null,
+    "denoise_strength": 1,
+    "diffusion_model": "flux1-fill-dev-Q3_K_S.gguf",
+    "generation_mode": "inpaint",
+    "height": 1024,
+    "loras": [],
+    "model": "flux1-fill-dev-Q3_K_S.gguf",
+    "negative_prompt": "",
+    "prompt": "anime girl with massive fennec ears blonde hair blue eyes wearing a pink shirt",
+    "sampler_name": "euler",
+    "scheduler": "normal",
+    "seed": 190664687740330,
+    "steps": 20,
+    "upscale_model": "",
+    "vae": "ae.safetensors",
+    "width": 1024
+  },
+  "description": "Flux Fill inpaint workflow using the non-gated YarvixPA Flux Fill Dev Q3_K_S GGUF UNet through ComfyUI-GGUF. Intended as a low-VRAM mask inpaint route when the official gated safetensors model is unavailable.",
+  "id": "origin_flux_fill_inpaint_gguf_q3",
+  "name": "Flux Fill Inpaint GGUF Q3",
+  "origin_source_path": "image/edit/flux_fill_inpaint_gguf_q3.json",
+  "output_kinds": [
+    "image"
+  ],
+  "required_controlnets": [],
+  "required_custom_nodes": [
+    "ComfyUI-GGUF"
+  ],
+  "required_loras": [],
+  "required_models": [
+    {
+      "kind": "clip",
+      "name": "clip_l.safetensors"
+    },
+    {
+      "kind": "clip",
+      "name": "t5xxl_fp8_e4m3fn_scaled.safetensors"
+    },
+    {
+      "kind": "vae",
+      "name": "ae.safetensors"
+    },
+    {
+      "kind": "diffusion_model",
+      "name": "flux1-fill-dev-Q3_K_S.gguf"
+    }
+  ],
+  "schema_version": 1,
+  "source": "official_origin",
+  "source_format": "ui_graph",
+  "ui": {
+    "initial_collapsed": true,
+    "panels": [
+      {
+        "collapsed_default": true,
+        "fields": [
+          {
+            "category": "TEXT",
+            "class_type": "CLIPTextEncode",
+            "constraints": {
+              "max_length": 2000,
+              "rows": 4
+            },
+            "current_value": "anime girl with massive fennec ears blonde hair blue eyes wearing a pink shirt",
+            "id": "node:53:text",
+            "input_name": "text",
+            "input_type": "textarea",
+            "label": "正向提示詞",
+            "node_id": "53",
+            "node_title": "CLIP Text Encode (Positive Prompt)",
+            "required": true
+          },
+          {
+            "category": "TEXT",
+            "class_type": "EmbeddingShortcuts",
+            "constraints": {
+              "target_field_ids": [
+                "node:53:text"
+              ],
+              "token_prefix": "<embeddings:"
+            },
+            "current_value": "",
+            "id": "text:embeddings",
+            "input_name": "embeddings",
+            "input_type": "embedding_shortcuts",
+            "label": "Embedding 快速插入",
+            "node_id": "",
+            "parent_category": "text",
+            "required": false,
+            "synthetic": true
+          }
+        ],
+        "id": "text",
+        "label": "文字輸入"
+      },
+      {
+        "collapsed_default": true,
+        "fields": [
+          {
+            "category": "IMAGE",
+            "class_type": "LoadImage",
+            "constraints": {
+              "accept_mime": [
+                "image/png",
+                "image/jpeg",
+                "image/webp"
+              ]
+            },
+            "current_value": "flux_fill_inpaint_example_input_image.png",
+            "id": "node:17:image",
+            "input_name": "image",
+            "input_type": "file_picker",
+            "label": "上傳圖片",
+            "node_id": "17",
+            "required": true
+          },
+          {
+            "category": "IMAGE",
+            "class_type": "LoadImageMask",
+            "constraints": {
+              "accept_mime": [
+                "image/png",
+                "image/jpeg",
+                "image/webp"
+              ]
+            },
+            "current_value": "hackme_agent_i2i_mask_apple_v5_1024x1024.png",
+            "id": "node:18:image",
+            "input_name": "image",
+            "input_type": "file_picker",
+            "label": "上傳遮罩",
+            "node_id": "18",
+            "required": true
+          },
+          {
+            "category": "TEXT",
+            "class_type": "LoadImageMask",
+            "constraints": {
+              "options": [
+                "alpha",
+                "red",
+                "green",
+                "blue"
+              ]
+            },
+            "current_value": "red",
+            "id": "node:18:channel",
+            "input_name": "channel",
+            "input_type": "select",
+            "label": "遮罩通道",
+            "node_id": "18",
+            "required": true
+          }
+        ],
+        "id": "image",
+        "label": "圖片輸入"
+      },
+      {
+        "collapsed_default": true,
+        "fields": [
+          {
+            "category": "MODEL",
+            "class_type": "DualCLIPLoader",
+            "current_value": "clip_l.safetensors",
+            "id": "node:48:clip_name1",
+            "input_name": "clip_name1",
+            "input_type": "select",
+            "label": "CLIP-L 文字編碼器",
+            "lock_reason": "template_default_model",
+            "locked": true,
+            "node_id": "48",
+            "read_only": true,
+            "required": false
+          },
+          {
+            "category": "MODEL",
+            "class_type": "DualCLIPLoader",
+            "current_value": "t5xxl_fp8_e4m3fn_scaled.safetensors",
+            "id": "node:48:clip_name2",
+            "input_name": "clip_name2",
+            "input_type": "select",
+            "label": "T5 / 第二文字編碼器",
+            "lock_reason": "template_default_model",
+            "locked": true,
+            "node_id": "48",
+            "read_only": true,
+            "required": false
+          },
+          {
+            "category": "MODEL",
+            "class_type": "VAELoader",
+            "current_value": "ae.safetensors",
+            "id": "node:50:vae_name",
+            "input_name": "vae_name",
+            "input_type": "select",
+            "label": "VAE",
+            "lock_reason": "template_default_model",
+            "locked": true,
+            "node_id": "50",
+            "read_only": true,
+            "required": false
+          },
+          {
+            "category": "MODEL",
+            "class_type": "UnetLoaderGGUF",
+            "current_value": "flux1-fill-dev-Q3_K_S.gguf",
+            "id": "node:51:unet_name",
+            "input_name": "unet_name",
+            "input_type": "select",
+            "label": "GGUF Diffusion / UNet 大模型",
+            "lock_reason": "template_default_model",
+            "locked": true,
+            "node_id": "51",
+            "read_only": true,
+            "required": true
+          }
+        ],
+        "id": "model",
+        "label": "模型需求"
+      },
+      {
+        "collapsed_default": true,
+        "fields": [
+          {
+            "category": "NUMERIC",
+            "class_type": "KSampler",
+            "constraints": {
+              "max": 9007199254740992,
+              "min": 0,
+              "step": 1
+            },
+            "current_value": 190664687740330,
+            "id": "node:57:seed",
+            "input_name": "seed",
+            "input_type": "number",
+            "label": "種子",
+            "node_id": "57",
+            "required": true
+          },
+          {
+            "category": "NUMERIC",
+            "class_type": "KSampler",
+            "constraints": {
+              "max": 150,
+              "min": 1,
+              "step": 1
+            },
+            "current_value": 20,
+            "id": "node:57:steps",
+            "input_name": "steps",
+            "input_type": "number",
+            "label": "步數",
+            "node_id": "57",
+            "required": true
+          },
+          {
+            "category": "NUMERIC",
+            "class_type": "KSampler",
+            "constraints": {
+              "max": 30.0,
+              "min": 0.5,
+              "step": 0.1
+            },
+            "current_value": 1,
+            "id": "node:57:cfg",
+            "input_name": "cfg",
+            "input_type": "number",
+            "label": "CFG",
+            "node_id": "57",
+            "required": true
+          },
+          {
+            "category": "SAMPLER",
+            "class_type": "KSampler",
+            "current_value": "euler",
+            "id": "node:57:sampler_name",
+            "input_name": "sampler_name",
+            "input_type": "select",
+            "label": "取樣器",
+            "node_id": "57",
+            "required": true
+          },
+          {
+            "category": "SAMPLER",
+            "class_type": "KSampler",
+            "current_value": "normal",
+            "id": "node:57:scheduler",
+            "input_name": "scheduler",
+            "input_type": "select",
+            "label": "排程器",
+            "node_id": "57",
+            "required": true
+          },
+          {
+            "category": "NUMERIC",
+            "class_type": "KSampler",
+            "constraints": {
+              "max": 1.0,
+              "min": 0.0,
+              "step": 0.05
+            },
+            "current_value": 1,
+            "id": "node:57:denoise",
+            "input_name": "denoise",
+            "input_type": "number",
+            "label": "Denoise",
+            "node_id": "57",
+            "required": true
+          }
+        ],
+        "id": "sampler",
+        "label": "採樣設定"
+      },
+      {
+        "collapsed_default": true,
+        "fields": [
+          {
+            "category": "NUMERIC",
+            "class_type": "FluxGuidance",
+            "current_value": 3.5,
+            "id": "node:49:guidance",
+            "input_name": "guidance",
+            "input_type": "number",
+            "label": "Flux Guidance",
+            "node_id": "49",
+            "required": true
+          }
+        ],
+        "id": "numeric",
+        "label": "進階數值參數"
+      },
+      {
+        "collapsed_default": false,
+        "fields": [],
+        "id": "compatibility",
+        "label": "相容性報告",
+        "read_only": true
+      },
+      {
+        "collapsed_default": true,
+        "fields": [],
+        "id": "raw",
+        "label": "原始 workflow",
+        "read_only": true
+      }
+    ]
+  },
+  "workflow_file": "workflow.json"
+}

@@ -2079,46 +2079,57 @@
 
     .ai-agent-layout {
       display: grid;
-      grid-template-columns: minmax(0, 1fr) minmax(260px, 340px);
+      grid-template-columns: minmax(0, 1fr) minmax(280px, 360px);
       gap: 1rem;
       align-items: start;
     }
 
     .ai-agent-chat-panel {
       min-width: 0;
+      display: flex;
+      flex-direction: column;
+      min-height: min(760px, calc(100vh - 190px));
+      overflow: hidden;
     }
 
     .ai-agent-thread {
-      min-height: 320px;
-      max-height: 52vh;
+      min-height: 360px;
+      max-height: min(58vh, 620px);
+      flex: 1 1 auto;
       overflow: auto;
       display: flex;
       flex-direction: column;
       gap: .65rem;
-      padding: .25rem;
+      padding: .8rem;
       margin: .7rem 0;
+      border: 1px solid rgba(255,255,255,.08);
+      border-radius: 8px;
+      background: rgba(0,0,0,.14);
+      scroll-behavior: smooth;
     }
 
     .ai-agent-message {
-      max-width: min(760px, 92%);
+      max-width: min(780px, 88%);
       border: 1px solid var(--border);
       border-radius: 8px;
-      padding: .65rem .75rem;
+      padding: .68rem .78rem;
       background: rgba(255,255,255,.045);
       overflow-wrap: anywhere;
+      word-break: break-word;
       white-space: pre-wrap;
+      box-shadow: 0 10px 22px rgba(0,0,0,.13);
     }
 
     .ai-agent-message.user {
       align-self: flex-end;
       border-color: rgba(122,123,220,.42);
-      background: rgba(122,123,220,.14);
+      background: linear-gradient(180deg, rgba(122,123,220,.18), rgba(122,123,220,.10));
     }
 
     .ai-agent-message.assistant {
       align-self: flex-start;
       border-color: rgba(67,182,160,.36);
-      background: rgba(67,182,160,.11);
+      background: linear-gradient(180deg, rgba(67,182,160,.14), rgba(67,182,160,.08));
     }
 
     .ai-agent-message-role {
@@ -2129,6 +2140,15 @@
 
     .ai-agent-message-body {
       line-height: 1.5;
+      font-size: .94rem;
+    }
+
+    .ai-agent-message-meta {
+      margin-top: .45rem;
+      color: var(--muted);
+      font-size: .72rem;
+      line-height: 1.35;
+      white-space: normal;
     }
 
     .ai-agent-image-results {
@@ -2182,7 +2202,24 @@
 
     .ai-agent-composer textarea {
       resize: vertical;
-      min-height: 130px;
+      min-height: 104px;
+      max-height: 38vh;
+      line-height: 1.45;
+    }
+
+    .ai-agent-composer {
+      border: 1px solid rgba(255,255,255,.08);
+      border-radius: 8px;
+      padding: .75rem;
+      background: rgba(255,255,255,.025);
+    }
+
+    .ai-agent-composer .grid2 {
+      align-items: end;
+    }
+
+    .ai-agent-composer .edit-user-actions {
+      justify-content: flex-end;
     }
 
     .ai-agent-tool-panel {
@@ -2207,6 +2244,12 @@
       align-items: center;
       gap: .55rem;
       margin: .45rem 0 .6rem;
+    }
+
+    .ai-agent-attachment-row .drive-card-sub {
+      min-width: 0;
+      overflow-wrap: anywhere;
+      line-height: 1.35;
     }
 
     .ai-agent-kv {
@@ -16328,18 +16371,87 @@
 
   .ai-agent-layout {
     grid-template-columns: 1fr;
+    gap: .75rem;
   }
 
   .grid3 {
     grid-template-columns: 1fr;
   }
 
+  .ai-agent-chat-panel {
+    min-height: auto;
+  }
+
+  .ai-agent-chat-panel > .drive-card-heading {
+    gap: .6rem;
+    align-items: flex-start;
+  }
+
+  .ai-agent-chat-panel > .drive-card-heading .edit-user-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
   .ai-agent-thread {
     min-height: 260px;
-    max-height: 48vh;
+    max-height: 46vh;
+    padding: .55rem;
+    margin: .55rem 0;
   }
 
   .ai-agent-message {
-    max-width: 100%;
+    max-width: 96%;
+    padding: .62rem .68rem;
+  }
+
+  .ai-agent-message.user {
+    max-width: 94%;
+  }
+
+  .ai-agent-composer {
+    padding: .62rem;
+  }
+
+  .ai-agent-composer .grid2,
+  .ai-agent-tool-form .grid2,
+  .ai-agent-tool-form .grid3 {
+    grid-template-columns: 1fr;
+  }
+
+  .ai-agent-composer textarea {
+    min-height: 92px;
+    max-height: 34vh;
+  }
+
+  .ai-agent-attachment-row {
+    align-items: stretch;
+  }
+
+  .ai-agent-attachment-row .btn,
+  .ai-agent-composer .edit-user-actions .btn {
+    width: 100%;
+  }
+
+  .ai-agent-side-panel {
+    max-height: none;
+  }
+
+  .ai-agent-kv {
+    grid-template-columns: 1fr;
+    gap: .2rem;
+  }
+
+  .ai-agent-kv strong {
+    margin-bottom: .35rem;
+  }
+
+  .ai-agent-readonly-panel,
+  .ai-agent-readonly-section,
+  .ai-agent-tool-selector-list {
+    max-height: 220px;
+  }
+
+  .ai-agent-tool-selector-row {
+    grid-template-columns: auto minmax(0, 1fr);
   }
 }

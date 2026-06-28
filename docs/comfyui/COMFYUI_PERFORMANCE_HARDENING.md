@@ -9,7 +9,7 @@ interrupts must not keep the main Flask request waiting for the full operation.
   returns immediately with `async=true` and `job.job_id`.
 - The browser polls `GET /api/comfyui/jobs/<job_id>` for progress and results.
 - The default generation worker timeout is bounded by
-  `COMFYUI_GENERATION_TIMEOUT_SECONDS` (`1800` seconds by default).
+  `COMFYUI_GENERATION_TIMEOUT_SECONDS` (`0` / unlimited by default).
 - Backend HTTP calls use `COMFYUI_BACKEND_REQUEST_TIMEOUT_SECONDS` (`8` seconds
   by default) so a stalled ComfyUI process cannot leave worker calls hanging for
   the old long default.
@@ -18,9 +18,13 @@ interrupts must not keep the main Flask request waiting for the full operation.
   default). Normal users still avoid global interrupt when another user's job is
   active on the same backend.
 - If a queued/running job stops reporting progress longer than
-  `COMFYUI_JOB_STALE_SECONDS` (`90` seconds by default), the job status payload
+  `COMFYUI_JOB_STALE_SECONDS` (`1500` seconds by default), the job status payload
   marks progress as `backend_unresponsive` so the UI can show that ComfyUI may
   be loading a large model or under disk/VRAM pressure.
+- A queued/running job is only marked failed after
+  `COMFYUI_BACKEND_UNRESPONSIVE_FAIL_SECONDS` (`7200` seconds by default) with
+  no new progress, which avoids treating low-VRAM Qwen Image Edit steps as a
+  crash.
 - `GET /api/comfyui/status` and `GET /api/comfyui/models` include
   `storage_warnings` when the configured ComfyUI project/model path is under
   `/mnt/*`.

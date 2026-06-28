@@ -1,0 +1,154 @@
+{
+  "17": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "flux_fill_inpaint_example_input_image.png",
+      "upload": "image"
+    }
+  },
+  "18": {
+    "class_type": "LoadImageMask",
+    "inputs": {
+      "channel": "red",
+      "image": "hackme_agent_i2i_mask_apple_v5_1024x1024.png"
+    }
+  },
+  "48": {
+    "class_type": "DualCLIPLoader",
+    "inputs": {
+      "clip_name1": "clip_l.safetensors",
+      "clip_name2": "t5xxl_fp8_e4m3fn_scaled.safetensors",
+      "device": "default",
+      "type": "flux"
+    }
+  },
+  "49": {
+    "class_type": "FluxGuidance",
+    "inputs": {
+      "conditioning": [
+        "53",
+        0
+      ],
+      "guidance": 3.5
+    }
+  },
+  "50": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "ae.safetensors"
+    }
+  },
+  "51": {
+    "class_type": "UnetLoaderGGUF",
+    "inputs": {
+      "unet_name": "flux1-fill-dev-Q3_K_S.gguf"
+    }
+  },
+  "52": {
+    "class_type": "ConditioningZeroOut",
+    "inputs": {
+      "conditioning": [
+        "53",
+        0
+      ]
+    }
+  },
+  "53": {
+    "_meta": {
+      "title": "CLIP Text Encode (Positive Prompt)"
+    },
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": [
+        "48",
+        0
+      ],
+      "text": "anime girl with massive fennec ears blonde hair blue eyes wearing a pink shirt"
+    }
+  },
+  "54": {
+    "class_type": "DifferentialDiffusion",
+    "inputs": {
+      "model": [
+        "51",
+        0
+      ]
+    }
+  },
+  "55": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": [
+        "57",
+        0
+      ],
+      "vae": [
+        "50",
+        0
+      ]
+    }
+  },
+  "56": {
+    "class_type": "InpaintModelConditioning",
+    "inputs": {
+      "mask": [
+        "18",
+        0
+      ],
+      "negative": [
+        "52",
+        0
+      ],
+      "noise_mask": true,
+      "pixels": [
+        "17",
+        0
+      ],
+      "positive": [
+        "49",
+        0
+      ],
+      "vae": [
+        "50",
+        0
+      ]
+    }
+  },
+  "57": {
+    "class_type": "KSampler",
+    "inputs": {
+      "cfg": 1,
+      "denoise": 1,
+      "latent_image": [
+        "56",
+        2
+      ],
+      "model": [
+        "54",
+        0
+      ],
+      "negative": [
+        "56",
+        1
+      ],
+      "positive": [
+        "56",
+        0
+      ],
+      "sampler_name": "euler",
+      "scheduler": "normal",
+      "seed": 190664687740330,
+      "steps": 20
+    }
+  },
+  "9": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "filename_prefix": "ComfyUI",
+      "images": [
+        "55",
+        0
+      ]
+    }
+  }
+}

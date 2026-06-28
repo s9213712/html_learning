@@ -7,6 +7,7 @@ from urllib import error as urllib_error
 
 from services.ai_agent.hermes import (
     AiAgentError,
+    AI_AGENT_TOOL_ARGUMENT_HINTS,
     ai_agent_capabilities,
     ai_agent_effective_tools,
     ai_agent_operation_mode_policy,
@@ -58,6 +59,16 @@ def test_ai_agent_public_settings_default_prompt_limit_is_relaxed():
     payload = public_ai_agent_settings({})
 
     assert payload["max_prompt_chars"] == 80000
+
+
+def test_ai_agent_comfyui_hint_requires_structured_qwen_edit_instruction():
+    hint = AI_AGENT_TOOL_ARGUMENT_HINTS["write_comfyui_generate"]
+
+    assert "Qwen Image Edit / origin_qwen_image_edit_2509" in hint
+    assert "必須提供 edit_instruction" in hint
+    assert "短英文直接編輯命令" in hint
+    assert "prompt 只放 style/preservation context" in hint
+    assert "不得把整段中文自然語言任務" in hint
 
 
 def test_ai_agent_base_url_rejects_credentials_query_and_fragment():
@@ -139,6 +150,17 @@ def test_ai_agent_multimodal_messages_are_openai_compatible():
             {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}},
         ],
     }]
+
+
+def test_ai_agent_multimodal_accepts_1920_png_sized_data_url():
+    data_url = "data:image/png;base64," + ("a" * (4 * 1024 * 1024))
+    messages = _normalize_chat_messages(
+        [{"role": "user", "content": "judge this generated image"}],
+        image_data_url=data_url,
+        allow_image_input=True,
+    )
+
+    assert messages[0]["content"][1]["image_url"]["url"] == data_url
 
 
 def test_ai_agent_rejects_image_when_disabled():
@@ -605,8 +627,10 @@ def test_ai_agent_operation_mode_normalizes_and_keeps_allowed_models():
 
     assert normalize_ai_agent_allowed_models("model-a,model-b") == "model-a,model-b"
     assert normalize_ai_agent_allowed_models(["model-a", "model-b", "model-a"]) == "model-a,model-b"
+    assert normalize_ai_agent_allowed_models("gpt-oss:120b-cloud,qwen3-vl:235b-instruct-cloud,qwen3.5:cloud") == "gpt-oss:120b-cloud,qwen3.5:cloud"
     assert normalize_ai_agent_allowed_models("  ") == ""
     assert normalize_ai_agent_allowed_models("model\nx") is None
+    assert normalize_ai_agent_model("qwen3-vl:235b-instruct-cloud") is None
     assert normalize_ai_agent_allowed_tools("check_resource_state,audit_scan") == "check_resource_state,audit_scan"
     assert normalize_ai_agent_allowed_tools("__none__") == "__none__"
     assert normalize_ai_agent_allowed_tools("__none__,audit_scan") is None

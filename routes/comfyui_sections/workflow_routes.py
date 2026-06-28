@@ -55,6 +55,11 @@ _OFFICIAL_TEMPLATE_MEDIA_MIME_BY_EXT = {
 }
 
 
+def _is_qwen_image_edit_2509_family(system_bundle_id):
+    value = str(system_bundle_id or "").strip()
+    return value == "origin_qwen_image_edit_2509" or value.startswith("origin_qwen_image_edit_2509_")
+
+
 def _official_template_media_path(name):
     clean_name = Path(str(name or "").strip()).name
     if not clean_name:
@@ -320,6 +325,29 @@ def register_comfyui_workflow_routes(app, ctx):
                     continue
                 inputs[key] = value
         return patched
+
+    def _apply_qwen_edit_reference_policy(workflow_json, *, system_bundle_id, image_field_assignments):
+        if not _is_qwen_image_edit_2509_family(system_bundle_id):
+            return workflow_json, False
+        if not isinstance(workflow_json, dict):
+            return workflow_json, False
+        prompt_node = workflow_json.get("494")
+        prompt_inputs = prompt_node.get("inputs") if isinstance(prompt_node, dict) else None
+        if not isinstance(prompt_inputs, dict):
+            return workflow_json, False
+        has_reference_image = "79" in {str(key) for key in (image_field_assignments or {}).keys()}
+        if has_reference_image:
+            if prompt_inputs.get("image2") == ["79", 0]:
+                return workflow_json, False
+            patched = json.loads(json.dumps(workflow_json))
+            patched["494"].setdefault("inputs", {})["image2"] = ["79", 0]
+            return patched, True
+        if "image2" not in prompt_inputs and "79" not in workflow_json:
+            return workflow_json, False
+        patched = json.loads(json.dumps(workflow_json))
+        patched["494"].setdefault("inputs", {}).pop("image2", None)
+        patched.pop("79", None)
+        return patched, True
 
     def _workflow_request_int(value, fallback, minimum, maximum):
         try:
@@ -976,8 +1004,13 @@ def register_comfyui_workflow_routes(app, ctx):
             default_params = parse_json_field(row["default_params_json"], {}) or {}
             preserved_seed = default_params.get("seed")
             workflow_json = apply_workflow_compatibility_fixes(parse_json_field(row["workflow_json"], {}) or {})
+            workflow_json, qwen_reference_changed = _apply_qwen_edit_reference_policy(
+                workflow_json,
+                system_bundle_id=row["system_bundle_id"],
+                image_field_assignments=image_field_assignments,
+            )
             runtime_dependency_row = row
-            runtime_workflow_changed = False
+            runtime_workflow_changed = bool(qwen_reference_changed)
             if is_upscale_breakpoint_workflow_id(row["system_bundle_id"]):
                 if not upscale_breakpoint:
                     default_upscale_mode = str(default_params.get("upscale_mode") or default_params.get("upscale_breakpoint") or "").strip()
@@ -1204,6 +1237,23 @@ def register_comfyui_workflow_routes(app, ctx):
                     return paid_api_error
 
             workflow_run_params = _workflow_snapshot_params(default_params, workflow_json)
+            requested_width = _workflow_request_int(
+                body.get("requested_width") or body.get("output_width") or body.get("width"),
+                0,
+                0,
+                4096,
+            )
+            requested_height = _workflow_request_int(
+                body.get("requested_height") or body.get("output_height") or body.get("height"),
+                0,
+                0,
+                4096,
+            )
+            if requested_width and requested_height:
+                workflow_run_params["requested_width"] = requested_width
+                workflow_run_params["requested_height"] = requested_height
+                workflow_run_params["output_width"] = requested_width
+                workflow_run_params["output_height"] = requested_height
             if seed_after_generate != "random" and preserved_seed is not None and not has_seed_patch:
                 workflow_run_params["seed"] = preserved_seed
             workflow_run_params["seed_after_generate"] = seed_after_generate

@@ -370,7 +370,8 @@ def test_flask_base_security_guardrails_are_configured():
     assert '"HACKME_PUBLIC_HOST"' in server
     assert '"HACKME_DEV_PUBLIC_HOST"' in server
     assert 'host_with_port = f"{host}:{port}"' in server
-    assert 'TRUSTED_HOSTS_DISABLED = _env_bool("HTML_LEARNING_DISABLE_TRUSTED_HOSTS", default=False)' in server
+    assert 'TRUSTED_HOST_CHECKS_ENABLED = _db_bool_setting(' in server
+    assert '"trusted_host_checks_enabled"' in server
     assert "if TRUSTED_HOSTS_DISABLED:" in server
     assert 'request_obj.headers.get("X-Maintenance-Bypass-Token", "")' in request_guards
     assert 'request_obj.args.get("maintenance_bypass_token"' not in request_guards

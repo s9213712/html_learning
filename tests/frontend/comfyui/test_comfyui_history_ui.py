@@ -70,7 +70,22 @@ def test_history_apply_restores_full_generation_payload():
     assert '"workflow_preset_id": int(row["preset_id"]),' in runtime_routes
     assert '@app.route("/api/comfyui/resources", methods=["GET"])' in runtime_routes
     assert 'workflow_run_params["workflow_preset_id"] = int(preset_id)' in workflow_routes
+    assert 'workflow_run_params["requested_width"] = requested_width' in workflow_routes
+    assert 'workflow_run_params["requested_height"] = requested_height' in workflow_routes
+    assert 'workflow_run_params["output_width"] = requested_width' in workflow_routes
+    assert 'workflow_run_params["output_height"] = requested_height' in workflow_routes
     assert 'workflow_json, vae_changed = _apply_workflow_vae_override(workflow_json, selected_vae)' in workflow_routes
+
+
+def test_qwen_edit_resize_prefers_requested_output_dimensions():
+    routes = _read("routes/comfyui.py")
+
+    assert '(params or {}).get("requested_width")' in routes
+    assert '(params or {}).get("requested_height")' in routes
+    assert 'or (params or {}).get("output_width")' in routes
+    assert 'or (params or {}).get("output_height")' in routes
+    assert 'or (params or {}).get("width")' in routes
+    assert 'or (params or {}).get("height")' in routes
 
 
 def test_load_last_settings_restores_template_mode_checkbox_and_dynamic_template_state():

@@ -22,6 +22,7 @@ import os
 import shutil
 from pathlib import Path
 from typing import Iterable
+import json
 
 
 REPO_SOURCE_DIR = Path(__file__).resolve().parents[3] / "workflows" / "comfyui"
@@ -32,9 +33,14 @@ SYSTEM_WORKFLOW_IDS = (
     "origin_sd35_large_depth_controlnet",
     "origin_capybara_image_edit",
     "origin_qwen_image_edit_2509",
+    "origin_qwen_image_edit_2509_anything2real",
+    "origin_qwen_image_edit_gguf_lite",
+    "origin_sdxl_checkpoint_inpaint",
     "origin_flux_fill_inpaint",
+    "origin_flux_fill_inpaint_gguf_q3",
     "origin_one_click_anime_to_real",
     "origin_flux_fill_outpaint",
+    "origin_flux_fill_outpaint_gguf_q3",
     "origin_anima_txt2img",
     "origin_sd35_txt2img",
     "origin_sdxl_txt2img",
@@ -54,6 +60,11 @@ SYSTEM_WORKFLOW_IDS = (
     "origin_wan22_14b_i2v_subgraphed",
     "origin_ltx23_t2v",
 )
+
+
+QWEN_IMAGE_EDIT_2509_REFERENCE_NODE_ID = "79"
+QWEN_IMAGE_EDIT_2509_PROMPT_NODE_ID = "494"
+QWEN_IMAGE_EDIT_2509_REFERENCE_IMAGE = "image_qwen_image_edit_2509_reference_image.png"
 
 
 def _runtime_root() -> Path:
@@ -115,9 +126,12 @@ def seed_default_comfyui_workflows(
 
     copied: list[str] = []
     skipped: list[str] = []
+    repaired: list[str] = []
     for src in source_dirs:
         dst = target / src.name
         if dst.exists() and _is_complete_workflow_dir(dst) and not overwrite:
+            if _repair_runtime_system_workflow_if_needed(src, dst):
+                repaired.append(src.name)
             skipped.append(src.name)
             continue
         # Either dst is partial/corrupt (always replace) or overwrite=True.
@@ -131,8 +145,67 @@ def seed_default_comfyui_workflows(
         "runtime_count": _list_runtime_count(target),
         "copied": copied,
         "skipped": skipped,
+        "repaired": repaired,
         "destination": str(target),
     }
+
+
+def _repair_runtime_system_workflow_if_needed(source_dir: Path, runtime_dir: Path) -> bool:
+    """Apply narrow migrations for official runtime bundles shipped by the repo.
+
+    Runtime bundles are intentionally not overwritten on every boot because an
+    operator may tune them. Some official workflow updates are structural
+    compatibility fixes, though, and stale runtime copies silently drop newer
+    capabilities. Keep those migrations explicit and conservative.
+    """
+    if source_dir.name != "origin_qwen_image_edit_2509":
+        return False
+    source_workflow_path = source_dir / "workflow.json"
+    runtime_workflow_path = runtime_dir / "workflow.json"
+    if not source_workflow_path.is_file() or not runtime_workflow_path.is_file():
+        return False
+    try:
+        source_workflow = json.loads(source_workflow_path.read_text(encoding="utf-8"))
+        runtime_workflow = json.loads(runtime_workflow_path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    if not isinstance(source_workflow, dict) or not isinstance(runtime_workflow, dict):
+        return False
+
+    source_reference_node = source_workflow.get(QWEN_IMAGE_EDIT_2509_REFERENCE_NODE_ID)
+    source_prompt_node = source_workflow.get(QWEN_IMAGE_EDIT_2509_PROMPT_NODE_ID)
+    if not isinstance(source_reference_node, dict) or not isinstance(source_prompt_node, dict):
+        return False
+    source_prompt_inputs = source_prompt_node.get("inputs")
+    if not isinstance(source_prompt_inputs, dict):
+        return False
+    source_image2 = source_prompt_inputs.get("image2")
+
+    runtime_prompt_node = runtime_workflow.get(QWEN_IMAGE_EDIT_2509_PROMPT_NODE_ID)
+    runtime_prompt_inputs = runtime_prompt_node.get("inputs") if isinstance(runtime_prompt_node, dict) else None
+    runtime_image2 = runtime_prompt_inputs.get("image2") if isinstance(runtime_prompt_inputs, dict) else None
+    if (
+        runtime_workflow.get(QWEN_IMAGE_EDIT_2509_REFERENCE_NODE_ID) == source_reference_node
+        and isinstance(runtime_prompt_inputs, dict)
+        and runtime_image2 == source_image2
+    ):
+        return False
+
+    runtime_workflow[QWEN_IMAGE_EDIT_2509_REFERENCE_NODE_ID] = source_reference_node
+    if not isinstance(runtime_prompt_inputs, dict):
+        runtime_prompt_inputs = {}
+        if isinstance(runtime_prompt_node, dict):
+            runtime_prompt_node["inputs"] = runtime_prompt_inputs
+    if isinstance(runtime_prompt_inputs, dict):
+        if source_image2 == [QWEN_IMAGE_EDIT_2509_REFERENCE_NODE_ID, 0]:
+            runtime_prompt_inputs["image2"] = source_image2
+        else:
+            runtime_prompt_inputs.pop("image2", None)
+    runtime_workflow_path.write_text(
+        json.dumps(runtime_workflow, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return True
 
 
 def _list_runtime_count(target: Path) -> int:

@@ -1,0 +1,298 @@
+{
+  "conversion": {
+    "allowlist_message": "",
+    "allowlist_status": "allowlisted",
+    "class_count": 8,
+    "denied_classes": [],
+    "node_count": 9,
+    "source_format": "api_prompt",
+    "source_path": "image/edit/sdxl_checkpoint_inpaint_local.json",
+    "structural_status": "pass",
+    "unknown_classes": []
+  },
+  "default_params": {
+    "batch_size": 1,
+    "cfg": 7,
+    "checkpoint": "JANKUTrainedChenkinNoobai_v777.safetensors",
+    "clip": "",
+    "controlnet": null,
+    "denoise_strength": 0.85,
+    "diffusion_model": "",
+    "generation_mode": "inpaint",
+    "height": 1024,
+    "loras": [],
+    "model": "JANKUTrainedChenkinNoobai_v777.safetensors",
+    "negative_prompt": "text, watermark, logo, signature, blurry, low quality, bad anatomy, bad hands, extra fingers, apple, red apple, red fruit",
+    "prompt": "by ogipote, anime style, 1girl, detailed SDXL anime illustration, small ceramic potted plant with brown soil and green leaves on the tabletop",
+    "sampler_name": "dpmpp_2m",
+    "scheduler": "karras",
+    "seed": 315392766550091,
+    "steps": 18,
+    "upscale_model": "",
+    "vae": "",
+    "width": 1024
+  },
+  "description": "Local SDXL checkpoint inpaint workflow that uses an installed checkpoint plus LoadImageMask/VAEEncodeForInpaint. It provides a runnable inpaint fallback when Flux Fill models are not installed.",
+  "id": "origin_sdxl_checkpoint_inpaint",
+  "name": "SDXL Checkpoint Inpaint (Local)",
+  "origin_source_path": "image/edit/sdxl_checkpoint_inpaint_local.json",
+  "output_kinds": [
+    "image"
+  ],
+  "required_controlnets": [],
+  "required_custom_nodes": [],
+  "required_loras": [],
+  "required_models": [
+    {
+      "kind": "checkpoint",
+      "name": "JANKUTrainedChenkinNoobai_v777.safetensors"
+    }
+  ],
+  "schema_version": 1,
+  "source": "project_local",
+  "source_format": "api_prompt",
+  "ui": {
+    "initial_collapsed": true,
+    "panels": [
+      {
+        "collapsed_default": true,
+        "fields": [
+          {
+            "category": "TEXT",
+            "class_type": "CLIPTextEncode",
+            "constraints": {
+              "max_length": 2000,
+              "rows": 4
+            },
+            "current_value": "by ogipote, anime style, 1girl, detailed SDXL anime illustration, small ceramic potted plant with brown soil and green leaves on the tabletop",
+            "id": "node:4:text",
+            "input_name": "text",
+            "input_type": "textarea",
+            "label": "正向提示詞",
+            "node_id": "4",
+            "required": true
+          },
+          {
+            "category": "TEXT",
+            "class_type": "CLIPTextEncode",
+            "constraints": {
+              "max_length": 2000,
+              "rows": 4
+            },
+            "current_value": "text, watermark, logo, signature, blurry, low quality, bad anatomy, bad hands, extra fingers, apple, red apple, red fruit",
+            "id": "node:5:text",
+            "input_name": "text",
+            "input_type": "textarea",
+            "label": "負面提示詞",
+            "node_id": "5",
+            "required": true
+          },
+          {
+            "category": "TEXT",
+            "class_type": "EmbeddingShortcuts",
+            "constraints": {
+              "target_field_ids": [
+                "node:4:text",
+                "node:5:text"
+              ],
+              "token_prefix": "<embeddings:"
+            },
+            "current_value": "",
+            "id": "text:embeddings",
+            "input_name": "embeddings",
+            "input_type": "embedding_shortcuts",
+            "label": "Embedding 快速插入",
+            "node_id": "",
+            "parent_category": "text",
+            "required": false,
+            "synthetic": true
+          }
+        ],
+        "id": "text",
+        "label": "文字輸入"
+      },
+      {
+        "collapsed_default": true,
+        "fields": [
+          {
+            "category": "IMAGE",
+            "class_type": "LoadImage",
+            "constraints": {
+              "accept_mime": [
+                "image/png",
+                "image/jpeg",
+                "image/webp"
+              ]
+            },
+            "current_value": "hackme_agent_i2i_source_v5_1024x1024.png",
+            "id": "node:1:image",
+            "input_name": "image",
+            "input_type": "file_picker",
+            "label": "來源圖片",
+            "node_id": "1",
+            "required": true
+          },
+          {
+            "category": "IMAGE",
+            "class_type": "LoadImageMask",
+            "constraints": {
+              "accept_mime": [
+                "image/png",
+                "image/jpeg",
+                "image/webp"
+              ]
+            },
+            "current_value": "hackme_agent_i2i_mask_apple_v5_1024x1024.png",
+            "id": "node:2:image",
+            "input_name": "image",
+            "input_type": "file_picker",
+            "label": "遮罩圖片",
+            "node_id": "2",
+            "required": true
+          },
+          {
+            "category": "IMAGE",
+            "class_type": "LoadImageMask",
+            "current_value": "red",
+            "id": "node:2:channel",
+            "input_name": "channel",
+            "input_type": "select",
+            "label": "遮罩通道",
+            "node_id": "2",
+            "required": true
+          }
+        ],
+        "id": "image",
+        "label": "圖片輸入"
+      },
+      {
+        "collapsed_default": true,
+        "fields": [
+          {
+            "category": "MODEL",
+            "class_type": "CheckpointLoaderSimple",
+            "current_value": "JANKUTrainedChenkinNoobai_v777.safetensors",
+            "id": "node:3:ckpt_name",
+            "input_name": "ckpt_name",
+            "input_type": "select",
+            "label": "Checkpoint / 大模型",
+            "node_id": "3",
+            "required": true
+          }
+        ],
+        "id": "model",
+        "label": "模型需求"
+      },
+      {
+        "collapsed_default": true,
+        "fields": [
+          {
+            "category": "NUMERIC",
+            "class_type": "KSampler",
+            "constraints": {
+              "max": 18446744073709551615,
+              "min": 0,
+              "step": 1
+            },
+            "current_value": 315392766550091,
+            "id": "node:7:seed",
+            "input_name": "seed",
+            "input_type": "number",
+            "label": "種子",
+            "node_id": "7",
+            "required": true
+          },
+          {
+            "category": "NUMERIC",
+            "class_type": "KSampler",
+            "constraints": {
+              "max": 10000,
+              "min": 1,
+              "step": 1
+            },
+            "current_value": 18,
+            "id": "node:7:steps",
+            "input_name": "steps",
+            "input_type": "number",
+            "label": "步數",
+            "node_id": "7",
+            "required": true
+          },
+          {
+            "category": "NUMERIC",
+            "class_type": "KSampler",
+            "constraints": {
+              "max": 100,
+              "min": 0,
+              "step": 0.1
+            },
+            "current_value": 7,
+            "id": "node:7:cfg",
+            "input_name": "cfg",
+            "input_type": "number",
+            "label": "CFG",
+            "node_id": "7",
+            "required": true
+          },
+          {
+            "category": "NUMERIC",
+            "class_type": "KSampler",
+            "constraints": {
+              "max": 1,
+              "min": 0,
+              "step": 0.01
+            },
+            "current_value": 0.85,
+            "id": "node:7:denoise",
+            "input_name": "denoise",
+            "input_type": "number",
+            "label": "重繪強度",
+            "node_id": "7",
+            "required": true
+          },
+          {
+            "category": "SAMPLER",
+            "class_type": "KSampler",
+            "current_value": "dpmpp_2m",
+            "id": "node:7:sampler_name",
+            "input_name": "sampler_name",
+            "input_type": "select",
+            "label": "採樣器",
+            "node_id": "7",
+            "required": true
+          },
+          {
+            "category": "SAMPLER",
+            "class_type": "KSampler",
+            "current_value": "karras",
+            "id": "node:7:scheduler",
+            "input_name": "scheduler",
+            "input_type": "select",
+            "label": "Scheduler",
+            "node_id": "7",
+            "required": true
+          },
+          {
+            "category": "NUMERIC",
+            "class_type": "VAEEncodeForInpaint",
+            "constraints": {
+              "max": 64,
+              "min": 0,
+              "step": 1
+            },
+            "current_value": 8,
+            "id": "node:6:grow_mask_by",
+            "input_name": "grow_mask_by",
+            "input_type": "number",
+            "label": "遮罩擴張",
+            "node_id": "6",
+            "required": true
+          }
+        ],
+        "id": "sampler",
+        "label": "採樣設定"
+      }
+    ]
+  },
+  "workflow_file": "workflow.json"
+}

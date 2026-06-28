@@ -1,3 +1,4 @@
+import base64
 import io
 import importlib.util
 import json
@@ -433,6 +434,36 @@ class FailingComfyUIClient(FakeComfyUIClient):
         from services.comfyui.client import ComfyUIError
 
         raise ComfyUIError("ComfyUI 產圖失敗")
+
+
+class BlackImageComfyUIClient(FakeComfyUIClient):
+    def generate_image(self, params, *, timeout_seconds=180, progress_callback=None, fetch_outputs=True):
+        if progress_callback:
+            progress_callback({
+                "phase": "running",
+                "percent": 80,
+                "current": 1,
+                "max": 1,
+                "current_node": "save",
+                "detail": "產生輸出中",
+                "queue_remaining": 0,
+            })
+        data = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADUlEQVR42mNgYGD4DwABBAEA"
+            "gh6FOQAAAABJRU5ErkJggg=="
+        )
+        image_ref = {"filename": "black_00001_.png", "subfolder": "", "type": "output"}
+        return {
+            "prompt_id": "black-prompt-1",
+            "image_ref": image_ref,
+            "mime_type": "image/png",
+            "data": data,
+            "images": [{
+                "image_ref": image_ref,
+                "mime_type": "image/png",
+                "data": data,
+            }],
+        }
 
 
 class FakePointsService:
@@ -1333,7 +1364,7 @@ def test_comfyui_history_rerun_reuses_saved_assets(tmp_path):
         break
       time.sleep(0.05)
       body = client.get(f"/api/comfyui/jobs/{job_id}").get_json()
-    assert body["job"]["status"] == "completed"
+    assert body["job"]["status"] == "completed", body
     rerun_history_id = body["job"]["result"]["history_id"]
     assert rerun_history_id > 0
     assert rerun_history_id != history_id
@@ -1608,7 +1639,7 @@ def test_comfyui_export_current_and_run_workflow_preset_preserve_parameters(tmp_
             break
         time.sleep(0.1)
         body = client.get(f"/api/comfyui/jobs/{job_id}").get_json()
-    assert body["job"]["status"] == "completed"
+    assert body["job"]["status"] == "completed", body
 
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -1629,6 +1660,70 @@ def test_comfyui_export_current_and_run_workflow_preset_preserve_parameters(tmp_
     assert FakeComfyUIClient.last_workflow["3"]["inputs"]["steps"] == 16
     assert FakeComfyUIClient.last_workflow["3"]["inputs"]["cfg"] == 5.5
     assert FakeComfyUIClient.last_wait_until_completed is True
+
+
+def test_qwen_edit_workflow_run_fetches_expected_image_without_waiting_for_history_completed(tmp_path):
+    class PngWorkflowClient(FakeComfyUIClient):
+        def generate_from_workflow(self, *args, **kwargs):
+            kwargs.pop("fetch_outputs", None)
+            result = super().generate_from_workflow(*args, **kwargs)
+            png = base64.b64decode(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
+            )
+            for item in result.get("images") or []:
+                item["data"] = png
+                item["size_bytes"] = len(png)
+            result["data"] = png
+            return result
+
+    db_path = tmp_path / "comfyui.db"
+    storage_root = tmp_path / "storage"
+    storage_root.mkdir()
+    _init_db(db_path)
+    client = _build_app(db_path, storage_root, comfyui_client=PngWorkflowClient()).test_client()
+
+    workflow = FakeComfyUIClient().build_generation_workflow({
+        "generation_mode": "txt2img",
+        "model": "dream.safetensors",
+        "prompt": "qwen edit wait strategy regression",
+        "negative_prompt": "",
+        "width": 512,
+        "height": 512,
+        "steps": 4,
+        "cfg": 1,
+        "sampler_name": "euler",
+        "scheduler": "normal",
+        "seed": 123,
+        "batch_size": 1,
+    })
+    preset = _import_workflow_preset(
+        client,
+        workflow,
+        title="Qwen Edit Wait Strategy",
+        default_params={"model": "dream.safetensors", "prompt": "qwen edit wait strategy regression"},
+    )
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "UPDATE comfyui_workflow_presets SET system_bundle_id=? WHERE id=?",
+            ("origin_qwen_image_edit_2509", int(preset["id"])),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    run = client.post(f"/api/comfyui/workflows/{preset['id']}/run", json={})
+    assert run.status_code == 200, run.get_json()
+    job_id = run.get_json()["job"]["job_id"]
+
+    body = client.get(f"/api/comfyui/jobs/{job_id}").get_json()
+    for _ in range(100):
+        if body["job"]["status"] == "completed":
+            break
+        time.sleep(0.1)
+        body = client.get(f"/api/comfyui/jobs/{job_id}").get_json()
+    assert body["job"]["status"] == "completed", body
+    assert FakeComfyUIClient.last_wait_until_completed is False
 
 
 def test_comfyui_workflow_audio_media_preview_can_play_generated_output(tmp_path):
@@ -2347,6 +2442,49 @@ def test_comfyui_generate_async_job_reports_progress_and_result(tmp_path):
     assert final_body["job"]["result"]["image"]["image_ref"]["filename"] == "hackme_web_00001_.png"
 
 
+def test_comfyui_generate_async_job_rejects_blank_black_output(tmp_path):
+    db_path = tmp_path / "comfyui.db"
+    storage_root = tmp_path / "storage"
+    storage_root.mkdir()
+    _init_db(db_path)
+    client = _build_app(db_path, storage_root, comfyui_client=BlackImageComfyUIClient()).test_client()
+
+    started = client.post(
+        "/api/comfyui/generate",
+        json={
+            "model": "dream.safetensors",
+            "prompt": "a quiet test image",
+            "width": 512,
+            "height": 512,
+            "steps": 4,
+            "cfg": 1,
+            "sampler_name": "euler",
+            "scheduler": "normal",
+            "seed": 123,
+            "batch_size": 1,
+            "confirm_billing": True,
+            "async_progress": True,
+        },
+    )
+
+    assert started.status_code == 200
+    job_id = started.get_json()["job"]["job_id"]
+    final_body = None
+    for _ in range(100):
+        polled = client.get(f"/api/comfyui/jobs/{job_id}")
+        assert polled.status_code == 200
+        final_body = polled.get_json()
+        if final_body["job"]["status"] == "error":
+            break
+        time.sleep(0.1)
+
+    assert final_body is not None
+    assert final_body["job"]["status"] == "error"
+    assert "輸出品質檢查失敗" in final_body["job"]["error"]
+    assert "全黑" in final_body["job"]["error"]
+    assert final_body["job"]["result"] is None
+
+
 def test_comfyui_generate_async_job_captures_request_meta_before_thread_handoff(tmp_path):
     db_path = tmp_path / "comfyui.db"
     storage_root = tmp_path / "storage"
@@ -2638,6 +2776,25 @@ def test_comfyui_generation_failure_does_not_charge_points(tmp_path):
 
     job = _await_comfyui_job(client, generated, expected_status="error")
     assert "ComfyUI 產圖失敗" in job["error"]
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        platform_job = conn.execute(
+            """
+            SELECT status, stage, progress_percent, error_message, finished_at
+            FROM job_center_jobs
+            WHERE source_module='comfyui' AND source_ref=?
+            """,
+            (job["job_id"],),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert platform_job is not None
+    assert platform_job["status"] == "failed"
+    assert platform_job["stage"] == "error"
+    assert platform_job["progress_percent"] == 100
+    assert "ComfyUI 產圖失敗" in platform_job["error_message"]
+    assert platform_job["finished_at"]
     assert points.spends == []
     assert points.balance == 100
 
@@ -4227,6 +4384,71 @@ def test_comfyui_diffusers_stale_progress_does_not_say_comfyui_backend(tmp_path,
     assert "網路下載位元組" in progress["detail"]
     assert "下載大型模型" not in progress["detail"]
     assert "ComfyUI 後端" not in progress["detail"]
+
+
+def test_comfyui_backend_unresponsive_stale_job_is_marked_error(tmp_path, monkeypatch):
+    monkeypatch.setattr(comfyui_routes, "COMFYUI_JOB_STALE_SECONDS", 0)
+    monkeypatch.setattr(comfyui_routes, "COMFYUI_BACKEND_UNRESPONSIVE_FAIL_SECONDS", 1)
+    db_path = tmp_path / "comfyui.db"
+    storage_root = tmp_path / "storage"
+    storage_root.mkdir()
+    _init_db(db_path)
+    client = _build_app(db_path, storage_root).test_client()
+
+    assert client.get("/api/comfyui/jobs/missing-job").status_code == 404
+    old_ts = time.time() - 10
+    progress = {
+        "phase": "backend_unresponsive",
+        "backend_unresponsive": True,
+        "percent": 86,
+        "detail": "ComfyUI 暫時沒有回覆結果查詢",
+        "completed": False,
+        "updated_at": old_ts,
+    }
+    conn = connect_sqlite(db_path, timeout=15, row_factory=True, foreign_keys=True, wal=True)
+    try:
+        conn.execute(
+            """
+            INSERT INTO comfyui_generation_jobs (
+                job_id, owner_user_id, owner_username, status, error,
+                progress_json, result_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "stale-backend-job",
+                1,
+                "alice",
+                "running",
+                "",
+                json.dumps(progress, ensure_ascii=False),
+                None,
+                old_ts - 120,
+                old_ts,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    polled = client.get("/api/comfyui/jobs/stale-backend-job")
+    payload = polled.get_json()
+    assert polled.status_code == 200
+    assert payload["job"]["status"] == "error"
+    assert payload["job"]["progress"]["phase"] == "error"
+    assert payload["job"]["progress"]["terminal_reason"] == "backend_unresponsive_timeout"
+    assert "已標記失敗" in payload["job"]["error"]
+
+    conn = connect_sqlite(db_path, timeout=15, row_factory=True, foreign_keys=True, wal=True)
+    try:
+        row = conn.execute(
+            "SELECT status, error, progress_json FROM comfyui_generation_jobs WHERE job_id='stale-backend-job'"
+        ).fetchone()
+    finally:
+        conn.close()
+    stored_progress = json.loads(row["progress_json"])
+    assert row["status"] == "error"
+    assert stored_progress["phase"] == "error"
+    assert stored_progress["terminal_reason"] == "backend_unresponsive_timeout"
 
 
 def test_comfyui_diffusers_failure_reports_reason_and_python_log_tail(tmp_path):

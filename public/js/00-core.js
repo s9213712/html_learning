@@ -1633,6 +1633,26 @@ async function fetchCsrfToken({ force = false } = {}) {
   return _csrfToken;
 }
 
+function abortableWait(promise, signal, message = "Request aborted") {
+  if (!signal) return promise;
+  if (signal.aborted) {
+    const err = new Error(message);
+    err.name = "AbortError";
+    return Promise.reject(err);
+  }
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      const err = new Error(message);
+      err.name = "AbortError";
+      reject(err);
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    Promise.resolve(promise)
+      .then(resolve, reject)
+      .finally(() => signal.removeEventListener("abort", onAbort));
+  });
+}
+
 function isStateChangingMethod(method) {
   return ["POST", "PUT", "PATCH", "DELETE"].includes(String(method || "GET").toUpperCase());
 }
@@ -1643,7 +1663,10 @@ async function apiFetch(url, options = {}, retryOnCsrf = true) {
   const method = String(opts.method || "GET").toUpperCase();
   const headers = new Headers(opts.headers || {});
   if (isStateChangingMethod(method) && !headers.has("X-CSRF-Token")) {
-    headers.set("X-CSRF-Token", await fetchCsrfToken());
+    headers.set(
+      "X-CSRF-Token",
+      await abortableWait(fetchCsrfToken(), opts.signal, "CSRF token request aborted")
+    );
   }
   opts.headers = headers;
   const response = await fetch(url, opts);

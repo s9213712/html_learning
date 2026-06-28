@@ -138,7 +138,13 @@ MAX_GENERATION_TIMEOUT_SECONDS = _env_int("COMFYUI_GENERATION_MAX_TIMEOUT_SECOND
 COMFYUI_BACKEND_REQUEST_TIMEOUT_SECONDS = _env_int("COMFYUI_BACKEND_REQUEST_TIMEOUT_SECONDS", 8, 2, 30)
 COMFYUI_STATUS_TIMEOUT_SECONDS = _env_float("COMFYUI_STATUS_TIMEOUT_SECONDS", 2.0, 0.5, 10.0)
 COMFYUI_INTERRUPT_TIMEOUT_SECONDS = _env_float("COMFYUI_INTERRUPT_TIMEOUT_SECONDS", 2.0, 0.5, 10.0)
-COMFYUI_JOB_STALE_SECONDS = _env_float("COMFYUI_JOB_STALE_SECONDS", 90.0, 10.0, 600.0)
+COMFYUI_JOB_STALE_SECONDS = _env_float("COMFYUI_JOB_STALE_SECONDS", 1500.0, 10.0, 4 * 3600.0)
+COMFYUI_BACKEND_UNRESPONSIVE_FAIL_SECONDS = _env_float(
+    "COMFYUI_BACKEND_UNRESPONSIVE_FAIL_SECONDS",
+    7200.0,
+    60.0,
+    24 * 3600.0,
+)
 COMFYUI_JOB_PROGRESS_DB_THROTTLE_SECONDS = _env_float("COMFYUI_JOB_PROGRESS_DB_THROTTLE_SECONDS", 2.0, 0.0, 30.0)
 COMFYUI_BASIC_PRICE_ITEM_KEY = "comfyui_txt2img_basic"
 MAX_COMFYUI_FETCH_IMAGE_BYTES = 50 * 1024 * 1024
@@ -1559,6 +1565,7 @@ def register_comfyui_routes(app, deps):
         for params_key, label in (
             ("source_image_ref", "來源"),
             ("mask_image_ref", "遮罩"),
+            ("reference_image_ref", "參考"),
         ):
             image_ref = params.get(params_key)
             materialized_ref = _materialize_generation_image_ref(actor, active_client, image_ref, label=label)
@@ -2170,14 +2177,32 @@ def register_comfyui_routes(app, deps):
                     percent = int(float(progress_data.get("percent") or 0))
                     stage = str(progress_data.get("phase") or "running")[:80]
                     detail = str(progress_data.get("detail") or "")[:1000]
+                    terminal_status_map = {
+                        "completed": "succeeded",
+                        "succeeded": "succeeded",
+                        "error": "failed",
+                        "failed": "failed",
+                        "cancelled": "cancelled",
+                        "canceled": "cancelled",
+                        "expired": "expired",
+                    }
+                    next_status = terminal_status_map.get(stage, "running")
+                    update_payload = {
+                        "status": next_status,
+                        "progress_percent": percent,
+                        "stage": stage,
+                        "stage_detail": detail,
+                    }
+                    if next_status in {"succeeded", "failed", "cancelled", "expired"}:
+                        update_payload["finished_at"] = __import__("datetime").datetime.utcnow().replace(microsecond=0).isoformat()
+                    if next_status == "failed":
+                        update_payload["error_message"] = str(progress_data.get("error_message") or detail or "ComfyUI 產圖失敗")[:1000]
+                        update_payload["error_stage"] = "comfyui"
                     update_platform_job(
                         conn,
                         platform_job["job_uuid"],
-                        status="running",
-                        progress_percent=percent,
-                        stage=stage,
-                        stage_detail=detail,
-                        defer_progress=True,
+                        defer_progress=next_status == "running",
+                        **update_payload,
                     )
                     add_job_event(
                         conn,
@@ -2266,11 +2291,16 @@ def register_comfyui_routes(app, deps):
             progress["completed"] = True
         if payload["status"] in {"queued", "running"}:
             progress = payload["progress"]
+            progress_phase = str(progress.get("phase") or "").strip().lower()
+            if progress.get("completed") is True or progress_phase in {"completed", "succeeded"}:
+                progress["result_pending"] = payload.get("result") is None
+                if progress["result_pending"]:
+                    progress["detail"] = progress.get("detail") or "ComfyUI 已完成輸出，正在整理站內結果"
+                return payload
             updated_at = float(progress.get("updated_at") or job.get("updated_at") or job.get("created_at") or 0)
             if updated_at and time.time() - updated_at >= COMFYUI_JOB_STALE_SECONDS:
                 is_diffusers = str(progress.get("backend_kind") or "").strip().lower() == "diffusers"
                 if is_diffusers:
-                    progress_phase = str(progress.get("phase") or "").strip().lower()
                     progress_step = str(progress.get("step") or "")
                     python_tail = "\n".join(str(line or "") for line in progress.get("python_log_tail") or [])
                     bytes_written = int(progress.get("bytes_written") or 0)
@@ -2305,6 +2335,28 @@ def register_comfyui_routes(app, deps):
                 progress["stale_seconds"] = int(time.time() - updated_at)
                 progress["timeout_seconds"] = int(progress.get("timeout_seconds") or DEFAULT_GENERATION_TIMEOUT_SECONDS)
                 progress["timeout_unlimited"] = int(progress.get("timeout_seconds") or 0) <= 0
+                if (
+                    progress.get("backend_unresponsive") is True
+                    and progress["stale_seconds"] >= COMFYUI_BACKEND_UNRESPONSIVE_FAIL_SECONDS
+                ):
+                    detail = (
+                        "ComfyUI 後端已超過 "
+                        f"{int(COMFYUI_BACKEND_UNRESPONSIVE_FAIL_SECONDS)} 秒沒有回覆；"
+                        "此工作已標記失敗，請檢查或重啟 ComfyUI 後重新送出。"
+                    )
+                    terminal_progress = {
+                        **progress,
+                        "phase": "error",
+                        "detail": detail,
+                        "error_message": detail,
+                        "completed": False,
+                        "terminal_reason": "backend_unresponsive_timeout",
+                    }
+                    _update_generation_job_progress(job["job_id"], terminal_progress)
+                    _update_generation_job(job["job_id"], status="error", error=detail, result=job.get("result"))
+                    payload["status"] = "error"
+                    payload["error"] = detail
+                    payload["progress"] = terminal_progress
         return payload
 
     def _active_generation_snapshot():
@@ -2570,6 +2622,168 @@ def register_comfyui_routes(app, deps):
         finally:
             conn.close()
         return images
+
+    def _looks_like_decodable_image_bytes(data):
+        if not isinstance(data, (bytes, bytearray)) or not data:
+            return False
+        header = bytes(data[:16])
+        return (
+            header.startswith(b"\x89PNG\r\n\x1a\n")
+            or header.startswith(b"\xff\xd8\xff")
+            or header.startswith(b"RIFF") and header[8:12] == b"WEBP"
+            or header.startswith(b"GIF87a")
+            or header.startswith(b"GIF89a")
+        )
+
+    def _comfyui_image_quality_issue(data):
+        if not isinstance(data, (bytes, bytearray)) or not data:
+            return "圖片內容為空"
+        if not _looks_like_decodable_image_bytes(data):
+            return ""
+        try:
+            from PIL import Image, ImageStat
+
+            with Image.open(BytesIO(bytes(data))) as image:
+                sample = image.convert("RGB")
+                sample.thumbnail((256, 256))
+                stat = ImageStat.Stat(sample)
+        except Exception as exc:
+            return f"圖片無法解析：{exc}"
+        extrema = stat.extrema or []
+        means = stat.mean or []
+        if not extrema or not means:
+            return "圖片統計資訊為空"
+        max_channel = max((pair[1] for pair in extrema), default=0)
+        min_channel = min((pair[0] for pair in extrema), default=0)
+        dynamic_range = max_channel - min_channel
+        mean_value = sum(float(value or 0) for value in means) / max(len(means), 1)
+        if max_channel <= 2 and mean_value <= 1.5:
+            return "圖片幾乎全黑"
+        if min_channel >= 253 and mean_value >= 253:
+            return "圖片幾乎全白"
+        if dynamic_range <= 2:
+            return "圖片幾乎是單一純色"
+        return ""
+
+    def _assert_comfyui_final_images_usable(result):
+        result_images = result.get("images") if isinstance(result.get("images"), list) else []
+        if not result_images and result.get("image_ref"):
+            result_images = [result]
+        if not result_images:
+            return
+        issues = []
+        for index, item in enumerate(result_images, start=1):
+            if not isinstance(item, dict):
+                continue
+            image_ref = item.get("image_ref") if isinstance(item.get("image_ref"), dict) else {}
+            filename = str(image_ref.get("filename") or f"#{index}")
+            issue = _comfyui_image_quality_issue(item.get("data") or b"")
+            if issue:
+                issues.append(f"{filename}: {issue}")
+        if issues:
+            raise ComfyUIError("ComfyUI 輸出品質檢查失敗：" + "；".join(issues[:5]))
+
+    def _is_qwen_edit_workflow_family_id(value):
+        workflow_id = str(value or "").strip()
+        return workflow_id == "origin_qwen_image_edit_2509" or workflow_id.startswith("origin_qwen_image_edit_2509_")
+
+    def _workflow_requested_output_size(params):
+        try:
+            width = int(float(
+                (params or {}).get("requested_width")
+                or (params or {}).get("output_width")
+                or (params or {}).get("width")
+                or 0
+            ))
+            height = int(float(
+                (params or {}).get("requested_height")
+                or (params or {}).get("output_height")
+                or (params or {}).get("height")
+                or 0
+            ))
+        except Exception:
+            return 0, 0
+        if width < 64 or height < 64 or width > 4096 or height > 4096:
+            return 0, 0
+        return width, height
+
+    def _resize_qwen_workflow_result_images_if_needed(active_client, result, params, *, actor=None, job_id, audit_ip="-", audit_ua="-"):
+        workflow_id = str((params or {}).get("workflow_system_bundle_id") or "").strip()
+        if not _is_qwen_edit_workflow_family_id(workflow_id):
+            return result
+        target_width, target_height = _workflow_requested_output_size(params)
+        if not target_width or not target_height:
+            return result
+        result_images = result.get("images") if isinstance(result.get("images"), list) else []
+        if not result_images:
+            return result
+        try:
+            from PIL import Image
+        except Exception as exc:
+            raise ComfyUIError(f"Qwen Edit 輸出尺寸保真需要 Pillow，但載入失敗：{exc}") from exc
+        changed = False
+        next_images = []
+        for index, item in enumerate(result_images, start=1):
+            if not isinstance(item, dict):
+                next_images.append(item)
+                continue
+            raw_data = item.get("data") or b""
+            if not raw_data:
+                next_images.append(item)
+                continue
+            try:
+                with Image.open(BytesIO(bytes(raw_data))) as image:
+                    original_size = tuple(image.size)
+                    if original_size == (target_width, target_height):
+                        next_images.append(item)
+                        continue
+                    resized = image.convert("RGB").resize((target_width, target_height), Image.Resampling.LANCZOS)
+                    out = BytesIO()
+                    resized.save(out, format="PNG", optimize=True)
+                    resized_data = out.getvalue()
+            except Exception as exc:
+                raise ComfyUIError(f"Qwen Edit 輸出尺寸檢查/調整失敗：{exc}") from exc
+            filename = f"qwen_edit_output_{target_width}x{target_height}_{hashlib.sha1(resized_data).hexdigest()[:12]}.png"
+            try:
+                uploaded_ref = active_client.upload_image_bytes(
+                    resized_data,
+                    filename,
+                    image_type="output",
+                    overwrite=False,
+                    subfolder=f"hackme/{_actor_value(actor or {}, 'id', '')}".strip("/"),
+                )
+            except Exception as exc:
+                raise ComfyUIError(f"Qwen Edit {target_width}x{target_height} 輸出回寫 ComfyUI 失敗：{exc}") from exc
+            previous_ref = item.get("image_ref") if isinstance(item.get("image_ref"), dict) else {}
+            next_ref = dict(uploaded_ref or {})
+            for key in ("output_node_id", "output_label"):
+                value = item.get(key) or previous_ref.get(key)
+                if value:
+                    next_ref[key] = value
+            next_item = dict(item)
+            next_item["data"] = resized_data
+            next_item["mime_type"] = "image/png"
+            next_item["size_bytes"] = len(resized_data)
+            next_item["image_ref"] = next_ref
+            next_images.append(next_item)
+            changed = True
+            audit(
+                "COMFYUI_QWEN_EDIT_OUTPUT_RESIZE",
+                audit_ip,
+                user=_actor_value(actor or {}, "username", "-"),
+                success=True,
+                ua=audit_ua,
+                detail=f"job_id={job_id}, index={index}, original={original_size[0]}x{original_size[1]}, target={target_width}x{target_height}, file={next_ref.get('filename')}",
+            )
+        if not changed:
+            return result
+        next_result = dict(result)
+        next_result["images"] = next_images
+        if next_images:
+            next_result["image_ref"] = next_images[0].get("image_ref") or result.get("image_ref")
+            next_result["mime_type"] = next_images[0].get("mime_type") or result.get("mime_type")
+            next_result["data"] = next_images[0].get("data") or result.get("data")
+        return next_result
 
     def _serialize_comfyui_media_records(result):
         import mimetypes
@@ -3095,9 +3309,10 @@ def register_comfyui_routes(app, deps):
                     active_client.generate_image,
                     timeout_seconds=timeout_seconds,
                     progress_callback=lambda progress: _update_generation_job_progress(job_id, progress),
-                    fetch_outputs=False,
+                    fetch_outputs=True,
                 ),
             )
+            _assert_comfyui_final_images_usable(result)
             billing = {"charged": False, "exempt": "root"} if not quote else None
             if quote:
                 billing = _charge_comfyui_generation(actor, quote, prompt_id=result.get("prompt_id"))
@@ -3355,12 +3570,22 @@ def register_comfyui_routes(app, deps):
                 "timeout_seconds": timeout_seconds,
                 "expected_count": expected_count,
                 "progress_callback": _workflow_progress_callback,
-                "wait_until_completed": True,
+                "wait_until_completed": not _is_qwen_edit_workflow_family_id(default_params.get("workflow_system_bundle_id")),
             }
             if prompt_extra_data:
                 run_kwargs["extra_data"] = prompt_extra_data
-            run_kwargs = _maybe_fetch_outputs_kwarg(active_client.generate_from_workflow, **run_kwargs, fetch_outputs=False)
+            run_kwargs = _maybe_fetch_outputs_kwarg(active_client.generate_from_workflow, **run_kwargs, fetch_outputs=True)
             result = active_client.generate_from_workflow(workflow_json, **run_kwargs)
+            result = _resize_qwen_workflow_result_images_if_needed(
+                active_client,
+                result,
+                default_params,
+                actor=actor,
+                job_id=job_id,
+                audit_ip=audit_ip,
+                audit_ua=audit_ua,
+            )
+            _assert_comfyui_final_images_usable(result)
             images = (
                 _finalize_generation_records(actor, default_params, result, backend_url=backend_binding.get("url"))
                 if isinstance(result.get("images"), list) and result.get("images")
@@ -3882,6 +4107,7 @@ def register_comfyui_routes(app, deps):
             "controlnet": controlnet,
             "source_image_ref": _normalize_image_ref_field(data.get("source_image_ref") or data.get("source_image_ref_json")),
             "mask_image_ref": _normalize_image_ref_field(data.get("mask_image_ref") or data.get("mask_image_ref_json")),
+            "reference_image_ref": _normalize_image_ref_field(data.get("reference_image_ref") or data.get("reference_image_ref_json") or data.get("pose_reference_image_ref")),
             "upscale_model": str(data.get("upscale_model") or "").strip(),
             "outpaint": _normalize_outpaint_payload(data),
         }

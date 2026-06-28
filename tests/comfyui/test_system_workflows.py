@@ -13,6 +13,7 @@ import pytest
 from services.comfyui.template.analyzer import analyze_workflow_json
 from services.comfyui.template.seeding import SYSTEM_WORKFLOW_IDS
 from services.comfyui.validation.sanitize import sanitize_workflow_json
+from routes.comfyui_sections.workflow_routes import _is_qwen_image_edit_2509_family
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -48,6 +49,14 @@ EXPECTED_ORIGIN_WORKFLOW_IDS = {
     "origin_wan_vace_inpainting",
     "origin_wan22_14b_i2v_subgraphed",
     "origin_ltx23_t2v",
+}
+
+EXPECTED_SYSTEM_WORKFLOW_IDS = EXPECTED_ORIGIN_WORKFLOW_IDS | {
+    "origin_flux_fill_inpaint_gguf_q3",
+    "origin_flux_fill_outpaint_gguf_q3",
+    "origin_qwen_image_edit_2509_anything2real",
+    "origin_qwen_image_edit_gguf_lite",
+    "origin_sdxl_checkpoint_inpaint",
 }
 
 
@@ -160,12 +169,19 @@ def _ui_fields(manifest):
 
 
 def test_system_registry_matches_origin_workflow_ids():
-    assert set(SYSTEM_WORKFLOW_IDS) == EXPECTED_ORIGIN_WORKFLOW_IDS
+    assert set(SYSTEM_WORKFLOW_IDS) == EXPECTED_SYSTEM_WORKFLOW_IDS
+
+
+def test_qwen_edit_reference_policy_applies_to_2509_family_workflows():
+    assert _is_qwen_image_edit_2509_family("origin_qwen_image_edit_2509")
+    assert _is_qwen_image_edit_2509_family("origin_qwen_image_edit_2509_anything2real")
+    assert not _is_qwen_image_edit_2509_family("origin_qwen_image_controlnet_2512")
+    assert not _is_qwen_image_edit_2509_family("origin_qwen_image_edit_gguf_lite")
 
 
 def test_system_dir_has_materialized_origin_workflows():
     ids = set(_system_ids())
-    missing = EXPECTED_ORIGIN_WORKFLOW_IDS - ids
+    missing = EXPECTED_SYSTEM_WORKFLOW_IDS - ids
     assert not missing, f"missing system workflows: {missing}"
 
 
@@ -185,7 +201,7 @@ def test_system_workflow_default_media_assets_are_present():
     missing = []
     duplicate = []
     checked = []
-    for workflow_id in sorted(EXPECTED_ORIGIN_WORKFLOW_IDS):
+    for workflow_id in sorted(EXPECTED_SYSTEM_WORKFLOW_IDS):
         for ref in _workflow_media_refs(workflow_id):
             checked.append(ref)
             matches = sorted(
@@ -209,7 +225,7 @@ def test_system_workflow_default_media_assets_are_present():
     assert not duplicate, "duplicate default media asset basenames:\n" + "\n".join(duplicate)
 
 
-@pytest.mark.parametrize("workflow_id", sorted(EXPECTED_ORIGIN_WORKFLOW_IDS))
+@pytest.mark.parametrize("workflow_id", sorted(EXPECTED_SYSTEM_WORKFLOW_IDS))
 def test_system_workflow_files_present(workflow_id):
     base = SYSTEM_DIR / workflow_id
     assert (base / "workflow.json").is_file(), f"{workflow_id}/workflow.json missing"
@@ -217,20 +233,21 @@ def test_system_workflow_files_present(workflow_id):
     assert (base / "README.md").is_file(), f"{workflow_id}/README.md missing"
 
 
-@pytest.mark.parametrize("workflow_id", sorted(EXPECTED_ORIGIN_WORKFLOW_IDS))
+@pytest.mark.parametrize("workflow_id", sorted(EXPECTED_SYSTEM_WORKFLOW_IDS))
 def test_system_workflow_passes_sanitize_and_analyze(workflow_id):
     sanitized = sanitize_workflow_json(_workflow(workflow_id))["workflow_json"]
     analysis = analyze_workflow_json(sanitized)
     assert not analysis.denied_classes, f"{workflow_id} uses denied classes: {analysis.denied_classes}"
 
 
-@pytest.mark.parametrize("workflow_id", sorted(EXPECTED_ORIGIN_WORKFLOW_IDS))
+@pytest.mark.parametrize("workflow_id", sorted(EXPECTED_SYSTEM_WORKFLOW_IDS))
 def test_system_manifest_schema_basics(workflow_id):
     manifest = _manifest(workflow_id)
     assert manifest["schema_version"] == 1
     assert manifest["id"] == workflow_id
     assert manifest["workflow_file"] == "workflow.json"
-    assert manifest["source"] == "official_origin"
+    expected_source = "project_local" if workflow_id == "origin_sdxl_checkpoint_inpaint" else "official_origin"
+    assert manifest["source"] == expected_source
     assert manifest["origin_source_path"].endswith(".json")
     assert isinstance(manifest.get("name"), str) and manifest["name"]
     assert isinstance(manifest.get("description"), str)
@@ -243,7 +260,7 @@ def test_system_manifest_schema_basics(workflow_id):
     )
 
 
-@pytest.mark.parametrize("workflow_id", sorted(EXPECTED_ORIGIN_WORKFLOW_IDS))
+@pytest.mark.parametrize("workflow_id", sorted(EXPECTED_SYSTEM_WORKFLOW_IDS))
 def test_manifest_output_kinds_match_workflow_output_nodes(workflow_id):
     manifest = _manifest(workflow_id)
     workflow = _workflow(workflow_id)
@@ -309,7 +326,7 @@ def test_text_to_audio_origin_workflow_uses_text_to_speech_mode():
     assert "TextEncodeAceStepAudio1.5" in classes
 
 
-@pytest.mark.parametrize("workflow_id", sorted(EXPECTED_ORIGIN_WORKFLOW_IDS))
+@pytest.mark.parametrize("workflow_id", sorted(EXPECTED_SYSTEM_WORKFLOW_IDS))
 def test_origin_manifest_core_numeric_defaults_are_usable(workflow_id):
     defaults = _manifest(workflow_id)["default_params"]
 
@@ -355,17 +372,29 @@ def test_non_sdxl_full_text_defaults_do_not_trigger_plain_embedding_names():
         assert "embedding:" not in prompt.lower()
 
 
-def test_qwen_edit_defaults_follow_reference_latent_prompt_links():
+def test_qwen_edit_defaults_keep_reference_node_optional():
     manifest = _manifest("origin_qwen_image_edit_2509")
+    workflow = _workflow("origin_qwen_image_edit_2509")
     defaults = manifest["default_params"]
     text_panel = next(panel for panel in manifest["ui"]["panels"] if panel["id"] == "text")
-    labels = {field["id"]: field["label"] for field in text_panel["fields"]}
+    fields = text_panel["fields"]
 
     assert defaults["prompt"] == "Replace the cat with a dalmatian, keeping the environment and scene consistent"
     assert defaults["steps"] == 4
     assert defaults["cfg"] == 1
-    assert labels["node:471:prompt"].startswith("負面提示詞")
-    assert labels["node:473:prompt"].startswith("正向提示詞")
+    assert any(
+        field["label"].startswith("負面提示詞")
+        and field["class_type"] == "TextEncodeQwenImageEditPlus"
+        for field in fields
+    )
+    assert any(
+        field["label"].startswith("正向提示詞")
+        and field["class_type"] == "TextEncodeQwenImageEditPlus"
+        for field in fields
+    )
+    assert workflow["79"]["class_type"] == "LoadImage"
+    assert workflow["79"]["inputs"]["image"] == "image_qwen_image_edit_2509_reference_image.png"
+    assert "image2" not in workflow["494"]["inputs"]
 
 
 def test_wrapped_qwen_prompt_text_fields_are_visible_and_labeled():

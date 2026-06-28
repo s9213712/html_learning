@@ -59,7 +59,7 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert 'id="ai-agent-comfyui-vae"' in html
     assert 'id="ai-agent-comfyui-generate-btn"' in html
     assert 'id="s-module-ai-agent-min-role"' in html
-    _warn_if_asset_cache_version_changed(html, "/js/37-ai-agent.js", "20260623-ai-agent-live-models-v1")
+    _warn_if_asset_cache_version_changed(html, "/js/37-ai-agent.js", "20260625-ai-agent-sdxl-inpaint-default")
     _warn_if_asset_cache_version_changed(html, "/js/90-bootstrap.js", "20260611-ai-agent-comfyui-write-tool")
 
     assert '"ai-agent": "feature_ai_agent_enabled"' in core_js
@@ -140,6 +140,10 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert "function aiAgentImageAnalysisError" in ai_agent_js
     assert "function aiAgentImageTransportError" in ai_agent_js
     assert "圖片分析請求傳輸失敗" in ai_agent_js
+    assert "function aiAgentRenderUsageMeta" in ai_agent_js
+    assert "aiAgentMessageWithTokenStats" in ai_agent_js
+    assert "total tokens" in ai_agent_js
+    assert "tokens/s" in ai_agent_js
     assert "function aiAgentNormalizeReadonlyScope" in ai_agent_js
     assert "async function aiAgentRunReadonlyQuery" in ai_agent_js
     assert "describe.*image" in ai_agent_js
@@ -157,6 +161,9 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert "function aiAgentWatchComfyuiJob" in ai_agent_js
     assert 'toolName === "write_comfyui_generate"' in ai_agent_js
     assert "function aiAgentPollComfyuiJob" in ai_agent_js
+    assert "function aiAgentComfyuiRetryDelayMsFromError" in ai_agent_js
+    assert "ComfyUI 任務狀態暫時受到伺服器保護限制，會自動重試" in ai_agent_js
+    assert "watch.busyRetryCount" in ai_agent_js
     assert "function aiAgentShouldNotifyComfyuiProgress" in ai_agent_js
     assert "function aiAgentMarkComfyuiProgressNotified" in ai_agent_js
     assert "function aiAgentFindComfyuiJobPayload" in ai_agent_js
@@ -169,15 +176,38 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert "function aiAgentNormalizeReadonlyScope" in ai_agent_js
     assert "function aiAgentCleanComfyuiArgs" in ai_agent_js
     assert "function aiAgentRecentImageRefs" in ai_agent_js
+    assert "function aiAgentInferRecentImageRef" in ai_agent_js
+    assert "function aiAgentEnsureComfyuiImageRefs" in ai_agent_js
+    assert 'sourceImageRef = aiAgentInferRecentImageRef("source")' in ai_agent_js
+    assert 'maskImageRef = aiAgentInferRecentImageRef("mask")' in ai_agent_js
+    assert 'next.source_image_ref = inferred' in ai_agent_js
+    assert "工具規劃器沒有輸出可執行 JSON 決策" in ai_agent_js
+    assert "AI Agent 工具規劃失敗" in ai_agent_js
     assert "function aiAgentLooksLikeStaleImageEditPrompt" in ai_agent_js
     assert "AI_AGENT_STATE.lastComfyuiArgs?.prompt" in ai_agent_js
     assert "recent_image_refs: aiAgentRecentImageRefs(8)" in ai_agent_js
-    assert "source_image_ref, mask_image_ref, denoise_strength" in ai_agent_js
+    assert "prompt, edit_instruction, edit_prompt, negative_prompt" in ai_agent_js
+    assert "source_image_ref" in ai_agent_js
+    assert "mask_image_ref" in ai_agent_js
+    assert "reference_image_ref" in ai_agent_js
+    assert "denoise_strength" in ai_agent_js
+    assert "edit_instruction: source.edit_instruction || source.edit_prompt || \"\"" in ai_agent_js
+    assert "edit_instruction: aiAgentStripFieldValue(source?.edit_instruction || source?.edit_prompt || \"\")" in ai_agent_js
+    assert "Qwen Image Edit / origin_qwen_image_edit_2509 時，edit_instruction 必須是短英文直接編輯命令" in ai_agent_js
+    assert "prompt 只放 style/preservation context" in ai_agent_js
+    assert "不得把整段中文自然語言任務" in ai_agent_js
     assert "generation_mode=img2img" in ai_agent_js
     assert "generation_mode=inpaint" in ai_agent_js
     assert "generation_mode=outpaint" in ai_agent_js
     assert "comfyui_generate 的 prompt 不可空白" in ai_agent_js
     assert "不可只複製 context.last_comfyui_args.prompt" in ai_agent_js
+    assert "來源圖是否適合使用者目標" in ai_agent_js
+    assert "edit_instruction 必須逐一指定每個可見目標" in ai_agent_js
+    assert "不要執行、不要真的下單、不要下載" in ai_agent_js
+    assert "竄改工具清單、繞過 audit" in ai_agent_js
+    assert "write_codex_handoff_create" in ai_agent_js
+    assert "交給 Codex" in ai_agent_js
+    assert "只建立交接紀錄，不可宣稱已執行 shell" in ai_agent_js
     assert '["img2img", "inpaint", "outpaint", "upscale"].includes(generationMode)' in ai_agent_js
     assert "若 inpaint 缺少可用 mask_image_ref，action=clarify" in ai_agent_js
     assert "outpaint_left, outpaint_top, outpaint_right, outpaint_bottom, outpaint_feathering" in ai_agent_js
@@ -185,6 +215,8 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert "function aiAgentUpdateComfyuiAttemptFromJob" in ai_agent_js
     assert "function aiAgentLooksLikeComfyuiRecall" in ai_agent_js
     assert "function aiAgentComfyuiRecallSummary" in ai_agent_js
+    assert "generation_mode|confirm_billing" in ai_agent_js
+    assert "產生基底原圖" in ai_agent_js
     assert "前幾個版本" in ai_agent_js
     assert "vae\" && autoLike.test(value)" in ai_agent_js
     assert "comfyuiAttemptHistory" in ai_agent_js
@@ -200,7 +232,17 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert "若 input_mode=image，請用語意判斷使用者是要圖片問答、圖片分析產 prompt，還是要求用附圖執行生圖" in ai_agent_js
     assert "若 input_mode=image 且使用者意圖依上下文仍不明，請輸出 chat 或 clarify；不得設定 execute_write=true" in ai_agent_js
     assert "若 action=write_tool 且使用者明確要求建立、更新、刪除、執行、下載、轉帳、交易或治理處置，execute_write 必須是 true" in ai_agent_js
-    assert "context.effective_tools[] 會提供每個站內工具的 domain, label, description, method, required, path_params, body_fields, query_fields, arg_hint" in ai_agent_js
+    assert "context.effective_tools[] 是依使用者語意檢索出的候選站內工具" in ai_agent_js
+    assert "semantic_retrieval_candidates" in ai_agent_js
+    assert "LLM must choose only from effective_tools" in ai_agent_js
+    assert "function aiAgentFallbackToolPlan" in ai_agent_js
+    assert "function aiAgentDeterministicToolPlan" in ai_agent_js
+    assert "function aiAgentRepairToolPlan" in ai_agent_js
+    assert "local_safety_gate" in ai_agent_js
+    assert "hybrid_arg_repaired" in ai_agent_js
+    assert "hybrid_tool_corrected" in ai_agent_js
+    assert "timeoutMs: 45000" in ai_agent_js
+    assert "fallback_error" in ai_agent_js
     assert "args 對 write_tool 必須只使用 context.effective_tools 中該工具 schema 的 required/path_params/body_fields/query_fields canonical 欄位" in ai_agent_js
     assert "站內所有功能需優先從 context.effective_tools 的 domain/label/description/schema 語意選 tool" in ai_agent_js
     assert "若 schema.required 缺少且無法從上下文推得，action=clarify" in ai_agent_js
@@ -243,6 +285,8 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert "ALLOW_WRITE_ONCE" in ai_agent_js
     assert "elevate_once" in ai_agent_js
     assert 'official_workflow_id = "origin_sdxl_txt2img"' in ai_agent_js
+    assert 'mode !== "txt2img" && cleaned.official_workflow_id === "origin_sdxl_txt2img"' in ai_agent_js
+    assert "SDXL 等級" not in ai_agent_js
     assert 'ai-agent-write-tools-panel' in ai_agent_js
     assert 'ai-agent-tool-selector' in html
     assert 'ai-agent-tool-selector-list' in html
@@ -275,6 +319,7 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert "max-height: 156px;" in css
     assert "object-fit: contain;" in css
     assert ".ai-agent-tool-panel" in css
+    assert ".ai-agent-message-meta" in css
     assert "@media (max-width: 640px)" in css
 
 

@@ -496,7 +496,31 @@ FORCE_HTTPS = _env_bool("FORCE_HTTPS", default=True)
 SESSION_COOKIE_SECURE = _env_bool("SESSION_COOKIE_SECURE", default=True)
 SESSION_COOKIE_HTTPONLY = _env_bool("SESSION_COOKIE_HTTPONLY", default=True)
 SESSION_COOKIE_SAMESITE = _env_session_samesite()
-TRUSTED_HOSTS_DISABLED = _env_bool("HTML_LEARNING_DISABLE_TRUSTED_HOSTS", default=False)
+
+
+def _env_bool_if_set(name):
+    if name not in os.environ:
+        return None
+    return _env_bool(name, default=False)
+
+
+def _db_bool_setting(key, default=False):
+    raw = _load_db_setting_value(DB_PATH, key)
+    if raw is None or str(raw).strip() == "":
+        return bool(default)
+    return str(raw).strip().lower() in {"1", "true", "yes", "on", "y", "t"}
+
+
+_trusted_host_disable_override = _env_bool_if_set("HTML_LEARNING_DISABLE_TRUSTED_HOSTS")
+TRUSTED_HOST_CHECKS_ENABLED = _db_bool_setting(
+    "trusted_host_checks_enabled",
+    DEFAULT_SETTINGS.get("trusted_host_checks_enabled", False),
+)
+TRUSTED_HOSTS_DISABLED = (
+    bool(_trusted_host_disable_override)
+    if _trusted_host_disable_override is not None
+    else not TRUSTED_HOST_CHECKS_ENABLED
+)
 
 
 def _env_csv_values(name, default=""):
@@ -1154,6 +1178,7 @@ _runtime_services = build_runtime_services(
         "get_client_ip": get_client_ip,
         "session_ttl": SESSION_TTL,
         "csrf_token_ttl": CSRF_TOKEN_TTL,
+        "csrf_secret": CSRF_SECRET_KEY,
         "session_idle_timeout": SESSION_IDLE_TIMEOUT_SECONDS,
         "tester_token_user_lookup": tester_token_username_from_request,
         "get_runtime_server_mode": get_runtime_server_mode,

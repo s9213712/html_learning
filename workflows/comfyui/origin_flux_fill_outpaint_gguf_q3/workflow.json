@@ -1,0 +1,186 @@
+{
+  "17": {
+    "_meta": {
+      "group_title": "Step 2 - Load image",
+      "title": "Step 2 - Load image"
+    },
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "螢幕快照 2026-04-09 17-16-46.png",
+      "upload": "image"
+    }
+  },
+  "23": {
+    "_meta": {
+      "group_title": "Prompt",
+      "title": "CLIP Text Encode (Positive Prompt)"
+    },
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": [
+        "34",
+        0
+      ],
+      "text": "anime style European Streets"
+    }
+  },
+  "26": {
+    "_meta": {
+      "group_title": "Prompt",
+      "title": "Prompt"
+    },
+    "class_type": "FluxGuidance",
+    "inputs": {
+      "conditioning": [
+        "23",
+        0
+      ],
+      "guidance": 3.5
+    }
+  },
+  "3": {
+    "class_type": "KSampler",
+    "inputs": {
+      "cfg": 1,
+      "denoise": 1,
+      "latent_image": [
+        "38",
+        2
+      ],
+      "model": [
+        "39",
+        0
+      ],
+      "negative": [
+        "38",
+        1
+      ],
+      "positive": [
+        "38",
+        0
+      ],
+      "sampler_name": "euler",
+      "scheduler": "normal",
+      "seed": 249750980212560,
+      "steps": 20
+    }
+  },
+  "31": {
+    "_meta": {
+      "group_title": "Step 1 - Load models",
+      "title": "Step 1 - Load models"
+    },
+    "class_type": "UnetLoaderGGUF",
+    "inputs": {
+      "unet_name": "flux1-fill-dev-Q3_K_S.gguf"
+    }
+  },
+  "32": {
+    "_meta": {
+      "group_title": "Step 1 - Load models",
+      "title": "Step 1 - Load models"
+    },
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "ae.safetensors"
+    }
+  },
+  "34": {
+    "_meta": {
+      "group_title": "Step 1 - Load models",
+      "title": "Step 1 - Load models"
+    },
+    "class_type": "DualCLIPLoader",
+    "inputs": {
+      "clip_name1": "clip_l.safetensors",
+      "clip_name2": "t5xxl_fp8_e4m3fn_scaled.safetensors",
+      "device": "default",
+      "type": "flux"
+    }
+  },
+  "38": {
+    "class_type": "InpaintModelConditioning",
+    "inputs": {
+      "mask": [
+        "44",
+        1
+      ],
+      "negative": [
+        "46",
+        0
+      ],
+      "noise_mask": false,
+      "pixels": [
+        "44",
+        0
+      ],
+      "positive": [
+        "26",
+        0
+      ],
+      "vae": [
+        "32",
+        0
+      ]
+    }
+  },
+  "39": {
+    "class_type": "DifferentialDiffusion",
+    "inputs": {
+      "model": [
+        "31",
+        0
+      ]
+    }
+  },
+  "44": {
+    "class_type": "ImagePadForOutpaint",
+    "inputs": {
+      "bottom": 400,
+      "feathering": 24,
+      "image": [
+        "17",
+        0
+      ],
+      "left": 400,
+      "right": 400,
+      "top": 0
+    }
+  },
+  "46": {
+    "_meta": {
+      "group_title": "Prompt",
+      "title": "Prompt"
+    },
+    "class_type": "ConditioningZeroOut",
+    "inputs": {
+      "conditioning": [
+        "23",
+        0
+      ]
+    }
+  },
+  "8": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": [
+        "3",
+        0
+      ],
+      "vae": [
+        "32",
+        0
+      ]
+    }
+  },
+  "9": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "filename_prefix": "ComfyUI",
+      "images": [
+        "8",
+        0
+      ]
+    }
+  }
+}

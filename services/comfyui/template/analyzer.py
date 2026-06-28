@@ -205,7 +205,7 @@ _FIELD_CATEGORY_TABLE: dict[tuple[str, str], FieldCategory] = {
     ("ByteDanceSeedreamNode", "fail_on_partial"): FieldCategory.SAMPLER,
     ("GrokImageEditNode", "resolution"): FieldCategory.SAMPLER,
     ("GrokImageEditNode", "aspect_ratio"): FieldCategory.SAMPLER,
-    ("ComfySwitchNode", "switch"): FieldCategory.SAMPLER,
+    ("ComfySwitchNode", "switch"): FieldCategory.BOOLEAN,
     ("ResizeImageMaskNode", "resize_type"): FieldCategory.SAMPLER,
     ("ResizeImageMaskNode", "scale_method"): FieldCategory.SAMPLER,
     ("ImageBlend", "blend_mode"): FieldCategory.SAMPLER,

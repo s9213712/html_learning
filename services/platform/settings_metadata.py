@@ -100,6 +100,7 @@ SETTING_GROUPS = (
             "server_listen_host",
             "server_listen_port",
             "server_ssl_enabled",
+            "trusted_host_checks_enabled",
             "server_timezone",
         ),
     },
@@ -593,6 +594,10 @@ SETTING_DETAILS = {
     "server_ssl_enabled": {
         "label": "Server 啟用 SSL/HTTPS",
         "description": "關閉會降為 HTTP plain。",
+    },
+    "trusted_host_checks_enabled": {
+        "label": "啟用 Trusted Host 檢查",
+        "description": "預設關閉以支援 port-forward / NAT 測試；開啟後只接受 allowlist Host，需重啟 server 才完整生效。",
     },
     "server_max_content_mb": {
         "label": "單次 HTTP request / 上傳上限 (MB)",

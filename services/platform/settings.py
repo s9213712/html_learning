@@ -65,6 +65,7 @@ DEFAULT_SETTINGS = {
     "server_listen_host": "",
     "server_listen_port": 0,
     "server_ssl_enabled": True,
+    "trusted_host_checks_enabled": False,
     "server_timezone": "UTC",
     "server_backpressure_enabled": True,
     "server_backpressure_mode": "auto",

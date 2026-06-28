@@ -1,0 +1,109 @@
+{
+  "1": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "hackme_agent_i2i_source_v5_1024x1024.png"
+    }
+  },
+  "2": {
+    "class_type": "LoadImageMask",
+    "inputs": {
+      "channel": "red",
+      "image": "hackme_agent_i2i_mask_apple_v5_1024x1024.png"
+    }
+  },
+  "3": {
+    "class_type": "CheckpointLoaderSimple",
+    "inputs": {
+      "ckpt_name": "JANKUTrainedChenkinNoobai_v777.safetensors"
+    }
+  },
+  "4": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": [
+        "3",
+        1
+      ],
+      "text": "by ogipote, anime style, 1girl, detailed SDXL anime illustration, small ceramic potted plant with brown soil and green leaves on the tabletop"
+    }
+  },
+  "5": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": [
+        "3",
+        1
+      ],
+      "text": "text, watermark, logo, signature, blurry, low quality, bad anatomy, bad hands, extra fingers, apple, red apple, red fruit"
+    }
+  },
+  "6": {
+    "class_type": "VAEEncodeForInpaint",
+    "inputs": {
+      "grow_mask_by": 8,
+      "mask": [
+        "2",
+        0
+      ],
+      "pixels": [
+        "1",
+        0
+      ],
+      "vae": [
+        "3",
+        2
+      ]
+    }
+  },
+  "7": {
+    "class_type": "KSampler",
+    "inputs": {
+      "cfg": 7,
+      "denoise": 0.85,
+      "latent_image": [
+        "6",
+        0
+      ],
+      "model": [
+        "3",
+        0
+      ],
+      "negative": [
+        "5",
+        0
+      ],
+      "positive": [
+        "4",
+        0
+      ],
+      "sampler_name": "dpmpp_2m",
+      "scheduler": "karras",
+      "seed": 315392766550091,
+      "steps": 18
+    }
+  },
+  "8": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": [
+        "7",
+        0
+      ],
+      "vae": [
+        "3",
+        2
+      ]
+    }
+  },
+  "9": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "filename_prefix": "hackme_sdxl_inpaint",
+      "images": [
+        "8",
+        0
+      ]
+    }
+  }
+}

@@ -1,13 +1,19 @@
 import json
 import hashlib
+import re
 import sqlite3
 from datetime import datetime
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 
+import pytest
 from cryptography.fernet import Fernet
 from flask import Flask, jsonify, make_response, request
-from services.ai_agent.hermes import AiAgentError, AI_AGENT_TOOL_BLUEPRINT, clear_ai_agent_audit_scan_state
+from services.ai_agent.hermes import (
+    AiAgentError,
+    AI_AGENT_TOOL_BLUEPRINT,
+    clear_ai_agent_audit_scan_state,
+)
 
 from routes.ai_agent import register_ai_agent_routes
 from routes.ai_agent import AI_AGENT_WRITE_TOOL_SPECS
@@ -143,6 +149,125 @@ def _build_db(path):
     )
     conn.commit()
     conn.close()
+
+
+def _register_fake_comfyui_workflow_routes(app, *, workflow_id, preset_id=77, captured=None):
+    captured = captured if captured is not None else {}
+    manifest = {
+        "ui": {
+            "panels": [
+                {
+                    "fields": [
+                        {
+                            "id": "node:492:prompt",
+                            "class_type": "TextEncodeQwenImageEditPlus",
+                            "input_name": "prompt",
+                            "input_type": "textarea",
+                            "label": "Negative prompt",
+                        },
+                        {
+                            "id": "node:494:prompt",
+                            "class_type": "TextEncodeQwenImageEditPlus",
+                            "input_name": "prompt",
+                            "input_type": "textarea",
+                            "label": "Positive prompt",
+                        },
+                        {
+                            "id": "node:78:image",
+                            "class_type": "LoadImage",
+                            "input_name": "image",
+                            "input_type": "file_picker",
+                            "label": "Upload image",
+                        },
+                        {
+                            "id": "node:79:image",
+                            "class_type": "LoadImage",
+                            "input_name": "image",
+                            "input_type": "file_picker",
+                            "label": "Reference pose image",
+                        },
+                        {"id": "node:499:steps", "class_type": "KSampler", "input_name": "steps", "input_type": "number", "label": "Steps"},
+                        {"id": "node:499:cfg", "class_type": "KSampler", "input_name": "cfg", "input_type": "number", "label": "CFG"},
+                        {"id": "node:499:seed", "class_type": "KSampler", "input_name": "seed", "input_type": "number", "label": "Seed"},
+                        {"id": "node:499:denoise", "class_type": "KSampler", "input_name": "denoise", "input_type": "number", "label": "Denoise"},
+                        {"id": "node:499:sampler_name", "class_type": "KSampler", "input_name": "sampler_name", "input_type": "select", "label": "Sampler"},
+                        {"id": "node:499:scheduler", "class_type": "KSampler", "input_name": "scheduler", "input_type": "select", "label": "Scheduler"},
+                        {"id": "node:44:left", "class_type": "ImagePadForOutpaint", "input_name": "left", "input_type": "number", "label": "left"},
+                        {"id": "node:44:top", "class_type": "ImagePadForOutpaint", "input_name": "top", "input_type": "number", "label": "top"},
+                        {"id": "node:44:right", "class_type": "ImagePadForOutpaint", "input_name": "right", "input_type": "number", "label": "right"},
+                        {"id": "node:44:bottom", "class_type": "ImagePadForOutpaint", "input_name": "bottom", "input_type": "number", "label": "bottom"},
+                        {"id": "node:44:feathering", "class_type": "ImagePadForOutpaint", "input_name": "feathering", "input_type": "number", "label": "feathering"},
+                    ]
+                }
+            ]
+        }
+    }
+    workflow_json = {
+        "78": {"class_type": "LoadImage", "inputs": {"image": "placeholder.png", "upload": "image"}},
+        "79": {
+            "class_type": "LoadImage",
+            "_meta": {"title": "Reference Pose Image"},
+            "inputs": {"image": "reference.png", "upload": "image"},
+        },
+        "492": {"class_type": "TextEncodeQwenImageEditPlus", "inputs": {"prompt": ""}},
+        "493": {"class_type": "ModelSamplingAuraFlow", "inputs": {"shift": 3}},
+        "494": {
+            "class_type": "TextEncodeQwenImageEditPlus",
+            "inputs": {"image1": ["78", 0], "image2": ["79", 0], "prompt": "default prompt"},
+        },
+        "478": {
+            "class_type": "KSampler",
+            "inputs": {
+                "cfg": 4,
+                "denoise": 1,
+                "sampler_name": "euler",
+                "scheduler": "simple",
+                "seed": 973414316252139,
+                "steps": 20,
+            },
+        },
+        "483": {"class_type": "ComfySwitchNode", "_meta": {"title": "Switch (Model)"}, "inputs": {"on_false": ["470", 0], "on_true": ["476", 0], "switch": True}},
+        "484": {"class_type": "ComfySwitchNode", "_meta": {"title": "Switch (Steps)"}, "inputs": {"on_false": 20, "on_true": 4, "switch": True}},
+        "485": {"class_type": "ComfySwitchNode", "_meta": {"title": "Switch (CFG)"}, "inputs": {"on_false": 4, "on_true": 1, "switch": True}},
+        "499": {
+            "class_type": "KSampler",
+            "inputs": {
+                "cfg": 4,
+                "denoise": 1,
+                "sampler_name": "euler",
+                "scheduler": "simple",
+                "seed": 1001672099958606,
+                "steps": 20,
+            },
+        },
+        "44": {"class_type": "ImagePadForOutpaint", "inputs": {"left": 0, "top": 0, "right": 0, "bottom": 0, "feathering": 40}},
+        "9": {"class_type": "SaveImage", "inputs": {"filename_prefix": "hackme_web"}},
+    }
+
+    @app.route("/api/comfyui/workflows", methods=["GET"])
+    def fake_comfyui_workflows():
+        preset = {"id": preset_id, "system_bundle_id": workflow_id, "is_official": True}
+        return _json_resp({"ok": True, "presets": [preset], "official_presets": [preset]})
+
+    @app.route(f"/api/comfyui/workflows/{preset_id}", methods=["GET"])
+    def fake_comfyui_workflow_detail():
+        return _json_resp({
+            "ok": True,
+            "preset": {
+                "id": preset_id,
+                "system_bundle_id": workflow_id,
+                "manifest_json": manifest,
+                "workflow_json": workflow_json,
+                "dependency_status": {},
+            },
+        })
+
+    @app.route(f"/api/comfyui/workflows/{preset_id}/run", methods=["POST"])
+    def fake_comfyui_workflow_run():
+        captured.update(request.get_json(silent=True) or {})
+        return _json_resp({"ok": True, "job": {"job_id": "job-workflow", "status": "queued"}, "workflow_run_id": 123})
+
+    return captured
 
 
 def _build_app(db_path, actor, *, settings=None, audit_events=None, fernet=None):
@@ -445,6 +570,81 @@ def test_ai_agent_write_tools_labels_disambiguate_similar_actions(tmp_path):
     assert labels["write_automation_job_run"] == "重試自動化任務"
     assert labels["write_video_upload"] == "AI Agent JSON 版影音發布"
     assert labels["write_video_publish"] == "發布既有雲端影音"
+
+
+def test_ai_agent_codex_handoff_tool_creates_reviewable_task(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    audit_events = []
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "write",
+            "ai_agent_allowed_tools": "write_codex_handoff_create",
+        },
+        audit_events=audit_events,
+    )
+    client = app.test_client()
+
+    listed = client.get("/api/ai-agent/write-tools")
+    catalog = listed.get_json()
+    assert listed.status_code == 200
+    assert catalog["tools"][0]["name"] == "write_codex_handoff_create"
+    assert catalog["tools"][0]["domain"] == "codex"
+    assert "objective" in catalog["tools"][0]["required"]
+
+    created = client.post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_codex_handoff_create",
+        "confirm": "EXECUTE",
+        "arguments": {
+            "title": "AI Agent i2i 後續交接",
+            "objective": "請 Codex 接手檢查 runtime 內的 i2i 測試報告並補測缺口。",
+            "context": {"report": "docs/AGENTS/reports/latest"},
+            "allowed_scope": "runtime_and_cloud_drive_only",
+            "requested_artifacts": ["summary", "test_results"],
+        },
+    })
+    payload = created.get_json()
+    assert created.status_code == 200
+    assert payload["ok"] is True
+    assert payload["result"]["handoff"]["status"] == "queued"
+    handoff_id = payload["result"]["handoff"]["id"]
+
+    reread = client.get("/api/ai-agent/codex-handoffs?include_context=1")
+    reread_payload = reread.get_json()
+    assert reread.status_code == 200
+    assert reread_payload["handoffs"][0]["id"] == handoff_id
+    assert reread_payload["handoffs"][0]["context"]["report"] == "docs/AGENTS/reports/latest"
+    assert any(event["args"][0] == "AI_AGENT_WRITE_TOOL" and event["kwargs"].get("success") is True for event in audit_events)
+
+
+def test_ai_agent_codex_handoff_marks_server_path_for_review(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "write",
+            "ai_agent_allowed_tools": "write_codex_handoff_create",
+        },
+    )
+
+    response = app.test_client().post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_codex_handoff_create",
+        "confirm": "EXECUTE",
+        "arguments": {
+            "objective": "請 Codex 修改 /home/s92137/hackme_web_05_AI_Agent/server.py。",
+            "allowed_scope": "requires_root_codex_review",
+        },
+    })
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert payload["result"]["handoff"]["status"] == "needs_review"
+    assert payload["result"]["handoff"]["warnings"]
 
 
 def test_ai_agent_write_tool_execute_requires_write_mode_for_mutation(tmp_path):
@@ -1326,18 +1526,17 @@ def test_ai_agent_comfyui_write_tool_preserves_image_edit_args(tmp_path):
             "ai_agent_allowed_tools": "write_comfyui_generate",
         },
     )
-    captured = {}
+    captured = _register_fake_comfyui_workflow_routes(
+        app,
+        workflow_id="origin_qwen_image_edit_2509",
+        preset_id=71,
+    )
 
     @app.route("/api/comfyui/models", methods=["GET"])
     def fake_comfyui_models():
         return _json_resp({"ok": True, "models": ["JANKUTrainedChenkinNoobai_v777.safetensors"]})
 
-    @app.route("/api/comfyui/generate", methods=["POST"])
-    def fake_comfyui_generate():
-        captured.update(request.get_json(silent=True) or {})
-        return _json_resp({"ok": True, "job": {"job_id": "job-img2img-edit", "status": "queued"}})
-
-    source_ref = {"filename": "source.png", "subfolder": "2026-06-23", "type": "output"}
+    source_ref = {"filename": "source.png", "subfolder": "2026-06-23", "type": "output", "cloud_file_id": "cloud-source-1"}
     response = app.test_client().post("/api/ai-agent/write-tools/execute", json={
         "tool": "write_comfyui_generate",
         "confirm": "EXECUTE",
@@ -1347,6 +1546,8 @@ def test_ai_agent_comfyui_write_tool_preserves_image_edit_args(tmp_path):
             "image_ref": source_ref,
             "denoise": 0.62,
             "cfg_scale": 6.5,
+            "width": 1920,
+            "height": 1080,
             "sampler": "euler",
             "mask_image_ref": None,
             "vae": None,
@@ -1357,13 +1558,558 @@ def test_ai_agent_comfyui_write_tool_preserves_image_edit_args(tmp_path):
 
     assert response.status_code == 200
     assert payload["ok"] is True
-    assert captured["generation_mode"] == "img2img"
-    assert captured["source_image_ref"] == source_ref
-    assert captured["denoise_strength"] == 0.62
-    assert captured["cfg"] == 6.5
-    assert captured["sampler_name"] == "euler"
-    assert "mask_image_ref" not in captured
-    assert "vae" not in captured
+    assert captured["user_inputs"]["494"]["prompt"] == "turn the existing portrait into watercolor style"
+    assert captured["image_field_assignments"]["78"] == "cloud-source-1"
+    assert "79" not in captured["image_field_assignments"]
+    assert "78" not in captured["user_inputs"]
+    assert captured["user_inputs"]["478"]["cfg"] == 1
+    assert captured["user_inputs"]["478"]["denoise"] == 0.62
+    assert captured["user_inputs"]["478"]["sampler_name"] == "euler"
+    assert captured["user_inputs"]["499"]["cfg"] == 1
+    assert captured["user_inputs"]["499"]["denoise"] == 0.62
+    assert captured["user_inputs"]["499"]["sampler_name"] == "euler"
+    assert "493" not in captured["user_inputs"]
+    assert "scheduler" not in captured["user_inputs"]["499"]
+    assert "seed" not in captured["user_inputs"]["499"]
+    assert captured["user_inputs"]["483"]["switch"] is True
+    assert captured["user_inputs"]["484"]["switch"] is True
+    assert captured["user_inputs"]["485"]["switch"] is True
+    assert captured["width"] == 1920
+    assert captured["height"] == 1080
+    assert any(
+        item.get("code") == "qwen_edit_lightning_sampler_clamped"
+        for item in payload["result"].get("workflow_bridge_adjustments", [])
+    )
+    assert "492" not in captured["user_inputs"]
+
+
+def test_ai_agent_comfyui_write_tool_extracts_denoise_strength_from_prompt_text(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "write",
+            "ai_agent_allowed_tools": "write_comfyui_generate",
+        },
+    )
+    captured = _register_fake_comfyui_workflow_routes(
+        app,
+        workflow_id="origin_qwen_image_edit_2509",
+        preset_id=72,
+    )
+
+    @app.route("/api/comfyui/models", methods=["GET"])
+    def fake_comfyui_models_for_denoise_prompt():
+        return _json_resp({"ok": True, "models": ["JANKUTrainedChenkinNoobai_v777.safetensors"]})
+
+    source_ref = {"filename": "source.png", "subfolder": "", "type": "input", "cloud_file_id": "cloud-source-1"}
+    response = app.test_client().post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_comfyui_generate",
+        "confirm": "EXECUTE",
+        "arguments": {
+            "prompt": (
+                "請使用 Qwen Image Edit 2509 把衣服改成不透明白色蕾絲洋裝；"
+                "請設定 denoise_strength=0.55；解析度 1080x1920，batch 1，steps 4，cfg 1。"
+            ),
+            "official_workflow_id": "origin_qwen_image_edit_2509",
+            "generation_mode": "img2img",
+            "source_image_ref": source_ref,
+            "confirm_billing": True,
+        },
+    })
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert captured["user_inputs"]["499"]["denoise"] == 0.55
+    assert captured["width"] == 1080
+    assert captured["height"] == 1920
+
+
+def test_ai_agent_comfyui_write_tool_extracts_inline_qwen_edit_instruction(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "write",
+            "ai_agent_allowed_tools": "write_comfyui_generate",
+        },
+    )
+    captured = _register_fake_comfyui_workflow_routes(
+        app,
+        workflow_id="origin_qwen_image_edit_2509",
+        preset_id=75,
+    )
+
+    @app.route("/api/comfyui/models", methods=["GET"])
+    def fake_comfyui_models():
+        return _json_resp({"ok": True, "models": ["JANKUTrainedChenkinNoobai_v777.safetensors"]})
+
+    source_ref = {"filename": "source.png", "subfolder": "", "type": "input", "cloud_file_id": "cloud-source-1"}
+    response = app.test_client().post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_comfyui_generate",
+        "confirm": "EXECUTE",
+        "arguments": {
+            "prompt": (
+                "請真的使用本站 ComfyUI 圖生圖語意改圖，source 使用人像測試原圖。"
+                "只把女孩可見衣服改成紅色連帽衫；不要改臉、髮型、手勢或背景。"
+                "提示詞基礎：by ogipote, anime style, 1girl。 "
+                "Use a short English edit instruction internally: change only the visible outfit to a red hoodie with red sleeves and small white drawstrings; preserve face, hair, hands, pose, body, and background."
+            ),
+            "official_workflow_id": "origin_qwen_image_edit_2509",
+            "generation_mode": "img2img",
+            "source_image_ref": source_ref,
+            "confirm_billing": True,
+        },
+    })
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    prompt = captured["user_inputs"]["494"]["prompt"]
+    assert prompt.startswith("change only the visible outfit to a red hoodie")
+    assert "Style and preservation context: anime style, 1girl" in prompt
+    assert "no visible artist name" in prompt
+    assert "by ogipote" not in prompt
+    assert "請真的使用本站" not in prompt
+    assert captured["image_field_assignments"]["78"] == "cloud-source-1"
+    assert "79" not in captured["image_field_assignments"]
+    assert any(
+        item.get("code") == "qwen_edit_instruction_prompt_applied"
+        for item in payload["result"].get("workflow_bridge_adjustments", [])
+    )
+
+
+@pytest.mark.parametrize(
+    ("prompt", "expected_prefix", "expected_fragment"),
+    [
+        (
+            "請真的使用本站 ComfyUI 圖生圖語意改圖，不要使用 inpaint mask；請使用 Qwen Image Edit 2509。"
+            "只把女孩可見衣服改成日系水手服，清楚可見 navy sailor collar、白色上衣與紅色領結；"
+            "不要改臉、表情、髮型、髮飾、手勢或背景。提示詞基礎：by ogipote, anime style, 1girl。",
+            "change only the visible outfit to a Japanese sailor uniform",
+            "white blouse, and red ribbon",
+        ),
+        (
+            "在原本女孩旁邊新增第二位清楚可見的 anime girl friend，站在畫面右側稍後方；"
+            "保留原本女孩的臉、髮型、衣服、手勢、身體姿勢與背景。提示詞基礎：by ogipote, anime style, 1girl。",
+            "add a second clearly visible anime girl friend",
+            "preserve the original girl",
+        ),
+        (
+            "把背景改成黃昏城市屋頂，不要改人物臉、髮型、衣服或姿勢。提示詞基礎：by ogipote, anime style, 1girl。",
+            "change only the background to",
+            "sunset city rooftop",
+        ),
+        (
+            "只把女孩可見衣服改成淡色日式和服，清楚可見 kimono collar、袖子與腰帶元素；"
+            "不要改臉、表情、髮型、髮飾、手勢或背景。提示詞基礎：by ogipote, anime style, 1girl。",
+            "change only the visible outfit to a pale Japanese kimono",
+            "obi sash",
+        ),
+        (
+            "只把女孩可見衣服改成明確的兩件式 bikini 泳裝，上半身可見 bikini top 與肩帶；"
+            "不要改臉、表情、髮型、髮飾、手勢或背景。提示詞基礎：by ogipote, anime style, 1girl。",
+            "change only the visible outfit to a tasteful two-piece bikini",
+            "visible shoulder straps",
+        ),
+        (
+            "只把女孩可見衣服改成可愛小惡魔 cosplay 服裝：黑色洋裝、紅色緞帶點綴、可見小惡魔角髮飾；"
+            "不要改臉、表情、主要髮型、手勢或背景。提示詞基礎：by ogipote, anime style, 1girl。",
+            "change only the visible outfit to a cute little-devil cosplay costume",
+            "devil-horn hair accessories",
+        ),
+        (
+            "把女孩姿勢改成揮手動作，保留身份、臉、髮型、衣服與背景。提示詞基礎：by ogipote, anime style, 1girl。",
+            "change the girl's pose to a clear waving-hand pose",
+            "preserve identity",
+        ),
+        (
+            "把女孩姿勢改成張開雙臂，補完原本被手遮住的胸前衣服與身體區域，保持身份、臉、髮型、衣服與背景。",
+            "change the girl's pose so both arms are opened outward",
+            "do not redesign the outfit",
+        ),
+        (
+            "做混合測試：1920x1080 橫幅 outpaint，背景改成躺在床上，女孩張開雙臂且雙手完整入鏡，補完原本被手遮住的衣服但不要改衣服設計。",
+            "convert the image into a 16:9 wide composition",
+            "preserve all unrequested original clothing attributes",
+        ),
+        (
+            "請真的使用本站 ComfyUI 圖生圖語意改圖，這次做混合測試：Qwen Image Edit 2509 語意改圖 + 1920x1080 橫幅外延構圖，"
+            "把畫面變成 1920x1080 橫幅，像左右 outpaint 一樣延伸構圖；把背景與姿勢改成同一個女孩躺在床上，背景有枕頭與柔軟床鋪。"
+            "兩隻手臂向左右張開，兩個手掌都要完整留在畫面內，不能裁切手掌。"
+            "原本被雙手遮住的胸前區域只用原本服裝外推補完：保持同一領口高度、同一紅色緞帶形狀與位置、同一肩帶位置、同一米色外套邊緣/版型/顏色、同一白色洋裝風格與衣服褶皺。"
+            "解析度 1920x1080，batch 1，steps 4，cfg 1，confirm_billing=true。提示詞基礎：by ogipote, anime style, 1girl。",
+            "convert the image into a 16:9 wide composition",
+            "including garment wearing state, exposure, neckline height",
+        ),
+        (
+            "把圖片改成更真實、半寫實風格，但保留同一個女孩、構圖、衣服與背景。提示詞基礎：by ogipote, anime style, 1girl。",
+            "convert the image to a more realistic",
+            "preserving the same girl",
+        ),
+        (
+            "請真的使用本站 ComfyUI 圖生圖語意改圖，不要使用 inpaint mask；請使用 Qwen Image Edit 2509。"
+            "這次做高難度混合語意編輯：第一，移除女孩頭髮上的白色髮夾，補成自然深藍色頭髮；"
+            "第二，把女孩髮型改成清楚的 twin tails / 雙馬尾，髮色仍接近原圖深藍黑色；"
+            "第三，在頭頂新增清楚貓耳髮飾，和被移除的白色髮夾不同；"
+            "第四，改成指定動作：右手食指輕輕觸摸嘴唇，左手伸到背後，頭歪著，手指結構要自然；"
+            "第五，在脖子周圍新增一條柔軟的紅色或深紅色圍巾，圍巾要清楚可見但不要遮住整張臉；"
+            "第六，把女孩表情改成病嬌風格，眼神更強烈、微笑略帶危險感，但不要恐怖血腥；"
+            "第七，讓胸部比例變大一些，但保持自然身體結構、衣服張力和同一人物身份；"
+            "第八，把可見白色洋裝改成精緻白色蕾絲洋裝風格，有 lace fabric texture、lace trim 和 subtle frills。"
+            "請保留同一個女孩與同一背景，不要加入文字、水印或額外人物。"
+            "解析度 1024x1024，batch 1，steps 4，cfg 1，confirm_billing=true。提示詞基礎：by ogipote, anime style, 1girl。",
+            "remove the white hair clips",
+            "right index finger gently touches the lips",
+        ),
+        (
+            "只把女孩表情改成病嬌風格，眼神更強烈、微笑略帶危險感；不要改髮型、髮色、衣服、手勢或背景。",
+            "change only the facial expression to yandere",
+            "preserve hair, outfit, hands, pose, body, and background",
+        ),
+        (
+            "請真的使用本站 ComfyUI 圖生圖語意改圖，不要使用 inpaint mask；請使用 Qwen Image Edit 2509。"
+            "把背景改成大街，車水馬龍，路人可以模糊化但要看得出街道人潮與交通；"
+            "尺寸改成 1080x1920 直式構圖，人物需要全身入鏡，從頭到腳都完整出現，不能裁切腳部。"
+            "腳上穿著木屐；衣服改為日式祭典和服，清楚可見 kimono collar、袖子、腰帶 obi 與祭典布料細節；"
+            "頭髮改為單馬尾，搭配日式祭典應有的髮飾。請保留同一個女孩的臉部身份與整體 anime style。",
+            "convert the image into a vertical 1080x1920 full-body composition",
+            "wearing traditional wooden geta sandals",
+        ),
+        (
+            "請真的使用本站 ComfyUI 圖生圖語意改圖，不要使用 inpaint mask；請使用 Qwen Image Edit 2509。"
+            "這次專門測試體態與服裝可辨識度：把同一個女孩改成全身站姿的成人感 anime woman，身形更高挑，腰更細，"
+            "胸部適度變大但自然，腿部更修長且比例合理；衣服改成合身白色蕾絲 one-piece dress，"
+            "要有 lace fabric texture、lace trim、細緻花邊與輕微褶皺。請保留同一張臉、深藍髮色、單馬尾、祭典髮飾與夜間大街背景。",
+            "edit the same girl into a full-body standing adult anime woman",
+            "make the waist visibly slimmer",
+        ),
+    ],
+)
+def test_ai_agent_comfyui_write_tool_derives_qwen_edit_instruction_from_cjk_prompt(tmp_path, prompt, expected_prefix, expected_fragment):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "write",
+            "ai_agent_allowed_tools": "write_comfyui_generate",
+        },
+    )
+    captured = _register_fake_comfyui_workflow_routes(
+        app,
+        workflow_id="origin_qwen_image_edit_2509",
+        preset_id=76,
+    )
+
+    @app.route("/api/comfyui/models", methods=["GET"])
+    def fake_comfyui_models():
+        return _json_resp({"ok": True, "models": ["JANKUTrainedChenkinNoobai_v777.safetensors"]})
+
+    source_ref = {"filename": "source.png", "subfolder": "", "type": "input", "cloud_file_id": "cloud-source-1"}
+    response = app.test_client().post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_comfyui_generate",
+        "confirm": "EXECUTE",
+        "arguments": {
+            "prompt": prompt,
+            "official_workflow_id": "origin_qwen_image_edit_2509",
+            "generation_mode": "img2img",
+            "source_image_ref": source_ref,
+            "confirm_billing": True,
+        },
+    })
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    qwen_prompt = captured["user_inputs"]["494"]["prompt"]
+    assert qwen_prompt.startswith(expected_prefix)
+    assert expected_fragment in qwen_prompt
+    if expected_prefix == "remove the white hair clips":
+        for required_fragment in (
+            "clear high twin tails",
+            "cat-ear hair accessories",
+            "left hand reaches behind the back",
+            "head is tilted",
+            "dark red scarf",
+            "yandere",
+            "bust moderately larger",
+            "delicate white lace dress",
+        ):
+            assert required_fragment in qwen_prompt
+    if expected_prefix == "convert the image into a vertical 1080x1920 full-body composition":
+        for required_fragment in (
+            "from head to feet",
+            "Japanese festival kimono",
+            "single ponytail",
+            "Japanese festival hair accessories",
+            "busy city street",
+            "traffic",
+            "blurred pedestrians",
+            "avoid cropped feet",
+        ):
+            assert required_fragment in qwen_prompt
+    if expected_prefix == "edit the same girl into a full-body standing adult anime woman":
+        for required_fragment in (
+            "taller, more elegant silhouette",
+            "waist visibly slimmer",
+            "legs longer",
+            "bust moderately larger",
+            "fully lined opaque white lace maxi dress",
+            "skin must not be visible through the dress",
+            "simple white dress shoes or geta sandals",
+            "do not make it a bodysuit",
+            "qipao",
+            "single ponytail",
+            "festival hair accessories",
+            "busy night street background",
+            "both feet visible",
+        ):
+            assert required_fragment in qwen_prompt
+    if "雙馬尾" not in prompt and "twin tails" not in prompt.lower():
+        assert "twin tails" not in qwen_prompt
+    if "realistic" in expected_prefix:
+        assert "anime style" not in qwen_prompt
+    else:
+        assert "Style and preservation context: anime style, 1girl" in qwen_prompt
+        assert "no visible artist name" in qwen_prompt
+        assert "by ogipote" not in qwen_prompt
+    assert "請真的使用本站" not in qwen_prompt
+    assert not re.search(r"[\u3400-\u9fff]", qwen_prompt)
+    assert captured["image_field_assignments"]["78"] == "cloud-source-1"
+    assert any(
+        item.get("code") == "qwen_edit_instruction_prompt_applied"
+        for item in payload["result"].get("workflow_bridge_adjustments", [])
+    )
+
+
+def test_ai_agent_comfyui_write_tool_overrides_short_qwen_edit_instruction_when_off_shoulder_guard_is_missing(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "write",
+            "ai_agent_allowed_tools": "write_comfyui_generate",
+        },
+    )
+    captured = _register_fake_comfyui_workflow_routes(
+        app,
+        workflow_id="origin_qwen_image_edit_2509",
+        preset_id=77,
+    )
+
+    @app.route("/api/comfyui/models", methods=["GET"])
+    def fake_comfyui_models():
+        return _json_resp({"ok": True, "models": ["JANKUTrainedChenkinNoobai_v777.safetensors"]})
+
+    source_ref = {"filename": "source.png", "subfolder": "", "type": "input", "cloud_file_id": "cloud-source-1"}
+    response = app.test_client().post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_comfyui_generate",
+        "confirm": "EXECUTE",
+        "arguments": {
+            "prompt": (
+                "請真的使用本站 ComfyUI 圖生圖語意改圖，這次做混合測試：Qwen Image Edit 2509 語意改圖 + 1920x1080 橫幅外延構圖，"
+                "把畫面變成 1920x1080 橫幅，像左右 outpaint 一樣延伸構圖；把背景與姿勢改成同一個女孩躺在床上，背景有枕頭與柔軟床鋪。"
+                "兩隻手臂向左右張開，兩個手掌都要完整留在畫面內，不能裁切手掌。"
+                "原本被雙手遮住的胸前區域只用原本服裝外推補完：保持同一領口高度、同一紅色緞帶形狀與位置、同一肩帶位置、同一米色外套邊緣/版型/顏色、同一白色洋裝風格與衣服褶皺。"
+                "解析度 1920x1080，batch 1，steps 4，cfg 1，confirm_billing=true。提示詞基礎：by ogipote, anime style, 1girl。"
+            ),
+            "edit_instruction": (
+                "transform the image to a girl lying on a bed with arms spread left and right, palms fully visible; "
+                "preserve face, hair, hairpin, ribbon, shoulder straps, beige jacket, white dress; "
+                "do not redesign clothes, no extra people, no text or watermark"
+            ),
+            "official_workflow_id": "origin_qwen_image_edit_2509",
+            "generation_mode": "img2img",
+            "source_image_ref": source_ref,
+            "confirm_billing": True,
+        },
+    })
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    qwen_prompt = captured["user_inputs"]["494"]["prompt"]
+    assert qwen_prompt.startswith("convert the image into a 16:9 wide composition")
+    assert "preserve all unrequested original clothing attributes" in qwen_prompt
+    assert "including garment wearing state, exposure, neckline height" in qwen_prompt
+    assert "if the original shoulders or collarbones are visible" in qwen_prompt
+    assert "do not add new fabric coverage" in qwen_prompt
+    assert "do not change how garments are worn" in qwen_prompt
+    assert "transform the image to a girl lying on a bed" not in qwen_prompt
+    assert not re.search(r"[\u3400-\u9fff]", qwen_prompt)
+    assert captured["image_field_assignments"]["78"] == "cloud-source-1"
+
+
+def test_ai_agent_comfyui_write_tool_treats_anything2real_as_qwen_edit_family(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "write",
+            "ai_agent_allowed_tools": "write_comfyui_generate",
+        },
+    )
+    captured = _register_fake_comfyui_workflow_routes(
+        app,
+        workflow_id="origin_qwen_image_edit_2509_anything2real",
+        preset_id=78,
+    )
+
+    @app.route("/api/comfyui/models", methods=["GET"])
+    def fake_comfyui_models():
+        return _json_resp({"ok": True, "models": ["Anything2RealAlpha.safetensors"]})
+
+    source_ref = {"filename": "source.png", "subfolder": "", "type": "input", "cloud_file_id": "cloud-source-1"}
+    response = app.test_client().post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_comfyui_generate",
+        "confirm": "EXECUTE",
+        "arguments": {
+            "prompt": (
+                "請使用 Anything2Real 把圖片改成 realistic photograph，但保留同一個女孩、構圖、衣服與背景。 "
+                "Use a short English edit instruction internally: transform the image to realistic photograph; preserve the same young woman, face identity, short dark blue hair, blue eyes, hair clips, beige cardigan, white dress, clasped hands, pose, composition, and simple indoor background."
+                "解析度 1024x1024，batch 1，steps 4，cfg 1，confirm_billing=true。"
+            ),
+            "official_workflow_id": "origin_qwen_image_edit_2509",
+            "generation_mode": "img2img",
+            "source_image_ref": source_ref,
+            "reference_image_ref": None,
+            "steps": 20,
+            "cfg": 4,
+            "confirm_billing": True,
+        },
+    })
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    qwen_prompt = captured["user_inputs"]["494"]["prompt"]
+    assert qwen_prompt.startswith("transform the image to realistic photograph")
+    assert "anime style" not in qwen_prompt
+    assert "請真的使用本站" not in qwen_prompt
+    assert "解析度" not in qwen_prompt
+    assert "confirm_billing" not in qwen_prompt
+    assert not re.search(r"[\u3400-\u9fff]", qwen_prompt)
+    assert captured["image_field_assignments"]["78"] == "cloud-source-1"
+    assert "79" not in captured["image_field_assignments"]
+    assert captured["user_inputs"]["483"]["switch"] is True
+    assert captured["user_inputs"]["484"]["switch"] is True
+    assert captured["user_inputs"]["485"]["switch"] is True
+    assert captured["user_inputs"]["499"]["steps"] == 4
+    assert captured["user_inputs"]["499"]["cfg"] == 1
+    assert any(
+        item.get("code") == "qwen_edit_style_context_omitted"
+        for item in payload["result"].get("workflow_bridge_adjustments", [])
+    )
+    assert any(
+        item.get("code") == "qwen_edit_lightning_sampler_clamped"
+        for item in payload["result"].get("workflow_bridge_adjustments", [])
+    )
+
+
+def test_ai_agent_comfyui_write_tool_assigns_qwen_reference_image_without_link_user_input(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "write",
+            "ai_agent_allowed_tools": "write_comfyui_generate",
+        },
+    )
+    captured = _register_fake_comfyui_workflow_routes(
+        app,
+        workflow_id="origin_qwen_image_edit_2509",
+        preset_id=73,
+    )
+
+    @app.route("/api/comfyui/models", methods=["GET"])
+    def fake_comfyui_models():
+        return _json_resp({"ok": True, "models": ["JANKUTrainedChenkinNoobai_v777.safetensors"]})
+
+    source_ref = {"filename": "source.png", "subfolder": "", "type": "input", "cloud_file_id": "cloud-source-1"}
+    reference_ref = {"filename": "pose.png", "subfolder": "", "type": "input", "cloud_file_id": "cloud-reference-1"}
+    response = app.test_client().post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_comfyui_generate",
+        "confirm": "EXECUTE",
+        "arguments": {
+            "prompt": "change the person pose to match the reference image, keep identity and clothing",
+            "official_workflow_id": "origin_qwen_image_edit_2509",
+            "generation_mode": "img2img",
+            "source_image_ref": source_ref,
+            "reference_image_ref": reference_ref,
+            "confirm_billing": True,
+        },
+    })
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert captured["image_field_assignments"]["78"] == "cloud-source-1"
+    assert captured["image_field_assignments"]["79"] == "cloud-reference-1"
+    assert captured["user_inputs"]["494"]["prompt"].startswith("change the person pose")
+    assert "image2" not in captured["user_inputs"]["494"]
+    assert any(
+        item.get("code") == "qwen_edit_reference_image_link_expected"
+        for item in payload["result"].get("workflow_bridge_adjustments", [])
+    )
+
+
+def test_ai_agent_comfyui_write_tool_does_not_fallback_source_into_qwen_reference(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "write",
+            "ai_agent_allowed_tools": "write_comfyui_generate",
+        },
+    )
+    captured = _register_fake_comfyui_workflow_routes(
+        app,
+        workflow_id="origin_qwen_image_edit_2509",
+        preset_id=74,
+    )
+
+    @app.route("/api/comfyui/models", methods=["GET"])
+    def fake_comfyui_models():
+        return _json_resp({"ok": True, "models": ["JANKUTrainedChenkinNoobai_v777.safetensors"]})
+
+    source_ref = {"filename": "source.png", "subfolder": "", "type": "input", "cloud_file_id": "cloud-source-1"}
+    response = app.test_client().post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_comfyui_generate",
+        "confirm": "EXECUTE",
+        "arguments": {
+            "prompt": "by ogipote, anime style, 1girl",
+            "edit_instruction": "make her expression surprised, preserve pose and clothing",
+            "official_workflow_id": "origin_qwen_image_edit_2509",
+            "generation_mode": "img2img",
+            "source_image_ref": source_ref,
+            "confirm_billing": True,
+        },
+    })
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert captured["image_field_assignments"]["78"] == "cloud-source-1"
+    assert "79" not in captured["image_field_assignments"]
+    assert not any(
+        item.get("code") == "qwen_edit_reference_image_link_expected"
+        for item in payload["result"].get("workflow_bridge_adjustments", [])
+    )
 
 
 def test_ai_agent_comfyui_write_tool_flattens_outpaint_args(tmp_path):
@@ -1377,16 +2123,15 @@ def test_ai_agent_comfyui_write_tool_flattens_outpaint_args(tmp_path):
             "ai_agent_allowed_tools": "write_comfyui_generate",
         },
     )
-    captured = {}
+    captured = _register_fake_comfyui_workflow_routes(
+        app,
+        workflow_id="origin_flux_fill_outpaint_gguf_q3",
+        preset_id=72,
+    )
 
     @app.route("/api/comfyui/models", methods=["GET"])
     def fake_comfyui_models():
         return _json_resp({"ok": True, "models": ["JANKUTrainedChenkinNoobai_v777.safetensors"]})
-
-    @app.route("/api/comfyui/generate", methods=["POST"])
-    def fake_comfyui_generate():
-        captured.update(request.get_json(silent=True) or {})
-        return _json_resp({"ok": True, "job": {"job_id": "job-outpaint-edit", "status": "queued"}})
 
     response = app.test_client().post("/api/ai-agent/write-tools/execute", json={
         "tool": "write_comfyui_generate",
@@ -1394,7 +2139,7 @@ def test_ai_agent_comfyui_write_tool_flattens_outpaint_args(tmp_path):
         "arguments": {
             "prompt": "extend the same scene outward",
             "mode": "outpainting",
-            "source_image_ref": {"filename": "scene.png", "subfolder": "", "type": "output"},
+            "source_image_ref": {"filename": "scene.png", "subfolder": "", "type": "output", "cloud_file_id": "cloud-scene-1"},
             "outpaint": {"left": 128, "top": 64, "right": 128, "bottom": 64, "feathering": 48},
             "confirm_billing": True,
         },
@@ -1403,12 +2148,14 @@ def test_ai_agent_comfyui_write_tool_flattens_outpaint_args(tmp_path):
 
     assert response.status_code == 200
     assert payload["ok"] is True
-    assert captured["generation_mode"] == "outpaint"
-    assert captured["outpaint_left"] == 128
-    assert captured["outpaint_top"] == 64
-    assert captured["outpaint_right"] == 128
-    assert captured["outpaint_bottom"] == 64
-    assert captured["outpaint_feathering"] == 48
+    assert captured["user_inputs"]["494"]["prompt"] == "extend the same scene outward"
+    assert captured["image_field_assignments"]["78"] == "cloud-scene-1"
+    assert "78" not in captured["user_inputs"]
+    assert captured["user_inputs"]["44"]["left"] == 128
+    assert captured["user_inputs"]["44"]["top"] == 64
+    assert captured["user_inputs"]["44"]["right"] == 128
+    assert captured["user_inputs"]["44"]["bottom"] == 64
+    assert captured["user_inputs"]["44"]["feathering"] == 48
 
 
 def test_ai_agent_comfyui_write_tool_rejects_unknown_checkpoint_before_queue(tmp_path):
@@ -1545,6 +2292,28 @@ def test_ai_agent_models_backend_unavailable_degrades_without_5xx(monkeypatch, t
         and event["kwargs"].get("success") is False
         for event in audit_events
     )
+
+
+def test_ai_agent_models_filters_retired_cloud_vision_model(monkeypatch, tmp_path):
+    db_path = tmp_path / "ai_agent_models_filter.db"
+    _build_db(db_path)
+    app = _build_app(db_path, {"id": 1, "username": "root", "role": "super_admin"})
+
+    def backend_models(settings):
+        return {
+            "object": "list",
+            "data": [
+                {"id": "qwen3-vl:235b-instruct-cloud"},
+                {"id": "qwen3.5:cloud"},
+            ],
+        }
+
+    monkeypatch.setattr("routes.ai_agent.ai_agent_models", backend_models)
+    payload = app.test_client().get("/api/ai-agent/models").get_json()
+    model_ids = [item["id"] for item in payload["models"]["data"]]
+
+    assert payload["ok"] is True
+    assert model_ids == ["qwen3.5:cloud"]
 
 
 def test_ai_agent_status_only_super_admin_gets_audit_scan(monkeypatch, tmp_path):

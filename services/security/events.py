@@ -35,6 +35,35 @@ SECURITY_EVENT_TYPES = {
 }
 
 
+def _ensure_ip_blocks_schema(conn):
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS security_events (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_type  TEXT,
+            ip_address  TEXT,
+            target_user TEXT,
+            detail      TEXT,
+            created_at  TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ip_blocks (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            ip_address     TEXT NOT NULL UNIQUE,
+            blocked_until  TEXT NOT NULL,
+            reason         TEXT,
+            created_at     TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_ip_blocks_ip ON ip_blocks(ip_address)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_ip_blocks_until ON ip_blocks(blocked_until)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sec_event_type_ip_time ON security_events(event_type, ip_address, created_at)")
+
+
 def _capacity_probe_unlimited():
     return str(os.environ.get("HACKME_CAPACITY_PROBE_UNLIMITED") or "").strip().lower() in {"1", "true", "yes", "on"}
 ROOT_NOTIFICATION_EVENT_TYPES = {
@@ -196,6 +225,7 @@ def _maybe_cleanup_old_events():
             return
         conn = _STATE["get_db"]()
         try:
+            _ensure_ip_blocks_schema(conn)
             cutoff = (datetime.now() - timedelta(days=_EVENT_RETENTION_DAYS)).isoformat()
             now_iso = datetime.now().isoformat()
             try:
@@ -240,6 +270,7 @@ def record_security_event(event_type, ip, target_user=None, detail="", created_a
     event_created_at = created_at or datetime.now().isoformat()
     conn = _STATE["get_db"]()
     try:
+        _ensure_ip_blocks_schema(conn)
         suppress_root_notification = _root_notification_recently_sent(
             conn,
             normalized_type,
@@ -279,6 +310,7 @@ def is_ip_blocked(ip):
     _maybe_cleanup_old_events()
     conn = _STATE["get_db"]()
     try:
+        _ensure_ip_blocks_schema(conn)
         row = conn.execute(
             "SELECT blocked_until FROM ip_blocks WHERE ip_address=? LIMIT 1",
             (ip,)
@@ -313,6 +345,7 @@ def block_ip(ip, minutes=10, reason="multiple failures"):
     blocked_until = (datetime.now() + timedelta(minutes=minutes)).isoformat()
     conn = _STATE["get_db"]()
     try:
+        _ensure_ip_blocks_schema(conn)
         conn.execute(
             "INSERT INTO ip_blocks (ip_address, blocked_until, reason, created_at) VALUES (?, ?, ?, ?) "
             "ON CONFLICT(ip_address) DO UPDATE SET blocked_until=excluded.blocked_until, reason=excluded.reason, created_at=excluded.created_at",

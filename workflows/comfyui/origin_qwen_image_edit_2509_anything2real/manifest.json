@@ -1,0 +1,407 @@
+{
+  "conversion": {
+    "allowlist_message": "",
+    "allowlist_status": "allowlisted",
+    "class_count": 15,
+    "denied_classes": [],
+    "node_count": 20,
+    "source_format": "ui_graph",
+    "source_path": "image/edit/image_qwen_image_edit_2509.json",
+    "structural_status": "pass",
+    "unknown_classes": []
+  },
+  "default_params": {
+    "batch_size": 1,
+    "cfg": 1,
+    "checkpoint": "",
+    "clip": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+    "controlnet": null,
+    "denoise_strength": 1,
+    "diffusion_model": "qwen_image_edit_2509_fp8_e4m3fn.safetensors",
+    "generation_mode": "img2img",
+    "height": 1024,
+    "loras": [
+      {
+        "name": "QWEN\\Qwen-Image-Edit-2509-Lightning-4steps-V1.0-bf16.safetensors",
+        "strength_model": 1,
+        "strength_clip": 1
+      },
+      {
+        "name": "QWEN\\Anything2RealAlpha.safetensors",
+        "strength_model": 0.85,
+        "strength_clip": 0
+      }
+    ],
+    "model": "qwen_image_edit_2509_fp8_e4m3fn.safetensors",
+    "negative_prompt": "",
+    "prompt": "transform the image to realistic photograph. Preserve the same subject, pose, composition, outfit, and background.",
+    "sampler_name": "euler",
+    "scheduler": "simple",
+    "seed": 1001672099958606,
+    "steps": 4,
+    "upscale_model": "",
+    "vae": "qwen_image_vae.safetensors",
+    "width": 1024
+  },
+  "description": "Qwen image-edit workflow with Lightning LoRA and Anything2RealAlpha chained for anime-to-realistic image editing.",
+  "id": "origin_qwen_image_edit_2509_anything2real",
+  "name": "Qwen Image Edit 2509 Anything2Real",
+  "origin_source_path": "image/edit/image_qwen_image_edit_2509.json",
+  "output_kinds": [
+    "image"
+  ],
+  "required_controlnets": [],
+  "required_custom_nodes": [],
+  "required_loras": [
+    {
+      "name": "QWEN\\Qwen-Image-Edit-2509-Lightning-4steps-V1.0-bf16.safetensors",
+      "strength_model": 1
+    },
+    {
+      "name": "QWEN\\Anything2RealAlpha.safetensors",
+      "strength_model": 0.85
+    }
+  ],
+  "required_models": [
+    {
+      "kind": "vae",
+      "name": "qwen_image_vae.safetensors"
+    },
+    {
+      "kind": "clip",
+      "name": "qwen_2.5_vl_7b_fp8_scaled.safetensors"
+    },
+    {
+      "kind": "diffusion_model",
+      "name": "qwen_image_edit_2509_fp8_e4m3fn.safetensors"
+    }
+  ],
+  "schema_version": 1,
+  "source": "official_origin",
+  "source_format": "ui_graph",
+  "ui": {
+    "initial_collapsed": true,
+    "panels": [
+      {
+        "collapsed_default": true,
+        "fields": [
+          {
+            "category": "TEXT",
+            "class_type": "TextEncodeQwenImageEditPlus",
+            "constraints": {
+              "max_length": 4000,
+              "rows": 5
+            },
+            "current_value": "",
+            "id": "node:492:prompt",
+            "input_name": "prompt",
+            "input_type": "textarea",
+            "label": "負面提示詞（Node 492）",
+            "node_id": "492",
+            "required": true
+          },
+          {
+            "category": "TEXT",
+            "class_type": "TextEncodeQwenImageEditPlus",
+            "constraints": {
+              "max_length": 4000,
+              "rows": 5
+            },
+            "current_value": "Replace the cat with a dalmatian, keeping the environment and scene consistent",
+            "id": "node:494:prompt",
+            "input_name": "prompt",
+            "input_type": "textarea",
+            "label": "正向提示詞（Node 494）",
+            "node_id": "494",
+            "required": true
+          },
+          {
+            "category": "TEXT",
+            "class_type": "EmbeddingShortcuts",
+            "constraints": {
+              "target_field_ids": [
+                "node:492:prompt",
+                "node:494:prompt"
+              ],
+              "token_prefix": "<embeddings:"
+            },
+            "current_value": "",
+            "id": "text:embeddings",
+            "input_name": "embeddings",
+            "input_type": "embedding_shortcuts",
+            "label": "Embedding 快速插入",
+            "node_id": "",
+            "parent_category": "text",
+            "required": false,
+            "synthetic": true
+          }
+        ],
+        "id": "text",
+        "label": "文字輸入"
+      },
+      {
+        "collapsed_default": true,
+        "fields": [
+          {
+            "category": "IMAGE",
+            "class_type": "LoadImage",
+            "constraints": {
+              "accept_mime": [
+                "image/png",
+                "image/jpeg",
+                "image/webp"
+              ]
+            },
+            "current_value": "image_qwen_image_edit_2509_input_image.png",
+            "id": "node:78:image",
+            "input_name": "image",
+            "input_type": "file_picker",
+            "label": "上傳圖片",
+            "node_id": "78",
+            "required": true
+          }
+        ],
+        "id": "image",
+        "label": "圖片輸入"
+      },
+      {
+        "collapsed_default": true,
+        "fields": [
+          {
+            "category": "MODEL",
+            "class_type": "VAELoader",
+            "current_value": "qwen_image_vae.safetensors",
+            "id": "node:489:vae_name",
+            "input_name": "vae_name",
+            "input_type": "select",
+            "label": "VAE（Node 489）",
+            "lock_reason": "template_default_model",
+            "locked": true,
+            "node_id": "489",
+            "read_only": true,
+            "required": false
+          },
+          {
+            "category": "MODEL",
+            "class_type": "CLIPLoader",
+            "current_value": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+            "id": "node:490:clip_name",
+            "input_name": "clip_name",
+            "input_type": "select",
+            "label": "CLIP / 文字編碼器（Node 490）",
+            "lock_reason": "template_default_model",
+            "locked": true,
+            "node_id": "490",
+            "read_only": true,
+            "required": false
+          },
+          {
+            "category": "MODEL",
+            "class_type": "UNETLoader",
+            "current_value": "qwen_image_edit_2509_fp8_e4m3fn.safetensors",
+            "id": "node:491:unet_name",
+            "input_name": "unet_name",
+            "input_type": "select",
+            "label": "Diffusion / UNet 大模型（Node 491）",
+            "lock_reason": "template_default_model",
+            "locked": true,
+            "node_id": "491",
+            "read_only": true,
+            "required": false
+          },
+          {
+            "category": "MODEL",
+            "class_type": "LoraLoaderModelOnly",
+            "current_value": "QWEN\\Qwen-Image-Edit-2509-Lightning-4steps-V1.0-bf16.safetensors",
+            "id": "node:497:lora_name",
+            "input_name": "lora_name",
+            "input_type": "select",
+            "label": "LoRA 模型（Model-only）（Node 497）",
+            "node_id": "497",
+            "required": true
+          },
+          {
+            "category": "MODEL",
+            "class_type": "LoraLoaderModelOnly",
+            "current_value": "QWEN\\Anything2RealAlpha.safetensors",
+            "id": "node:511:lora_name",
+            "input_name": "lora_name",
+            "input_type": "select",
+            "label": "Anything2Real LoRA（Node 511）",
+            "node_id": "511",
+            "required": true
+          }
+        ],
+        "id": "model",
+        "label": "模型需求"
+      },
+      {
+        "collapsed_default": true,
+        "fields": [
+          {
+            "category": "NUMERIC",
+            "class_type": "KSampler",
+            "constraints": {
+              "max": 9007199254740992,
+              "min": 0,
+              "step": 1
+            },
+            "current_value": 1001672099958606,
+            "id": "node:499:seed",
+            "input_name": "seed",
+            "input_type": "number",
+            "label": "種子（Node 499）",
+            "node_id": "499",
+            "required": true
+          },
+          {
+            "category": "SAMPLER",
+            "class_type": "KSampler",
+            "current_value": "euler",
+            "id": "node:499:sampler_name",
+            "input_name": "sampler_name",
+            "input_type": "select",
+            "label": "取樣器（Node 499）",
+            "node_id": "499",
+            "required": true
+          },
+          {
+            "category": "SAMPLER",
+            "class_type": "KSampler",
+            "current_value": "simple",
+            "id": "node:499:scheduler",
+            "input_name": "scheduler",
+            "input_type": "select",
+            "label": "排程器（Node 499）",
+            "node_id": "499",
+            "required": true
+          },
+          {
+            "category": "NUMERIC",
+            "class_type": "KSampler",
+            "constraints": {
+              "max": 1.0,
+              "min": 0.0,
+              "step": 0.05
+            },
+            "current_value": 1,
+            "id": "node:499:denoise",
+            "input_name": "denoise",
+            "input_type": "number",
+            "label": "Denoise（Node 499）",
+            "node_id": "499",
+            "required": true
+          },
+          {
+            "category": "SAMPLER",
+            "class_type": "ComfySwitchNode",
+            "current_value": true,
+            "id": "node:504:switch",
+            "input_name": "switch",
+            "input_type": "select",
+            "label": "ComfySwitchNode.switch（Switch (Model)）",
+            "node_id": "504",
+            "node_title": "Switch (Model)",
+            "required": true
+          },
+          {
+            "category": "SAMPLER",
+            "class_type": "ComfySwitchNode",
+            "current_value": true,
+            "id": "node:505:switch",
+            "input_name": "switch",
+            "input_type": "select",
+            "label": "ComfySwitchNode.switch（Switch (Steps)）",
+            "node_id": "505",
+            "node_title": "Switch (Steps)",
+            "required": true
+          },
+          {
+            "category": "SAMPLER",
+            "class_type": "ComfySwitchNode",
+            "current_value": true,
+            "id": "node:506:switch",
+            "input_name": "switch",
+            "input_type": "select",
+            "label": "ComfySwitchNode.switch（Switch (CFG)）",
+            "node_id": "506",
+            "node_title": "Switch (CFG)",
+            "required": true
+          }
+        ],
+        "id": "sampler",
+        "label": "採樣設定"
+      },
+      {
+        "collapsed_default": true,
+        "fields": [
+          {
+            "category": "NUMERIC",
+            "class_type": "ModelSamplingAuraFlow",
+            "constraints": {
+              "max": 20.0,
+              "min": 0.0,
+              "step": 0.1
+            },
+            "current_value": 3,
+            "id": "node:493:shift",
+            "input_name": "shift",
+            "input_type": "number",
+            "label": "Model Shift（Node 493）",
+            "node_id": "493",
+            "required": true
+          },
+          {
+            "category": "NUMERIC",
+            "class_type": "LoraLoaderModelOnly",
+            "constraints": {
+              "max": 2.0,
+              "min": -2.0,
+              "step": 0.05
+            },
+            "current_value": 1,
+            "id": "node:497:strength_model",
+            "input_name": "strength_model",
+            "input_type": "number",
+            "label": "LoRA 強度（Node 497）",
+            "node_id": "497",
+            "required": true
+          },
+          {
+            "category": "NUMERIC",
+            "class_type": "LoraLoaderModelOnly",
+            "constraints": {
+              "max": 2.0,
+              "min": -2.0,
+              "step": 0.05
+            },
+            "current_value": 0.85,
+            "id": "node:511:strength_model",
+            "input_name": "strength_model",
+            "input_type": "number",
+            "label": "Anything2Real LoRA 強度（Node 511）",
+            "node_id": "511",
+            "required": true
+          }
+        ],
+        "id": "numeric",
+        "label": "進階數值參數"
+      },
+      {
+        "collapsed_default": false,
+        "fields": [],
+        "id": "compatibility",
+        "label": "相容性報告",
+        "read_only": true
+      },
+      {
+        "collapsed_default": true,
+        "fields": [],
+        "id": "raw",
+        "label": "原始 workflow",
+        "read_only": true
+      }
+    ]
+  },
+  "workflow_file": "workflow.json"
+}

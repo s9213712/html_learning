@@ -49,7 +49,7 @@
     },
     {
       "kind": "clip",
-      "name": "t5xxl_fp16.safetensors"
+      "name": "t5xxl_fp8_e4m3fn_scaled.safetensors"
     },
     {
       "kind": "diffusion_model",
@@ -155,7 +155,7 @@
           {
             "category": "MODEL",
             "class_type": "DualCLIPLoader",
-            "current_value": "t5xxl_fp16.safetensors",
+            "current_value": "t5xxl_fp8_e4m3fn_scaled.safetensors",
             "id": "node:34:clip_name2",
             "input_name": "clip_name2",
             "input_type": "select",

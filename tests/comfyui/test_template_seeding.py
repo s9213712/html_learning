@@ -51,6 +51,55 @@ def test_seed_idempotent_on_subsequent_boot(tmp_path):
     assert body["alpha"]["class_type"] == "CUSTOM"
 
 
+def test_seed_repairs_stale_qwen_edit_reference_image_runtime_bundle(tmp_path):
+    src = tmp_path / "src" / "comfyui"
+    source_bundle = src / "origin_qwen_image_edit_2509"
+    source_bundle.mkdir(parents=True)
+    source_workflow = {
+        "78": {"class_type": "LoadImage", "inputs": {"image": "source.png", "upload": "image"}},
+        "79": {
+            "_meta": {"title": "Reference Pose Image"},
+            "class_type": "LoadImage",
+            "inputs": {"image": "reference.png", "upload": "image"},
+        },
+        "494": {
+            "class_type": "TextEncodeQwenImageEditPlus",
+            "inputs": {"image1": ["78", 0], "prompt": "edit"},
+        },
+    }
+    (source_bundle / "workflow.json").write_text(json.dumps(source_workflow), encoding="utf-8")
+    (source_bundle / "manifest.json").write_text(
+        json.dumps({"id": "origin_qwen_image_edit_2509", "name": "Qwen edit"}),
+        encoding="utf-8",
+    )
+
+    runtime = tmp_path / "rt"
+    runtime_bundle = runtime / "comfyui" / "origin_qwen_image_edit_2509"
+    runtime_bundle.mkdir(parents=True)
+    stale_workflow = {
+        "78": {"class_type": "LoadImage", "inputs": {"image": "source.png", "upload": "image"}},
+        "494": {
+            "class_type": "TextEncodeQwenImageEditPlus",
+            "inputs": {"image1": ["78", 0], "image2": ["79", 0], "prompt": "operator tuned prompt"},
+        },
+    }
+    (runtime_bundle / "workflow.json").write_text(json.dumps(stale_workflow), encoding="utf-8")
+    (runtime_bundle / "manifest.json").write_text(
+        json.dumps({"id": "origin_qwen_image_edit_2509", "name": "Qwen edit"}),
+        encoding="utf-8",
+    )
+
+    report = seed_default_comfyui_workflows(source_dir=src, runtime_root=runtime)
+    repaired = json.loads((runtime_bundle / "workflow.json").read_text(encoding="utf-8"))
+
+    assert report["copied"] == []
+    assert report["skipped"] == ["origin_qwen_image_edit_2509"]
+    assert report["repaired"] == ["origin_qwen_image_edit_2509"]
+    assert repaired["79"] == source_workflow["79"]
+    assert "image2" not in repaired["494"]["inputs"]
+    assert repaired["494"]["inputs"]["prompt"] == "operator tuned prompt"
+
+
 def test_seed_fills_in_missing_workflows(tmp_path):
     """If a new workflow lands in source after first seed, it gets copied."""
     src = _seed_source(tmp_path)

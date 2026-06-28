@@ -45,7 +45,10 @@ def test_dev_launcher_copies_repo_to_tmp_and_bootstraps_dev_friendly_runtime():
     assert "--cloud-drive-root PATH" in script
     assert "--cloud-drive-max-size SIZE" in script
     assert "--allow-any-host" in script
+    assert 'DISABLE_TRUSTED_HOSTS="${HACKME_DEV_DISABLE_TRUSTED_HOSTS:-${HTML_LEARNING_DISABLE_TRUSTED_HOSTS:-auto}}"' in script
     assert "HTML_LEARNING_DISABLE_TRUSTED_HOSTS=1" in script
+    assert "unset HTML_LEARNING_DISABLE_TRUSTED_HOSTS" in script
+    assert "trusted_hosts:       managed by frontend setting" in script
     assert "CAPACITY_SETTINGS_FINALIZED=0" in script
     assert 'if [[ "$CAPACITY_SETTINGS_FINALIZED" != "1" ]]; then' in script
     assert 'CAPACITY_SETTINGS_FINALIZED=1' in script
@@ -74,7 +77,11 @@ def test_dev_launcher_copies_repo_to_tmp_and_bootstraps_dev_friendly_runtime():
     release_gate = (ROOT / "scripts" / "qa" / "points_chain_release_gate.py").read_text(encoding="utf-8")
     assert '"--no-sync-defaults"' in release_gate
     assert 'export HACKME_DEV_GUNICORN_MAX_REQUESTS="$GUNICORN_MAX_REQUESTS"' in script
-    assert 'HACKME_RUNTIME_OUTPUT_CAPTURE=0 "$PYTHON_BIN" - <<\'PY\'' in script
+    assert 'BOOTSTRAP_TIMEOUT_SECONDS="${HACKME_DEV_BOOTSTRAP_TIMEOUT_SECONDS:-180}"' in script
+    assert 'HACKME_RUNTIME_OUTPUT_CAPTURE=0 timeout "${BOOTSTRAP_TIMEOUT_SECONDS}s" "$PYTHON_BIN" - <<\'PY\'' in script
+    assert "print_startup_failure_context" in script
+    assert "server process did not become reachable" in script
+    assert "port probe permission denied" in script
     assert '"audit_chain_enabled": False' in script
     assert '"integrity_guard_enabled": False' in script
     assert '"production_single_ip_account_lock_enabled": False' in script
@@ -100,8 +107,8 @@ def test_dev_launcher_prints_transmission_access_credentials():
     assert "[dev-tmp] transmission_web:      $(transmission_rpc_web_url)" in script
     assert '[dev-tmp] transmission_user:     ${TRANSMISSION_RPC_USERNAME:-<blank>}' in script
     assert '[dev-tmp] transmission_password: ${TRANSMISSION_RPC_PASSWORD:-<blank>}' in script
-    assert 'say "[dev-tmp] accounts:   root/${ROOT_PASSWORD} admin/${MANAGER_PASSWORD} test/${TEST_PASSWORD}"\nprint_transmission_access_summary' in script
-    assert script.count('say "[dev-tmp] accounts:   root/${ROOT_PASSWORD} admin/${MANAGER_PASSWORD} test/${TEST_PASSWORD}"') == 2
+    assert 'say "[dev-tmp] bootstrap defaults: root/${ROOT_PASSWORD} admin/${MANAGER_PASSWORD} test/${TEST_PASSWORD}"\nprint_transmission_access_summary' in script
+    assert script.count('say "[dev-tmp] bootstrap defaults: root/${ROOT_PASSWORD} admin/${MANAGER_PASSWORD} test/${TEST_PASSWORD}"') == 2
 
 
 def test_dev_launcher_shutdown_recognizes_custom_tmp_run_roots():

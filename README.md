@@ -45,6 +45,45 @@ ComfyUI / GGUF 的遠端/本地設定，也不會顯示 ComfyUI Account/Civitai
 新增 profile、遠端實測、已安裝 GGUF 清單與多精度選單流程見
 [docs/AGENTS/skills/hackme-gguf-profile/SKILL.md](docs/AGENTS/skills/hackme-gguf-profile/SKILL.md)。
 
+## AI Agent / ComfyUI Image Editing Status
+
+本輪更新把站內 AI Agent 從固定捷徑式操作往「自然語言理解 + 受控站內工具執行」
+推進：前台聊天介面可由自然語言選用 ComfyUI 生圖、圖生圖、歷史重跑、
+下載/雲端/治理等站內 write tools；root 端可管理可寫 tools；模型列表改由
+後端/供應商設定提供，不再在前台硬寫死已不存在模型。Agent 仍被限制在站內
+runtime、雲端硬碟與已授權 API 範圍，不能直接寫伺服器任意檔案。
+
+ComfyUI 產圖路徑也做了低 VRAM / 慢速 workflow hardening：Qwen Image Edit
+長步驟不再被過短 stale timeout 誤判失敗；Qwen edit workflow 可從 partial /
+history 取回正式後處理輸出；產圖進度、tokens/s / total tokens、歷史重跑、
+GGUF / Anything2Real / SDXL inpaint workflow profile 與 ComfyUI 設定分區都已納入
+前台與測試覆蓋。完整的大量圖片與對話紀錄保留在本機
+`docs/AGENTS/reports/`，不進 GitHub；GitHub 只保留摘要：
+[docs/AGENTS/AI_AGENT_I2I_TEST_SUMMARY.md](docs/AGENTS/AI_AGENT_I2I_TEST_SUMMARY.md)。
+
+目前已確認的 i2i 能力邊界：
+
+- 可用：保留 1080x1920 source 比例、Qwen Image Edit 2509 語意改圖、正式輸出
+  1080x1920 後處理、髮色/髮型/表情/配飾/一般服裝替換、背景保留、進度追蹤。
+- 部分可用：高強度服裝 + 體態混合修改。`denoise=0.85` 能把和服換成白色蕾絲
+  長裙並改體態，但會改變原本雙手 clasped 姿勢，且容易漂到高開衩旗袍感。
+- 仍需修正：高強度 i2i 時的姿勢保真、negative prompt 合併、透明/高開衩/
+  qipao/cheongsam 漂移，以及 workflow run `params_json` 中 width/height /
+  denoise 記錄與實際 queue 參數不一致。
+
+本輪關鍵測試參數摘要：
+
+| Run | Source / Output | Workflow | Model / LoRA | Params | Result |
+| --- | --- | --- | --- | --- | --- |
+| v5 body/lace/proportions | source 被錯誤壓成 `1024x1024`，要求 output `1080x1920` | `origin_qwen_image_edit_2509` | `qwen_image_edit_2509_fp8_e4m3fn.safetensors` + Lightning 4-step LoRA | steps 4, cfg 1, denoise 0.55 | FAIL。測試工具先破壞比例，產生上下模糊延展帶，不能當模型能力判定。 |
+| v6 body/lace/proportions | source `1080x1920`，final output `1080x1920` | `origin_qwen_image_edit_2509` | 同上 | steps 4, cfg 1, denoise 0.55 | FAIL。比例修好，但模型過度保守，仍保留和服，服裝/體態目標未達成。 |
+| v7 body/lace/proportions | source `1080x1920`，final output `1080x1920` | `origin_qwen_image_edit_2509` | 同上 | steps 4, cfg 1, denoise 0.85, strengthened English edit prompt | PARTIAL / FAIL。服裝與體態有改，但動作被改、裙子漂到高開衩旗袍感，不符合保真規則。 |
+
+下一輪建議測試：`denoise=0.70-0.75`，明確加入 `keep both hands clasped in front
+of chest`，並補強 negative prompt：`qipao, cheongsam, high slit, exposed leg,
+transparent dress, pose drift`。若混合任務仍不穩定，改成兩段式：先只換服裝，
+再測體態比例。
+
 ## First-Time Deployer Route
 
 1. [docs/00_START_HERE.md](docs/00_START_HERE.md)

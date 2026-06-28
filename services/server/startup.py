@@ -11,6 +11,7 @@ import threading
 import time
 from datetime import datetime
 
+from services.points_chain.security_context import points_safe_mode_security_context
 from services.platform.time_settings import normalize_server_timezone
 
 
@@ -139,6 +140,16 @@ def _mode_allows_points_initial_grants(mode):
     return str(mode or "").strip() in {"production", "dev_ready", "test"}
 
 
+def _points_safe_mode_status_for_audit(points_service):
+    if not points_service or not hasattr(points_service, "safe_mode_status"):
+        return {}
+    try:
+        status = points_service.safe_mode_status()
+    except Exception as exc:
+        return {"safe_mode": None, "status_error": f"{exc.__class__.__name__}: {str(exc)[:200]}"}
+    return status if isinstance(status, dict) else {}
+
+
 def bootstrap_points_initial_grants_if_due(
     *,
     points_service,
@@ -188,9 +199,39 @@ def bootstrap_points_initial_grants_if_due(
             )
         return {"ok": True, "skipped": False, "mode": mode, "genesis": genesis, "salary": salary}
     except Exception as exc:
+        safe_mode = _points_safe_mode_status_for_audit(points_service)
+        security_context = points_safe_mode_security_context(
+            safe_mode,
+            source="server_startup.bootstrap_points_initial_grants",
+            source_ip="0.0.0.0",
+            user_agent="system-startup",
+            blocked_action="bootstrap points ledger transaction",
+            error=exc,
+            mode=mode,
+            actor=system_actor,
+            extra={
+                "event": "POINTS_BOOTSTRAP_GRANTS_FAILED",
+                "seal_genesis": seal_genesis and points_chain_enabled,
+                "require_wallet": points_chain_enabled,
+                "economy_enabled": economy_enabled,
+                "points_chain_enabled": points_chain_enabled,
+            },
+        )
         if callable(audit):
-            audit("POINTS_BOOTSTRAP_GRANTS_FAILED", "0.0.0.0", success=False, detail=str(exc))
-        return {"ok": False, "skipped": False, "mode": mode, "error": str(exc)}
+            audit(
+                "POINTS_BOOTSTRAP_GRANTS_FAILED",
+                security_context["source_ip"],
+                success=False,
+                detail=json.dumps(security_context, ensure_ascii=False, sort_keys=True),
+            )
+        return {
+            "ok": False,
+            "skipped": False,
+            "mode": mode,
+            "error": str(exc),
+            "safe_mode": safe_mode,
+            "security_context": security_context,
+        }
 
 
 def _wait_or_stop(shutdown_event, seconds):

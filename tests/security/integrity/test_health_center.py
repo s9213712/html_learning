@@ -21,7 +21,15 @@ class _SnapshotStub:
         return [{"id": "snap_test"}]
 
 
-def _make_app(tmp_path, actor=None, audit_result=(True, None, "integrity OK"), include_forum_tables=True, activation_log=None, integrity_guard=None):
+def _make_app(
+    tmp_path,
+    actor=None,
+    audit_result=(True, None, "integrity OK"),
+    include_forum_tables=True,
+    activation_log=None,
+    integrity_guard=None,
+    points_service=None,
+):
     db_path = tmp_path / "health.db"
     chat_dir = tmp_path / "chats"
     log_dir = tmp_path / "logs"
@@ -88,6 +96,7 @@ def _make_app(tmp_path, actor=None, audit_result=(True, None, "integrity OK"), i
         "integrity_guard": integrity_guard,
         "is_audit_chain_enabled": lambda: True,
         "json_resp": _json_resp,
+        "points_service": points_service,
         "repair_audit_chain": lambda **kwargs: {"entries_resealed": 0},
         "repair_violation_chains": lambda: {"entries_resealed": 0},
         "require_csrf": _passthrough,
@@ -239,6 +248,47 @@ def test_admin_health_broken_audit_chain_marks_critical_without_auto_lockdown(tm
     assert data["audit_integrity"]["operator_action_required"] is True
     assert data["audit_integrity"]["auto_lockdown_applied"] is False
     assert activation_log == []
+
+
+def test_admin_health_marks_points_safe_mode_critical_with_forensics(tmp_path):
+    class PointsServiceStub:
+        def safe_mode_status(self):
+            return {
+                "safe_mode": True,
+                "reason": "governance_clock_jump_detected",
+                "forensic_bundle_id": "fb-health-clock",
+                "verification": {
+                    "violation": "wall_clock_fast_forward",
+                    "wall_elapsed_seconds": 7200,
+                    "monotonic_elapsed_seconds": 10,
+                    "tolerance_seconds": 300,
+                    "guard_model": "wall_clock_vs_monotonic_v1",
+                    "observed_ip": "203.0.113.77",
+                },
+            }
+
+        def transfer_finality_observability_snapshot(self, *, recent_limit):
+            return {
+                "ok": True,
+                "status": "ok",
+                "snapshot_type": "points_transfer_finality_observability",
+                "bounded": True,
+                "recent_limit": recent_limit,
+            }
+
+    app = _make_app(tmp_path, points_service=PointsServiceStub())
+    res = app.test_client().get("/api/admin/health")
+    data = res.get_json()
+
+    assert res.status_code == 200
+    assert data["status"] == "critical"
+    points = data["points_finality"]
+    assert points["status"] == "critical"
+    assert points["safe_mode_active"] is True
+    assert points["safe_mode"]["reason"] == "governance_clock_jump_detected"
+    assert points["attack_method"] == "suspected_governance_clock_manipulation"
+    assert points["safe_mode_security"]["attack_classification"]["score"] >= points["safe_mode_security"]["attack_classification"]["threshold"]
+    assert any(item["value"] == "203.0.113.77" for item in points["safe_mode_security"]["ip_evidence"])
 
 
 def test_health_integrity_guard_clean_deploy_drift_is_degraded_not_critical(tmp_path):

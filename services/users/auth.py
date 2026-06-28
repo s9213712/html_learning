@@ -67,6 +67,7 @@ _STATE = {
     "tester_token_user_lookup": None,
     "get_runtime_server_mode": None,
     "get_system_settings": None,
+    "csrf_secret": None,
 }
 
 _ARGON2_TIME_COST = _env_int(
@@ -135,6 +136,7 @@ def configure_auth_service(
     tester_token_user_lookup=None,
     get_runtime_server_mode=None,
     get_system_settings=None,
+    csrf_secret=None,
 ):
     _STATE.update({
         "get_db": get_db,
@@ -151,6 +153,7 @@ def configure_auth_service(
         "tester_token_user_lookup": tester_token_user_lookup,
         "get_runtime_server_mode": get_runtime_server_mode,
         "get_system_settings": get_system_settings,
+        "csrf_secret": csrf_secret,
     })
     with _SESSION_COLUMNS_LOCK:
         _SESSION_COLUMNS_CACHE["columns"] = None
@@ -269,6 +272,66 @@ def _auth_write(operation, *, attempts=5, delay_seconds=0.1):
     if last_exc is not None:
         raise last_exc
     return None
+
+
+_PUBLIC_CSRF_PREFIX = "pcsrf1"
+
+
+def _csrf_signing_secret():
+    secret = _STATE.get("csrf_secret")
+    if secret:
+        return str(secret)
+    if has_request_context():
+        try:
+            app_secret = current_app.config.get("SECRET_KEY")
+            if app_secret:
+                return str(app_secret)
+        except Exception:
+            pass
+    return "hackme-public-csrf-test-secret"
+
+
+def _public_csrf_payload(issued_at, expires_at, nonce):
+    return f"{_PUBLIC_CSRF_PREFIX}|__public__|{issued_at}|{expires_at}|{nonce}"
+
+
+def _public_csrf_signature(issued_at, expires_at, nonce):
+    return hmac.new(
+        _csrf_signing_secret().encode("utf-8"),
+        _public_csrf_payload(issued_at, expires_at, nonce).encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _make_public_csrf_token():
+    issued_at = int(time.time())
+    expires_at = issued_at + int(effective_csrf_token_ttl_seconds())
+    nonce = secrets.token_urlsafe(18)
+    sig = _public_csrf_signature(issued_at, expires_at, nonce)
+    return f"{_PUBLIC_CSRF_PREFIX}.{issued_at}.{expires_at}.{nonce}.{sig}"
+
+
+def _verify_public_csrf_token(token):
+    if not isinstance(token, str) or not token.startswith(f"{_PUBLIC_CSRF_PREFIX}."):
+        return False
+    parts = token.split(".")
+    if len(parts) != 5:
+        return False
+    _, issued_raw, expires_raw, nonce, sig = parts
+    try:
+        issued_at = int(issued_raw)
+        expires_at = int(expires_raw)
+    except Exception:
+        return False
+    now = int(time.time())
+    if issued_at > now + 300 or expires_at <= now:
+        return False
+    if expires_at - issued_at > int(effective_csrf_token_ttl_seconds()) + 300:
+        return False
+    if not nonce or len(sig) != 64:
+        return False
+    expected = _public_csrf_signature(issued_at, expires_at, nonce)
+    return hmac.compare_digest(sig, expected)
 
 
 def _session_columns(auth_conn):
@@ -520,10 +583,12 @@ def timing_delay():
 
 
 def make_csrf_token():
-    return secrets.token_urlsafe(32)
+    return _make_public_csrf_token()
 
 
 def store_csrf_token(token, username):
+    if username == "__public__" and _verify_public_csrf_token(token):
+        return
     expires = (datetime.now() + timedelta(seconds=effective_csrf_token_ttl_seconds())).isoformat()
     now = datetime.now().isoformat()
     token_hash = hashlib.sha256(token.encode()).hexdigest()
@@ -541,6 +606,8 @@ def verify_csrf_token(token, username):
         return False
     if not isinstance(username, str) or not username:
         return False
+    if username == "__public__" and _verify_public_csrf_token(token):
+        return True
     conn = _auth_db()
     try:
         row = conn.execute(
@@ -557,6 +624,8 @@ def consume_csrf_token(token, username):
         return False
     if not isinstance(username, str) or not username:
         return False
+    if username == "__public__" and _verify_public_csrf_token(token):
+        return True
     conn = _auth_db()
     try:
         conn.execute("BEGIN IMMEDIATE")

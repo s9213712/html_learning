@@ -252,6 +252,37 @@ def test_require_csrf_consumes_public_token_but_keeps_session_tokens(tmp_path, m
     assert auth.verify_csrf_token("public-token", "__public__") is False
 
 
+def test_public_signed_csrf_token_avoids_auth_db_write(tmp_path, monkeypatch):
+    db_path = tmp_path / "csrf.sqlite"
+
+    def get_db():
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS csrf_tokens (token_hash TEXT PRIMARY KEY, username TEXT NOT NULL, expires_at TEXT NOT NULL)"
+        )
+        return conn
+
+    auth.configure_auth_service(
+        get_db=get_db,
+        get_user_by_username=lambda username: None,
+        fernet=None,
+        csrf_secret="signed-public-csrf-test-secret",
+    )
+    token = auth.make_csrf_token()
+    auth.store_csrf_token(token, "__public__")
+
+    conn = get_db()
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM csrf_tokens").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+    assert auth.verify_csrf_token(token, "__public__") is True
+    assert auth.consume_csrf_token(token, "__public__") is True
+    assert auth.verify_csrf_token(token, "__public__") is True
+
+
 def test_login_accepts_public_csrf_even_when_old_session_cookie_exists(monkeypatch):
     events = []
     consumed = []

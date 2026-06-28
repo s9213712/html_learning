@@ -89,8 +89,11 @@ def test_media_workflow_allowlist_supports_video_audio_nodes():
         "UnetLoaderGGUF",
         "SaveAudio",
         "IndexTTSNode",
+        "CLIPLoaderGGUF",
+        "ReferenceLatent",
     }
     assert expected <= MEDIA_WORKFLOW_ALLOWLIST
+    assert is_allowed_class("TextEncodeQwenImageEditPlus") is True
 
 
 def test_is_explicitly_denied_class_regex_patterns():

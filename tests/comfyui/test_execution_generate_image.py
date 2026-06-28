@@ -1,8 +1,14 @@
 """Regression for services.comfyui.execution.generate_image()."""
 
+import json
+
 import pytest
 
 from services.comfyui import execution as comfy_execution
+
+
+def test_backend_unresponsive_default_allows_low_vram_qwen_steps():
+    assert comfy_execution.BACKEND_UNRESPONSIVE_FAIL_SECONDS >= 7200
 
 
 class _GeneratedImage:
@@ -91,6 +97,66 @@ def test_wait_for_images_treats_transient_history_timeout_as_recoverable(monkeyp
     assert images == [{"filename": "done.png", "subfolder": "", "type": "output"}]
     assert any(event.get("backend_unresponsive") is True for event in progress_events)
     assert any(event.get("phase") == "completed" for event in progress_events)
+
+
+def test_wait_for_images_fails_after_backend_unresponsive_limit(monkeypatch):
+    clock = {"now": 0.0}
+    progress_events = []
+
+    class AlwaysTimeoutHistoryClient:
+        timeout = 1
+
+        def _json_request(self, path, *, timeout=None):
+            assert path == "/history/prompt-1"
+            raise RuntimeError("ComfyUI 連線失敗：timed out")
+
+    class FakeWebSocketModule:
+        class WebSocketTimeoutException(Exception):
+            pass
+
+        class WebSocketConnectionClosedException(Exception):
+            pass
+
+    class FakeWebSocket:
+        def __init__(self):
+            self.sent = False
+
+        def recv(self):
+            if not self.sent:
+                self.sent = True
+                return json.dumps({
+                    "type": "progress",
+                    "data": {"prompt_id": "prompt-1", "node": "499", "value": 1, "max": 4},
+                })
+            raise FakeWebSocketModule.WebSocketTimeoutException()
+
+    def fake_time():
+        return clock["now"]
+
+    def fake_sleep(seconds):
+        clock["now"] += max(float(seconds), 0.15)
+
+    monkeypatch.setattr(comfy_execution, "BACKEND_UNRESPONSIVE_FAIL_SECONDS", 1)
+    monkeypatch.setattr(comfy_execution.time, "time", fake_time)
+    monkeypatch.setattr(comfy_execution.time, "sleep", fake_sleep)
+
+    with pytest.raises(RuntimeError) as exc:
+        comfy_execution.wait_for_images(
+            AlwaysTimeoutHistoryClient(),
+            "prompt-1",
+            timeout_seconds=0,
+            poll_interval=0.5,
+            expected_count=1,
+            error_cls=RuntimeError,
+            progress_callback=progress_events.append,
+            websocket_conn=FakeWebSocket(),
+            websocket_module=FakeWebSocketModule,
+        )
+
+    assert "連續" in str(exc.value)
+    assert "沒有回覆 history 查詢" in str(exc.value)
+    assert any(event.get("phase") == "running" for event in progress_events)
+    assert any(event.get("backend_unresponsive_seconds", 0) >= 1 for event in progress_events)
 
 
 def test_wait_for_outputs_reports_comfyui_execution_error_detail():

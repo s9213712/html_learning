@@ -4,7 +4,7 @@
     "allowlist_status": "allowlisted",
     "class_count": 15,
     "denied_classes": [],
-    "node_count": 35,
+    "node_count": 19,
     "source_format": "ui_graph",
     "source_path": "image/edit/image_qwen_image_edit_2509.json",
     "structural_status": "pass",
@@ -32,7 +32,7 @@
     "prompt": "Replace the cat with a dalmatian, keeping the environment and scene consistent",
     "sampler_name": "euler",
     "scheduler": "simple",
-    "seed": 973414316252139,
+    "seed": 1001672099958606,
     "steps": 4,
     "upscale_model": "",
     "vae": "qwen_image_vae.safetensors",
@@ -84,36 +84,6 @@
               "rows": 5
             },
             "current_value": "",
-            "id": "node:471:prompt",
-            "input_name": "prompt",
-            "input_type": "textarea",
-            "label": "負面提示詞（Node 471）",
-            "node_id": "471",
-            "required": true
-          },
-          {
-            "category": "TEXT",
-            "class_type": "TextEncodeQwenImageEditPlus",
-            "constraints": {
-              "max_length": 4000,
-              "rows": 5
-            },
-            "current_value": "Replace the cat with a dalmatian, keeping the environment and scene consistent",
-            "id": "node:473:prompt",
-            "input_name": "prompt",
-            "input_type": "textarea",
-            "label": "正向提示詞（Node 473）",
-            "node_id": "473",
-            "required": true
-          },
-          {
-            "category": "TEXT",
-            "class_type": "TextEncodeQwenImageEditPlus",
-            "constraints": {
-              "max_length": 4000,
-              "rows": 5
-            },
-            "current_value": "",
             "id": "node:492:prompt",
             "input_name": "prompt",
             "input_type": "textarea",
@@ -141,8 +111,6 @@
             "class_type": "EmbeddingShortcuts",
             "constraints": {
               "target_field_ids": [
-                "node:471:prompt",
-                "node:473:prompt",
                 "node:492:prompt",
                 "node:494:prompt"
               ],
@@ -190,59 +158,6 @@
       {
         "collapsed_default": true,
         "fields": [
-          {
-            "category": "MODEL",
-            "class_type": "VAELoader",
-            "current_value": "qwen_image_vae.safetensors",
-            "id": "node:468:vae_name",
-            "input_name": "vae_name",
-            "input_type": "select",
-            "label": "VAE（Node 468）",
-            "lock_reason": "template_default_model",
-            "locked": true,
-            "node_id": "468",
-            "read_only": true,
-            "required": false
-          },
-          {
-            "category": "MODEL",
-            "class_type": "CLIPLoader",
-            "current_value": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
-            "id": "node:469:clip_name",
-            "input_name": "clip_name",
-            "input_type": "select",
-            "label": "CLIP / 文字編碼器（Node 469）",
-            "lock_reason": "template_default_model",
-            "locked": true,
-            "node_id": "469",
-            "read_only": true,
-            "required": false
-          },
-          {
-            "category": "MODEL",
-            "class_type": "UNETLoader",
-            "current_value": "qwen_image_edit_2509_fp8_e4m3fn.safetensors",
-            "id": "node:470:unet_name",
-            "input_name": "unet_name",
-            "input_type": "select",
-            "label": "Diffusion / UNet 大模型（Node 470）",
-            "lock_reason": "template_default_model",
-            "locked": true,
-            "node_id": "470",
-            "read_only": true,
-            "required": false
-          },
-          {
-            "category": "MODEL",
-            "class_type": "LoraLoaderModelOnly",
-            "current_value": "QWEN\\Qwen-Image-Edit-2509-Lightning-4steps-V1.0-bf16.safetensors",
-            "id": "node:476:lora_name",
-            "input_name": "lora_name",
-            "input_type": "select",
-            "label": "LoRA 模型（Model-only）（Node 476）",
-            "node_id": "476",
-            "required": true
-          },
           {
             "category": "MODEL",
             "class_type": "VAELoader",
@@ -303,96 +218,6 @@
       {
         "collapsed_default": true,
         "fields": [
-          {
-            "category": "NUMERIC",
-            "class_type": "KSampler",
-            "constraints": {
-              "max": 9007199254740992,
-              "min": 0,
-              "step": 1
-            },
-            "current_value": 973414316252139,
-            "id": "node:478:seed",
-            "input_name": "seed",
-            "input_type": "number",
-            "label": "種子（Node 478）",
-            "node_id": "478",
-            "required": true
-          },
-          {
-            "category": "SAMPLER",
-            "class_type": "KSampler",
-            "current_value": "euler",
-            "id": "node:478:sampler_name",
-            "input_name": "sampler_name",
-            "input_type": "select",
-            "label": "取樣器（Node 478）",
-            "node_id": "478",
-            "required": true
-          },
-          {
-            "category": "SAMPLER",
-            "class_type": "KSampler",
-            "current_value": "simple",
-            "id": "node:478:scheduler",
-            "input_name": "scheduler",
-            "input_type": "select",
-            "label": "排程器（Node 478）",
-            "node_id": "478",
-            "required": true
-          },
-          {
-            "category": "NUMERIC",
-            "class_type": "KSampler",
-            "constraints": {
-              "max": 1.0,
-              "min": 0.0,
-              "step": 0.05
-            },
-            "current_value": 1,
-            "id": "node:478:denoise",
-            "input_name": "denoise",
-            "input_type": "number",
-            "label": "Denoise（Node 478）",
-            "node_id": "478",
-            "required": true
-          },
-          {
-            "category": "SAMPLER",
-            "class_type": "ComfySwitchNode",
-            "current_value": true,
-            "id": "node:483:switch",
-            "input_name": "switch",
-            "input_type": "select",
-            "label": "ComfySwitchNode.switch（Switch (Model)）",
-            "node_id": "483",
-            "node_title": "Switch (Model)",
-            "required": true
-          },
-          {
-            "category": "SAMPLER",
-            "class_type": "ComfySwitchNode",
-            "current_value": true,
-            "id": "node:484:switch",
-            "input_name": "switch",
-            "input_type": "select",
-            "label": "ComfySwitchNode.switch（Switch (Steps)）",
-            "node_id": "484",
-            "node_title": "Switch (Steps)",
-            "required": true
-          },
-          {
-            "category": "SAMPLER",
-            "class_type": "ComfySwitchNode",
-            "current_value": true,
-            "id": "node:485:switch",
-            "input_name": "switch",
-            "input_type": "select",
-            "label": "ComfySwitchNode.switch（Switch (CFG)）",
-            "node_id": "485",
-            "node_title": "Switch (CFG)",
-            "required": true
-          },
           {
             "category": "NUMERIC",
             "class_type": "KSampler",
@@ -490,38 +315,6 @@
       {
         "collapsed_default": true,
         "fields": [
-          {
-            "category": "NUMERIC",
-            "class_type": "ModelSamplingAuraFlow",
-            "constraints": {
-              "max": 20.0,
-              "min": 0.0,
-              "step": 0.1
-            },
-            "current_value": 3,
-            "id": "node:472:shift",
-            "input_name": "shift",
-            "input_type": "number",
-            "label": "Model Shift（Node 472）",
-            "node_id": "472",
-            "required": true
-          },
-          {
-            "category": "NUMERIC",
-            "class_type": "LoraLoaderModelOnly",
-            "constraints": {
-              "max": 2.0,
-              "min": -2.0,
-              "step": 0.05
-            },
-            "current_value": 1,
-            "id": "node:476:strength_model",
-            "input_name": "strength_model",
-            "input_type": "number",
-            "label": "LoRA 強度（Node 476）",
-            "node_id": "476",
-            "required": true
-          },
           {
             "category": "NUMERIC",
             "class_type": "ModelSamplingAuraFlow",

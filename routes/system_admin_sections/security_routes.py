@@ -13,6 +13,7 @@ from pathlib import Path
 
 from flask import request
 
+from services.points_chain.security_context import points_safe_mode_security_context
 from services.server.backpressure import backpressure_status
 from services.server.domain_databases import DOMAIN_DATABASES
 from services.system.gpu_probe import find_nvidia_smi
@@ -640,6 +641,14 @@ def register_system_admin_security_routes(app, ctx):
                 "disabled": True,
                 "msg": "points service unavailable",
             }
+        safe_mode = {}
+        safe_mode_error = ""
+        if hasattr(points_service, "safe_mode_status"):
+            try:
+                maybe_safe_mode = points_service.safe_mode_status()
+                safe_mode = maybe_safe_mode if isinstance(maybe_safe_mode, dict) else {}
+            except Exception as exc:
+                safe_mode_error = f"{exc.__class__.__name__}: {str(exc)[:160]}"
         try:
             payload = points_service.transfer_finality_observability_snapshot(recent_limit=200)
         except Exception as exc:
@@ -651,6 +660,35 @@ def register_system_admin_security_routes(app, ctx):
                 "error": exc.__class__.__name__,
                 "msg": str(exc)[:200],
             }
+        if not isinstance(payload, dict):
+            payload = {
+                "ok": False,
+                "status": "warning",
+                "snapshot_type": "points_transfer_finality_observability",
+                "bounded": True,
+                "error": "invalid_snapshot",
+                "msg": "points finality snapshot did not return an object",
+            }
+        security_context = points_safe_mode_security_context(
+            safe_mode,
+            source="admin_health.points_finality",
+            source_ip=get_client_ip() or "0.0.0.0",
+            user_agent=get_ua() or "",
+            blocked_action="points ledger writes",
+        )
+        payload["safe_mode"] = safe_mode
+        payload["safe_mode_security"] = security_context
+        if safe_mode_error:
+            payload["safe_mode_error"] = safe_mode_error
+        if safe_mode.get("safe_mode"):
+            payload["ok"] = False
+            payload["status"] = "critical"
+            payload["safe_mode_active"] = True
+            payload["attack_method"] = security_context.get("attack_method")
+            payload["msg"] = (
+                "PointsChain safe mode active; ledger writes are paused until "
+                "branch/governance recovery resolves the incident."
+            )
         try:
             latest = _peek_management_snapshot_summary("points_finality_sweep")
             payload["latest_sweep_snapshot"] = {

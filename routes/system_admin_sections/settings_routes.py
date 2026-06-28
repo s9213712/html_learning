@@ -128,6 +128,8 @@ def register_system_admin_settings_routes(app, ctx):
         except Exception:
             payload["server_max_content_current_mb"] = 0
         payload["server_max_content_env_override"] = bool(str(os.environ.get("HTML_LEARNING_MAX_CONTENT_MB") or "").strip())
+        payload["trusted_host_checks_currently_enabled"] = app.config.get("TRUSTED_HOSTS") is not None
+        payload["trusted_host_checks_env_override"] = "HTML_LEARNING_DISABLE_TRUSTED_HOSTS" in os.environ
         comfyui_account_key = str(payload.get("comfyui_account_api_key") or "").strip()
         payload["comfyui_account_api_key"] = ""
         payload["comfyui_account_api_key_configured"] = bool(comfyui_account_key)

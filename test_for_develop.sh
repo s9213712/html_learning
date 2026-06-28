@@ -17,7 +17,7 @@ PORT="${PORT:-5000}"
 RESTART_PORT=""
 TRUSTED_HOSTS="${HTML_LEARNING_TRUSTED_HOSTS:-}"
 PUBLIC_HOST="${HACKME_DEV_PUBLIC_HOST:-}"
-DISABLE_TRUSTED_HOSTS="${HACKME_DEV_DISABLE_TRUSTED_HOSTS:-${HTML_LEARNING_DISABLE_TRUSTED_HOSTS:-1}}"
+DISABLE_TRUSTED_HOSTS="${HACKME_DEV_DISABLE_TRUSTED_HOSTS:-${HTML_LEARNING_DISABLE_TRUSTED_HOSTS:-auto}}"
 SHUTDOWN=0
 CLI_MODE=0
 SKIP_INSTALL=0
@@ -242,6 +242,8 @@ write_restart_shortcut_script() {
   restart_args+=(--no-capacity-probe --no-hls-slot-probe)
   if [[ "$DISABLE_TRUSTED_HOSTS" == "1" ]]; then
     restart_args+=(--allow-any-host)
+  elif [[ "$DISABLE_TRUSTED_HOSTS" == "0" ]]; then
+    restart_args+=(--enforce-trusted-hosts)
   fi
   if [[ "$RUNTIME_IN_SOURCE" == "1" ]]; then
     restart_args+=(--runtime-in-source)
@@ -671,6 +673,9 @@ Options:
                            external HTTPS test URL. Alias-friendly for NAT IPs.
   --allow-any-host         Development escape hatch: disable Flask trusted-host
                            checks for this launch. Do not use for production.
+  --enforce-trusted-hosts  Enable Flask trusted-host checks for this launch.
+                           This overrides the dev default and requires a
+                           compatible --trusted-hosts / public host allowlist.
   --stop                   Stop prior dev server process group / child tree for
                            --port and exit. Only terminates processes launched
                            from hackme_web dev runtime paths or this source repo.
@@ -1406,6 +1411,8 @@ print_resolved_config() {
   say "  port:                $PORT"
   if [[ "$DISABLE_TRUSTED_HOSTS" == "1" ]]; then
     say "  trusted_hosts:       disabled (dev only)"
+  elif [[ "$DISABLE_TRUSTED_HOSTS" == "auto" ]]; then
+    say "  trusted_hosts:       managed by frontend setting"
   else
     say "  trusted_hosts:       ${TRUSTED_HOSTS:-<app default local hosts>}"
   fi
@@ -3454,6 +3461,41 @@ wait_for_server_url() {
   return 1
 }
 
+print_startup_failure_context() {
+  local status="${1:-unknown}"
+  say "[dev-tmp] startup failed: $status"
+  if [[ -n "${PID_FILE:-}" && -f "$PID_FILE" ]]; then
+    local pid
+    pid="$(sed -n '1p' "$PID_FILE" 2>/dev/null | tr -dc '0-9' || true)"
+    if [[ -n "$pid" ]]; then
+      if kill -0 "$pid" 2>/dev/null; then
+        say "[dev-tmp] startup pid: $pid is still running"
+        if command -v ps >/dev/null 2>&1; then
+          ps -o pid,ppid,stat,etime,cmd -p "$pid" 2>/dev/null || true
+        fi
+      else
+        say "[dev-tmp] startup pid: $pid is stale or exited"
+      fi
+    fi
+  fi
+  if command -v pgrep >/dev/null 2>&1; then
+    local related
+    related="$(pgrep -af 'gunicorn .*server:app|server.py' 2>/dev/null || true)"
+    if [[ -n "$related" ]]; then
+      say "[dev-tmp] startup related processes:"
+      printf '%s\n' "$related"
+    fi
+  fi
+  if [[ -n "${LOG_CAPTURE:-}" && -f "$LOG_CAPTURE" ]]; then
+    say "[dev-tmp] startup log tail: $LOG_CAPTURE"
+    tail -n 80 "$LOG_CAPTURE" 2>/dev/null || true
+  fi
+  if [[ -n "${GUNICORN_ERROR_LOG:-}" && -f "$GUNICORN_ERROR_LOG" ]]; then
+    say "[dev-tmp] gunicorn error tail: $GUNICORN_ERROR_LOG"
+    tail -n 80 "$GUNICORN_ERROR_LOG" 2>/dev/null || true
+  fi
+}
+
 print_generated_dev_tokens() {
   local tokens_file="${HACKME_DEV_TOKENS_FILE:-}"
   if [[ -z "$tokens_file" || ! -s "$tokens_file" ]]; then
@@ -4064,6 +4106,9 @@ for family, socktype, proto, _canonname, sockaddr in addresses:
         with socket.socket(family, socktype, proto) as sock:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sock.bind(sockaddr)
+    except PermissionError as exc:
+        print(f"port probe permission denied for {sockaddr}: {exc}", file=sys.stderr)
+        raise SystemExit(2)
     except OSError:
         raise SystemExit(1)
 
@@ -4193,9 +4238,13 @@ find_next_available_port() {
   fi
 
   for ((candidate = requested + 1; candidate <= upper; candidate++)); do
-    if port_is_available "$candidate"; then
+    local probe_status=0
+    port_is_available "$candidate" || probe_status=$?
+    if [[ "$probe_status" == "0" ]]; then
       AVAILABLE_PORT="$candidate"
       return 0
+    elif [[ "$probe_status" == "2" ]]; then
+      die "cannot probe fallback ports on host $HOST due socket permission denial; run outside the sandbox or choose a fixed port"
     fi
   done
 
@@ -4203,9 +4252,13 @@ find_next_available_port() {
     if (( candidate >= requested && candidate <= upper )); then
       continue
     fi
-    if port_is_available "$candidate"; then
+    local probe_status=0
+    port_is_available "$candidate" || probe_status=$?
+    if [[ "$probe_status" == "0" ]]; then
       AVAILABLE_PORT="$candidate"
       return 0
+    elif [[ "$probe_status" == "2" ]]; then
+      die "cannot probe fallback ports on host $HOST due socket permission denial; run outside the sandbox or choose a fixed port"
     fi
   done
 
@@ -4504,8 +4557,12 @@ resolve_server_port() {
   fi
   PORT="$requested"
 
-  if port_is_available "$requested"; then
+  local probe_status=0
+  port_is_available "$requested" || probe_status=$?
+  if [[ "$probe_status" == "0" ]]; then
     return 0
+  elif [[ "$probe_status" == "2" ]]; then
+    die "cannot probe port $requested on host $HOST due socket permission denial; run outside the sandbox or use an approved restart command"
   fi
 
   case "$PORT_CONFLICT_ACTION" in
@@ -4969,8 +5026,12 @@ if runtime_maintenance_action_requested; then
   normalize_runtime_maintenance_options
 else
   normalize_runtime_options
-  normalize_yes_no_value "$DISABLE_TRUSTED_HOSTS" "disable trusted hosts"
-  DISABLE_TRUSTED_HOSTS="$NORMALIZED_YES_NO"
+  if [[ "${DISABLE_TRUSTED_HOSTS,,}" == "auto" || -z "$DISABLE_TRUSTED_HOSTS" ]]; then
+    DISABLE_TRUSTED_HOSTS="auto"
+  else
+    normalize_yes_no_value "$DISABLE_TRUSTED_HOSTS" "disable trusted hosts"
+    DISABLE_TRUSTED_HOSTS="$NORMALIZED_YES_NO"
+  fi
   finalize_trusted_hosts
 fi
 apply_comfyui_dev_gunicorn_timeout_floor
@@ -5045,6 +5106,14 @@ else
   say "[dev-tmp] python:    python3 (reuse current environment)"
 fi
 resolve_server_port
+if [[ -f "$PID_FILE" ]]; then
+  existing_server_pid="$(sed -n '1p' "$PID_FILE" 2>/dev/null | tr -dc '0-9' || true)"
+  if [[ -n "$existing_server_pid" && ! -d "/proc/$existing_server_pid" ]]; then
+    say "[dev-tmp] startup: removing stale pid file $PID_FILE (pid=$existing_server_pid)"
+    rm -f "$PID_FILE"
+  fi
+  unset existing_server_pid
+fi
 finalize_trusted_hosts
 if [[ "$ROOT_PASSWORD" == "root" && "$MANAGER_PASSWORD" == "admin" && "$TEST_PASSWORD" == "test" ]]; then
   DEFAULT_ACCOUNT_PASSWORDS=1
@@ -5065,7 +5134,12 @@ export HTML_LEARNING_HOST="$HOST"
 export HTML_LEARNING_PORT="$PORT"
 if [[ "$DISABLE_TRUSTED_HOSTS" == "1" ]]; then
   export HTML_LEARNING_DISABLE_TRUSTED_HOSTS=1
-elif [[ -n "$TRUSTED_HOSTS" ]]; then
+elif [[ "$DISABLE_TRUSTED_HOSTS" == "0" ]]; then
+  export HTML_LEARNING_DISABLE_TRUSTED_HOSTS=0
+else
+  unset HTML_LEARNING_DISABLE_TRUSTED_HOSTS
+fi
+if [[ -n "$TRUSTED_HOSTS" ]]; then
   export HTML_LEARNING_TRUSTED_HOSTS="$TRUSTED_HOSTS"
 fi
 export HTML_LEARNING_ROOT_PASSWORD="$ROOT_PASSWORD"
@@ -5156,7 +5230,9 @@ export PYTHONPYCACHEPREFIX="$RUNTIME_ROOT/pycache"
 
 cd "$COPY_ROOT"
 
-HACKME_RUNTIME_OUTPUT_CAPTURE=0 "$PYTHON_BIN" - <<'PY'
+BOOTSTRAP_TIMEOUT_SECONDS="${HACKME_DEV_BOOTSTRAP_TIMEOUT_SECONDS:-180}"
+BOOTSTRAP_STATUS=0
+HACKME_RUNTIME_OUTPUT_CAPTURE=0 timeout "${BOOTSTRAP_TIMEOUT_SECONDS}s" "$PYTHON_BIN" - <<'PY' || BOOTSTRAP_STATUS=$?
 from datetime import datetime, timedelta
 import json
 import os
@@ -5726,6 +5802,14 @@ if selected_server_mode in {"test", "internal_test"} and dev_tokens_path:
         pass
     os.replace(tmp_path, dev_tokens_path)
 PY
+if [[ "$BOOTSTRAP_STATUS" != "0" ]]; then
+  if [[ "$BOOTSTRAP_STATUS" == "124" ]]; then
+    print_startup_failure_context "bootstrap timed out after ${BOOTSTRAP_TIMEOUT_SECONDS}s before server start"
+    die "dev runtime bootstrap timed out after ${BOOTSTRAP_TIMEOUT_SECONDS}s"
+  fi
+  print_startup_failure_context "bootstrap exited with status $BOOTSTRAP_STATUS before server start"
+  die "dev runtime bootstrap failed with status $BOOTSTRAP_STATUS"
+fi
 
 if [[ "$FOREGROUND" == "1" ]]; then
   if [[ "$RUNTIME_IN_SOURCE" == "1" ]]; then
@@ -5747,7 +5831,7 @@ if [[ "$FOREGROUND" == "1" ]]; then
   if [[ "$SERVER_RUNNER" == "flask" ]]; then
     say "[dev-tmp] warning:   Flask/Werkzeug direct server is debug-only; use gunicorn for uploads/HLS/load."
   fi
-  say "[dev-tmp] accounts:   root/${ROOT_PASSWORD} admin/${MANAGER_PASSWORD} test/${TEST_PASSWORD}"
+  say "[dev-tmp] bootstrap defaults: root/${ROOT_PASSWORD} admin/${MANAGER_PASSWORD} test/${TEST_PASSWORD}"
   print_transmission_access_summary
   print_generated_dev_tokens
   write_restart_shortcut_script
@@ -5795,6 +5879,14 @@ SERVER_PID="$!"
 printf '%s\n' "$SERVER_PID" > "$PID_FILE"
 
 SERVER_URL="$(wait_for_server_url || true)"
+if [[ -z "$SERVER_URL" ]]; then
+  if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+    print_startup_failure_context "server process exited before health check passed"
+    die "dev server exited before startup health check passed"
+  fi
+  print_startup_failure_context "server process did not become reachable on $HOST:$PORT"
+  die "dev server did not become reachable on $HOST:$PORT"
+fi
 
 if [[ "$RUNTIME_IN_SOURCE" == "1" ]]; then
   say "[dev-tmp] source:    $COPY_ROOT (source runtime deployment)"
@@ -5815,28 +5907,26 @@ say "[dev-tmp] pid:       $SERVER_PID"
 say "[dev-tmp] runner:    $SERVER_RUNNER"
 if [[ "$DISABLE_TRUSTED_HOSTS" == "1" ]]; then
   say "[dev-tmp] trusted:   disabled by --allow-any-host (dev only)"
+elif [[ "$DISABLE_TRUSTED_HOSTS" == "auto" ]]; then
+  say "[dev-tmp] trusted:   managed by frontend setting"
 elif [[ -n "$TRUSTED_HOSTS" ]]; then
   say "[dev-tmp] trusted:   $TRUSTED_HOSTS"
 fi
-if [[ -n "$SERVER_URL" ]]; then
-  say "[dev-tmp] url:       $SERVER_URL"
-  if [[ -n "$PUBLIC_HOST" ]]; then
-    case "$PUBLIC_HOST" in
-      \[*\]|*:*:*)
-        say "[dev-tmp] public:    https://$PUBLIC_HOST"
-        ;;
-      *:*)
-        say "[dev-tmp] public:    https://$PUBLIC_HOST"
-        ;;
-      *)
-        say "[dev-tmp] public:    https://$PUBLIC_HOST:$PORT"
-        ;;
-    esac
-  fi
-else
-  say "[dev-tmp] url:       startup pending; inspect logs"
+say "[dev-tmp] url:       $SERVER_URL"
+if [[ -n "$PUBLIC_HOST" ]]; then
+  case "$PUBLIC_HOST" in
+    \[*\]|*:*:*)
+      say "[dev-tmp] public:    https://$PUBLIC_HOST"
+      ;;
+    *:*)
+      say "[dev-tmp] public:    https://$PUBLIC_HOST"
+      ;;
+    *)
+      say "[dev-tmp] public:    https://$PUBLIC_HOST:$PORT"
+      ;;
+  esac
 fi
-say "[dev-tmp] accounts:   root/${ROOT_PASSWORD} admin/${MANAGER_PASSWORD} test/${TEST_PASSWORD}"
+say "[dev-tmp] bootstrap defaults: root/${ROOT_PASSWORD} admin/${MANAGER_PASSWORD} test/${TEST_PASSWORD}"
 print_transmission_access_summary
 if [[ "$FOREGROUND" == "1" ]]; then
   say "[dev-tmp] log:       foreground mode uses stdout/stderr"

@@ -1,0 +1,415 @@
+{
+  "conversion": {
+    "allowlist_message": "",
+    "allowlist_status": "allowlisted",
+    "class_count": 13,
+    "denied_classes": [],
+    "node_count": 13,
+    "source_format": "ui_graph",
+    "source_path": "image/outpaint/flux_fill_outpaint_gguf_q3.json",
+    "structural_status": "pass",
+    "unknown_classes": []
+  },
+  "default_params": {
+    "batch_size": 1,
+    "cfg": 1,
+    "checkpoint": "",
+    "clip": "clip_l.safetensors",
+    "controlnet": null,
+    "denoise_strength": 1,
+    "diffusion_model": "flux1-fill-dev-Q3_K_S.gguf",
+    "generation_mode": "outpaint",
+    "height": 1024,
+    "loras": [],
+    "model": "flux1-fill-dev-Q3_K_S.gguf",
+    "negative_prompt": "",
+    "prompt": "anime style European Streets",
+    "sampler_name": "euler",
+    "scheduler": "normal",
+    "seed": 249750980212560,
+    "steps": 20,
+    "upscale_model": "",
+    "vae": "ae.safetensors",
+    "width": 1024
+  },
+  "description": "Flux Fill outpaint workflow using the non-gated YarvixPA Flux Fill Dev Q3_K_S GGUF UNet through ComfyUI-GGUF. Intended as a low-VRAM outpaint route when the official gated safetensors model is unavailable.",
+  "id": "origin_flux_fill_outpaint_gguf_q3",
+  "name": "Flux Fill Outpaint GGUF Q3",
+  "origin_source_path": "image/outpaint/flux_fill_outpaint_gguf_q3.json",
+  "output_kinds": [
+    "image"
+  ],
+  "required_controlnets": [],
+  "required_custom_nodes": [
+    "ComfyUI-GGUF"
+  ],
+  "required_loras": [],
+  "required_models": [
+    {
+      "kind": "clip",
+      "name": "clip_l.safetensors"
+    },
+    {
+      "kind": "clip",
+      "name": "t5xxl_fp8_e4m3fn_scaled.safetensors"
+    },
+    {
+      "kind": "diffusion_model",
+      "name": "flux1-fill-dev-Q3_K_S.gguf"
+    },
+    {
+      "kind": "vae",
+      "name": "ae.safetensors"
+    }
+  ],
+  "schema_version": 1,
+  "source": "official_origin",
+  "source_format": "ui_graph",
+  "ui": {
+    "initial_collapsed": true,
+    "panels": [
+      {
+        "collapsed_default": true,
+        "fields": [
+          {
+            "category": "TEXT",
+            "class_type": "CLIPTextEncode",
+            "constraints": {
+              "max_length": 2000,
+              "rows": 4
+            },
+            "current_value": "anime style European Streets",
+            "id": "node:23:text",
+            "input_name": "text",
+            "input_type": "textarea",
+            "label": "正向提示詞",
+            "node_id": "23",
+            "node_title": "CLIP Text Encode (Positive Prompt)",
+            "required": true
+          },
+          {
+            "category": "TEXT",
+            "class_type": "EmbeddingShortcuts",
+            "constraints": {
+              "target_field_ids": [
+                "node:23:text"
+              ],
+              "token_prefix": "<embeddings:"
+            },
+            "current_value": "",
+            "id": "text:embeddings",
+            "input_name": "embeddings",
+            "input_type": "embedding_shortcuts",
+            "label": "Embedding 快速插入",
+            "node_id": "",
+            "parent_category": "text",
+            "required": false,
+            "synthetic": true
+          }
+        ],
+        "id": "text",
+        "label": "文字輸入"
+      },
+      {
+        "collapsed_default": true,
+        "fields": [
+          {
+            "category": "IMAGE",
+            "class_type": "LoadImage",
+            "constraints": {
+              "accept_mime": [
+                "image/png",
+                "image/jpeg",
+                "image/webp"
+              ]
+            },
+            "current_value": "螢幕快照 2026-04-09 17-16-46.png",
+            "id": "node:17:image",
+            "input_name": "image",
+            "input_type": "file_picker",
+            "label": "上傳圖片",
+            "node_id": "17",
+            "node_title": "Step 2 - Load image",
+            "required": true
+          }
+        ],
+        "id": "image",
+        "label": "圖片輸入"
+      },
+      {
+        "collapsed_default": true,
+        "fields": [
+          {
+            "category": "MODEL",
+            "class_type": "DualCLIPLoader",
+            "current_value": "clip_l.safetensors",
+            "id": "node:34:clip_name1",
+            "input_name": "clip_name1",
+            "input_type": "select",
+            "label": "CLIP-L 文字編碼器（Step 1 - Load models）",
+            "lock_reason": "template_default_model",
+            "locked": true,
+            "node_id": "34",
+            "node_title": "Step 1 - Load models",
+            "read_only": true,
+            "required": false
+          },
+          {
+            "category": "MODEL",
+            "class_type": "DualCLIPLoader",
+            "current_value": "t5xxl_fp8_e4m3fn_scaled.safetensors",
+            "id": "node:34:clip_name2",
+            "input_name": "clip_name2",
+            "input_type": "select",
+            "label": "T5 / 第二文字編碼器（Step 1 - Load models）",
+            "lock_reason": "template_default_model",
+            "locked": true,
+            "node_id": "34",
+            "node_title": "Step 1 - Load models",
+            "read_only": true,
+            "required": false
+          },
+          {
+            "category": "MODEL",
+            "class_type": "UnetLoaderGGUF",
+            "current_value": "flux1-fill-dev-Q3_K_S.gguf",
+            "id": "node:31:unet_name",
+            "input_name": "unet_name",
+            "input_type": "select",
+            "label": "GGUF Diffusion / UNet 大模型（Step 1 - Load models）",
+            "lock_reason": "template_default_model",
+            "locked": true,
+            "node_id": "31",
+            "node_title": "Step 1 - Load models",
+            "read_only": true,
+            "required": false
+          },
+          {
+            "category": "MODEL",
+            "class_type": "VAELoader",
+            "current_value": "ae.safetensors",
+            "id": "node:32:vae_name",
+            "input_name": "vae_name",
+            "input_type": "select",
+            "label": "VAE（Step 1 - Load models）",
+            "lock_reason": "template_default_model",
+            "locked": true,
+            "node_id": "32",
+            "node_title": "Step 1 - Load models",
+            "read_only": true,
+            "required": false
+          }
+        ],
+        "id": "model",
+        "label": "模型需求"
+      },
+      {
+        "collapsed_default": true,
+        "fields": [
+          {
+            "category": "NUMERIC",
+            "class_type": "KSampler",
+            "constraints": {
+              "max": 9007199254740992,
+              "min": 0,
+              "step": 1
+            },
+            "current_value": 249750980212560,
+            "id": "node:3:seed",
+            "input_name": "seed",
+            "input_type": "number",
+            "label": "種子",
+            "node_id": "3",
+            "required": true
+          },
+          {
+            "category": "NUMERIC",
+            "class_type": "KSampler",
+            "constraints": {
+              "max": 150,
+              "min": 1,
+              "step": 1
+            },
+            "current_value": 20,
+            "id": "node:3:steps",
+            "input_name": "steps",
+            "input_type": "number",
+            "label": "步數",
+            "node_id": "3",
+            "required": true
+          },
+          {
+            "category": "NUMERIC",
+            "class_type": "KSampler",
+            "constraints": {
+              "max": 30.0,
+              "min": 0.5,
+              "step": 0.1
+            },
+            "current_value": 1,
+            "id": "node:3:cfg",
+            "input_name": "cfg",
+            "input_type": "number",
+            "label": "CFG",
+            "node_id": "3",
+            "required": true
+          },
+          {
+            "category": "SAMPLER",
+            "class_type": "KSampler",
+            "current_value": "euler",
+            "id": "node:3:sampler_name",
+            "input_name": "sampler_name",
+            "input_type": "select",
+            "label": "取樣器",
+            "node_id": "3",
+            "required": true
+          },
+          {
+            "category": "SAMPLER",
+            "class_type": "KSampler",
+            "current_value": "normal",
+            "id": "node:3:scheduler",
+            "input_name": "scheduler",
+            "input_type": "select",
+            "label": "排程器",
+            "node_id": "3",
+            "required": true
+          },
+          {
+            "category": "NUMERIC",
+            "class_type": "KSampler",
+            "constraints": {
+              "max": 1.0,
+              "min": 0.0,
+              "step": 0.05
+            },
+            "current_value": 1,
+            "id": "node:3:denoise",
+            "input_name": "denoise",
+            "input_type": "number",
+            "label": "Denoise",
+            "node_id": "3",
+            "required": true
+          }
+        ],
+        "id": "sampler",
+        "label": "採樣設定"
+      },
+      {
+        "collapsed_default": true,
+        "fields": [
+          {
+            "category": "NUMERIC",
+            "class_type": "FluxGuidance",
+            "current_value": 3.5,
+            "id": "node:26:guidance",
+            "input_name": "guidance",
+            "input_type": "number",
+            "label": "Flux Guidance",
+            "node_id": "26",
+            "node_title": "Prompt",
+            "required": true
+          },
+          {
+            "category": "NUMERIC",
+            "class_type": "ImagePadForOutpaint",
+            "constraints": {
+              "max": 4096,
+              "min": 0,
+              "step": 8
+            },
+            "current_value": 400,
+            "id": "node:44:left",
+            "input_name": "left",
+            "input_type": "number",
+            "label": "外擴 - 左",
+            "node_id": "44",
+            "required": true
+          },
+          {
+            "category": "NUMERIC",
+            "class_type": "ImagePadForOutpaint",
+            "constraints": {
+              "max": 4096,
+              "min": 0,
+              "step": 8
+            },
+            "current_value": 0,
+            "id": "node:44:top",
+            "input_name": "top",
+            "input_type": "number",
+            "label": "外擴 - 上",
+            "node_id": "44",
+            "required": true
+          },
+          {
+            "category": "NUMERIC",
+            "class_type": "ImagePadForOutpaint",
+            "constraints": {
+              "max": 4096,
+              "min": 0,
+              "step": 8
+            },
+            "current_value": 400,
+            "id": "node:44:right",
+            "input_name": "right",
+            "input_type": "number",
+            "label": "外擴 - 右",
+            "node_id": "44",
+            "required": true
+          },
+          {
+            "category": "NUMERIC",
+            "class_type": "ImagePadForOutpaint",
+            "constraints": {
+              "max": 4096,
+              "min": 0,
+              "step": 8
+            },
+            "current_value": 400,
+            "id": "node:44:bottom",
+            "input_name": "bottom",
+            "input_type": "number",
+            "label": "外擴 - 下",
+            "node_id": "44",
+            "required": true
+          },
+          {
+            "category": "NUMERIC",
+            "class_type": "ImagePadForOutpaint",
+            "constraints": {
+              "max": 256,
+              "min": 0,
+              "step": 1
+            },
+            "current_value": 24,
+            "id": "node:44:feathering",
+            "input_name": "feathering",
+            "input_type": "number",
+            "label": "羽化",
+            "node_id": "44",
+            "required": true
+          }
+        ],
+        "id": "numeric",
+        "label": "進階數值參數"
+      },
+      {
+        "collapsed_default": false,
+        "fields": [],
+        "id": "compatibility",
+        "label": "相容性報告",
+        "read_only": true
+      },
+      {
+        "collapsed_default": true,
+        "fields": [],
+        "id": "raw",
+        "label": "原始 workflow",
+        "read_only": true
+      }
+    ]
+  },
+  "workflow_file": "workflow.json"
+}

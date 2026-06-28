@@ -2,6 +2,13 @@ import os
 
 from services.comfyui.settings import COMFYUI_DEFAULT_SETTINGS, DEFAULT_COMFYUI_REMOTE_API_URL
 from services.platform.settings import DEFAULT_SETTINGS
+from routes import comfyui as comfyui_routes
+
+
+def test_comfyui_generation_stale_defaults_allow_low_vram_qwen_steps():
+    assert comfyui_routes.DEFAULT_GENERATION_TIMEOUT_SECONDS == 0
+    assert comfyui_routes.COMFYUI_JOB_STALE_SECONDS >= 1500
+    assert comfyui_routes.COMFYUI_BACKEND_UNRESPONSIVE_FAIL_SECONDS >= 7200
 
 
 def test_comfyui_defaults_use_localhost_remote_api_mode():

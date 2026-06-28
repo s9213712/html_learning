@@ -5591,6 +5591,10 @@
               <label><input type="checkbox" id="s-server-ssl-enabled" /> 啟用 SSL / HTTPS（需 runtime/cert.pem 與 runtime/key.pem，重啟生效）</label>
             </div>
             <div class="field">
+              <label><input type="checkbox" id="s-trusted-host-checks-enabled" /> 啟用 Trusted Host 檢查（預設關閉；開啟後需重啟）</label>
+              <div class="field-hint">Port-forward / NAT 測試請保持關閉；正式綁定網域時再開啟並設定 Host allowlist。</div>
+            </div>
+            <div class="field">
               <label>Listen IP / Host（空白代表沿用環境變數）</label>
               <input type="text" id="s-server-listen-host" placeholder="0.0.0.0 / 127.0.0.1 / localhost / ::" />
             </div>
@@ -7933,7 +7937,7 @@
 <!-- cache marker retained for template-import regression: /js/36-comfyui.js?v=20260509-comfyui-template-embeddings -->
 <script src="/js/36-comfyui.js?v=20260621-comfyui-draft-restore" defer></script>
 <script src="/js/36-comfyui-workflows.js?v=20260614-comfyui-embedding-commas" defer></script>
-<script src="/js/37-ai-agent.js?v=20260623-ai-agent-live-models-v1" defer></script>
+<script src="/js/37-ai-agent.js?v=20260626-ai-agent-adversarial-ui" defer></script>
 <script src="/js/37-bug-report.js?v=20260502-device-feature" defer></script>
 <script src="/js/41-game-modules.js?v=20260601-rubiks-visible" defer></script>
 <script src="/js/games/game-view-registry.js?v=20260513-legacy-modules" defer></script>
@@ -7942,7 +7946,7 @@
 <script src="/js/42-experiments.js?v=20260528-experiments-bounded-motion" defer></script>
   <script src="/js/39-videos.js?v=20260603-video-audio-native" defer></script>
 <script src="/js/40-auth-users.js?v=20260621-avatar-rotation-controls" defer></script>
-<script src="/js/50-admin.js?v=20260605-hf-repo-sanitize" defer></script>
+<script src="/js/50-admin.js?v=20260623-trusted-host-setting-v1" defer></script>
 <script src="/js/51-admin-server-mode-launch-check.js?v=20260621-launch-release-actions" defer></script>
 <script src="/js/52-admin-trading.js?v=20260601-admin-trading-module" defer></script>
 <script src="/js/53-admin-storage-economy.js?v=20260602-transmission-test-status" defer></script>

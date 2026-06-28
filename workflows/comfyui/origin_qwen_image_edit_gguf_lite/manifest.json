@@ -1,0 +1,256 @@
+{
+  "conversion": {
+    "allowlist_message": "",
+    "allowlist_status": "allowlisted",
+    "class_count": 14,
+    "denied_classes": [],
+    "node_count": 15,
+    "source_format": "api_prompt",
+    "source_path": "image/edit/qwen_image_edit_gguf_lite.json",
+    "structural_status": "pass",
+    "unknown_classes": []
+  },
+  "default_params": {
+    "batch_size": 1,
+    "cfg": 4,
+    "checkpoint": "",
+    "clip": "qwen2.5-vl-7b-test-q4_0.gguf",
+    "controlnet": null,
+    "denoise_strength": 1,
+    "diffusion_model": "qwen-image-edit-q2_k_s.gguf",
+    "generation_mode": "img2img",
+    "height": 1024,
+    "loras": [],
+    "model": "qwen-image-edit-q2_k_s.gguf",
+    "negative_prompt": "",
+    "prompt": "Replace the cat with a dalmatian, keeping the environment and scene consistent",
+    "sampler_name": "euler",
+    "scheduler": "simple",
+    "seed": 1001672099958606,
+    "steps": 20,
+    "upscale_model": "",
+    "vae": "qwen_image_vae.safetensors",
+    "width": 1024
+  },
+  "description": "Qwen Image Edit 2509 GGUF workflow for low-VRAM ComfyUI-GGUF installs. Uses GGUF UNet and GGUF Qwen VL text encoder, while keeping the standard qwen_image_vae.safetensors through VAELoader because this runtime does not expose VaeGGUF.",
+  "id": "origin_qwen_image_edit_gguf_lite",
+  "name": "Qwen Image Edit GGUF Lite",
+  "origin_source_path": "image/edit/qwen_image_edit_gguf_lite.json",
+  "output_kinds": [
+    "image"
+  ],
+  "required_controlnets": [],
+  "required_custom_nodes": [
+    "ComfyUI-GGUF"
+  ],
+  "required_loras": [],
+  "required_models": [
+    {
+      "kind": "vae",
+      "name": "qwen_image_vae.safetensors"
+    },
+    {
+      "kind": "clip",
+      "name": "qwen2.5-vl-7b-test-q4_0.gguf"
+    },
+    {
+      "kind": "diffusion_model",
+      "name": "qwen-image-edit-q2_k_s.gguf"
+    }
+  ],
+  "schema_version": 1,
+  "source": "official_origin",
+  "source_format": "api_prompt",
+  "ui": {
+    "initial_collapsed": true,
+    "panels": [
+      {
+        "collapsed_default": true,
+        "fields": [
+          {
+            "category": "TEXT",
+            "class_type": "TextEncodeQwenImageEditPlus",
+            "constraints": {
+              "max_length": 4000,
+              "rows": 5
+            },
+            "current_value": "",
+            "id": "node:492:prompt",
+            "input_name": "prompt",
+            "input_type": "textarea",
+            "label": "Negative prompt (Node 492)",
+            "node_id": "492",
+            "required": true
+          },
+          {
+            "category": "TEXT",
+            "class_type": "TextEncodeQwenImageEditPlus",
+            "constraints": {
+              "max_length": 4000,
+              "rows": 5
+            },
+            "current_value": "Replace the cat with a dalmatian, keeping the environment and scene consistent",
+            "id": "node:494:prompt",
+            "input_name": "prompt",
+            "input_type": "textarea",
+            "label": "Positive prompt (Node 494)",
+            "node_id": "494",
+            "required": true
+          },
+          {
+            "category": "TEXT",
+            "class_type": "EmbeddingShortcuts",
+            "constraints": {
+              "target_field_ids": [
+                "node:492:prompt",
+                "node:494:prompt"
+              ],
+              "token_prefix": "<embeddings:"
+            },
+            "current_value": "",
+            "id": "text:embeddings",
+            "input_name": "embeddings",
+            "input_type": "embedding_shortcuts",
+            "label": "Embedding 快速插入",
+            "node_id": "",
+            "parent_category": "text",
+            "required": false,
+            "synthetic": true
+          }
+        ],
+        "id": "text",
+        "label": "Text"
+      },
+      {
+        "collapsed_default": true,
+        "fields": [
+          {
+            "category": "IMAGE",
+            "class_type": "LoadImage",
+            "constraints": {
+              "accept_mime": [
+                "image/png",
+                "image/jpeg",
+                "image/webp"
+              ]
+            },
+            "current_value": "image_qwen_image_edit_2509_input_image.png",
+            "id": "node:78:image",
+            "input_name": "image",
+            "input_type": "file_picker",
+            "label": "Upload image",
+            "node_id": "78",
+            "required": true
+          }
+        ],
+        "id": "image",
+        "label": "Image"
+      },
+      {
+        "collapsed_default": true,
+        "fields": [
+          {
+            "category": "MODEL",
+            "class_type": "VAELoader",
+            "current_value": "qwen_image_vae.safetensors",
+            "id": "node:489:vae_name",
+            "input_name": "vae_name",
+            "input_type": "select",
+            "label": "VAE (Node 489)",
+            "lock_reason": "template_default_model",
+            "locked": true,
+            "node_id": "489",
+            "read_only": true,
+            "required": true
+          },
+          {
+            "category": "MODEL",
+            "class_type": "CLIPLoaderGGUF",
+            "current_value": "qwen2.5-vl-7b-test-q4_0.gguf",
+            "id": "node:490:clip_name",
+            "input_name": "clip_name",
+            "input_type": "select",
+            "label": "GGUF CLIP / text encoder (Node 490)",
+            "lock_reason": "template_default_model",
+            "locked": true,
+            "node_id": "490",
+            "read_only": true,
+            "required": true
+          },
+          {
+            "category": "MODEL",
+            "class_type": "UnetLoaderGGUF",
+            "current_value": "qwen-image-edit-q2_k_s.gguf",
+            "id": "node:491:unet_name",
+            "input_name": "unet_name",
+            "input_type": "select",
+            "label": "GGUF Diffusion / UNet (Node 491)",
+            "lock_reason": "template_default_model",
+            "locked": true,
+            "node_id": "491",
+            "read_only": true,
+            "required": true
+          }
+        ],
+        "id": "model",
+        "label": "Models"
+      },
+      {
+        "collapsed_default": true,
+        "fields": [
+          {
+            "category": "NUMERIC",
+            "class_type": "KSampler",
+            "constraints": {
+              "max": 150,
+              "min": 1,
+              "step": 1
+            },
+            "current_value": 20,
+            "id": "node:499:steps",
+            "input_name": "steps",
+            "input_type": "number",
+            "label": "Steps (Node 499)",
+            "node_id": "499",
+            "required": true
+          },
+          {
+            "category": "NUMERIC",
+            "class_type": "KSampler",
+            "constraints": {
+              "max": 30,
+              "min": 0.5,
+              "step": 0.1
+            },
+            "current_value": 4,
+            "id": "node:499:cfg",
+            "input_name": "cfg",
+            "input_type": "number",
+            "label": "CFG (Node 499)",
+            "node_id": "499",
+            "required": true
+          },
+          {
+            "category": "NUMERIC",
+            "class_type": "KSampler",
+            "constraints": {
+              "max": 9007199254740992,
+              "min": 0,
+              "step": 1
+            },
+            "current_value": 1001672099958606,
+            "id": "node:499:seed",
+            "input_name": "seed",
+            "input_type": "number",
+            "label": "Seed (Node 499)",
+            "node_id": "499",
+            "required": true
+          }
+        ],
+        "id": "numeric",
+        "label": "Sampling"
+      }
+    ]
+  },
+  "workflow_file": "workflow.json"
+}

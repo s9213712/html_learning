@@ -2550,6 +2550,7 @@ async function loadSettings() {
   if ($("s-session-idle-timeout")) $("s-session-idle-timeout").value = s.session_idle_timeout_minutes ?? "";
   if ($("s-notification-muted-types")) $("s-notification-muted-types").value = s.notification_muted_types || "";
   if ($("s-server-ssl-enabled")) $("s-server-ssl-enabled").checked = !!s.server_ssl_enabled;
+  if ($("s-trusted-host-checks-enabled")) $("s-trusted-host-checks-enabled").checked = !!s.trusted_host_checks_enabled;
   if ($("s-server-listen-host")) $("s-server-listen-host").value = s.server_listen_host || "";
   if ($("s-server-listen-port")) $("s-server-listen-port").value = s.server_listen_port || "";
   if ($("s-server-timezone")) $("s-server-timezone").value = s.server_timezone || "UTC";
@@ -4900,6 +4901,7 @@ async function saveSettings() {
     session_idle_timeout_minutes: parseInt($("s-session-idle-timeout")?.value || "0", 10) || 0,
     notification_muted_types: ($("s-notification-muted-types")?.value || "").trim(),
     server_ssl_enabled: $("s-server-ssl-enabled") ? !!$("s-server-ssl-enabled").checked : true,
+    trusted_host_checks_enabled: !!$("s-trusted-host-checks-enabled")?.checked,
     server_listen_host: ($("s-server-listen-host")?.value || "").trim(),
     server_listen_port: parseInt($("s-server-listen-port")?.value || "0"),
     server_timezone: ($("s-server-timezone")?.value || "UTC").trim() || "UTC",

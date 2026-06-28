@@ -1,3 +1,4 @@
+import json
 import pytest
 from datetime import datetime
 
@@ -218,6 +219,57 @@ def test_points_bootstrap_initial_grants_skip_internal_test_without_force():
 
     assert result["skipped"] is True
     assert result["mode"] == "internal_test"
+
+
+def test_points_bootstrap_failure_audit_includes_safe_mode_forensics():
+    audits = []
+
+    class PointsStub:
+        def bootstrap_admin_initial_grants(self, **kwargs):
+            raise ValueError(
+                "PointsChain safe mode active; ledger transaction is paused until "
+                "branch/governance recovery resolves the incident"
+            )
+
+        def safe_mode_status(self):
+            return {
+                "safe_mode": True,
+                "reason": "governance_clock_jump_detected",
+                "forensic_bundle_id": "fb-clock-1",
+                "verification": {
+                    "violation": "wall_clock_fast_forward",
+                    "observed_ip": "203.0.113.42",
+                },
+                "restore_plan": {"governance_recovery_required": True},
+            }
+
+    result = startup.bootstrap_points_initial_grants_if_due(
+        points_service=PointsStub(),
+        get_system_settings=lambda: {
+            "feature_economy_enabled": True,
+            "feature_points_chain_enabled": True,
+        },
+        get_runtime_server_mode=lambda: "production",
+        audit=lambda *args, **kwargs: audits.append((args, kwargs)),
+    )
+
+    assert result["ok"] is False
+    assert result["safe_mode"]["safe_mode"] is True
+    assert audits and audits[0][0][0] == "POINTS_BOOTSTRAP_GRANTS_FAILED"
+    assert audits[0][0][1] == "0.0.0.0"
+    detail = json.loads(audits[0][1]["detail"])
+    assert detail["severity"] == "critical"
+    assert detail["attack_surface"] == "points_chain"
+    assert detail["attack_method"] == "suspected_governance_clock_manipulation"
+    assert detail["attack_classification"]["score"] >= detail["attack_classification"]["threshold"]
+    assert detail["attack_classification"]["confidence"] in {"medium", "high"}
+    assert detail["source"] == "server_startup.bootstrap_points_initial_grants"
+    assert detail["source_ip"] == "0.0.0.0"
+    assert "no direct client request IP" in detail["source_ip_note"]
+    assert detail["safe_mode_reason"] == "governance_clock_jump_detected"
+    assert detail["forensic_bundle_id"] == "fb-clock-1"
+    assert detail["verification"]["violation"] == "wall_clock_fast_forward"
+    assert any(item["value"] == "203.0.113.42" for item in detail["ip_evidence"])
 
 
 def test_import_mode_workers_start_for_gunicorn_import_but_not_plain_import():

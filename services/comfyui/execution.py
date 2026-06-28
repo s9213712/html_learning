@@ -3,6 +3,7 @@
 import json
 import inspect
 import mimetypes
+import os
 import time
 import urllib.parse
 import uuid
@@ -10,6 +11,10 @@ import uuid
 
 QUEUE_TIMEOUT_EXTENSION_SECONDS = 1800
 QUEUE_MAX_TIMEOUT_SECONDS = 21600
+BACKEND_UNRESPONSIVE_FAIL_SECONDS = max(
+    60,
+    int(os.environ.get("COMFYUI_BACKEND_UNRESPONSIVE_FAIL_SECONDS", "7200") or "7200"),
+)
 OUTPUT_REF_KEYS = {
     "images": "images",
     "video": "videos",
@@ -550,6 +555,7 @@ def wait_for_outputs(
     next_history_poll = 0.0
     history_error_count = 0
     last_history_error = None
+    backend_unresponsive_since = None
     while True:
         now = time.time()
         if snapshot.get("phase") == "running" and not running_started:
@@ -599,16 +605,22 @@ def wait_for_outputs(
                 history = client._json_request(f"/history/{urllib.parse.quote(str(prompt_id))}", timeout=client.timeout)
                 history_error_count = 0
                 last_history_error = None
+                backend_unresponsive_since = None
                 snapshot.pop("backend_unresponsive", None)
                 snapshot.pop("history_error_count", None)
                 snapshot.pop("last_history_error", None)
+                snapshot.pop("backend_unresponsive_seconds", None)
             except error_cls as exc:
                 if not _is_transient_comfy_error(exc):
                     raise
                 history_error_count += 1
                 last_history_error = str(exc)
+                if backend_unresponsive_since is None:
+                    backend_unresponsive_since = now
+                backend_silence = max(0, int(now - backend_unresponsive_since))
                 snapshot["phase"] = "backend_unresponsive" if running_started else snapshot.get("phase", "queued")
                 snapshot["backend_unresponsive"] = True
+                snapshot["backend_unresponsive_seconds"] = backend_silence
                 snapshot["history_error_count"] = history_error_count
                 snapshot["last_history_error"] = last_history_error[:240]
                 snapshot["updated_at"] = time.time()
@@ -617,6 +629,11 @@ def wait_for_outputs(
                     "已保留工作並持續補抓結果。"
                 )
                 emit_progress(progress_callback, snapshot)
+                if running_started and backend_silence >= BACKEND_UNRESPONSIVE_FAIL_SECONDS:
+                    raise error_cls(
+                        "ComfyUI 後端連續 "
+                        f"{backend_silence} 秒沒有回覆 history 查詢；已停止等待，請檢查或重啟 ComfyUI 後重試。"
+                    )
                 next_history_poll = now + max(float(poll_interval), 1.0)
                 time.sleep(0.15)
                 continue

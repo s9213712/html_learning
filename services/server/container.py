@@ -38,6 +38,7 @@ def build_runtime_services(*, config, deps):
         tester_token_user_lookup=deps["tester_token_user_lookup"],
         get_runtime_server_mode=deps["get_runtime_server_mode"],
         get_system_settings=deps.get("get_system_settings"),
+        csrf_secret=deps.get("csrf_secret"),
     )
     configure_audit_service(
         get_db=deps.get("get_audit_db", deps["get_db"]),

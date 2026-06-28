@@ -7,7 +7,8 @@ __pycache__/
 test_backtest_full.py
 /runtime/
 # Generated QA, stress, and security probe outputs. Keep durable conclusions in
-# docs/AGENTS/reports or docs/RELEASE instead of committing run artifacts.
+# small summary docs such as docs/AGENTS/*_SUMMARY.md or docs/RELEASE instead of
+# committing bulky run artifacts.
 /artifacts/
 *:Zone.Identifier
 
@@ -64,7 +65,7 @@ secure_backups/
 attack_test/
 pentest_artifacts/
 /research/
-docs/AGENTS/reports/**/*.db
+docs/AGENTS/reports/
 architecture_scan.md
 notes/
 security/reports/*

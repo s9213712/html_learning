@@ -21,14 +21,22 @@ from services.ai_agent.hermes import (
     run_ai_agent_audit_scan,
     ai_agent_write_guard_status,
     ai_agent_models,
+    filter_retired_ai_agent_models,
     _is_mock_chat_reply,
     public_ai_agent_settings,
 )
+from services.comfyui.template.analyzer import FieldCategory, analyze_workflow_json
 from services.storage.catalog import create_share_link
 
 
 AI_AGENT_CHAT_WORKER_LIMIT = max(1, int(os.environ.get("HACKME_AI_AGENT_CHAT_WORKER_LIMIT", "8") or "8"))
 AI_AGENT_CHAT_WORKERS = threading.BoundedSemaphore(AI_AGENT_CHAT_WORKER_LIMIT)
+AI_AGENT_COMFYUI_SHORTCUT_WORKFLOWS = {
+    "img2img": "origin_qwen_image_edit_2509",
+    "inpaint": "origin_sdxl_checkpoint_inpaint",
+    "outpaint": "origin_flux_fill_outpaint_gguf_q3",
+}
+AI_AGENT_COMFYUI_LEGACY_SHORTCUT_WORKFLOWS = {"", "origin_sdxl_txt2img"}
 
 
 AI_AGENT_WRITE_TOOL_SPECS = {
@@ -59,10 +67,11 @@ AI_AGENT_WRITE_TOOL_SPECS = {
         "path": "/api/comfyui/generate",
         "path_params": {},
         "body_fields": {
-            "prompt", "negative_prompt", "model", "checkpoint", "checkpoint_name", "width", "height",
+            "prompt", "edit_instruction", "edit_prompt", "negative_prompt", "model", "checkpoint", "checkpoint_name", "width", "height",
             "steps", "cfg", "cfg_scale", "sampler", "sampler_name", "scheduler", "seed", "batch_size",
             "generation_mode", "source_image_ref", "source_image_ref_json", "mask_image_ref",
-            "mask_image_ref_json", "denoise_strength", "outpaint_left", "outpaint_top",
+            "mask_image_ref_json", "reference_image_ref", "reference_image_ref_json",
+            "pose_reference_image_ref", "pose_reference_ref", "denoise_strength", "outpaint_left", "outpaint_top",
             "outpaint_right", "outpaint_bottom", "outpaint_feathering",
             "workflow", "workflow_id", "official_workflow_id", "template_id", "lora",
             "loras", "vae", "vae_name", "timeout_seconds", "confirm_billing",
@@ -190,6 +199,18 @@ AI_AGENT_WRITE_TOOL_SPECS = {
         "body_fields": {"force"},
         "required": set(),
         "write": False,
+    },
+    "write_codex_handoff_create": {
+        "label": "建立 Codex 交接任務",
+        "description": "建立給 Codex/root 審核接手的站內交接任務；只排程與紀錄，不直接執行 shell 或修改伺服器檔案。",
+        "method": "DIRECT",
+        "path_params": {},
+        "body_fields": {
+            "title", "objective", "context", "allowed_scope", "priority",
+            "requested_artifacts", "safety_notes", "source_conversation_id",
+        },
+        "required": {"objective"},
+        "write": True,
     },
     "write_trading_place_order": {
         "label": "建立交易掛單",
@@ -1286,6 +1307,7 @@ def register_ai_agent_routes(app, deps):
     get_ua = deps.get("get_ua", lambda: "")
     get_db = deps["get_db"]
     get_audit_db = deps.get("get_audit_db", get_db)
+    storage_root = deps.get("STORAGE_DIR", ".")
     fernet = deps.get("fernet")
     audit = deps.get("audit", lambda *args, **kwargs: None)
     json_resp = deps["json_resp"]
@@ -2025,6 +2047,37 @@ def register_ai_agent_routes(app, deps):
             "ON ai_agent_conversations(owner_user_id, updated_at)"
         )
 
+    def _ensure_ai_agent_codex_handoff_schema(conn):
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ai_agent_codex_handoffs (
+                id TEXT PRIMARY KEY,
+                owner_user_id INTEGER NOT NULL,
+                owner_username TEXT NOT NULL,
+                status TEXT NOT NULL,
+                priority TEXT NOT NULL,
+                title TEXT NOT NULL,
+                objective TEXT NOT NULL,
+                context_json TEXT NOT NULL,
+                allowed_scope TEXT NOT NULL,
+                requested_artifacts_json TEXT NOT NULL,
+                safety_notes TEXT NOT NULL,
+                source_conversation_id TEXT,
+                source_session_binding TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ai_agent_codex_handoffs_owner_updated "
+            "ON ai_agent_codex_handoffs(owner_user_id, updated_at)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ai_agent_codex_handoffs_status_updated "
+            "ON ai_agent_codex_handoffs(status, updated_at)"
+        )
+
     def _conversation_binding():
         return _actor_session_binding() or "sessionless"
 
@@ -2056,6 +2109,8 @@ def register_ai_agent_routes(app, deps):
                     continue
                 images.append({
                     "image_ref": image_ref,
+                    "cloud_file_id": str(image.get("cloud_file_id") or image_ref.get("cloud_file_id") or "")[:160],
+                    "storage_file_id": str(image.get("storage_file_id") or image_ref.get("storage_file_id") or "")[:160],
                     "prompt_id": str(image.get("prompt_id") or "")[:160],
                     "filename": str(image.get("filename") or "")[:260],
                     "mime_type": str(image.get("mime_type") or "")[:80],
@@ -2355,10 +2410,51 @@ def register_ai_agent_routes(app, deps):
 
     def _normalize_comfyui_write_args(args):
         normalized = dict(args or {})
+        prompt_text = str(
+            normalized.get("prompt")
+            or normalized.get("edit_instruction")
+            or normalized.get("edit_prompt")
+            or normalized.get("description")
+            or ""
+        )
         mode = _first_present_arg(normalized, ("generation_mode", "mode", "edit_mode", "image_edit_mode", "task_mode"))
         mode = _normalize_comfyui_generation_mode(mode)
         if mode:
             normalized["generation_mode"] = mode
+        requested_workflow_id = str(normalized.get("official_workflow_id") or "").strip()
+        wants_anything2real = bool(re.search(
+            r"anything\s*2\s*real|anything2real|realistic\s+photograph|photoreal",
+            prompt_text,
+            re.IGNORECASE,
+        ))
+        if wants_anything2real and requested_workflow_id in {"", "origin_qwen_image_edit_2509"}:
+            normalized["official_workflow_id"] = "origin_qwen_image_edit_2509_anything2real"
+        elif not requested_workflow_id:
+            if re.search(r"\bqwen\s+image\s+edit\b|\bqwen\s+edit\b|qwen\s*image\s*edit\s*2509", prompt_text, re.IGNORECASE):
+                normalized["official_workflow_id"] = "origin_qwen_image_edit_2509"
+        size_match = re.search(r"(?<!\d)([1-9]\d{2,4})\s*[x×]\s*([1-9]\d{2,4})(?!\d)", prompt_text, re.IGNORECASE)
+        if size_match:
+            if normalized.get("width") is None:
+                normalized["width"] = int(size_match.group(1))
+            if normalized.get("height") is None:
+                normalized["height"] = int(size_match.group(2))
+        if _first_present_arg(normalized, ("denoise_strength", "denoise", "strength")) is None:
+            denoise_match = re.search(
+                r"\bdenoise(?:[_\s-]*strength)?\s*[:=]\s*(0(?:\.\d+)?|1(?:\.0+)?)\b",
+                prompt_text,
+                re.IGNORECASE,
+            )
+            if denoise_match:
+                try:
+                    denoise_value = float(denoise_match.group(1))
+                except (TypeError, ValueError):
+                    denoise_value = None
+                if denoise_value is not None and 0 <= denoise_value <= 1:
+                    normalized["denoise_strength"] = denoise_value
+        if not str(normalized.get("official_workflow_id") or "").strip():
+            shortcut_workflow = AI_AGENT_COMFYUI_SHORTCUT_WORKFLOWS.get(mode)
+            if shortcut_workflow:
+                normalized["official_workflow_id"] = shortcut_workflow
         if not normalized.get("cfg") and normalized.get("cfg_scale") is not None:
             normalized["cfg"] = normalized.get("cfg_scale")
         if not normalized.get("sampler_name") and normalized.get("sampler") is not None:
@@ -2375,6 +2471,12 @@ def register_ai_agent_routes(app, deps):
         ))
         if mask_ref is not None:
             normalized["mask_image_ref"] = mask_ref
+        reference_ref = _first_present_arg(normalized, (
+            "reference_image_ref", "reference_image_ref_json", "reference_ref",
+            "pose_reference_image_ref", "pose_reference_ref", "pose_ref",
+        ))
+        if reference_ref is not None:
+            normalized["reference_image_ref"] = reference_ref
         denoise = _first_present_arg(normalized, ("denoise_strength", "denoise", "strength"))
         if denoise is not None:
             normalized["denoise_strength"] = denoise
@@ -2394,7 +2496,422 @@ def register_ai_agent_routes(app, deps):
             for field in ("outpaint_left", "outpaint_top", "outpaint_right", "outpaint_bottom"):
                 if normalized.get(field) is None:
                     normalized[field] = expand
+        _normalize_qwen_edit_inline_instruction(normalized)
         return normalized
+
+    def _extract_inline_edit_instruction(prompt):
+        text = str(prompt or "").strip()
+        if not text:
+            return ""
+        match = re.search(
+            r"(?:use\s+a\s+short\s+english\s+edit\s+instruction\s+internally|"
+            r"short\s+english\s+edit\s+instruction|internal\s+edit\s+instruction)"
+            r"\s*[:：]\s*(.+?)\s*$",
+            text,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if not match:
+            return ""
+        instruction = re.sub(r"\s+", " ", match.group(1)).strip(" \t\r\n\"'`")
+        instruction = re.split(
+            r"(?:解析度|分辨率|尺寸|batch\s*\d*|steps\s*\d*|cfg\s*\d*|confirm_billing|LoRA\s+strength|提示詞基礎|source\s+使用)",
+            instruction,
+            maxsplit=1,
+            flags=re.IGNORECASE,
+        )[0].strip(" \t\r\n\"'`。．;；")
+        return instruction[:1200]
+
+    def _extract_prompt_style_context(prompt):
+        text = str(prompt or "").strip()
+        if not text:
+            return ""
+        match = re.search(
+            r"(?:提示詞基礎|基礎提示詞|prompt\s*base|base\s*prompt|style\s*prompt)"
+            r"\s*[:：]\s*([^。．\n\r；;]+)",
+            text,
+            re.IGNORECASE,
+        )
+        if match:
+            style = re.sub(r"\s+", " ", match.group(1)).strip(" \t\r\n\"'`")
+            if style:
+                return style[:500]
+        if re.search(r"\bby\s+ogipote\b", text, re.IGNORECASE):
+            parts = []
+            for phrase in ("by ogipote", "anime style", "1girl"):
+                if re.search(rf"\b{re.escape(phrase)}\b", text, re.IGNORECASE):
+                    parts.append(phrase)
+            return ", ".join(parts) or "by ogipote, anime style, 1girl"
+        return ""
+
+    def _sanitize_qwen_edit_style_context(style_context):
+        style = re.sub(r"\s+", " ", str(style_context or "")).strip(" \t\r\n\"'`")
+        if not style:
+            return ""
+        # Qwen edit can render "by <artist>" style tags as visible signatures.
+        # Keep the visual style intent, but never pass artist bylines literally.
+        style = re.sub(r"\bby\s+[A-Za-z0-9_.-]+\b\s*,?\s*", "", style, flags=re.IGNORECASE)
+        style = re.sub(r"\s*,\s*,+", ", ", style).strip(" ,")
+        if not style:
+            style = "anime style, 1girl"
+        guards = "no text, no watermark, no signature, no logo, no visible artist name"
+        if "no text" not in style.lower():
+            style = f"{style}, {guards}"
+        return style[:500]
+
+    def _prompt_has_cjk(prompt):
+        return bool(re.search(r"[\u3400-\u9fff]", str(prompt or "")))
+
+    def _english_background_target_from_prompt(text, lower):
+        if "屋頂" in text or "rooftop" in lower:
+            if "夜" in text or "night" in lower:
+                return "a nighttime city rooftop with distant lights"
+            if "黃昏" in text or "夕陽" in text or "sunset" in lower or "dusk" in lower:
+                return "a sunset city rooftop with warm sky and distant buildings"
+            return "a city rooftop with distant buildings"
+        if "城市" in text or "city" in lower:
+            if "夜" in text or "night" in lower:
+                return "a nighttime city background with distant lights"
+            if "黃昏" in text or "夕陽" in text or "sunset" in lower or "dusk" in lower:
+                return "a sunset city background with warm sky"
+            return "a clean city background"
+        if "花園" in text or "garden" in lower:
+            return "a bright flower garden background"
+        if "海邊" in text or "beach" in lower:
+            return "a sunny beach background"
+        if "教室" in text or "classroom" in lower:
+            return "a clean anime classroom background"
+        if re.search(r"[\u3400-\u9fff]", text):
+            return "the requested scenic anime background"
+        return text or "the requested new background"
+
+    def _derive_qwen_edit_instruction_from_prompt(prompt):
+        text = re.sub(r"\s+", " ", str(prompt or "")).strip()
+        if not text or not _prompt_has_cjk(text):
+            return ""
+        lower = text.lower()
+        preserve_identity = "preserve face, expression, hairstyle, hands, pose, body, and background"
+        wants_remove_hairclips = (
+            ("移除" in text or "刪除" in text or "拿掉" in text or "remove" in lower or "delete" in lower)
+            and ("髮夾" in text or "hair clip" in lower or "hairclip" in lower)
+        )
+        wants_scarf = "圍巾" in text or "scarf" in lower
+        wants_yandere = "病嬌" in text or "yandere" in lower
+        wants_lace = "蕾絲" in text or "lace" in lower or "lacy" in lower
+        wants_cat_ears = "貓耳" in text or "cat-ear" in lower or "cat ear" in lower or "cat ears" in lower
+        wants_index_finger_lips = (
+            ("食指" in text or "index finger" in lower)
+            and ("嘴唇" in text or "嘴邊" in text or "唇" in text or "lips" in lower or "mouth" in lower)
+        )
+        wants_left_hand_behind_back = (
+            ("左手" in text or "left hand" in lower or "left arm" in lower)
+            and ("背後" in text or "behind back" in lower or "behind her back" in lower)
+        )
+        wants_head_tilt = "頭歪" in text or "歪著" in text or "tilted head" in lower or "head tilted" in lower
+        wants_twin_tails = (
+            "雙馬尾" in text
+            or "twin tails" in lower
+        ) and bool(re.search(
+            r"(改成|改為|換成|變成|加入|新增|加上|只把|change|turn|make|add)",
+            text,
+            re.IGNORECASE,
+        ))
+        wants_larger_bust = bool(re.search(
+            r"(胸部|胸口|胸圍|bust|chest)[^。．；;\n\r]{0,20}(變大|更大|放大|較大|larger|bigger)",
+            text,
+            re.IGNORECASE,
+        )) or bool(re.search(
+            r"(變大|更大|放大|較大|larger|bigger)[^。．；;\n\r]{0,20}(胸部|胸口|胸圍|bust|chest)",
+            text,
+            re.IGNORECASE,
+        ))
+        if wants_remove_hairclips and wants_scarf and wants_yandere and wants_lace and wants_larger_bust:
+            hairstyle_clause = (
+                "change the hairstyle to clear high twin tails while keeping the same dark blue hair color; "
+                if wants_twin_tails else
+                "preserve the main hair length and dark blue hair color; "
+            )
+            cat_ears_clause = (
+                "add clear cat-ear hair accessories on top of the head, separate from the removed white hair clips; "
+                if wants_cat_ears else
+                ""
+            )
+            pose_clause = (
+                "change the pose so the right index finger gently touches the lips, the left hand reaches behind the back, "
+                "and the head is tilted; keep the gesture anatomically plausible with visible natural fingers; "
+                if wants_index_finger_lips and wants_left_hand_behind_back and wants_head_tilt else
+                "preserve the pose and hands; "
+            )
+            return (
+                "remove the white hair clips and fill those areas with natural dark blue hair; "
+                f"{hairstyle_clause}"
+                f"{cat_ears_clause}"
+                f"{pose_clause}"
+                "add a clearly visible soft dark red scarf around the neck without covering the whole face; "
+                "change the facial expression to yandere with intense eyes and a slightly dangerous smile, no horror and no gore; "
+                "make the bust moderately larger while keeping natural anatomy, the same identity, and believable clothing tension; "
+                "change the visible white dress into a delicate white lace dress with lace fabric texture, lace trim, and subtle frills; "
+                "preserve the same girl, background, composition, and overall anime style; "
+                "do not add text, watermark, extra people, or unrelated objects."
+            )
+        wants_vertical_full_body_festival = (
+            ("1080x1920" in lower or "1080×1920" in text)
+            and ("全身" in text or "full body" in lower)
+            and ("大街" in text or "街" in text or "street" in lower)
+            and ("車水馬龍" in text or "traffic" in lower or "busy street" in lower)
+            and ("和服" in text or "kimono" in lower)
+            and ("木屐" in text or "geta" in lower)
+            and ("單馬尾" in text or "ponytail" in lower)
+        )
+        if wants_vertical_full_body_festival:
+            return (
+                "convert the image into a vertical 1080x1920 full-body composition showing the same girl from head to feet; "
+                "make sure both feet are visible and she is wearing traditional wooden geta sandals; "
+                "change the visible outfit to a Japanese festival kimono with sleeves, collar, obi sash, and tasteful festival fabric details; "
+                "change the hairstyle to a single ponytail with Japanese festival hair accessories; "
+                "change the background to a busy city street during a Japanese festival with traffic, street lights, and blurred pedestrians; "
+                "keep pedestrians softly blurred and secondary, preserve the same face identity and overall anime style; "
+                "avoid cropped feet, missing legs, extra limbs, text, watermark, and extra main characters."
+            )
+        wants_body_lace_proportion_test = (
+            ("體態" in text or "身形" in text or "body proportion" in lower or "body proportions" in lower)
+            and ("高挑" in text or "更高" in text or "taller" in lower)
+            and ("腰" in text or "waist" in lower)
+            and wants_larger_bust
+            and ("腿" in text or "legs" in lower)
+            and ("蕾絲" in text or "lace" in lower)
+        )
+        if wants_body_lace_proportion_test:
+            return (
+                "edit the same girl into a full-body standing adult anime woman with a taller, more elegant silhouette; "
+                "make the waist visibly slimmer, make the legs longer and more graceful, and make the bust moderately larger while keeping natural anatomy and believable clothing tension; "
+                "change the outfit to a fully lined opaque white lace maxi dress: solid white fabric underneath, lace as decorative overlay only, lace trim, subtle frills, a clear real skirt hem, and modest coverage; "
+                "skin must not be visible through the dress on the torso, hips, thighs, or legs; "
+                "preserve the original footwear if possible, otherwise add simple white dress shoes or geta sandals with both feet visible; "
+                "do not make it a bodysuit, swimsuit, transparent outfit, lingerie, qipao, cheongsam, visible underwear, or bare-feet fashion pose; "
+                "preserve the same face identity, dark blue hair color, single ponytail, festival hair accessories, anime style, and the busy night street background; "
+                "keep both feet visible inside the frame; avoid extra fingers, missing fingers, broken hands, impossible body proportions, body or clothing penetration, cropped feet, text, watermark, and extra people."
+            )
+        if "水手服" in text or "sailor collar" in lower:
+            return (
+                "change only the visible outfit to a Japanese sailor uniform with a navy sailor collar, "
+                "white blouse, and red ribbon; preserve face, expression, hairstyle, hair accessories, hands, pose, body, and background."
+            )
+        if "紅色連帽" in text or "red hoodie" in lower:
+            return (
+                "change only the visible outfit to a red hoodie with red sleeves and small white drawstrings; "
+                f"{preserve_identity}."
+            )
+        if "和服" in text or "kimono" in lower:
+            return (
+                "change only the visible outfit to a pale Japanese kimono with a clear collar, sleeves, and obi sash; "
+                f"{preserve_identity}."
+            )
+        if "bikini" in lower:
+            return (
+                "change only the visible outfit to a tasteful two-piece bikini with visible shoulder straps; "
+                f"{preserve_identity}."
+            )
+        if "泳裝" in text or "泳衣" in text or "swimsuit" in lower:
+            return (
+                "change only the visible outfit to a modest one-piece swimsuit; "
+                f"{preserve_identity}."
+            )
+        if "小惡魔" in text or "little devil" in lower:
+            return (
+                "change only the visible outfit to a cute little-devil cosplay costume with dark dress, red ribbon accents, "
+                "and small devil-horn hair accessories; preserve face, expression, main hairstyle, hands, pose, body, and background."
+            )
+        if "新增第二位" in text or "第二位清楚" in text or "second" in lower:
+            return (
+                "add a second clearly visible anime girl friend standing slightly behind on the right side; "
+                "preserve the original girl, her face, hair, outfit, hands, pose, body, and the overall scene."
+            )
+        wants_open_arms = (
+            "張開雙臂" in text
+            or "雙臂張開" in text
+            or bool(re.search(r"(?:兩隻|雙|二隻|2\s*隻)?\s*手臂[^。．；;\n\r]{0,20}(?:左右|兩側|向外|外側)?[^。．；;\n\r]{0,10}張開", text))
+            or bool(re.search(r"張開[^。．；;\n\r]{0,12}(?:兩隻|雙|二隻|2\s*隻)?\s*手臂", text))
+            or "open arms" in lower
+            or "arms open" in lower
+            or "spread arms" in lower
+        )
+        wants_bed_scene = (
+            "床" in text
+            or "躺" in text
+            or "bed" in lower
+            or "lying" in lower
+            or "laying" in lower
+        )
+        wants_outpaint_or_wide = (
+            "outpaint" in lower
+            or "外延" in text
+            or "擴圖" in text
+            or "1920x1080" in lower
+            or "1920×1080" in text
+            or "橫幅" in text
+        )
+        if wants_open_arms and wants_bed_scene and wants_outpaint_or_wide:
+            return (
+                "convert the image into a 16:9 wide composition as if outpainted left and right; "
+                "place the same girl lying on a bed with pillows and soft bedding in the background; "
+                "both arms are opened outward to the sides with both hands fully visible inside the frame; "
+                "extrapolate only the previously covered front of the outfit from the existing design; "
+                "preserve all unrequested original clothing attributes, including garment wearing state, exposure, neckline height, "
+                "fabric coverage, straps, accessories, folds, colors, and how each layer is draped on the body; "
+                "if the original shoulders or collarbones are visible, keep the same visible skin areas; "
+                "if the original cardigan or outer layer is slipped below the shoulders, keep it slipped below the shoulders "
+                "and draped on the upper arms or forearms instead of pulled back onto the shoulders; preserve the same red ribbon shape "
+                "and position, same shoulder strap positions, same beige cardigan edges, colors, and clothing style; "
+                "naturally complete the white dress, cardigan interior, clothing folds, and body contours; "
+                "do not add new fabric coverage, do not change how garments are worn, "
+                "do not redesign the outfit, do not change the face, hair, hair clips, ribbon, straps, cardigan cut, or color palette; "
+                "avoid extra arms, broken hands, missing fingers, cropped hands, text, watermark, and extra people."
+            )
+        if "背景" in text and re.search(r"(?:把|將)?背景\s*(?:改成|改為|換成|替換成|變成|改變為)", text):
+            match = re.search(r"(?:把|將)?背景\s*(?:改成|改為|換成|替換成|變成|改變為)\s*([^；;。．\n\r]+)", text)
+            target = re.sub(r"\s+", " ", match.group(1)).strip(" ，,。．;；") if match else "the requested new background"
+            target = _english_background_target_from_prompt(target, target.lower())
+            return f"change only the background to {target}; preserve the girl, face, hair, outfit, pose, body, and foreground objects."
+        explicit_pose_edit = bool(re.search(r"(?:把|將)?(?:女孩|人物|角色)?(?:的)?(?:姿勢|動作)\s*(?:改成|改為|換成|變成|改變為)", text))
+        if explicit_pose_edit or "pose to" in lower:
+            if "敬禮" in text or "salute" in lower:
+                pose = "a casual salute pose with one hand raised beside the forehead"
+            elif "揮手" in text or "waving" in lower or "wave" in lower:
+                pose = "a clear waving-hand pose"
+            elif "v sign" in lower or "v字" in lower or "勝利" in text:
+                pose = "a V-sign peace pose"
+            elif wants_open_arms:
+                return (
+                    "change the girl's pose so both arms are opened outward to the sides, away from the chest; "
+                    "extrapolate only the previously covered area from the existing outfit; preserve all unrequested original clothing "
+                    "attributes, including garment wearing state, exposure, neckline height, fabric coverage, straps, accessories, folds, "
+                    "colors, and how each layer is draped on the body; if the original shoulders or collarbones are visible, keep the same "
+                    "visible skin areas; if the original cardigan or outer layer is slipped below the shoulders, keep it slipped below the "
+                    "shoulders and draped on the upper arms or forearms instead of pulled back onto the shoulders; naturally complete the white dress, "
+                    "same neckline height, same red ribbon shape and position, same shoulder strap positions, same beige cardigan edges, "
+                    "cardigan interior, clothing folds, and body contours; do not redesign the outfit, do not change the neckline, "
+                    "ribbon, straps, cardigan cut, colors, or background; do not add new fabric coverage or change how garments are worn; "
+                    "preserve identity, face, hair, body proportions, and style; "
+                    "avoid extra arms, broken hands, missing fingers, or cropped hands."
+                )
+            elif "cross" in lower or "交叉" in text:
+                pose = "an arms-crossed pose"
+            else:
+                pose = "the requested new pose"
+            return f"change the girl's pose to {pose}; preserve identity, face, hair, outfit, body proportions, and background."
+        if "真實" in text or "realistic" in lower or "寫實" in text:
+            return (
+                "convert the image to a more realistic semi-realistic illustration style while preserving the same girl, "
+                "face, hair, outfit, pose, composition, and background."
+            )
+        if "貓耳" in text or "cat-ear" in lower or "cat ear" in lower:
+            return f"add cat-ear hair accessories to the girl; {preserve_identity}."
+        if "換臉" in text or "臉換" in text or "change face" in lower or "face identity" in lower:
+            return (
+                "change only the girl's face identity to a different anime character face with a slightly more mature face shape "
+                "and different eye shape; preserve hairstyle, hair color, outfit, hands, pose, body, composition, and background."
+            )
+        if wants_yandere:
+            return (
+                "change only the facial expression to yandere with intense eyes and a slightly dangerous smile, no horror and no gore; "
+                "preserve hair, outfit, hands, pose, body, and background."
+            )
+        if wants_twin_tails:
+            return f"change only the hairstyle to high twin tails; preserve face, expression, outfit, hands, pose, body, and background."
+        if "髮色" in text or "銀" in text or "silver" in lower:
+            return f"change only the hair color to silver-white; preserve face, expression, outfit, hands, pose, body, and background."
+        if "表情" in text or "驚訝" in text or "surprised" in lower:
+            return f"change only the facial expression to surprised with a slightly open mouth; preserve hair, outfit, hands, pose, body, and background."
+        if "手環" in text or "wristband" in lower:
+            return f"remove only the black wristband from the girl's wrist; {preserve_identity}."
+        if "項鍊" in text or "necklace" in lower:
+            return (
+                "replace only the visible neck ribbon with a simple small gold necklace; "
+                f"{preserve_identity}."
+            )
+        if re.search(r"(改成|改為|換成|替換|移除|刪除|修正|修復|新增)", text):
+            return (
+                "apply only the requested semantic image edit from the user instruction; preserve all unmentioned subjects, "
+                "identity, face, hair, outfit, pose, body, composition, and background as much as possible."
+            )
+        return ""
+
+    def _is_qwen_edit_workflow_id(workflow_id):
+        workflow_id = str(workflow_id or "").strip()
+        return workflow_id == "origin_qwen_image_edit_2509" or workflow_id.startswith("origin_qwen_image_edit_2509_")
+
+    def _qwen_edit_instruction_needs_derived_override(current_instruction, derived_instruction):
+        current = str(current_instruction or "").strip().lower()
+        derived = str(derived_instruction or "").strip().lower()
+        if not current or not derived:
+            return False
+        strict_preservation_terms = (
+            "garment wearing state",
+            "exposure",
+            "fabric coverage",
+            "how each layer is draped",
+            "visible skin areas",
+            "slipped below the shoulders",
+            "do not add new fabric coverage",
+            "change how garments are worn",
+        )
+        derived_requires_strict_preservation = any(term in derived for term in strict_preservation_terms)
+        if not derived_requires_strict_preservation:
+            return False
+        current_has_strict_preservation_guard = any(term in current for term in strict_preservation_terms)
+        if current_has_strict_preservation_guard:
+            return False
+        pose_or_canvas_terms = (
+            "open",
+            "spread",
+            "arms",
+            "bed",
+            "lying",
+            "outpaint",
+            "16:9",
+            "1920",
+            "wide",
+        )
+        return any(term in current for term in pose_or_canvas_terms)
+
+    def _normalize_qwen_edit_inline_instruction(normalized):
+        workflow_id = str(
+            normalized.get("official_workflow_id")
+            or normalized.get("workflow_id")
+            or normalized.get("template_id")
+            or ""
+        ).strip()
+        prompt = str(normalized.get("prompt") or "").strip()
+        is_qwen_edit = _is_qwen_edit_workflow_id(workflow_id) or str(normalized.get("generation_mode") or "").strip().lower() == "img2img"
+        instruction = _extract_inline_edit_instruction(prompt)
+        if not instruction and is_qwen_edit:
+            instruction = _derive_qwen_edit_instruction_from_prompt(prompt)
+        if not instruction:
+            return
+        current_instruction = str(
+            normalized.get("edit_instruction")
+            or normalized.get("edit_prompt")
+            or ""
+        ).strip()
+        if (
+            not current_instruction
+            or current_instruction == prompt
+            or _extract_inline_edit_instruction(current_instruction)
+            or _qwen_edit_instruction_needs_derived_override(current_instruction, instruction)
+        ):
+            normalized["edit_instruction"] = instruction
+        if is_qwen_edit:
+            normalized["prompt"] = _sanitize_qwen_edit_style_context(
+                _extract_prompt_style_context(prompt) or "anime style, 1girl"
+            )
+
+    def _official_workflow_id_from_body(body):
+        value = str((body or {}).get("official_workflow_id") or (body or {}).get("workflow_id") or (body or {}).get("template_id") or "").strip()
+        return value
+
+    def _should_run_official_workflow(body):
+        workflow_id = _official_workflow_id_from_body(body)
+        return workflow_id and workflow_id not in AI_AGENT_COMFYUI_LEGACY_SHORTCUT_WORKFLOWS
 
     def _build_write_tool_request(tool_name, spec, args):
         args = dict(args or {})
@@ -2450,6 +2967,8 @@ def register_ai_agent_routes(app, deps):
                 args["file_id"] = cloud_file_id
         if tool_name == "write_comfyui_generate":
             args = _normalize_comfyui_write_args(args)
+            if _is_missing_arg(args.get("edit_instruction")) and not _is_missing_arg(args.get("edit_prompt")):
+                args["edit_instruction"] = args.get("edit_prompt")
         missing = [
             key for key in sorted(spec.get("required") or [])
             if _is_missing_arg(args.get(key))
@@ -2517,12 +3036,36 @@ def register_ai_agent_routes(app, deps):
 
     def _prepare_comfyui_write_body(body):
         next_body = dict(body or {})
+        next_body, canvas_msg = _prepare_qwen_edit_canvas_source_if_needed(next_body)
+        if canvas_msg:
+            return None, canvas_msg
         requested = str(
             next_body.get("model")
             or next_body.get("checkpoint")
             or next_body.get("checkpoint_name")
             or ""
         ).strip()
+        if _should_run_official_workflow(next_body):
+            if not requested:
+                return next_body, ""
+            status_code, models_payload = _dispatch_internal_api("GET", "/api/comfyui/models", None)
+            model_options = []
+            if 200 <= int(status_code or 500) < 400 and isinstance(models_payload, dict):
+                model_options = list(models_payload.get("models") or [])
+            if not model_options:
+                msg = ""
+                if isinstance(models_payload, dict):
+                    msg = str(models_payload.get("msg") or "").strip()
+                suffix = f"：{msg}" if msg else ""
+                return None, f"目前無法讀取 ComfyUI checkpoint 清單，已取消送出產圖{suffix}"
+            resolved, msg, _matches = _resolve_comfyui_checkpoint_name(requested, model_options)
+            if msg:
+                return None, msg
+            if resolved:
+                next_body["model"] = resolved
+                next_body["checkpoint"] = resolved
+                next_body["checkpoint_name"] = resolved
+            return next_body, ""
         status_code, models_payload = _dispatch_internal_api("GET", "/api/comfyui/models", None)
         model_options = []
         if 200 <= int(status_code or 500) < 400 and isinstance(models_payload, dict):
@@ -2571,6 +3114,673 @@ def register_ai_agent_routes(app, deps):
         if payload is None:
             payload = {"raw": response.get_data(as_text=True)[:4000]}
         return response.status_code, payload
+
+    def _dispatch_internal_image_upload(filename, data, mime_type="image/png"):
+        headers = {}
+        csrf = request.headers.get("X-CSRF-Token") or request.headers.get("X-CSRFToken") or request.cookies.get("csrf_token") or ""
+        if csrf:
+            headers["X-CSRF-Token"] = csrf
+        user_agent = request.headers.get("User-Agent") or ""
+        if user_agent:
+            headers["User-Agent"] = user_agent
+        with app.test_client() as client:
+            for name, value in request.cookies.items():
+                client.set_cookie(str(name), str(value))
+            response = client.open(
+                "/api/comfyui/import-uploaded-image",
+                method="POST",
+                data={"image": (io.BytesIO(data), filename, mime_type)},
+                content_type="multipart/form-data",
+                headers=headers,
+                environ_base={"hackme.internal_dispatch": "ai_agent_write_tool"},
+            )
+        payload = response.get_json(silent=True)
+        if payload is None:
+            payload = {"raw": response.get_data(as_text=True)[:4000]}
+        return response.status_code, payload
+
+    def _workflow_node_input_patch(user_inputs, node_id, input_name, value):
+        if _is_missing_arg(value):
+            return
+        node_key = str(node_id or "").strip()
+        input_key = str(input_name or "").strip()
+        if not node_key or not input_key:
+            return
+        patch = user_inputs.setdefault(node_key, {})
+        patch[input_key] = value
+
+    def _workflow_field_node_id(field):
+        raw = str((field or {}).get("id") or "").strip()
+        match = re.match(r"^node:([^:]+):", raw)
+        return match.group(1) if match else ""
+
+    def _workflow_fields_from_preset(preset):
+        manifest = preset.get("manifest_json") if isinstance(preset, dict) else {}
+        panels = ((manifest or {}).get("ui") or {}).get("panels") if isinstance(manifest, dict) else []
+        fields = []
+        for panel in panels or []:
+            if not isinstance(panel, dict):
+                continue
+            for field in panel.get("fields") or []:
+                if isinstance(field, dict):
+                    fields.append(field)
+        return fields
+
+    def _source_image_filename(body):
+        ref = (body or {}).get("source_image_ref") or (body or {}).get("source_image_ref_json")
+        if isinstance(ref, str):
+            try:
+                ref = json.loads(ref)
+            except Exception:
+                ref = {"filename": ref}
+        if isinstance(ref, dict):
+            return str(ref.get("filename") or "").strip()
+        return ""
+
+    def _image_ref_from_body(body, key):
+        ref = (body or {}).get(key) or (body or {}).get(f"{key}_json")
+        if isinstance(ref, str):
+            try:
+                ref = json.loads(ref)
+            except Exception:
+                ref = {"filename": ref}
+        return ref if isinstance(ref, dict) else {}
+
+    def _cloud_file_id_from_image_ref(ref):
+        if not isinstance(ref, dict):
+            return ""
+        for key in ("cloud_file_id", "file_id", "uploaded_file_id"):
+            value = str(ref.get(key) or "").strip()
+            if value:
+                return value
+        return ""
+
+    def _save_comfyui_ref_to_cloud_file_id(ref):
+        if not isinstance(ref, dict) or not str(ref.get("filename") or "").strip():
+            return "", None
+        status_code, payload = _dispatch_internal_api("POST", "/api/comfyui/save", {"image_ref": ref})
+        if not (200 <= int(status_code or 500) < 400) or not isinstance(payload, dict) or not payload.get("ok"):
+            return "", payload if isinstance(payload, dict) else {"ok": False, "msg": f"HTTP {status_code}"}
+        file_info = payload.get("file") if isinstance(payload.get("file"), dict) else {}
+        return str(file_info.get("file_id") or "").strip(), payload
+
+    def _resolve_cloud_file_id_for_image_ref(ref):
+        cloud_file_id = _cloud_file_id_from_image_ref(ref)
+        if cloud_file_id:
+            return cloud_file_id, None
+        return _save_comfyui_ref_to_cloud_file_id(ref)
+
+    def _target_canvas_dimensions_from_body(body):
+        try:
+            width = int(float((body or {}).get("width") or 0))
+            height = int(float((body or {}).get("height") or 0))
+        except Exception:
+            return 0, 0
+        if width < 64 or height < 64 or width > 2048 or height > 2048:
+            return 0, 0
+        return width, height
+
+    def _resolve_uploaded_file_path_for_actor(file_id):
+        actor = get_current_user_ctx() or {}
+        actor_id = int(_actor_value(actor, "id", 0) or 0)
+        if actor_id <= 0:
+            return None, "尚未登入，無法讀取來源圖片"
+        conn = get_db()
+        try:
+            row = conn.execute(
+                """
+                SELECT id, owner_user_id, storage_path, original_filename_plain_for_public
+                FROM uploaded_files
+                WHERE id=? AND owner_user_id=? AND deleted_at IS NULL
+                """,
+                (str(file_id or "").strip(), actor_id),
+            ).fetchone()
+        finally:
+            conn.close()
+        if not row:
+            return None, "找不到可用的來源圖片檔案"
+        raw_path = str(row["storage_path"] or "").strip()
+        if not raw_path:
+            return None, "來源圖片缺少儲存路徑"
+        path = os.path.abspath(raw_path) if os.path.isabs(raw_path) else ""
+        candidates = []
+        if path:
+            candidates.append(path)
+        else:
+            try:
+                from services.storage.paths import resolve_storage_path
+                candidates.append(str(resolve_storage_path(storage_root, raw_path, create_parent=False)))
+            except Exception:
+                candidates.append(os.path.join(str(storage_root or "."), raw_path))
+        for candidate in candidates:
+            if candidate and os.path.isfile(candidate):
+                return candidate, ""
+        return None, f"來源圖片實體不存在：{raw_path}"
+
+    def _qwen_edit_source_canvas_needed(body, image_size):
+        workflow_id = _official_workflow_id_from_body(body)
+        if not _is_qwen_edit_workflow_id(workflow_id):
+            return False
+        mode = str((body or {}).get("generation_mode") or "").strip().lower()
+        if mode and mode != "img2img":
+            return False
+        width, height = _target_canvas_dimensions_from_body(body)
+        if not width or not height:
+            return False
+        source_width, source_height = image_size
+        if source_width <= 0 or source_height <= 0:
+            return False
+        source_ratio = source_width / source_height
+        target_ratio = width / height
+        return abs(source_ratio - target_ratio) > 0.03
+
+    def _render_qwen_edit_canvas(source_path, *, width, height):
+        try:
+            from PIL import Image, ImageFilter
+        except Exception as exc:
+            return None, (0, 0), f"Pillow 載入失敗，無法建立 Qwen Edit 寬畫布：{exc}"
+        try:
+            with Image.open(source_path) as img:
+                source = img.convert("RGB")
+        except Exception as exc:
+            return None, (0, 0), f"來源圖片讀取失敗：{exc}"
+        source_size = source.size
+        src_w, src_h = source_size
+        if src_w <= 0 or src_h <= 0:
+            return None, source_size, "來源圖片尺寸不合法"
+
+        cover_scale = max(width / src_w, height / src_h)
+        cover_size = (max(1, int(round(src_w * cover_scale))), max(1, int(round(src_h * cover_scale))))
+        cover = source.resize(cover_size, Image.Resampling.LANCZOS)
+        left = max(0, (cover.width - width) // 2)
+        top = max(0, (cover.height - height) // 2)
+        canvas = cover.crop((left, top, left + width, top + height)).filter(ImageFilter.GaussianBlur(radius=24))
+
+        fit_scale = min(width / src_w, height / src_h)
+        fit_size = (max(1, int(round(src_w * fit_scale))), max(1, int(round(src_h * fit_scale))))
+        foreground = source.resize(fit_size, Image.Resampling.LANCZOS)
+        paste_left = (width - foreground.width) // 2
+        paste_top = (height - foreground.height) // 2
+        canvas.paste(foreground, (paste_left, paste_top))
+        out = io.BytesIO()
+        canvas.save(out, format="PNG", optimize=True)
+        return out.getvalue(), source_size, ""
+
+    def _prepare_qwen_edit_canvas_source_if_needed(body):
+        next_body = dict(body or {})
+        source_ref = _image_ref_from_body(next_body, "source_image_ref")
+        if not source_ref:
+            return next_body, ""
+        width, height = _target_canvas_dimensions_from_body(next_body)
+        if not width or not height:
+            return next_body, ""
+        source_cloud, save_payload = _resolve_cloud_file_id_for_image_ref(source_ref)
+        if not source_cloud:
+            msg = ""
+            if isinstance(save_payload, dict):
+                msg = str(save_payload.get("msg") or "").strip()
+            audit(
+                "AI_AGENT_QWEN_EDIT_CANVAS_SOURCE_SKIP",
+                get_client_ip(),
+                user=_actor_value(get_current_user_ctx() or {}, "username"),
+                success=False,
+                ua=get_ua(),
+                detail=f"missing_source_cloud_file_id {msg}"[:240],
+            )
+            return next_body, ""
+        source_path, path_msg = _resolve_uploaded_file_path_for_actor(source_cloud)
+        if path_msg:
+            audit(
+                "AI_AGENT_QWEN_EDIT_CANVAS_SOURCE_SKIP",
+                get_client_ip(),
+                user=_actor_value(get_current_user_ctx() or {}, "username"),
+                success=False,
+                ua=get_ua(),
+                detail=f"source_file_id={source_cloud} {path_msg}"[:240],
+            )
+            return next_body, ""
+        try:
+            from PIL import Image
+            with Image.open(source_path) as probe:
+                image_size = tuple(probe.size)
+        except Exception as exc:
+            return None, f"來源圖片尺寸讀取失敗：{exc}"
+        if not _qwen_edit_source_canvas_needed(next_body, image_size):
+            return next_body, ""
+
+        canvas_bytes, original_size, canvas_msg = _render_qwen_edit_canvas(source_path, width=width, height=height)
+        if canvas_msg:
+            return None, canvas_msg
+        filename = f"qwen_edit_canvas_{width}x{height}_{hashlib.sha1(canvas_bytes).hexdigest()[:12]}.png"
+        status_code, payload = _dispatch_internal_image_upload(filename, canvas_bytes, "image/png")
+        if not (200 <= int(status_code or 500) < 400) or not isinstance(payload, dict) or not payload.get("ok"):
+            msg = str((payload or {}).get("msg") or (payload or {}).get("raw") or "").strip() if isinstance(payload, dict) else ""
+            return None, f"Qwen Edit 寬畫布來源圖匯入失敗{('：' + msg) if msg else ''}"
+        image_info = payload.get("image") if isinstance(payload.get("image"), dict) else {}
+        imported_ref = image_info.get("image_ref") if isinstance(image_info.get("image_ref"), dict) else {}
+        if not imported_ref:
+            return None, "Qwen Edit 寬畫布匯入成功但缺少 ComfyUI image_ref"
+        updated_ref = dict(imported_ref)
+        for key in ("cloud_file_id", "storage_file_id", "filename", "mime_type", "size_bytes"):
+            if image_info.get(key) is not None:
+                updated_ref[key] = image_info.get(key)
+        next_body["source_image_ref"] = updated_ref
+        next_body["source_image_ref_json"] = updated_ref
+        audit(
+            "AI_AGENT_QWEN_EDIT_CANVAS_SOURCE",
+            get_client_ip(),
+            user=_actor_value(get_current_user_ctx() or {}, "username"),
+            success=True,
+            ua=get_ua(),
+            detail=(
+                f"source_file_id={source_cloud} original={original_size[0]}x{original_size[1]} "
+                f"canvas={width}x{height} new_file_id={updated_ref.get('cloud_file_id')}"
+            ),
+        )
+        return next_body, ""
+
+    def _workflow_json_from_preset(preset):
+        workflow = preset.get("workflow_json") if isinstance(preset, dict) else {}
+        if isinstance(workflow, str):
+            try:
+                workflow = json.loads(workflow)
+            except Exception:
+                workflow = {}
+        return workflow if isinstance(workflow, dict) else {}
+
+    def _workflow_protected_media_assignments(preset, body):
+        workflow = _workflow_json_from_preset(preset)
+        if not workflow:
+            return {}, None
+        workflow_id = _official_workflow_id_from_body(body)
+        source_ref = _image_ref_from_body(body, "source_image_ref")
+        mask_ref = _image_ref_from_body(body, "mask_image_ref")
+        reference_ref = _image_ref_from_body(body, "reference_image_ref")
+        source_cloud, source_save_payload = _resolve_cloud_file_id_for_image_ref(source_ref)
+        mask_cloud, mask_save_payload = _resolve_cloud_file_id_for_image_ref(mask_ref)
+        reference_cloud, reference_save_payload = _resolve_cloud_file_id_for_image_ref(reference_ref)
+        assignments = {}
+        missing = []
+        for node_id, node in workflow.items():
+            if not isinstance(node, dict):
+                continue
+            class_type = str(node.get("class_type") or "").strip()
+            inputs = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
+            meta = node.get("_meta") if isinstance(node.get("_meta"), dict) else {}
+            title = str(meta.get("title") or node.get("title") or "").strip().lower()
+            is_reference_node = (
+                _is_qwen_edit_workflow_id(workflow_id)
+                and class_type == "LoadImage"
+                and ("reference" in title or str(node_id) == "79")
+            )
+            if class_type == "LoadImage" and "image" in inputs:
+                if is_reference_node:
+                    if reference_cloud:
+                        assignments[str(node_id)] = reference_cloud
+                    # Qwen Image Edit can run in single-image mode. Do not
+                    # silently feed the source image into the reference node,
+                    # or ordinary edits become unintended two-image edits.
+                    continue
+                elif source_cloud:
+                    assignments[str(node_id)] = source_cloud
+                else:
+                    missing.append(str(node_id))
+            elif class_type == "LoadImageMask" and "image" in inputs:
+                if mask_cloud:
+                    assignments[str(node_id)] = mask_cloud
+                else:
+                    missing.append(str(node_id))
+            elif class_type == "LoadVideo" and "file" in inputs:
+                missing.append(str(node_id))
+        if missing:
+            save_error = source_save_payload or mask_save_payload or reference_save_payload or {}
+            msg = str(save_error.get("msg") or "").strip() if isinstance(save_error, dict) else ""
+            suffix = f"：{msg}" if msg else ""
+            return assignments, {
+                "ok": False,
+                "msg": f"官方 workflow 需要站內雲端圖片來源，無法從目前圖片引用取得 cloud_file_id{suffix}",
+                "stage": "missing_source_cloud_file_id",
+                "missing_media_nodes": missing,
+                "source_image_ref": source_ref,
+                "mask_image_ref": mask_ref,
+                "reference_image_ref": reference_ref,
+                "save_error": save_error,
+            }
+        return assignments, None
+
+    def _workflow_required_user_input_defaults(preset):
+        defaults = {}
+        for field in _workflow_fields_from_preset(preset):
+            if not isinstance(field, dict) or not field.get("required"):
+                continue
+            node_id = _workflow_field_node_id(field)
+            input_name = str(field.get("input_name") or "").strip()
+            class_type = str(field.get("class_type") or "").strip()
+            input_type = str(field.get("input_type") or "").strip()
+            if not node_id or not input_name:
+                continue
+            if input_type == "file_picker" and class_type in {"LoadImage", "LoadImageMask"}:
+                continue
+            if "current_value" not in field:
+                continue
+            _workflow_node_input_patch(defaults, node_id, input_name, field.get("current_value"))
+        return defaults
+
+    def _workflow_request_scalar_fields(body):
+        return {
+            "steps": (body or {}).get("steps"),
+            "cfg": (body or {}).get("cfg") if (body or {}).get("cfg") is not None else (body or {}).get("cfg_scale"),
+            "seed": (body or {}).get("seed"),
+            "denoise": (body or {}).get("denoise_strength"),
+            "sampler_name": (body or {}).get("sampler_name") if (body or {}).get("sampler_name") is not None else (body or {}).get("sampler"),
+            "scheduler": (body or {}).get("scheduler"),
+            "left": (body or {}).get("outpaint_left"),
+            "top": (body or {}).get("outpaint_top"),
+            "right": (body or {}).get("outpaint_right"),
+            "bottom": (body or {}).get("outpaint_bottom"),
+            "feathering": (body or {}).get("outpaint_feathering"),
+        }
+
+    def _workflow_apply_analyzed_sampler_fallbacks(preset, user_inputs, scalar_fields, adjustments):
+        workflow = _workflow_json_from_preset(preset)
+        if not workflow:
+            return
+        try:
+            analysis = analyze_workflow_json(workflow)
+        except Exception:
+            return
+        for field in analysis.user_inputs:
+            if field.class_type != "KSampler":
+                continue
+            if field.category not in {FieldCategory.NUMERIC, FieldCategory.SAMPLER}:
+                continue
+            input_name = str(field.input_name or "").strip()
+            if input_name not in scalar_fields or _is_missing_arg(scalar_fields.get(input_name)):
+                continue
+            _workflow_node_input_patch(user_inputs, field.node_id, input_name, scalar_fields.get(input_name))
+            adjustments.append({
+                "code": "workflow_sampler_arg_applied",
+                "node_id": str(field.node_id),
+                "input_name": input_name,
+                "value": scalar_fields.get(input_name),
+            })
+
+    def _workflow_apply_checkpoint_override(preset, body, user_inputs, adjustments):
+        requested = str(
+            (body or {}).get("checkpoint_name")
+            or (body or {}).get("checkpoint")
+            or (body or {}).get("model")
+            or ""
+        ).strip()
+        if not requested:
+            return
+        workflow = _workflow_json_from_preset(preset)
+        if not workflow:
+            return
+        applied = []
+        for node_id, node in workflow.items():
+            if not isinstance(node, dict):
+                continue
+            if str(node.get("class_type") or "").strip() != "CheckpointLoaderSimple":
+                continue
+            inputs = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
+            if "ckpt_name" not in inputs:
+                continue
+            _workflow_node_input_patch(user_inputs, node_id, "ckpt_name", requested)
+            applied.append(str(node_id))
+        if applied:
+            adjustments.append({
+                "code": "workflow_checkpoint_arg_applied",
+                "input_name": "ckpt_name",
+                "node_ids": applied,
+                "value": requested,
+            })
+
+    def _workflow_apply_qwen_edit_switch_policy(preset, body, user_inputs, adjustments):
+        workflow_id = str((preset or {}).get("system_bundle_id") or "").strip()
+        if not _is_qwen_edit_workflow_id(workflow_id):
+            return
+        requested_profile = str(
+            (body or {}).get("qwen_edit_profile")
+            or (body or {}).get("qwen_profile")
+            or (body or {}).get("profile")
+            or ""
+        ).strip().lower()
+        requested_steps = (body or {}).get("steps")
+        requested_cfg = (body or {}).get("cfg") if (body or {}).get("cfg") is not None else (body or {}).get("cfg_scale")
+        use_base_branch = requested_profile in {"base", "full", "slow", "quality"}
+        workflow = _workflow_json_from_preset(preset)
+        for node_id, node in workflow.items():
+            if not isinstance(node, dict) or str(node.get("class_type") or "") != "ComfySwitchNode":
+                continue
+            meta = node.get("_meta") if isinstance(node.get("_meta"), dict) else {}
+            title = str(meta.get("title") or node.get("title") or "").strip().lower()
+            if title not in {"switch (model)", "switch (steps)", "switch (cfg)"}:
+                continue
+            _workflow_node_input_patch(user_inputs, node_id, "switch", False if use_base_branch else True)
+            adjustments.append({
+                "code": "qwen_edit_base_branch_selected" if use_base_branch else "qwen_edit_lightning_branch_enforced",
+                "node_id": str(node_id),
+                "reason": "explicit_profile_request" if use_base_branch else "default_fast_profile",
+            })
+        if use_base_branch:
+            return
+        clamped = False
+        for node_id, patch in list(user_inputs.items()):
+            if not isinstance(patch, dict):
+                continue
+            if "steps" in patch and patch.get("steps") != 4:
+                patch["steps"] = 4
+                clamped = True
+            if "cfg" in patch and patch.get("cfg") != 1:
+                patch["cfg"] = 1
+                clamped = True
+        if clamped or requested_steps is not None or requested_cfg is not None:
+            adjustments.append({
+                "code": "qwen_edit_lightning_sampler_clamped",
+                "steps": 4,
+                "cfg": 1,
+                "requested_steps": requested_steps,
+                "requested_cfg": requested_cfg,
+            })
+
+    def _workflow_qwen_edit_prompt(body):
+        workflow_id = _official_workflow_id_from_body(body)
+        if not _is_qwen_edit_workflow_id(workflow_id):
+            return str((body or {}).get("prompt") or "").strip(), []
+        edit_instruction = str(
+            (body or {}).get("edit_instruction")
+            or (body or {}).get("edit_prompt")
+            or ""
+        ).strip()
+        prompt = str((body or {}).get("prompt") or "").strip()
+        if not edit_instruction:
+            return prompt, []
+        style_context = prompt
+        lower_instruction = edit_instruction.lower()
+        style_shift_to_realistic = (
+            "semi-realistic" in lower_instruction
+            or "realistic" in lower_instruction
+            or "photoreal" in lower_instruction
+            or "寫實" in edit_instruction
+            or "真實" in edit_instruction
+        )
+        adjustments = [{
+            "code": "qwen_edit_instruction_prompt_applied",
+            "source": "edit_instruction",
+        }]
+        if style_shift_to_realistic and re.search(r"\banime\s+style\b|\bby\s+ogipote\b", style_context, re.IGNORECASE):
+            style_context = ""
+            adjustments.append({
+                "code": "qwen_edit_style_context_omitted",
+                "reason": "realistic_style_shift",
+            })
+        if style_context and edit_instruction not in style_context:
+            combined = (
+                f"{edit_instruction}\n\n"
+                f"Style and preservation context: {style_context}"
+            )
+        else:
+            combined = edit_instruction
+        return combined, adjustments
+
+    def _qwen_edit_prompt_needs_instruction(body):
+        workflow_id = _official_workflow_id_from_body(body)
+        if not _is_qwen_edit_workflow_id(workflow_id):
+            return False
+        mode = str((body or {}).get("generation_mode") or "").strip().lower()
+        if mode and mode != "img2img":
+            return False
+        edit_instruction = str(
+            (body or {}).get("edit_instruction")
+            or (body or {}).get("edit_prompt")
+            or ""
+        ).strip()
+        if edit_instruction:
+            return False
+        prompt = str((body or {}).get("prompt") or "").strip()
+        if not prompt:
+            return True
+        compact = re.sub(r"[\W_]+", "", prompt.lower())
+        style_only = compact in {
+            "byogipoteanimestyle1girl",
+            "animestyle1girl",
+            "1girl",
+        }
+        if style_only:
+            return True
+        return not re.search(
+            r"\b(replace|remove|delete|change|edit|modify|fix|repair|transform|turn|convert|keep|preserve|保持|保留|替換|改成|移除|刪除|修正|修復|換成)\b",
+            prompt,
+            re.IGNORECASE,
+        )
+
+    def _workflow_user_inputs_from_generate_body(preset, body):
+        user_inputs = _workflow_required_user_input_defaults(preset)
+        fields = _workflow_fields_from_preset(preset)
+        prompt, prompt_adjustments = _workflow_qwen_edit_prompt(body)
+        negative = str((body or {}).get("negative_prompt") or "").strip()
+        default_negative = "low quality, worst quality, text, watermark, logo"
+        scalar_fields = _workflow_request_scalar_fields(body)
+        adjustments = list(prompt_adjustments)
+        for field in fields:
+            node_id = _workflow_field_node_id(field)
+            input_name = str(field.get("input_name") or "").strip()
+            if not node_id or not input_name:
+                continue
+            class_type = str(field.get("class_type") or "")
+            label = str(field.get("label") or "").lower()
+            input_type = str(field.get("input_type") or "")
+            if input_type == "file_picker" and class_type in {"LoadImage", "LoadImageMask"}:
+                continue
+            if input_type == "textarea" and prompt and ("negative" not in label and "負面" not in label):
+                _workflow_node_input_patch(user_inputs, node_id, input_name, prompt)
+            elif input_type == "textarea" and negative and ("negative" in label or "負面" in label):
+                _workflow_node_input_patch(user_inputs, node_id, input_name, negative)
+            elif (
+                input_type == "textarea"
+                and field.get("required")
+                and ("negative" in label or "負面" in label)
+            ):
+                _workflow_node_input_patch(user_inputs, node_id, input_name, default_negative)
+                adjustments.append({
+                    "code": "workflow_required_negative_prompt_defaulted",
+                    "node_id": str(node_id),
+                    "input_name": input_name,
+                    "value": default_negative,
+                })
+            elif input_name in scalar_fields:
+                _workflow_node_input_patch(user_inputs, node_id, input_name, scalar_fields.get(input_name))
+        _workflow_apply_analyzed_sampler_fallbacks(preset, user_inputs, scalar_fields, adjustments)
+        _workflow_apply_checkpoint_override(preset, body, user_inputs, adjustments)
+        _workflow_apply_qwen_edit_switch_policy(preset, body, user_inputs, adjustments)
+        workflow_id = str((preset or {}).get("system_bundle_id") or "").strip()
+        reference_ref = _image_ref_from_body(body, "reference_image_ref")
+        if _is_qwen_edit_workflow_id(workflow_id) and reference_ref:
+            adjustments.append({
+                "code": "qwen_edit_reference_image_link_expected",
+                "node_id": "494",
+                "input_name": "image2",
+                "reference_node_id": "79",
+            })
+        return user_inputs, adjustments
+
+    def _workflow_dependency_error(preset):
+        status = (preset or {}).get("dependency_status") if isinstance(preset, dict) else None
+        if not isinstance(status, dict):
+            return None
+        missing_keys = ("missing_nodes", "missing_models", "missing_loras", "missing_controlnets", "missing_custom_nodes")
+        missing = {key: status.get(key) for key in missing_keys if status.get(key)}
+        if not missing:
+            return None
+        return {
+            "ok": False,
+            "msg": "官方 ComfyUI workflow 依賴尚未安裝，已取消送出，避免退回錯誤的快捷 workflow。",
+            "stage": "missing_workflow_dependency",
+            "dependency_status": status,
+            "missing": missing,
+        }
+
+    def _dispatch_official_comfyui_workflow(body):
+        workflow_id = _official_workflow_id_from_body(body)
+        status_code, workflows_payload = _dispatch_internal_api("GET", "/api/comfyui/workflows", None)
+        if not (200 <= int(status_code or 500) < 400) or not isinstance(workflows_payload, dict) or not workflows_payload.get("ok"):
+            return status_code, workflows_payload
+        presets = workflows_payload.get("presets") or workflows_payload.get("official_presets") or []
+        preset_summary = next(
+            (
+                item for item in presets
+                if isinstance(item, dict) and str(item.get("system_bundle_id") or "").strip() == workflow_id
+            ),
+            None,
+        )
+        if not preset_summary:
+            return 404, {"ok": False, "msg": f"找不到官方 ComfyUI workflow：{workflow_id}", "stage": "workflow_not_found"}
+        preset_id = int(preset_summary.get("id") or 0)
+        detail_status, detail_payload = _dispatch_internal_api("GET", f"/api/comfyui/workflows/{preset_id}", None)
+        if not (200 <= int(detail_status or 500) < 400) or not isinstance(detail_payload, dict) or not detail_payload.get("ok"):
+            return detail_status, detail_payload
+        preset = detail_payload.get("preset") if isinstance(detail_payload.get("preset"), dict) else {}
+        dependency_error = _workflow_dependency_error(preset)
+        if dependency_error:
+            return 409, dependency_error
+        mode = str((body or {}).get("generation_mode") or "").strip().lower()
+        if mode in {"img2img", "inpaint", "outpaint"} and not _source_image_filename(body):
+            return 400, {"ok": False, "msg": "官方圖片編輯 workflow 需要來源圖片", "stage": "missing_source_image"}
+        if _qwen_edit_prompt_needs_instruction(body):
+            return 400, {
+                "ok": False,
+                "msg": "Qwen Image Edit 需要明確的語意編輯命令；請提供 edit_instruction，或把 prompt 寫成 replace/remove/change/fix 類的直接編輯指令。",
+                "stage": "missing_qwen_edit_instruction",
+            }
+        image_assignments, image_assignment_error = _workflow_protected_media_assignments(preset, body)
+        if image_assignment_error:
+            return 400, image_assignment_error
+        user_inputs, workflow_adjustments = _workflow_user_inputs_from_generate_body(preset, body)
+        run_body = {
+            "user_inputs": user_inputs,
+            "image_field_assignments": image_assignments,
+            "run_count": body.get("batch_size") or body.get("run_count") or 1,
+            "seed_after_generate": "fixed",
+        }
+        for source_key, target_key in (
+            ("width", "width"),
+            ("height", "height"),
+            ("output_width", "output_width"),
+            ("output_height", "output_height"),
+            ("requested_width", "requested_width"),
+            ("requested_height", "requested_height"),
+        ):
+            if body.get(source_key) not in (None, ""):
+                run_body[target_key] = body.get(source_key)
+        if body.get("vae") or body.get("vae_name"):
+            run_body["vae"] = body.get("vae") or body.get("vae_name")
+        run_status, run_payload = _dispatch_internal_api("POST", f"/api/comfyui/workflows/{preset_id}/run", run_body)
+        if isinstance(run_payload, dict):
+            run_payload.setdefault("official_workflow_id", workflow_id)
+            if workflow_adjustments:
+                run_payload.setdefault("workflow_bridge_adjustments", workflow_adjustments)
+        return run_status, run_payload
 
     def _launch_step_ok(status_code, payload):
         if not (200 <= int(status_code or 500) < 400):
@@ -2750,6 +3960,115 @@ def register_ai_agent_routes(app, deps):
         if payload is None:
             payload = {"raw": response.get_data(as_text=True)[:4000]}
         return response.status_code, payload
+
+    def _codex_handoff_json(value, *, max_chars=12000):
+        try:
+            raw = json.dumps(value, ensure_ascii=False, sort_keys=True)
+        except Exception:
+            raw = json.dumps(str(value or ""), ensure_ascii=False)
+        if len(raw) <= max_chars:
+            return raw
+        return json.dumps({
+            "truncated": True,
+            "preview": raw[:max_chars],
+            "omitted_chars": len(raw) - max_chars,
+        }, ensure_ascii=False, sort_keys=True)
+
+    def _codex_handoff_text(value, limit):
+        return str(value or "").strip()[:limit]
+
+    def _codex_handoff_path_warnings(*values):
+        warnings = []
+        for value in values:
+            if isinstance(value, (dict, list, tuple)):
+                text = _codex_handoff_json(value, max_chars=16000)
+            else:
+                text = str(value or "")
+            outside_paths = _ai_agent_os_paths_outside_runtime(text)
+            if outside_paths:
+                preview = ", ".join(outside_paths[:4])
+                warnings.append(f"contains_server_path_outside_runtime:{preview}")
+        return warnings
+
+    def _execute_codex_handoff_create(actor, args):
+        objective = _codex_handoff_text(args.get("objective"), 6000)
+        if not objective:
+            return 400, {"ok": False, "msg": "objective 必填"}
+        title = _codex_handoff_text(args.get("title"), 160)
+        if not title:
+            title = objective.splitlines()[0][:120] or "Codex handoff"
+        priority = _codex_handoff_text(args.get("priority") or "normal", 24).lower()
+        if priority not in {"low", "normal", "high", "urgent"}:
+            priority = "normal"
+        allowed_scope = _codex_handoff_text(args.get("allowed_scope") or "runtime_and_cloud_drive_only", 500)
+        safety_notes = _codex_handoff_text(args.get("safety_notes"), 2000)
+        context = args.get("context") if "context" in args else {}
+        requested_artifacts = args.get("requested_artifacts") if "requested_artifacts" in args else []
+        source_conversation_id = _conversation_id(args.get("source_conversation_id") or "")
+        if source_conversation_id == "default" and not args.get("source_conversation_id"):
+            source_conversation_id = ""
+
+        warnings = _codex_handoff_path_warnings(
+            title, objective, context, allowed_scope, requested_artifacts, safety_notes,
+        )
+        if warnings:
+            safety_notes = (safety_notes + "\n" if safety_notes else "") + "\n".join(warnings)
+        status = "needs_review" if warnings else "queued"
+        now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        seed = json.dumps({
+            "actor": _actor_value(actor, "username", ""),
+            "objective": objective,
+            "created_at": now,
+            "scope": allowed_scope,
+        }, ensure_ascii=False, sort_keys=True)
+        handoff_id = "codex-" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:20]
+
+        conn = get_db()
+        try:
+            _ensure_ai_agent_codex_handoff_schema(conn)
+            conn.execute(
+                """
+                INSERT INTO ai_agent_codex_handoffs (
+                    id, owner_user_id, owner_username, status, priority, title, objective,
+                    context_json, allowed_scope, requested_artifacts_json, safety_notes,
+                    source_conversation_id, source_session_binding, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    handoff_id,
+                    int(_actor_value(actor, "id", 0) or 0),
+                    str(_actor_value(actor, "username", "") or ""),
+                    status,
+                    priority,
+                    title,
+                    objective,
+                    _codex_handoff_json(context),
+                    allowed_scope,
+                    _codex_handoff_json(requested_artifacts, max_chars=4000),
+                    safety_notes,
+                    source_conversation_id,
+                    _conversation_binding(),
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return 200, {
+            "ok": True,
+            "handoff": {
+                "id": handoff_id,
+                "status": status,
+                "priority": priority,
+                "title": title,
+                "objective": objective,
+                "allowed_scope": allowed_scope,
+                "warnings": warnings,
+                "created_at": now,
+            },
+            "msg": "已建立 Codex 交接任務；此接口只排程與紀錄，需由 root/Codex 審核後才會執行。",
+        }
 
     def _execute_share_create(actor, args):
         if not str(args.get("storage_file_id") or args.get("file_id") or "").strip():
@@ -2956,6 +4275,60 @@ def register_ai_agent_routes(app, deps):
                 return text[:180]
         return ""
 
+    @app.route("/api/ai-agent/codex-handoffs", methods=["GET"])
+    @require_csrf_safe
+    def ai_agent_codex_handoffs_route():
+        actor, denied = _require_write_tool_actor()
+        if denied:
+            return denied
+        limit = _coerce_limit(request.args.get("limit", "20"))
+        include_context = _parse_bool(request.args.get("include_context")) is True
+        status = str(request.args.get("status") or "").strip().lower()
+        params = []
+        where = ""
+        if status:
+            where = "WHERE status=?"
+            params.append(status)
+        conn = get_db()
+        try:
+            _ensure_ai_agent_codex_handoff_schema(conn)
+            rows = conn.execute(
+                f"""
+                SELECT id, owner_user_id, owner_username, status, priority, title, objective,
+                       context_json, allowed_scope, requested_artifacts_json, safety_notes,
+                       source_conversation_id, created_at, updated_at
+                FROM ai_agent_codex_handoffs
+                {where}
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (*params, limit),
+            ).fetchall()
+        finally:
+            conn.close()
+        items = []
+        for row in rows:
+            item = {
+                "id": row["id"],
+                "owner_user_id": row["owner_user_id"],
+                "owner_username": row["owner_username"],
+                "status": row["status"],
+                "priority": row["priority"],
+                "title": row["title"],
+                "objective": row["objective"],
+                "allowed_scope": row["allowed_scope"],
+                "requested_artifacts": json.loads(row["requested_artifacts_json"] or "[]"),
+                "safety_notes": row["safety_notes"],
+                "source_conversation_id": row["source_conversation_id"],
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+            }
+            if include_context:
+                item["context"] = json.loads(row["context_json"] or "{}")
+            items.append(item)
+        _audit_agent_event("AI_AGENT_CODEX_HANDOFFS_LIST", actor, success=True, detail=f"count={len(items)},status={status or 'all'}")
+        return json_resp({"ok": True, "handoffs": items})
+
     @app.route("/api/ai-agent/write-tools", methods=["GET"])
     @require_csrf_safe
     def ai_agent_write_tools_route():
@@ -3078,6 +4451,8 @@ def register_ai_agent_routes(app, deps):
                     status_code, payload = _execute_subtitle_upload(args)
                 elif tool_name == "write_member_set_avatar_from_cloud":
                     status_code, payload = _execute_member_avatar_from_cloud(args)
+                elif tool_name == "write_codex_handoff_create":
+                    status_code, payload = _execute_codex_handoff_create(actor, args)
                 else:
                     return json_resp({"ok": False, "msg": "DIRECT tool 尚未實作", "tool": tool_name}), 500
             else:
@@ -3090,7 +4465,12 @@ def register_ai_agent_routes(app, deps):
                     if msg:
                         _audit_agent_event("AI_AGENT_WRITE_TOOL", actor, success=False, detail=f"tool={tool_name},error={msg[:180]}")
                         return json_resp({"ok": False, "msg": msg}), 400
-                status_code, payload = _dispatch_internal_api(spec.get("method"), path, body)
+                    if _should_run_official_workflow(body):
+                        status_code, payload = _dispatch_official_comfyui_workflow(body)
+                    else:
+                        status_code, payload = _dispatch_internal_api(spec.get("method"), path, body)
+                else:
+                    status_code, payload = _dispatch_internal_api(spec.get("method"), path, body)
         except Exception as exc:
             audit(
                 "AI_AGENT_WRITE_TOOL",
@@ -3383,6 +4763,7 @@ def register_ai_agent_routes(app, deps):
                 "models": {},
                 "backend_unavailable": True,
             })
+        models = filter_retired_ai_agent_models(models)
         model_count = len(models.get("data") or []) if isinstance(models, dict) else 0
         _audit_agent_event("AI_AGENT_MODELS", actor, success=True, detail=f"models={model_count}")
         return json_resp({"ok": True, "models": models})
