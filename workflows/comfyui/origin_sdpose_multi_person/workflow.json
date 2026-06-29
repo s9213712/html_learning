@@ -122,6 +122,7 @@
       "draw_face": true,
       "draw_feet": true,
       "draw_hands": true,
+      "draw_head": true,
       "face_point_size": 2,
       "keypoints": [
         "692",

@@ -364,6 +364,17 @@
             "required": true
           },
           {
+            "category": "BOOLEAN",
+            "class_type": "SDPoseDrawKeypoints",
+            "current_value": true,
+            "id": "node:694:draw_head",
+            "input_name": "draw_head",
+            "input_type": "checkbox",
+            "label": "繪製頭部",
+            "node_id": "694",
+            "required": true
+          },
+          {
             "category": "NUMERIC",
             "class_type": "SDPoseDrawKeypoints",
             "constraints": {

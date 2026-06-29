@@ -1375,6 +1375,105 @@ def test_ai_agent_comfyui_write_tool_maps_checkpoint_to_model(tmp_path):
     assert captured["checkpoint"] == "JANKU-V777.safetensors"
 
 
+def test_ai_agent_comfyui_write_tool_preserves_controlnet_pose_args(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "write",
+            "ai_agent_allowed_tools": "write_comfyui_generate",
+        },
+    )
+    captured = {}
+
+    @app.route("/api/comfyui/models", methods=["GET"])
+    def fake_comfyui_models():
+        return _json_resp({"ok": True, "models": ["JANKU-V777.safetensors"]})
+
+    @app.route("/api/comfyui/generate", methods=["POST"])
+    def fake_comfyui_generate():
+        captured.update(request.get_json(silent=True) or {})
+        return _json_resp({"ok": True, "job": {"job_id": "job-control", "status": "queued"}})
+
+    control_ref = {"cloud_file_id": "pose-map-1", "filename": "pose_map.png", "type": "input"}
+    response = app.test_client().post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_comfyui_generate",
+        "confirm": "EXECUTE",
+        "arguments": {
+            "prompt": "by ogipote, anime style, 1girl, striped pajamas",
+            "generation_mode": "txt2img",
+            "control_image_ref": control_ref,
+            "controlnet_type": "pose",
+            "controlnet_model": "QWEN\\Qwen-Image-2512-Fun-Controlnet-Union-2602.safetensors",
+            "control_strength": 0.9,
+            "confirm_billing": True,
+        },
+    })
+    payload = response.get_json()
+
+    assert response.status_code == 200, payload
+    assert payload["ok"] is True
+    assert captured["control_image_ref"] == control_ref
+    assert captured["controlnet"]["image_ref"] == control_ref
+    assert captured["controlnet_type"] == "pose"
+    assert captured["controlnet_model"] == "QWEN\\Qwen-Image-2512-Fun-Controlnet-Union-2602.safetensors"
+    assert captured["control_strength"] == 0.9
+
+
+def test_ai_agent_official_qwen_controlnet_run_receives_pose_args(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "write",
+            "ai_agent_allowed_tools": "write_comfyui_generate",
+        },
+    )
+    captured = _register_fake_comfyui_workflow_routes(
+        app,
+        workflow_id="origin_qwen_image_controlnet_2512",
+        preset_id=78,
+    )
+
+    @app.route("/api/comfyui/models", methods=["GET"])
+    def fake_comfyui_models():
+        return _json_resp({"ok": True, "models": ["qwen_image_2512_fp8_e4m3fn.safetensors"]})
+
+    control_ref = {"cloud_file_id": "pose-map-1", "filename": "pose_map.png", "type": "input"}
+    response = app.test_client().post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_comfyui_generate",
+        "confirm": "EXECUTE",
+        "arguments": {
+            "prompt": "by ogipote, anime style, 1girl, striped pajamas",
+            "generation_mode": "txt2img",
+            "official_workflow_id": "origin_qwen_image_controlnet_2512",
+            "control_image_ref": control_ref,
+            "controlnet_type": "pose",
+            "controlnet_preprocessor": "none",
+            "controlnet_model": "QWEN\\Qwen-Image-2512-Fun-Controlnet-Union-2602.safetensors",
+            "control_strength": 0.9,
+            "control_start": 0,
+            "control_end": 1,
+            "confirm_billing": True,
+        },
+    })
+    payload = response.get_json()
+
+    assert response.status_code == 200, payload
+    assert payload["ok"] is True
+    assert captured["controlnet_type"] == "pose"
+    assert captured["controlnet_preprocessor"] == "none"
+    assert captured["controlnet_model"] == "QWEN\\Qwen-Image-2512-Fun-Controlnet-Union-2602.safetensors"
+    assert captured["control_strength"] == 0.9
+    assert captured["control_start"] == 0
+    assert captured["control_end"] == 1
+    assert captured["image_field_assignments"]["78"] == "pose-map-1"
+
+
 def test_ai_agent_comfyui_write_tool_resolves_natural_checkpoint_name(tmp_path):
     db_path = tmp_path / "ai_agent_routes.db"
     _build_db(db_path)
@@ -1672,9 +1771,10 @@ def test_ai_agent_comfyui_write_tool_extracts_inline_qwen_edit_instruction(tmp_p
     assert payload["ok"] is True
     prompt = captured["user_inputs"]["494"]["prompt"]
     assert prompt.startswith("change only the visible outfit to a red hoodie")
-    assert "Style and preservation context: anime style, 1girl" in prompt
+    assert "Style and preservation context: by ogipote, anime style, 1girl" in prompt
+    assert "style tag only" in prompt
+    assert "do not render words" in prompt
     assert "no visible artist name" in prompt
-    assert "by ogipote" not in prompt
     assert "請真的使用本站" not in prompt
     assert captured["image_field_assignments"]["78"] == "cloud-source-1"
     assert "79" not in captured["image_field_assignments"]
@@ -1885,9 +1985,13 @@ def test_ai_agent_comfyui_write_tool_derives_qwen_edit_instruction_from_cjk_prom
     if "realistic" in expected_prefix:
         assert "anime style" not in qwen_prompt
     else:
-        assert "Style and preservation context: anime style, 1girl" in qwen_prompt
+        assert "Style and preservation context:" in qwen_prompt
+        if "by ogipote" in prompt:
+            assert "Style and preservation context: by ogipote, anime style, 1girl" in qwen_prompt
+        assert "style tag only" in qwen_prompt
+        assert "do not render words" in qwen_prompt
+        assert "no visible text" in qwen_prompt
         assert "no visible artist name" in qwen_prompt
-        assert "by ogipote" not in qwen_prompt
     assert "請真的使用本站" not in qwen_prompt
     assert not re.search(r"[\u3400-\u9fff]", qwen_prompt)
     assert captured["image_field_assignments"]["78"] == "cloud-source-1"
@@ -2114,8 +2218,18 @@ def test_ai_agent_comfyui_write_tool_does_not_fallback_source_into_qwen_referenc
     assert payload["ok"] is True
     assert captured["image_field_assignments"]["78"] == "cloud-source-1"
     assert "79" not in captured["image_field_assignments"]
+    prompt = captured["user_inputs"]["494"]["prompt"]
+    assert prompt.startswith("make her expression surprised")
+    assert "Style and preservation context: by ogipote, anime style, 1girl" in prompt
+    assert "style tag only" in prompt
+    assert "do not render words" in prompt
+    assert "no visible artist name" in prompt
     assert not any(
         item.get("code") == "qwen_edit_reference_image_link_expected"
+        for item in payload["result"].get("workflow_bridge_adjustments", [])
+    )
+    assert any(
+        item.get("code") == "qwen_edit_style_context_sanitized"
         for item in payload["result"].get("workflow_bridge_adjustments", [])
     )
 

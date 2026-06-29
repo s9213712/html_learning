@@ -16,6 +16,7 @@ import struct
 import sys
 import time
 import zlib
+from io import BytesIO
 from pathlib import Path
 
 
@@ -106,6 +107,51 @@ def _png_rgba(width, height, rgba):
         + chunk(b"IDAT", zlib.compress(raw, level=9))
         + chunk(b"IEND", b"")
     )
+
+
+def _image_quality_issue(data):
+    if not isinstance(data, (bytes, bytearray)) or not data:
+        return ""
+    try:
+        from PIL import Image, ImageStat
+
+        with Image.open(BytesIO(bytes(data))) as image:
+            sample = image.convert("RGB")
+            sample.thumbnail((256, 256))
+            stat = ImageStat.Stat(sample)
+    except Exception as exc:
+        return f"image cannot be decoded: {exc}"
+    extrema = stat.extrema or []
+    means = stat.mean or []
+    if not extrema or not means:
+        return "image statistics are empty"
+    max_channel = max((pair[1] for pair in extrema), default=0)
+    min_channel = min((pair[0] for pair in extrema), default=0)
+    dynamic_range = max_channel - min_channel
+    mean_value = sum(float(value or 0) for value in means) / max(len(means), 1)
+    if max_channel <= 2 and mean_value <= 1.5:
+        return "image is almost entirely black"
+    if min_channel >= 253 and mean_value >= 253:
+        return "image is almost entirely white"
+    if dynamic_range <= 2:
+        return "image is almost a single solid color"
+    return ""
+
+
+def _output_quality_issues(output):
+    images = output.get("images") if isinstance(output.get("images"), list) else []
+    if not images and output.get("data"):
+        images = [output]
+    issues = []
+    for index, item in enumerate(images, start=1):
+        if not isinstance(item, dict):
+            continue
+        issue = _image_quality_issue(item.get("data") or b"")
+        if issue:
+            image_ref = item.get("image_ref") if isinstance(item.get("image_ref"), dict) else {}
+            filename = image_ref.get("filename") or f"image #{index}"
+            issues.append(f"{filename}: {issue}")
+    return issues
 
 
 def _load_workflow(bundle_id):
@@ -255,6 +301,45 @@ def _load_custom_params(args):
     return params
 
 
+def _conditioning_source_node_ids(workflow, node_ref, *, input_names=None, seen=None):
+    if seen is None:
+        seen = set()
+    if not isinstance(node_ref, list) or not node_ref:
+        return set()
+    node_id = str(node_ref[0])
+    if not node_id or node_id in seen:
+        return set()
+    seen.add(node_id)
+    node = workflow.get(node_id) if isinstance(workflow, dict) else None
+    if not isinstance(node, dict):
+        return {node_id}
+    inputs = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
+    class_type = str(node.get("class_type") or "")
+    source_ids = {node_id}
+    names = input_names or ("conditioning",)
+    if class_type == "ReferenceLatent":
+        names = ("conditioning",)
+    for input_name in names:
+        upstream_ref = inputs.get(input_name)
+        if isinstance(upstream_ref, list) and upstream_ref:
+            source_ids.update(_conditioning_source_node_ids(workflow, upstream_ref, seen=seen))
+    return source_ids
+
+
+def _negative_conditioning_node_ids(workflow):
+    negative_node_ids = set()
+    if not isinstance(workflow, dict):
+        return negative_node_ids
+    for node in workflow.values():
+        if not isinstance(node, dict):
+            continue
+        inputs = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
+        ref = inputs.get("negative")
+        if isinstance(ref, list) and ref:
+            negative_node_ids.update(_conditioning_source_node_ids(workflow, ref))
+    return negative_node_ids
+
+
 def _apply_generation_params_to_node(node_id, node, params, negative_node_ids):
     if not isinstance(node, dict) or not isinstance(params, dict):
         return
@@ -293,7 +378,9 @@ def _apply_generation_params_to_node(node_id, node, params, negative_node_ids):
     if "width" in params and "height" in params and "size_preset" in inputs and isinstance(inputs.get("size_preset"), str):
         inputs["size_preset"] = f"{int(params['width'])}x{int(params['height'])} (1:1)"
     if "prompt" in params and "prompt" in inputs and isinstance(inputs.get("prompt"), str):
-        inputs["prompt"] = params["prompt"]
+        inputs["prompt"] = params.get("negative_prompt", inputs["prompt"]) if str(node_id) in negative_node_ids else params["prompt"]
+    if "negative_prompt" in params and "prompt" in inputs and isinstance(inputs.get("prompt"), str) and str(node_id) in negative_node_ids:
+        inputs["prompt"] = params["negative_prompt"]
     if "prompt" in params and "text" in inputs and isinstance(inputs.get("text"), str):
         inputs["text"] = params.get("negative_prompt", inputs["text"]) if str(node_id) in negative_node_ids else params["prompt"]
     if "negative_prompt" in params and "text" in inputs and isinstance(inputs.get("text"), str) and str(node_id) in negative_node_ids:
@@ -351,14 +438,7 @@ def _patch_for_probe(
         generation_params = custom_params
     else:
         generation_params = {}
-    negative_node_ids = set()
-    for node in patched.values():
-        if not isinstance(node, dict):
-            continue
-        inputs = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
-        ref = inputs.get("negative")
-        if isinstance(ref, list) and ref:
-            negative_node_ids.add(str(ref[0]))
+    negative_node_ids = _negative_conditioning_node_ids(patched)
     for node_id, node in patched.items():
         if not isinstance(node, dict):
             continue
@@ -397,6 +477,24 @@ def _result(bundle_id, *, status, detail="", preflight=None, elapsed_ms=None, ou
     if output is not None:
         payload["output"] = output
     return payload
+
+
+def _queue_prompt_location(client, prompt_id, *, timeout_seconds=None):
+    prompt_id = str(prompt_id or "").strip()
+    if not prompt_id:
+        return "unknown"
+    try:
+        queue = client._json_request("/queue", timeout=timeout_seconds)
+    except Exception as exc:
+        return f"unknown: queue read failed: {exc}"
+    for key, label in (("queue_running", "running"), ("queue_pending", "pending")):
+        items = queue.get(key) if isinstance(queue, dict) else []
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if isinstance(item, (list, tuple)) and len(item) > 1 and str(item[1]) == prompt_id:
+                return label
+    return "absent"
 
 
 def run_probe(args):
@@ -462,19 +560,23 @@ def run_probe(args):
             if args.acceptance_only:
                 prompt_id = client.queue_prompt(patched)
                 elapsed_ms = (time.perf_counter() - start) * 1000
-                interrupt_detail = ""
-                try:
-                    client.interrupt(timeout_seconds=args.request_timeout)
-                except Exception as exc:
-                    interrupt_detail = f"interrupt failed: {exc}"
+                cleanup_details = []
                 try:
                     client.delete_queue_items([prompt_id], timeout_seconds=args.request_timeout)
                 except Exception as exc:
-                    suffix = f"queue delete failed: {exc}"
-                    interrupt_detail = f"{interrupt_detail}; {suffix}" if interrupt_detail else suffix
+                    cleanup_details.append(f"queue delete failed: {exc}")
+                location = _queue_prompt_location(client, prompt_id, timeout_seconds=args.request_timeout)
+                if location == "running":
+                    try:
+                        client.interrupt(timeout_seconds=args.request_timeout)
+                    except Exception as exc:
+                        cleanup_details.append(f"interrupt failed: {exc}")
+                    location = _queue_prompt_location(client, prompt_id, timeout_seconds=args.request_timeout)
+                if location != "absent":
+                    cleanup_details.append(f"prompt cleanup location: {location}")
                 detail = "accepted only; output intentionally skipped by --acceptance-only"
-                if interrupt_detail:
-                    detail = f"{detail}; {interrupt_detail}"
+                if cleanup_details:
+                    detail = f"{detail}; {'; '.join(cleanup_details)}"
                 results.append(_result(
                     bundle_id,
                     status="accepted",
@@ -501,6 +603,20 @@ def run_probe(args):
                 "video_count": len(media.get("videos") or []),
                 "audio_count": len(media.get("audio") or []),
             }
+            quality_issues = [] if args.no_fetch_outputs else _output_quality_issues(output)
+            if quality_issues:
+                output_summary["quality_issues"] = quality_issues[:5]
+                results.append(_result(
+                    bundle_id,
+                    status="run_failed",
+                    detail="output quality check failed: " + "; ".join(quality_issues[:5]),
+                    preflight=preflight,
+                    elapsed_ms=elapsed_ms,
+                    output=output_summary,
+                ))
+                if not args.continue_on_fail:
+                    break
+                continue
             results.append(_result(bundle_id, status="completed", preflight=preflight, elapsed_ms=elapsed_ms, output=output_summary))
         except Exception as exc:
             elapsed_ms = (time.perf_counter() - start) * 1000

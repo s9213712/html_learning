@@ -71,7 +71,10 @@ AI_AGENT_WRITE_TOOL_SPECS = {
             "steps", "cfg", "cfg_scale", "sampler", "sampler_name", "scheduler", "seed", "batch_size",
             "generation_mode", "source_image_ref", "source_image_ref_json", "mask_image_ref",
             "mask_image_ref_json", "reference_image_ref", "reference_image_ref_json",
-            "pose_reference_image_ref", "pose_reference_ref", "denoise_strength", "outpaint_left", "outpaint_top",
+            "pose_reference_image_ref", "pose_reference_ref", "control_image_ref", "control_image_ref_json",
+            "controlnet", "controlnet_enabled", "controlnet_type", "controlnet_model",
+            "controlnet_preprocessor", "control_strength", "control_start", "control_end",
+            "denoise_strength", "outpaint_left", "outpaint_top",
             "outpaint_right", "outpaint_bottom", "outpaint_feathering",
             "workflow", "workflow_id", "official_workflow_id", "template_id", "lora",
             "loras", "vae", "vae_name", "timeout_seconds", "confirm_billing",
@@ -2477,6 +2480,16 @@ def register_ai_agent_routes(app, deps):
         ))
         if reference_ref is not None:
             normalized["reference_image_ref"] = reference_ref
+        control_ref = _first_present_arg(normalized, (
+            "control_image_ref", "control_image_ref_json", "control_ref",
+            "controlnet_image_ref", "controlnet_ref", "pose_map_image_ref", "pose_map_ref",
+        ))
+        if control_ref is not None:
+            normalized["control_image_ref"] = control_ref
+            control = normalized.get("controlnet") if isinstance(normalized.get("controlnet"), dict) else {}
+            control = dict(control)
+            control.setdefault("image_ref", control_ref)
+            normalized["controlnet"] = control
         denoise = _first_present_arg(normalized, ("denoise_strength", "denoise", "strength"))
         if denoise is not None:
             normalized["denoise_strength"] = denoise
@@ -2547,16 +2560,16 @@ def register_ai_agent_routes(app, deps):
         style = re.sub(r"\s+", " ", str(style_context or "")).strip(" \t\r\n\"'`")
         if not style:
             return ""
-        # Qwen edit can render "by <artist>" style tags as visible signatures.
-        # Keep the visual style intent, but never pass artist bylines literally.
-        style = re.sub(r"\bby\s+[A-Za-z0-9_.-]+\b\s*,?\s*", "", style, flags=re.IGNORECASE)
         style = re.sub(r"\s*,\s*,+", ", ", style).strip(" ,")
         if not style:
-            style = "anime style, 1girl"
-        guards = "no text, no watermark, no signature, no logo, no visible artist name"
+            style = "by ogipote, anime style, 1girl"
+        guards = (
+            "style tag only, do not render words, no visible text, no watermark, "
+            "no signature, no logo, no visible artist name"
+        )
         if "no text" not in style.lower():
             style = f"{style}, {guards}"
-        return style[:500]
+        return style[:700]
 
     def _prompt_has_cjk(prompt):
         return bool(re.search(r"[\u3400-\u9fff]", str(prompt or "")))
@@ -3414,9 +3427,14 @@ def register_ai_agent_routes(app, deps):
         source_ref = _image_ref_from_body(body, "source_image_ref")
         mask_ref = _image_ref_from_body(body, "mask_image_ref")
         reference_ref = _image_ref_from_body(body, "reference_image_ref")
+        control_ref = _image_ref_from_body(body, "control_image_ref")
+        if not control_ref and isinstance((body or {}).get("controlnet"), dict):
+            nested_control_ref = ((body or {}).get("controlnet") or {}).get("image_ref")
+            control_ref = nested_control_ref if isinstance(nested_control_ref, dict) else {}
         source_cloud, source_save_payload = _resolve_cloud_file_id_for_image_ref(source_ref)
         mask_cloud, mask_save_payload = _resolve_cloud_file_id_for_image_ref(mask_ref)
         reference_cloud, reference_save_payload = _resolve_cloud_file_id_for_image_ref(reference_ref)
+        control_cloud, control_save_payload = _resolve_cloud_file_id_for_image_ref(control_ref)
         assignments = {}
         missing = []
         for node_id, node in workflow.items():
@@ -3431,6 +3449,10 @@ def register_ai_agent_routes(app, deps):
                 and class_type == "LoadImage"
                 and ("reference" in title or str(node_id) == "79")
             )
+            is_controlnet_input_node = (
+                workflow_id == "origin_qwen_image_controlnet_2512"
+                and class_type == "LoadImage"
+            )
             if class_type == "LoadImage" and "image" in inputs:
                 if is_reference_node:
                     if reference_cloud:
@@ -3439,6 +3461,8 @@ def register_ai_agent_routes(app, deps):
                     # silently feed the source image into the reference node,
                     # or ordinary edits become unintended two-image edits.
                     continue
+                elif is_controlnet_input_node and control_cloud:
+                    assignments[str(node_id)] = control_cloud
                 elif source_cloud:
                     assignments[str(node_id)] = source_cloud
                 else:
@@ -3451,7 +3475,7 @@ def register_ai_agent_routes(app, deps):
             elif class_type == "LoadVideo" and "file" in inputs:
                 missing.append(str(node_id))
         if missing:
-            save_error = source_save_payload or mask_save_payload or reference_save_payload or {}
+            save_error = source_save_payload or mask_save_payload or reference_save_payload or control_save_payload or {}
             msg = str(save_error.get("msg") or "").strip() if isinstance(save_error, dict) else ""
             suffix = f"：{msg}" if msg else ""
             return assignments, {
@@ -3462,6 +3486,7 @@ def register_ai_agent_routes(app, deps):
                 "source_image_ref": source_ref,
                 "mask_image_ref": mask_ref,
                 "reference_image_ref": reference_ref,
+                "control_image_ref": control_ref,
                 "save_error": save_error,
             }
         return assignments, None
@@ -3633,6 +3658,14 @@ def register_ai_agent_routes(app, deps):
                 "code": "qwen_edit_style_context_omitted",
                 "reason": "realistic_style_shift",
             })
+        elif style_context:
+            sanitized_style_context = _sanitize_qwen_edit_style_context(style_context)
+            if sanitized_style_context != style_context:
+                style_context = sanitized_style_context
+                adjustments.append({
+                    "code": "qwen_edit_style_context_sanitized",
+                    "reason": "avoid_visible_artist_text",
+                })
         if style_context and edit_instruction not in style_context:
             combined = (
                 f"{edit_instruction}\n\n"
@@ -3793,6 +3826,16 @@ def register_ai_agent_routes(app, deps):
                 run_body[target_key] = body.get(source_key)
         if body.get("vae") or body.get("vae_name"):
             run_body["vae"] = body.get("vae") or body.get("vae_name")
+        for key in (
+            "controlnet_type",
+            "controlnet_preprocessor",
+            "controlnet_model",
+            "control_strength",
+            "control_start",
+            "control_end",
+        ):
+            if body.get(key) not in (None, ""):
+                run_body[key] = body.get(key)
         run_status, run_payload = _dispatch_internal_api("POST", f"/api/comfyui/workflows/{preset_id}/run", run_body)
         if isinstance(run_payload, dict):
             run_payload.setdefault("official_workflow_id", workflow_id)

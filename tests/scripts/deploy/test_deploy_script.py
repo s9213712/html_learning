@@ -147,6 +147,57 @@ def test_dev_launcher_dry_run_resolves_cloud_drive_storage_options(tmp_path):
     assert "trusted_hosts:       disabled (dev only)" in result.stdout
 
 
+def test_dev_launcher_dry_run_resolves_cloudflare_tunnel_options(tmp_path):
+    helper = tmp_path / "tunnel_helper.py"
+    helper.write_text("# helper placeholder\n", encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            str(ROOT / "test_for_develop.sh"),
+            "--cli",
+            "--dry-run",
+            "--server-runner",
+            "flask",
+            "--no-capacity-probe",
+            "--cloudflare-tunnel",
+            "--cloudflare-tunnel-url",
+            "https://127.0.0.1:5000",
+            "--cloudflare-tunnel-helper",
+            str(helper),
+            "--cloudflare-tunnel-protocol",
+            "quic",
+            "--cloudflare-tunnel-timeout",
+            "7",
+            "--install-cloudflared",
+            "--cloudflare-tunnel-no-tls-verify",
+        ],
+        cwd=ROOT,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "cloudflare_tunnel:   1" in result.stdout
+    assert "cloudflare_local:    https://127.0.0.1:5000" in result.stdout
+    assert f"cloudflare_helper:   {helper}" in result.stdout
+    assert "cloudflare_proto:    quic timeout=7s tls_verify=1" in result.stdout
+    assert "cloudflare_install:  1" in result.stdout
+
+
+def test_cloudflare_tunnel_helper_is_repo_script_with_apt_install_command():
+    script = (ROOT / "test_for_develop.sh").read_text(encoding="utf-8")
+    helper = (ROOT / "scripts" / "ops" / "cloudflare_tunnel_helper.py").read_text(encoding="utf-8")
+
+    assert 'DEFAULT_CLOUDFLARE_TUNNEL_HELPER="$SOURCE_ROOT/scripts/ops/cloudflare_tunnel_helper.py"' in script
+    assert "--install-cloudflared" in script
+    assert "install_cloudflared_if_requested" in script
+    assert "https://pkg.cloudflare.com/cloudflare-main.gpg" in helper
+    assert "https://pkg.cloudflare.com/cloudflared any main" in helper
+    assert 'install = sub.add_parser("install", help="install cloudflared")' in helper
+    assert '"apt-get", "install"' in helper
+
+
 def test_legacy_root_wrappers_are_removed():
     assert not (ROOT / "one_click_setup.sh").exists()
     assert not (ROOT / "on_live_reports_make.sh").exists()

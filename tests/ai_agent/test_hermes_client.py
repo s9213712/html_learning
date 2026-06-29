@@ -73,6 +73,14 @@ def test_ai_agent_comfyui_hint_requires_structured_qwen_edit_instruction():
     assert "hand on shoulder" in hint
     assert "場景服裝語境" in hint
     assert "festival kimono/yukata" in hint
+    assert "artist/style tag" in hint
+    assert "正向 prompt 要保留" in hint
+    assert "do not render words" in hint
+    assert "pose/control workflow" in hint
+    assert "origin_sdpose_multi_person" in hint
+    assert "origin_qwen_image_controlnet_2512" in hint
+    assert "Qwen-Image-2512-Fun-Controlnet-Union-2602.safetensors" in hint
+    assert "control_image_ref=pose map" in hint
 
 
 def test_ai_agent_base_url_rejects_credentials_query_and_fragment():

@@ -13,7 +13,10 @@ import pytest
 from services.comfyui.template.analyzer import analyze_workflow_json
 from services.comfyui.template.seeding import SYSTEM_WORKFLOW_IDS
 from services.comfyui.validation.sanitize import sanitize_workflow_json
-from routes.comfyui_sections.workflow_routes import _is_qwen_image_edit_2509_family
+from routes.comfyui_sections.workflow_routes import (
+    _apply_qwen_2512_controlnet_pose_mode,
+    _is_qwen_image_edit_2509_family,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -79,6 +82,35 @@ def _manifest(workflow_id):
 
 def _workflow(workflow_id):
     return json.loads((SYSTEM_DIR / workflow_id / "workflow.json").read_text(encoding="utf-8"))
+
+
+def test_qwen_2512_pose_controlnet_bypasses_canny_preprocessor():
+    workflow = _workflow("origin_qwen_image_controlnet_2512")
+    patched, changed = _apply_qwen_2512_controlnet_pose_mode(
+        workflow,
+        {
+            "system_bundle_id": "origin_qwen_image_controlnet_2512",
+            "controlnet_type": "pose",
+        },
+    )
+
+    assert changed is True
+    assert patched["131"]["inputs"]["image"] == ["123", 0]
+    assert workflow["131"]["inputs"]["image"] == ["122", 0]
+
+
+def test_qwen_2512_canny_controlnet_keeps_canny_preprocessor():
+    workflow = _workflow("origin_qwen_image_controlnet_2512")
+    patched, changed = _apply_qwen_2512_controlnet_pose_mode(
+        workflow,
+        {
+            "system_bundle_id": "origin_qwen_image_controlnet_2512",
+            "controlnet_type": "canny",
+        },
+    )
+
+    assert changed is False
+    assert patched["131"]["inputs"]["image"] == ["122", 0]
 
 
 def _normalize_output_kind(kind):

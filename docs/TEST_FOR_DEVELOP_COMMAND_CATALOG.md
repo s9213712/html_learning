@@ -39,6 +39,30 @@ Generated restart shortcuts are written under the active runtime root by default
 as `restart_develop_server.sh`. Set `HACKME_DEV_RESTART_SCRIPT_FILE` only when a
 specific alternate shortcut path is needed.
 
+### Cloudflare Quick Tunnel
+
+| Option | Purpose |
+| --- | --- |
+| `--cloudflare-tunnel`, `--cloudflare-quick-tunnel`, `--quick-tunnel` | Start a temporary Cloudflare Quick Tunnel after the local dev server passes health check. |
+| `--no-cloudflare-tunnel`, `--disable-cloudflare-tunnel`, `--no-quick-tunnel` | Disable tunnel autostart. Default. |
+| `--cloudflare-tunnel-url URL`, `--quick-tunnel-url URL` | Local service URL to expose. Default is the launched server URL, usually `https://127.0.0.1:PORT`. |
+| `--cloudflare-tunnel-helper PATH` | Override the Cloudflare Tunnel helper. Default: `scripts/ops/cloudflare_tunnel_helper.py`. |
+| `--cloudflare-tunnel-protocol PROTOCOL` | `http2` or `quic`. Default: `http2`. |
+| `--cloudflare-tunnel-timeout SEC` | Seconds to wait for a `trycloudflare.com` URL. Default: `120`. |
+| `--install-cloudflared`, `--cloudflare-install`, `--install-cloudflare` | Install/check `cloudflared` through the project helper before starting the tunnel. Uses Cloudflare's apt repository and `sudo` when the binary is missing. |
+| `--no-install-cloudflared`, `--no-cloudflare-install`, `--no-install-cloudflare` | Do not install `cloudflared` automatically. Default. |
+| `--cloudflare-tunnel-no-tls-verify` | Allow self-signed local HTTPS. Default is auto for `https://127.0.0.1`, `https://localhost`, and `https://[::1]`. |
+| `--cloudflare-tunnel-verify-tls` | Force local HTTPS certificate verification. |
+
+Quick Tunnel state is written under the active runtime root in
+`.cloudflare-tunnel/` plus a `cloudflare_tunnel.json` summary. `--stop` also
+attempts to stop helper-started quick tunnels from known dev runtime roots.
+
+Security boundary: this exposes the local dev server to the public internet.
+Use it for temporary external/mobile checks only, keep trusted-host enforcement
+managed by the frontend setting or an explicit allowlist, and avoid exposing
+default root/admin credentials on untrusted networks.
+
 ### Feature Selection
 
 | Option | Purpose |
@@ -228,6 +252,17 @@ Start the current repo in-place on port 5000:
 ```bash
 ./test_for_develop.sh --cli --in-place --host 0.0.0.0 --port 5000 --port-conflict kill
 ```
+
+Start the current repo and publish a temporary Cloudflare Quick Tunnel:
+
+```bash
+./test_for_develop.sh --cli --in-place --port 5000 --port-conflict kill \
+  --cloudflare-tunnel
+```
+
+The launcher prints the `https://*.trycloudflare.com` URL when `cloudflared`
+is installed. If it is missing, the dev server still starts and the launcher
+prints an install warning.
 
 Stop a server started by the launcher:
 

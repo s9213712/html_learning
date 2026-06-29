@@ -39,6 +39,31 @@ def test_preflight_ignores_model_inputs_connected_from_other_nodes():
     assert result["missing_models"] == []
 
 
+def test_output_quality_flags_all_black_png():
+    probe = _load_probe_module()
+    black_png = probe._png_rgba(32, 32, (0, 0, 0, 255))
+
+    issues = probe._output_quality_issues({"data": black_png})
+
+    assert issues
+    assert "almost entirely black" in issues[0]
+
+
+def test_output_quality_accepts_non_solid_png():
+    probe = _load_probe_module()
+    from PIL import Image
+    from io import BytesIO
+
+    image = Image.new("RGB", (32, 32), (0, 0, 0))
+    for x in range(16, 32):
+        for y in range(32):
+            image.putpixel((x, y), (255, 128, 64))
+    out = BytesIO()
+    image.save(out, format="PNG")
+
+    assert probe._output_quality_issues({"data": out.getvalue()}) == []
+
+
 def test_preflight_reports_literal_missing_model_inputs():
     probe = _load_probe_module()
     object_info = {
@@ -279,6 +304,56 @@ def test_custom_params_apply_only_explicit_overrides():
     assert patched["3"]["inputs"]["ckpt_name"] == "custom.safetensors"
     assert patched["4"]["inputs"]["width"] == 768
     assert patched["4"]["inputs"]["height"] == 1024
+
+
+def test_custom_params_apply_negative_prompt_through_reference_latent_prompt_inputs():
+    probe = _load_probe_module()
+    workflow = {
+        "1": {
+            "class_type": "KSampler",
+            "inputs": {
+                "positive": ["5", 0],
+                "negative": ["6", 0],
+                "steps": 4,
+            },
+        },
+        "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": "clip.safetensors"}},
+        "3": {"class_type": "VAELoader", "inputs": {"vae_name": "vae.safetensors"}},
+        "4": {"class_type": "LoadImage", "inputs": {"image": "source.png", "upload": "image"}},
+        "5": {"class_type": "ReferenceLatent", "inputs": {"conditioning": ["7", 0], "latent": ["9", 0]}},
+        "6": {"class_type": "ReferenceLatent", "inputs": {"conditioning": ["8", 0], "latent": ["9", 0]}},
+        "7": {
+            "class_type": "TextEncodeQwenImageEditPlus",
+            "inputs": {"clip": ["2", 0], "image1": ["4", 0], "prompt": "original positive", "vae": ["3", 0]},
+        },
+        "8": {
+            "class_type": "TextEncodeQwenImageEditPlus",
+            "inputs": {"clip": ["2", 0], "image1": ["4", 0], "prompt": "", "vae": ["3", 0]},
+        },
+        "9": {"class_type": "VAEEncode", "inputs": {"pixels": ["4", 0], "vae": ["3", 0]}},
+    }
+
+    patched = probe._patch_for_probe(
+        workflow,
+        "qwen_edit_reference_latent",
+        width=256,
+        height=256,
+        steps=1,
+        prompt="smoke prompt",
+        negative_prompt="smoke negative",
+        checkpoint_model="",
+        source_image_name="probe_source.png",
+        mask_image_name="probe_mask.png",
+        parameter_mode="custom",
+        custom_params={
+            "prompt": "adult portrait edit",
+            "negative_prompt": "text, watermark, black image",
+        },
+    )
+
+    assert patched["7"]["inputs"]["prompt"] == "adult portrait edit"
+    assert patched["8"]["inputs"]["prompt"] == "text, watermark, black image"
+    assert patched["4"]["inputs"]["image"] == "probe_source.png"
 
 
 def test_custom_params_can_be_loaded_from_aliases_and_explicit_flags():

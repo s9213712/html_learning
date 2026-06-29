@@ -87,6 +87,14 @@ BT_DOWNLOAD_STAGING_DIR="${HACKME_BT_DOWNLOAD_STAGING_DIR:-}"
 BT_DOWNLOAD_CONFIG_SET=0
 TRANSMISSION_CONFIG_SET=0
 REMOTE_DOWNLOAD_LIMITS_SET=0
+CLOUDFLARE_TUNNEL="${HACKME_DEV_CLOUDFLARE_TUNNEL:-0}"
+CLOUDFLARE_TUNNEL_URL="${HACKME_DEV_CLOUDFLARE_TUNNEL_URL:-}"
+DEFAULT_CLOUDFLARE_TUNNEL_HELPER="$SOURCE_ROOT/scripts/ops/cloudflare_tunnel_helper.py"
+CLOUDFLARE_TUNNEL_HELPER="${HACKME_DEV_CLOUDFLARE_TUNNEL_HELPER:-$DEFAULT_CLOUDFLARE_TUNNEL_HELPER}"
+CLOUDFLARE_TUNNEL_PROTOCOL="${HACKME_DEV_CLOUDFLARE_TUNNEL_PROTOCOL:-http2}"
+CLOUDFLARE_TUNNEL_TIMEOUT="${HACKME_DEV_CLOUDFLARE_TUNNEL_TIMEOUT:-120}"
+CLOUDFLARE_TUNNEL_NO_TLS_VERIFY="${HACKME_DEV_CLOUDFLARE_TUNNEL_NO_TLS_VERIFY:-auto}"
+CLOUDFLARE_TUNNEL_INSTALL="${HACKME_DEV_INSTALL_CLOUDFLARED:-0}"
 [[ -n "${HACKME_BT_BACKEND+x}" ]] && BT_DOWNLOAD_CONFIG_SET=1
 [[ -n "${HACKME_TRANSMISSION_RPC_URL+x}" || -n "${HACKME_TRANSMISSION_RPC_USERNAME+x}" || -n "${HACKME_TRANSMISSION_RPC_PASSWORD+x}" || -n "${HACKME_BT_DOWNLOAD_STAGING_DIR+x}" || -n "${HACKME_DEV_SETUP_TRANSMISSION_BACKEND+x}" || -n "${HACKME_DEV_TRANSMISSION_SETUP_SCRIPT+x}" || -n "${HACKME_DEV_TRANSMISSION_SERVICE+x}" || -n "${HACKME_DEV_TRANSMISSION_SETTINGS_FILE+x}" || -n "${HACKME_DEV_TRANSMISSION_RPC_BIND_ADDRESS+x}" || -n "${HACKME_DEV_TRANSMISSION_RPC_WHITELIST+x}" || -n "${HACKME_DEV_TRANSMISSION_RPC_WHITELIST_ENABLED+x}" || -n "${HACKME_DEV_TRANSMISSION_RPC_AUTHENTICATION_REQUIRED+x}" || -n "${HACKME_DEV_TRANSMISSION_ALLOW_ANY_RPC_IP+x}" ]] && TRANSMISSION_CONFIG_SET=1
 [[ -n "${HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL+x}" || -n "${HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_PER_USER+x}" ]] && REMOTE_DOWNLOAD_LIMITS_SET=1
@@ -144,6 +152,145 @@ append_arg_if_value() {
   [[ -n "$value" ]] || return 0
   local -n target_args="$target_var"
   target_args+=("$option" "$value")
+}
+
+cloudflare_tunnel_enabled() {
+  local value="${CLOUDFLARE_TUNNEL:-0}"
+  value="${value,,}"
+  [[ "$value" == "1" || "$value" == "true" || "$value" == "yes" || "$value" == "on" || "$value" == "quick" ]]
+}
+
+cloudflare_tunnel_local_url() {
+  if [[ -n "$CLOUDFLARE_TUNNEL_URL" ]]; then
+    printf '%s\n' "$CLOUDFLARE_TUNNEL_URL"
+  elif [[ -n "${SERVER_URL:-}" ]]; then
+    printf '%s\n' "$SERVER_URL"
+  else
+    printf 'https://127.0.0.1:%s\n' "$PORT"
+  fi
+}
+
+cloudflare_tunnel_should_skip_tls_verify() {
+  local value="${CLOUDFLARE_TUNNEL_NO_TLS_VERIFY:-auto}"
+  value="${value,,}"
+  if [[ "$value" == "1" || "$value" == "true" || "$value" == "yes" || "$value" == "on" ]]; then
+    return 0
+  fi
+  if [[ "$value" == "0" || "$value" == "false" || "$value" == "no" || "$value" == "off" ]]; then
+    return 1
+  fi
+  local local_url
+  local_url="$(cloudflare_tunnel_local_url)"
+  [[ "$local_url" == https://127.0.0.1:* || "$local_url" == https://localhost:* || "$local_url" == https://[::1]:* ]]
+}
+
+install_cloudflared_if_requested() {
+  [[ "${CLOUDFLARE_TUNNEL_INSTALL:-0}" == "1" ]] || return 0
+  local helper="$CLOUDFLARE_TUNNEL_HELPER"
+  local state_file="$RUNTIME_ROOT/cloudflare_install.json"
+  local output status
+  mkdir -p "$RUNTIME_ROOT"
+  if [[ ! -f "$helper" ]]; then
+    say "[dev-tmp] cloudflare: helper not found for install: $helper"
+    printf '{"ok":false,"error":"helper not found","helper":%s}\n' "$("$PYTHON_BIN" -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$helper")" > "$state_file" 2>/dev/null || true
+    return 0
+  fi
+  say "[dev-tmp] cloudflare: checking/installing cloudflared via apt helper"
+  set +e
+  output="$(cd "$RUNTIME_ROOT" && "$PYTHON_BIN" "$helper" install --method apt 2>&1)"
+  status=$?
+  set -e
+  printf '%s\n' "$output" > "$state_file"
+  if [[ "$status" != "0" ]]; then
+    say "[dev-tmp] cloudflare: cloudflared install failed (state: $state_file)"
+    return 0
+  fi
+  say "[dev-tmp] cloudflare: cloudflared install/check ok (state: $state_file)"
+}
+
+start_cloudflare_quick_tunnel_if_requested() {
+  cloudflare_tunnel_enabled || return 0
+  install_cloudflared_if_requested
+  local helper="$CLOUDFLARE_TUNNEL_HELPER"
+  local state_file="$RUNTIME_ROOT/cloudflare_tunnel.json"
+  local local_url output status public_url reused pid
+  local_url="$(cloudflare_tunnel_local_url)"
+  mkdir -p "$RUNTIME_ROOT"
+  if [[ ! -f "$helper" ]]; then
+    say "[dev-tmp] cloudflare: helper not found: $helper"
+    printf '{"ok":false,"error":"helper not found","helper":%s}\n' "$("$PYTHON_BIN" -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$helper")" > "$state_file" 2>/dev/null || true
+    return 0
+  fi
+  local helper_args=(quick --url "$local_url" --protocol "$CLOUDFLARE_TUNNEL_PROTOCOL" --timeout "$CLOUDFLARE_TUNNEL_TIMEOUT")
+  if cloudflare_tunnel_should_skip_tls_verify; then
+    helper_args+=(--no-tls-verify)
+  fi
+  say "[dev-tmp] cloudflare: starting quick tunnel for $local_url"
+  set +e
+  output="$(cd "$RUNTIME_ROOT" && "$PYTHON_BIN" "$helper" "${helper_args[@]}" 2>&1)"
+  status=$?
+  set -e
+  printf '%s\n' "$output" > "$state_file"
+  if [[ "$status" != "0" ]]; then
+    say "[dev-tmp] cloudflare: failed to start quick tunnel (state: $state_file)"
+    if printf '%s\n' "$output" | grep -qi 'cloudflared not found'; then
+      say "[dev-tmp] cloudflare: install cloudflared first, then rerun with --cloudflare-tunnel"
+    fi
+    return 0
+  fi
+  public_url="$(printf '%s\n' "$output" | "$PYTHON_BIN" -c 'import json,sys; data=json.load(sys.stdin); print(data.get("public_url") or "")' 2>/dev/null || true)"
+  reused="$(printf '%s\n' "$output" | "$PYTHON_BIN" -c 'import json,sys; data=json.load(sys.stdin); print("1" if data.get("reused") else "0")' 2>/dev/null || true)"
+  pid="$(printf '%s\n' "$output" | "$PYTHON_BIN" -c 'import json,sys; data=json.load(sys.stdin); print(data.get("pid") or "")' 2>/dev/null || true)"
+  if [[ -n "$public_url" ]]; then
+    if [[ "$reused" == "1" ]]; then
+      say "[dev-tmp] cloudflare: ${public_url} (reused)"
+    else
+      say "[dev-tmp] cloudflare: ${public_url}"
+    fi
+    [[ -n "$pid" ]] && say "[dev-tmp] cloudflare pid: $pid"
+    say "[dev-tmp] cloudflare stop: cd $RUNTIME_ROOT && $PYTHON_BIN $helper stop"
+  else
+    say "[dev-tmp] cloudflare: quick tunnel started but public URL was not parsed (state: $state_file)"
+  fi
+}
+
+stop_cloudflare_quick_tunnel_in_runtime() {
+  local runtime_dir="$1"
+  [[ -n "$runtime_dir" && -d "$runtime_dir/.cloudflare-tunnel" ]] || return 0
+  local helper="$CLOUDFLARE_TUNNEL_HELPER"
+  [[ -f "$helper" ]] || return 0
+  local output status
+  set +e
+  output="$(cd "$runtime_dir" && "$PYTHON_BIN" "$helper" stop 2>&1)"
+  status=$?
+  set -e
+  if [[ "$status" == "0" ]]; then
+    say "[dev-tmp] cloudflare: stopped quick tunnel in $runtime_dir"
+  else
+    say "[dev-tmp] cloudflare: stop failed in $runtime_dir: $output"
+  fi
+}
+
+stop_cloudflare_quick_tunnel_candidates() {
+  local runtime_dir
+  local seen=""
+  local candidates=(
+    "$SOURCE_ROOT/runtime"
+    "${CUSTOM_RUNTIME_ROOT:-}"
+  )
+  while IFS= read -r runtime_dir; do
+    candidates+=("$runtime_dir")
+  done < <(
+    find /tmp -maxdepth 3 -type d \( -path '/tmp/hackme_web_dev_*/runtime' -o -path '/tmp/hackme_web_dev_*/hackme_web/runtime' \) 2>/dev/null || true
+  )
+  for runtime_dir in "${candidates[@]:-}"; do
+    [[ -n "$runtime_dir" ]] || continue
+    runtime_dir="$(readlink -f "$runtime_dir" 2>/dev/null || true)"
+    [[ -n "$runtime_dir" ]] || continue
+    [[ "$seen" != *"|$runtime_dir|"* ]] || continue
+    seen+="|$runtime_dir|"
+    stop_cloudflare_quick_tunnel_in_runtime "$runtime_dir"
+  done
 }
 
 runtime_maintenance_action_requested() {
@@ -230,6 +377,13 @@ write_restart_shortcut_script() {
   append_arg_if_value restart_args --bt-download-staging-dir "$BT_DOWNLOAD_STAGING_DIR"
   append_arg_if_value restart_args --remote-download-global "${HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL:-}"
   append_arg_if_value restart_args --remote-download-per-user "${HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_PER_USER:-}"
+  append_arg_if_value restart_args --cloudflare-tunnel-url "$CLOUDFLARE_TUNNEL_URL"
+  append_arg_if_value restart_args --cloudflare-tunnel-helper "$CLOUDFLARE_TUNNEL_HELPER"
+  append_arg_if_value restart_args --cloudflare-tunnel-protocol "$CLOUDFLARE_TUNNEL_PROTOCOL"
+  append_arg_if_value restart_args --cloudflare-tunnel-timeout "$CLOUDFLARE_TUNNEL_TIMEOUT"
+  if [[ "$CLOUDFLARE_TUNNEL_INSTALL" == "1" ]]; then
+    restart_args+=(--install-cloudflared)
+  fi
 
   if [[ "$SETUP_TRANSMISSION_BACKEND" == "1" ]]; then
     restart_args+=(--setup-transmission-backend)
@@ -271,6 +425,16 @@ write_restart_shortcut_script() {
   else
     restart_args+=(--no-trading-background-dev-ready)
   fi
+  if cloudflare_tunnel_enabled; then
+    restart_args+=(--cloudflare-tunnel)
+  else
+    restart_args+=(--no-cloudflare-tunnel)
+  fi
+  if [[ "${CLOUDFLARE_TUNNEL_NO_TLS_VERIFY,,}" == "1" || "${CLOUDFLARE_TUNNEL_NO_TLS_VERIFY,,}" == "true" || "${CLOUDFLARE_TUNNEL_NO_TLS_VERIFY,,}" == "yes" || "${CLOUDFLARE_TUNNEL_NO_TLS_VERIFY,,}" == "on" ]]; then
+    restart_args+=(--cloudflare-tunnel-no-tls-verify)
+  elif [[ "${CLOUDFLARE_TUNNEL_NO_TLS_VERIFY,,}" == "0" || "${CLOUDFLARE_TUNNEL_NO_TLS_VERIFY,,}" == "false" || "${CLOUDFLARE_TUNNEL_NO_TLS_VERIFY,,}" == "no" || "${CLOUDFLARE_TUNNEL_NO_TLS_VERIFY,,}" == "off" ]]; then
+    restart_args+=(--cloudflare-tunnel-verify-tls)
+  fi
   if [[ "$SERVER_RUNNER" == "gunicorn" ]]; then
     restart_args+=(
       --gunicorn-workers "$GUNICORN_WORKERS"
@@ -303,6 +467,13 @@ write_restart_shortcut_script() {
       HACKME_DEV_COMFYUI_API_PORT
       HACKME_DEV_COMFYUI_BASE_DIR
       HACKME_DEV_COMFYUI_LOCAL_START_SCRIPT
+      HACKME_DEV_CLOUDFLARE_TUNNEL
+      HACKME_DEV_CLOUDFLARE_TUNNEL_URL
+      HACKME_DEV_CLOUDFLARE_TUNNEL_HELPER
+      HACKME_DEV_CLOUDFLARE_TUNNEL_PROTOCOL
+      HACKME_DEV_CLOUDFLARE_TUNNEL_TIMEOUT
+      HACKME_DEV_CLOUDFLARE_TUNNEL_NO_TLS_VERIFY
+      HACKME_DEV_INSTALL_CLOUDFLARED
     )
     for env_name in "${restart_env_names[@]}"; do
       env_value="${!env_name:-}"
@@ -730,6 +901,29 @@ Options:
   --no-trading-background-dev-ready
                            Keep dev_ready trading background jobs disabled
                            except sitewide metrics refresh. Default
+  --cloudflare-tunnel      Start a Cloudflare Quick Tunnel after the dev server
+                           passes health check. Uses the repo helper
+                           helper and writes state under runtime/.cloudflare-tunnel.
+  --no-cloudflare-tunnel   Disable Cloudflare Tunnel autostart. Default
+  --cloudflare-tunnel-url URL
+                           Local URL exposed by the tunnel. Default: the
+                           launched dev server URL, usually https://127.0.0.1:PORT
+  --cloudflare-tunnel-helper PATH
+                           Helper path. Default:
+                           scripts/ops/cloudflare_tunnel_helper.py
+  --cloudflare-tunnel-protocol http2|quic
+                           cloudflared tunnel protocol. Default: http2
+  --cloudflare-tunnel-timeout SEC
+                           Seconds to wait for trycloudflare URL. Default: 120
+  --install-cloudflared    Install/check cloudflared through the project helper
+                           before starting a Cloudflare Tunnel. Uses Cloudflare's
+                           apt repository and sudo when cloudflared is missing
+  --no-install-cloudflared Do not install cloudflared automatically. Default
+  --cloudflare-tunnel-no-tls-verify
+                           Allow self-signed local HTTPS. Default: auto for
+                           localhost/127.0.0.1 HTTPS
+  --cloudflare-tunnel-verify-tls
+                           Force local HTTPS certificate verification
   --server-runner RUNNER    flask or gunicorn. Default: gunicorn
   --gunicorn-workers N      Default: auto when --server-runner gunicorn
                            auto means local capacity probe result when present;
@@ -1294,6 +1488,14 @@ normalize_runtime_options() {
   BACKTEST_PROBE_ON_STARTUP="$NORMALIZED_YES_NO"
   normalize_yes_no_value "$TRADING_BACKGROUND_DEV_READY" "trading background dev_ready"
   TRADING_BACKGROUND_DEV_READY="$NORMALIZED_YES_NO"
+  if cloudflare_tunnel_enabled; then
+    CLOUDFLARE_TUNNEL=1
+  else
+    normalize_yes_no_value "$CLOUDFLARE_TUNNEL" "cloudflare tunnel"
+    CLOUDFLARE_TUNNEL="$NORMALIZED_YES_NO"
+  fi
+  normalize_yes_no_value "$CLOUDFLARE_TUNNEL_INSTALL" "install cloudflared"
+  CLOUDFLARE_TUNNEL_INSTALL="$NORMALIZED_YES_NO"
 }
 
 append_unique_csv_value() {
@@ -1440,6 +1642,13 @@ print_resolved_config() {
   say "  idle_logout_minutes: ${SESSION_IDLE_TIMEOUT_MINUTES:-<profile default>}"
   say "  server_mode:         $SERVER_MODE"
   say "  trading_bg_dev:      $TRADING_BACKGROUND_DEV_READY"
+  say "  cloudflare_tunnel:   $CLOUDFLARE_TUNNEL"
+  if cloudflare_tunnel_enabled; then
+    say "  cloudflare_local:    ${CLOUDFLARE_TUNNEL_URL:-<launched server URL>}"
+    say "  cloudflare_helper:   $CLOUDFLARE_TUNNEL_HELPER"
+    say "  cloudflare_proto:    $CLOUDFLARE_TUNNEL_PROTOCOL timeout=${CLOUDFLARE_TUNNEL_TIMEOUT}s tls_verify=${CLOUDFLARE_TUNNEL_NO_TLS_VERIFY}"
+    say "  cloudflare_install:  $CLOUDFLARE_TUNNEL_INSTALL"
+  fi
   say "  cloud_drive_root:    ${CLOUD_DRIVE_STORAGE_ROOT:-<runtime/storage>}"
   say "  cloud_drive_max_mb:  ${CLOUD_DRIVE_GLOBAL_CAPACITY_LIMIT_MB:-<default disk 95%>}"
   say "  max_content_mb:      ${MAX_CONTENT_MB:-<app default>}"
@@ -4514,6 +4723,7 @@ shutdown_dev_servers_for_port() {
   fi
   pids="$(shutdown_candidate_pids_for_port "$PORT" | paste -sd ' ' - | sed 's/[[:space:]]*$//')"
   shutdown_dev_server_pids "$pids"
+  stop_cloudflare_quick_tunnel_candidates
 }
 
 resolve_occupied_port_interactively() {
@@ -4710,6 +4920,46 @@ while [[ $# -gt 0 ]]; do
       ;;
     --no-trading-background-dev-ready|--disable-trading-background-dev-ready)
       TRADING_BACKGROUND_DEV_READY=0
+      shift
+      ;;
+    --cloudflare-tunnel|--cloudflare-quick-tunnel|--quick-tunnel)
+      CLOUDFLARE_TUNNEL=1
+      shift
+      ;;
+    --no-cloudflare-tunnel|--disable-cloudflare-tunnel|--no-quick-tunnel)
+      CLOUDFLARE_TUNNEL=0
+      shift
+      ;;
+    --cloudflare-tunnel-url|--quick-tunnel-url)
+      CLOUDFLARE_TUNNEL_URL="${2:?missing Cloudflare Tunnel local URL}"
+      shift 2
+      ;;
+    --cloudflare-tunnel-helper)
+      CLOUDFLARE_TUNNEL_HELPER="${2:?missing Cloudflare Tunnel helper path}"
+      shift 2
+      ;;
+    --cloudflare-tunnel-protocol)
+      CLOUDFLARE_TUNNEL_PROTOCOL="${2:?missing Cloudflare Tunnel protocol}"
+      shift 2
+      ;;
+    --cloudflare-tunnel-timeout)
+      CLOUDFLARE_TUNNEL_TIMEOUT="${2:?missing Cloudflare Tunnel timeout seconds}"
+      shift 2
+      ;;
+    --install-cloudflared|--cloudflare-install|--install-cloudflare)
+      CLOUDFLARE_TUNNEL_INSTALL=1
+      shift
+      ;;
+    --no-install-cloudflared|--no-cloudflare-install|--no-install-cloudflare)
+      CLOUDFLARE_TUNNEL_INSTALL=0
+      shift
+      ;;
+    --cloudflare-tunnel-no-tls-verify|--cloudflare-no-tls-verify)
+      CLOUDFLARE_TUNNEL_NO_TLS_VERIFY=1
+      shift
+      ;;
+    --cloudflare-tunnel-verify-tls|--cloudflare-verify-tls)
+      CLOUDFLARE_TUNNEL_NO_TLS_VERIFY=0
       shift
       ;;
     --server-runner)
@@ -5004,6 +5254,14 @@ normalize_capacity_probe_mode
 normalize_capacity_probe_tier
 normalize_hls_slot_probe_mode
 normalize_bt_download_backend
+case "$CLOUDFLARE_TUNNEL_PROTOCOL" in
+  http2|quic) ;;
+  *) die "cloudflare tunnel protocol must be http2 or quic: $CLOUDFLARE_TUNNEL_PROTOCOL" ;;
+esac
+[[ "$CLOUDFLARE_TUNNEL_TIMEOUT" =~ ^[0-9]+$ && "$CLOUDFLARE_TUNNEL_TIMEOUT" != "0" ]] || die "cloudflare tunnel timeout must be a positive integer"
+if cloudflare_tunnel_enabled && [[ "$FOREGROUND" == "1" ]]; then
+  die "--cloudflare-tunnel cannot be combined with --foreground because foreground mode execs the server process"
+fi
 export HACKME_BT_BACKEND="$BT_DOWNLOAD_BACKEND"
 export HACKME_TRANSMISSION_RPC_URL="$TRANSMISSION_RPC_URL"
 export HACKME_TRANSMISSION_RPC_USERNAME="$TRANSMISSION_RPC_USERNAME"
@@ -5913,6 +6171,7 @@ elif [[ -n "$TRUSTED_HOSTS" ]]; then
   say "[dev-tmp] trusted:   $TRUSTED_HOSTS"
 fi
 say "[dev-tmp] url:       $SERVER_URL"
+start_cloudflare_quick_tunnel_if_requested
 if [[ -n "$PUBLIC_HOST" ]]; then
   case "$PUBLIC_HOST" in
     \[*\]|*:*:*)

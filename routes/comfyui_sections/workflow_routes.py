@@ -60,6 +60,23 @@ def _is_qwen_image_edit_2509_family(system_bundle_id):
     return value == "origin_qwen_image_edit_2509" or value.startswith("origin_qwen_image_edit_2509_")
 
 
+def _apply_qwen_2512_controlnet_pose_mode(workflow_json, body):
+    system_bundle_id = str((body or {}).get("system_bundle_id") or "").strip()
+    if system_bundle_id != "origin_qwen_image_controlnet_2512":
+        return workflow_json, False
+    control_type = str((body or {}).get("controlnet_type") or "").strip().lower()
+    preprocessor = str((body or {}).get("controlnet_preprocessor") or "").strip().lower()
+    if control_type not in {"pose", "openpose", "sdpose"} and preprocessor not in {"none", "passthrough", "pose", "openpose", "sdpose"}:
+        return workflow_json, False
+    workflow = json.loads(json.dumps(workflow_json or {}))
+    apply_node = workflow.get("131") if isinstance(workflow.get("131"), dict) else {}
+    apply_inputs = apply_node.get("inputs") if isinstance(apply_node.get("inputs"), dict) else {}
+    if not apply_inputs or apply_inputs.get("image") == ["123", 0]:
+        return workflow, False
+    apply_inputs["image"] = ["123", 0]
+    return workflow, True
+
+
 def _official_template_media_path(name):
     clean_name = Path(str(name or "").strip()).name
     if not clean_name:
@@ -1004,13 +1021,19 @@ def register_comfyui_workflow_routes(app, ctx):
             default_params = parse_json_field(row["default_params_json"], {}) or {}
             preserved_seed = default_params.get("seed")
             workflow_json = apply_workflow_compatibility_fixes(parse_json_field(row["workflow_json"], {}) or {})
+            body_with_bundle = dict(body)
+            body_with_bundle["system_bundle_id"] = row["system_bundle_id"]
+            workflow_json, qwen_pose_control_changed = _apply_qwen_2512_controlnet_pose_mode(
+                workflow_json,
+                body_with_bundle,
+            )
             workflow_json, qwen_reference_changed = _apply_qwen_edit_reference_policy(
                 workflow_json,
                 system_bundle_id=row["system_bundle_id"],
                 image_field_assignments=image_field_assignments,
             )
             runtime_dependency_row = row
-            runtime_workflow_changed = bool(qwen_reference_changed)
+            runtime_workflow_changed = bool(qwen_reference_changed or qwen_pose_control_changed)
             if is_upscale_breakpoint_workflow_id(row["system_bundle_id"]):
                 if not upscale_breakpoint:
                     default_upscale_mode = str(default_params.get("upscale_mode") or default_params.get("upscale_breakpoint") or "").strip()
