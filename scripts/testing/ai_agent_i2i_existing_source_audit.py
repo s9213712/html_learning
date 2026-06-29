@@ -971,6 +971,12 @@ def main() -> int:
     parser.add_argument("--api-base-url", default="http://127.0.0.1:11434/v1")
     parser.add_argument("--comfyui-api-url", default="http://127.0.0.1:8189")
     parser.add_argument(
+        "--stalled-job-seconds",
+        type=int,
+        default=1800,
+        help="Fail a submitted ComfyUI job when its visible status/progress does not change for this many seconds. Set 0 to disable.",
+    )
+    parser.add_argument(
         "--denoise-strength",
         type=float,
         default=None,
@@ -1242,7 +1248,12 @@ def main() -> int:
             polls: list[dict[str, Any]] = []
             preview: dict[str, Any] = {}
             if job_id:
-                job, polls = wait_job(page, job_id, args.job_timeout_seconds)
+                job, polls = wait_job(
+                    page,
+                    job_id,
+                    args.job_timeout_seconds,
+                    stalled_seconds=args.stalled_job_seconds,
+                )
                 image = first_result_image(job)
                 if image:
                     preview = save_preview_with_retry(page, image["image_ref"], result_dir / f"{artifact_slug}_result.png")

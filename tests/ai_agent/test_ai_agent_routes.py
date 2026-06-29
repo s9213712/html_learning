@@ -2686,6 +2686,8 @@ def test_ai_agent_routes_smoke_with_fake_hermes_endpoints(tmp_path, monkeypatch)
     system_prompt = chat_calls[0][2]["messages"][0]["content"]
     assert "不能在一般聊天中聲稱已呼叫" in system_prompt
     assert "工具：check_generation_progress" in system_prompt
+    assert "多次查詢沒有新進度" in system_prompt
+    assert "疑似停滯" in system_prompt
 
 
 def test_ai_agent_audit_scan_requires_super_admin(tmp_path, monkeypatch):

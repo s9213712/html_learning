@@ -515,17 +515,33 @@ def login(page, base_url: str, username: str, password: str) -> None:
 
 def open_ai_agent(page, base_url: str) -> None:
     page.goto(base_url + "/", wait_until="domcontentloaded")
-    page.wait_for_function(
-        """() => (
-          typeof switchModuleTab === "function"
-          && typeof currentUser !== "undefined"
-          && !!currentUser
-          && typeof canAccessModule === "function"
-          && canAccessModule("ai-agent")
-          && document.querySelector("#ai-agent-input")
-        )""",
-        timeout=20_000,
-    )
+    try:
+        page.wait_for_function(
+            """() => (
+              typeof switchModuleTab === "function"
+              && typeof currentUser !== "undefined"
+              && !!currentUser
+              && typeof canAccessModule === "function"
+              && canAccessModule("ai-agent")
+              && document.querySelector("#ai-agent-input")
+            )""",
+            timeout=60_000,
+        )
+    except Exception as exc:
+        diagnostics = page.evaluate(
+            """() => ({
+              readyState: document.readyState,
+              hasSwitchModuleTab: typeof switchModuleTab === "function",
+              hasCurrentUserGlobal: typeof currentUser !== "undefined",
+              currentUser: typeof currentUser !== "undefined" ? currentUser : null,
+              hasCanAccessModule: typeof canAccessModule === "function",
+              canAccessAiAgent: typeof canAccessModule === "function" ? canAccessModule("ai-agent") : null,
+              hasAiAgentInput: !!document.querySelector("#ai-agent-input"),
+              aiAgentModuleHidden: document.querySelector("#module-ai-agent")?.hidden ?? null,
+              bodyTextHead: (document.body?.innerText || "").slice(0, 1000),
+            })"""
+        )
+        raise RuntimeError(f"AI agent module did not become ready: {diagnostics}") from exc
     page.evaluate(
         """() => {
           if (typeof syncSidebarMenuVisibility === "function") syncSidebarMenuVisibility();
@@ -822,15 +838,41 @@ def extract_json_object(text: str) -> dict[str, Any]:
     return {}
 
 
-def wait_job(page, job_id: str, timeout_seconds: int) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+def _job_progress_signature(result: dict[str, Any], job: dict[str, Any], progress: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        result.get("status"),
+        bool(result.get("ok")),
+        job.get("status"),
+        progress.get("phase"),
+        progress.get("percent"),
+        progress.get("completed"),
+        progress.get("detail") or progress.get("error_message") or job.get("error"),
+    )
+
+
+def wait_job(
+    page,
+    job_id: str,
+    timeout_seconds: int,
+    *,
+    stalled_seconds: int = 1800,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     deadline = time.time() + timeout_seconds
     polls: list[dict[str, Any]] = []
     last_job: dict[str, Any] = {}
     completed_phase_seen_at: float | None = None
+    last_signature: tuple[Any, ...] | None = None
+    last_signature_changed_at = time.time()
     while time.time() < deadline:
         result = api_fetch(page, "GET", f"/api/comfyui/jobs/{job_id}")
         last_job = (result.get("body") or {}).get("job") or {}
         progress = last_job.get("progress") if isinstance(last_job.get("progress"), dict) else {}
+        now = time.time()
+        signature = _job_progress_signature(result, last_job, progress)
+        if signature != last_signature:
+            last_signature = signature
+            last_signature_changed_at = now
+        unchanged_seconds = max(0.0, now - last_signature_changed_at)
         polls.append({
             "at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "http_status": result.get("status"),
@@ -839,6 +881,7 @@ def wait_job(page, job_id: str, timeout_seconds: int) -> tuple[dict[str, Any], l
             "phase": progress.get("phase"),
             "percent": progress.get("percent"),
             "detail": progress.get("detail") or progress.get("error_message") or last_job.get("error"),
+            "unchanged_seconds": round(unchanged_seconds, 3),
         })
         status = str(last_job.get("status") or "").lower()
         phase = str(progress.get("phase") or "").lower()
@@ -850,6 +893,13 @@ def wait_job(page, job_id: str, timeout_seconds: int) -> tuple[dict[str, Any], l
             elif time.time() - completed_phase_seen_at >= 45:
                 last_job["status"] = "completed_pending_result"
                 return last_job, polls
+        if stalled_seconds > 0 and unchanged_seconds >= stalled_seconds:
+            last_job["status"] = last_job.get("status") or "running"
+            last_job["stalled"] = True
+            last_job["stalled_seconds"] = round(unchanged_seconds, 3)
+            last_job["stalled_reason"] = "job progress did not change before stalled_seconds"
+            last_job["last_progress_signature"] = list(signature)
+            return last_job, polls
         time.sleep(5)
     last_job["timed_out"] = True
     return last_job, polls
@@ -1177,6 +1227,12 @@ def main() -> int:
     parser.add_argument("--root-password", default="root")
     parser.add_argument("--out-dir", default="")
     parser.add_argument("--job-timeout-seconds", type=int, default=1800)
+    parser.add_argument(
+        "--stalled-job-seconds",
+        type=int,
+        default=1800,
+        help="Fail a submitted ComfyUI job when its visible status/progress does not change for this many seconds. Set 0 to disable.",
+    )
     parser.add_argument("--model", default=DEFAULT_AI_AGENT_MODEL)
     parser.add_argument("--api-base-url", default=DEFAULT_AI_AGENT_API_BASE_URL)
     parser.add_argument("--comfyui-api-url", default=DEFAULT_COMFYUI_API_URL)
@@ -1322,7 +1378,12 @@ def main() -> int:
         source_preview: dict[str, Any] = {}
         source_image: dict[str, Any] | None = None
         if source_job_id:
-            source_job, source_polls = wait_job(page, source_job_id, args.job_timeout_seconds)
+            source_job, source_polls = wait_job(
+                page,
+                source_job_id,
+                args.job_timeout_seconds,
+                stalled_seconds=args.stalled_job_seconds,
+            )
             source_image = first_result_image(source_job)
             if source_image:
                 source_preview = save_preview(page, source_image["image_ref"], out_dir / "assets" / SOURCE_IMAGE_NAME)
@@ -1476,7 +1537,12 @@ def main() -> int:
             polls: list[dict[str, Any]] = []
             preview: dict[str, Any] = {}
             if job_id:
-                job, polls = wait_job(page, job_id, args.job_timeout_seconds)
+                job, polls = wait_job(
+                    page,
+                    job_id,
+                    args.job_timeout_seconds,
+                    stalled_seconds=args.stalled_job_seconds,
+                )
                 image = first_result_image(job)
                 if image:
                     preview_path = result_dir / f"{case['case_id']}_result.png"

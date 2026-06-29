@@ -25,6 +25,9 @@ const AI_AGENT_STATE = {
   lastComfyuiArgs: null,
   comfyuiPreviewLoads: {},
   persistTimer: null,
+  persistRetryTimer: null,
+  persistRetryCount: 0,
+  conversationPersistError: "",
   loadingConversation: false,
   historyLoading: false,
   historyOpen: false,
@@ -53,9 +56,10 @@ function aiAgentConversationStorageKey(scope = AI_AGENT_STATE.accountScope || ai
   return `hackme:ai-agent:conversation:${scope || "anonymous"}`;
 }
 
-function aiAgentPersistConversation(scope = AI_AGENT_STATE.accountScope) {
+async function aiAgentPersistConversation(scope = AI_AGENT_STATE.accountScope, options = {}) {
   if (!scope || AI_AGENT_STATE.loadingConversation) return;
   if (!AI_AGENT_STATE.sessionId && !AI_AGENT_STATE.messages.length) return;
+  const retryCount = Math.max(0, Number(options.retryCount || 0) || 0);
   const conversationId = aiAgentEnsureSessionId();
   const payload = {
     sessionId: conversationId,
@@ -78,19 +82,42 @@ function aiAgentPersistConversation(scope = AI_AGENT_STATE.accountScope) {
     })),
     habits: {},
   };
-  apiFetch(API + "/ai-agent/conversation", {
-    method: "PUT",
-    credentials: "same-origin",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ conversation_id: conversationId, payload }),
-  }).catch(() => undefined);
+  try {
+    const res = await apiFetch(API + "/ai-agent/conversation", {
+      method: "PUT",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ conversation_id: conversationId, payload }),
+    });
+    let json = {};
+    try { json = await res.json(); } catch (err) { json = {}; }
+    if (!res.ok || !json.ok) {
+      throw new Error(json.msg || `HTTP ${res.status}`);
+    }
+    AI_AGENT_STATE.persistRetryCount = 0;
+    AI_AGENT_STATE.conversationPersistError = "";
+  } catch (err) {
+    const message = String(err && err.message ? err.message : err || "conversation persist failed").slice(0, 240);
+    AI_AGENT_STATE.conversationPersistError = message;
+    AI_AGENT_STATE.persistRetryCount = retryCount + 1;
+    if (AI_AGENT_STATE.persistRetryCount <= 3) {
+      if (AI_AGENT_STATE.persistRetryTimer) clearTimeout(AI_AGENT_STATE.persistRetryTimer);
+      const delay = Math.min(10000, 1000 * (2 ** (AI_AGENT_STATE.persistRetryCount - 1)));
+      AI_AGENT_STATE.persistRetryTimer = setTimeout(() => {
+        AI_AGENT_STATE.persistRetryTimer = null;
+        aiAgentPersistConversation(scope, { retryCount: AI_AGENT_STATE.persistRetryCount });
+      }, delay);
+    } else {
+      console.warn("AI Agent conversation persist failed after retries", message);
+    }
+  }
 }
 
 function aiAgentSchedulePersistConversation() {
   if (AI_AGENT_STATE.persistTimer) clearTimeout(AI_AGENT_STATE.persistTimer);
   AI_AGENT_STATE.persistTimer = setTimeout(() => {
     AI_AGENT_STATE.persistTimer = null;
-    aiAgentPersistConversation();
+    aiAgentPersistConversation().catch(() => undefined);
   }, 350);
 }
 

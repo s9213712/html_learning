@@ -59,7 +59,7 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert 'id="ai-agent-comfyui-vae"' in html
     assert 'id="ai-agent-comfyui-generate-btn"' in html
     assert 'id="s-module-ai-agent-min-role"' in html
-    _warn_if_asset_cache_version_changed(html, "/js/37-ai-agent.js", "20260628-ai-agent-i2i-interaction-preserve")
+    _warn_if_asset_cache_version_changed(html, "/js/37-ai-agent.js", "20260629-ai-agent-conversation-retry")
     _warn_if_asset_cache_version_changed(html, "/js/90-bootstrap.js", "20260611-ai-agent-comfyui-write-tool")
 
     assert '"ai-agent": "feature_ai_agent_enabled"' in core_js
@@ -285,6 +285,10 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert "await aiAgentExecuteToolPlan(plan, plannerText, input" in ai_agent_js
     assert "aiAgentConversationStorageKey" in ai_agent_js
     assert 'API + "/ai-agent/conversation"' in ai_agent_js
+    assert "conversationPersistError" in ai_agent_js
+    assert "persistRetryCount" in ai_agent_js
+    assert "AI Agent conversation persist failed after retries" in ai_agent_js
+    assert "aiAgentPersistConversation(scope, { retryCount: AI_AGENT_STATE.persistRetryCount })" in ai_agent_js
     assert "localStorage.setItem" not in ai_agent_js
     assert "ALLOW_WRITE_ONCE" in ai_agent_js
     assert "elevate_once" in ai_agent_js

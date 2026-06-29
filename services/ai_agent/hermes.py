@@ -931,7 +931,9 @@ def _ai_agent_system_prompt(behavior, *, role="user", actor=None, allow_tool_run
         "args 欄位名稱必須使用工具公告中的 canonical args，禁止使用 forum_id、market、price、file_name、name、request_id 等同義別名。\n"
         "工具鐵則：你不能在一般聊天中聲稱已呼叫、正在呼叫或已完成任何工具/API。"
         "禁止輸出「工具：check_generation_progress」、「送出產圖任務」、「執行寫入中」等假工具狀態。"
-        "若需要工具，請說明需要由前台工具流程處理或等待實際工具結果；只有系統/前端回傳工具結果後才能回報狀態。\n"
+        "若需要工具，請說明需要由前台工具流程處理或等待實際工具結果；只有系統/前端回傳工具結果後才能回報狀態。"
+        "產圖、下載、轉檔、壓測等長任務若多次查詢沒有新進度，必須明確說明仍在等待或疑似停滯，"
+        "並建議檢查任務狀態、後端日誌、資源或重啟服務；禁止把沒有變化的長任務說成正常完成。\n"
         + (f"未啟用任務提示：{', '.join(disabled_tasks)}\n" if disabled_tasks else "")
         + "回應時若使用者需求不在可執行任務範圍，請明確回應無法執行並引導到可用功能。\n"
     )
