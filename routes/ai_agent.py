@@ -2835,6 +2835,18 @@ def register_ai_agent_routes(app, deps):
                 "replace only the visible neck ribbon with a simple small gold necklace; "
                 f"{preserve_identity}."
             )
+        if (
+            ("第二張" in text or "參考圖" in text or "reference" in lower)
+            and ("姿勢" in text or "pose" in lower)
+            and ("床" in text or "bed" in lower)
+            and ("睡衣" in text or "pajama" in lower or "pyjama" in lower)
+        ):
+            return (
+                "use the reference image only for the pose; change the source character to match the reference pose; "
+                "change the scene to a bedroom on a bed; change the outfit to pajamas; preserve the source character identity, "
+                "face, hairstyle, hair color, body proportions, and anime style; do not copy the reference character identity, "
+                "face, hair, ears, tail, bath scene, towel, or background."
+            )
         if re.search(r"(改成|改為|換成|替換|移除|刪除|修正|修復|新增)", text):
             return (
                 "apply only the requested semantic image edit from the user instruction; preserve all unmentioned subjects, "

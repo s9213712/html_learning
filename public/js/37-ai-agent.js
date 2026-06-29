@@ -792,12 +792,43 @@ function aiAgentRecentImageRefs(limit = 8) {
   return refs.slice(0, limit);
 }
 
-function aiAgentInferRecentImageRef(kind = "source") {
+function aiAgentImageRefKey(ref) {
+  if (!ref || typeof ref !== "object") return "";
+  return [
+    ref.type || "",
+    ref.subfolder || "",
+    ref.filename || "",
+    ref.cloud_file_id || "",
+    ref.storage_file_id || "",
+  ].join("|");
+}
+
+function aiAgentSameImageRef(left, right) {
+  const leftKey = aiAgentImageRefKey(left);
+  const rightKey = aiAgentImageRefKey(right);
+  return !!leftKey && !!rightKey && leftKey === rightKey;
+}
+
+function aiAgentTextSuggestsReferenceImage(text = "") {
+  const raw = String(text || "").toLowerCase();
+  if (!raw) return false;
+  return /reference|ref image|pose ref|pose reference|參考圖|參考影像|參考圖片|參考姿勢|姿勢參考|動作參考|第二張|第\s*2\s*張|另一張|second image|2nd image|copy pose|像第二張|照第二張|姿勢|動作|pose/.test(raw);
+}
+
+function aiAgentTextSuggestsImageEdit(text = "") {
+  const raw = aiAgentNormalizeUserText(text).toLowerCase();
+  if (!raw) return false;
+  return /(修改|改成|換成|變成|重繪|加工|編輯|修圖|圖生圖|img2img|第一張|原圖|上一張|這張圖|source image|reference|參考圖|第二張|第\s*2\s*張|another image|second image|pose|姿勢|動作)/i.test(raw);
+}
+
+function aiAgentInferRecentImageRef(kind = "source", options = {}) {
   const refs = aiAgentRecentImageRefs(12);
   if (!refs.length) return null;
+  const excludeRef = options?.exclude || null;
   const wantsMask = kind === "mask";
   const wantsReference = kind === "reference";
   const scored = refs
+    .filter((item) => !excludeRef || !aiAgentSameImageRef(item.image_ref, excludeRef))
     .map((item, index) => {
       const context = String(item.context || "").toLowerCase();
       const filename = String(item.filename || item.image_ref?.filename || "").toLowerCase();
@@ -837,7 +868,11 @@ function aiAgentEnsureComfyuiImageRefs(args = {}) {
     if (inferred) next.mask_image_ref = inferred;
   }
   if (!next.reference_image_ref && /reference|參考|ref/.test(String(next.prompt || next.edit_instruction || next.edit_prompt || "").toLowerCase())) {
-    const inferred = aiAgentInferRecentImageRef("reference");
+    const inferred = aiAgentInferRecentImageRef("reference", { exclude: next.source_image_ref });
+    if (inferred) next.reference_image_ref = inferred;
+  }
+  if (!next.reference_image_ref && aiAgentTextSuggestsReferenceImage(String(next.prompt || next.edit_instruction || next.edit_prompt || ""))) {
+    const inferred = aiAgentInferRecentImageRef("reference", { exclude: next.source_image_ref });
     if (inferred) next.reference_image_ref = inferred;
   }
   return next;
@@ -1278,7 +1313,15 @@ function aiAgentFallbackExtractToolArgs(userText = "", toolName = "") {
       .trim()
       .slice(0, 3800);
     if (negativeMatch) args.negative_prompt = negativeMatch[1].trim().slice(0, 3800);
-    args.generation_mode = /圖生圖|img2img/i.test(raw) ? "img2img" : "txt2img";
+    const inferredImageEdit = aiAgentTextSuggestsImageEdit(raw) && aiAgentRecentImageRefs(1).length > 0;
+    args.generation_mode = /圖生圖|img2img/i.test(raw) || inferredImageEdit ? "img2img" : "txt2img";
+    if (args.generation_mode === "img2img") {
+      args.official_workflow_id = "origin_qwen_image_edit_2509";
+      args.source_image_ref = aiAgentInferRecentImageRef("source");
+      if (aiAgentTextSuggestsReferenceImage(raw)) {
+        args.reference_image_ref = aiAgentInferRecentImageRef("reference", { exclude: args.source_image_ref });
+      }
+    }
     const width = raw.match(/(?:寬|width|解析度)\s*[=:：]?\s*(\d{3,4})/i);
     const height = raw.match(/(?:高|height|解析度\s*\d{3,4}\s*x)\s*[=:：]?\s*(\d{3,4})/i);
     args.width = width ? Number(width[1]) : 1024;
@@ -2210,9 +2253,12 @@ function aiAgentExtractJsonObject(text) {
 
 function aiAgentNormalizeAnalysisArgs(parsed, userText) {
   const source = parsed?.arguments && typeof parsed.arguments === "object" ? parsed.arguments : parsed;
-  const generationMode = aiAgentNormalizeComfyuiGenerationMode(
+  let generationMode = aiAgentNormalizeComfyuiGenerationMode(
     source?.generation_mode || source?.mode || source?.edit_mode || source?.image_edit_mode || ""
   );
+  if (!generationMode && aiAgentTextSuggestsImageEdit(userText) && aiAgentRecentImageRefs(2).length) {
+    generationMode = "img2img";
+  }
   let sourceImageRef = aiAgentResolveRecentImageRef(source?.source_image_ref || source?.source_image_ref_json || source?.image_ref || source?.source_ref);
   let maskImageRef = aiAgentResolveRecentImageRef(source?.mask_image_ref || source?.mask_image_ref_json || source?.mask_ref);
   let referenceImageRef = aiAgentResolveRecentImageRef(source?.reference_image_ref || source?.reference_image_ref_json || source?.reference_ref || source?.pose_reference_image_ref || source?.pose_ref);
@@ -2230,13 +2276,22 @@ function aiAgentNormalizeAnalysisArgs(parsed, userText) {
     prompt = aiAgentStripFieldValue(userText || prompt);
   }
   if (!prompt) throw new Error("圖片分析沒有產生可用提示詞");
+  if (!referenceImageRef && aiAgentTextSuggestsReferenceImage([
+    userText,
+    prompt,
+    source?.edit_instruction,
+    source?.edit_prompt,
+  ].filter(Boolean).join(" "))) {
+    referenceImageRef = aiAgentInferRecentImageRef("reference", { exclude: sourceImageRef });
+  }
+  const shouldDefaultImageEditSize = ["img2img", "inpaint", "outpaint", "upscale"].includes(generationMode) && sourceImageRef;
   const args = {
     prompt,
     edit_instruction: aiAgentStripFieldValue(source?.edit_instruction || source?.edit_prompt || ""),
     edit_prompt: aiAgentStripFieldValue(source?.edit_prompt || ""),
     negative_prompt: aiAgentStripFieldValue(source?.negative_prompt || source?.negative || ""),
-    width: source?.width,
-    height: source?.height,
+    width: source?.width || (shouldDefaultImageEditSize ? 1024 : undefined),
+    height: source?.height || (shouldDefaultImageEditSize ? 1024 : undefined),
     steps: source?.steps,
     cfg_scale: source?.cfg_scale ?? source?.cfg,
     cfg: source?.cfg,
@@ -2247,7 +2302,7 @@ function aiAgentNormalizeAnalysisArgs(parsed, userText) {
     sampler: aiAgentStripFieldValue(source?.sampler || ""),
     sampler_name: aiAgentStripFieldValue(source?.sampler_name || ""),
     scheduler: aiAgentStripFieldValue(source?.scheduler || ""),
-    official_workflow_id: source?.official_workflow_id || "",
+    official_workflow_id: source?.official_workflow_id || (generationMode === "img2img" ? "origin_qwen_image_edit_2509" : ""),
     generation_mode: generationMode,
     source_image_ref: sourceImageRef,
     mask_image_ref: maskImageRef,
