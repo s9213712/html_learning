@@ -17,7 +17,7 @@ import time
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse, urlunparse
 import urllib.error
 import urllib.request
 
@@ -2276,7 +2276,24 @@ def register_comfyui_routes(app, deps):
             return None, json_resp({"ok": False, "msg": "無權查看此 ComfyUI 工作"}, 403)
         return job, None
 
-    def _generation_job_payload(job):
+    def _comfyui_prompt_runtime_presence(actor, prompt_id):
+        prompt_id = str(prompt_id or "").strip()
+        if not actor or not prompt_id:
+            return "unknown", {"reason": "missing_actor_or_prompt_id"}
+        try:
+            binding = _comfyui_binding(actor)
+            client = _client_for_url(binding["url"])
+            history = client._json_request(f"/history/{quote(prompt_id, safe='')}", timeout=3)
+            if isinstance(history, dict) and isinstance(history.get(prompt_id), dict):
+                return "history", {"backend_url": binding.get("url")}
+            queue = client._json_request("/queue", timeout=3)
+            if prompt_id in json.dumps(queue, ensure_ascii=False):
+                return "queue", {"backend_url": binding.get("url")}
+            return "missing", {"backend_url": binding.get("url")}
+        except Exception as exc:
+            return "unknown", {"error": str(exc)[:300]}
+
+    def _generation_job_payload(job, actor=None):
         payload = {
             "job_id": job["job_id"],
             "status": job["status"],
@@ -2298,7 +2315,32 @@ def register_comfyui_routes(app, deps):
                     progress["detail"] = progress.get("detail") or "ComfyUI 已完成輸出，正在整理站內結果"
                 return payload
             updated_at = float(progress.get("updated_at") or job.get("updated_at") or job.get("created_at") or 0)
-            if updated_at and time.time() - updated_at >= COMFYUI_JOB_STALE_SECONDS:
+            stale_seconds = int(time.time() - updated_at) if updated_at else 0
+            if updated_at and stale_seconds >= COMFYUI_JOB_STALE_SECONDS:
+                prompt_id = str(progress.get("prompt_id") or "").strip()
+                presence, presence_meta = _comfyui_prompt_runtime_presence(actor, prompt_id)
+                if prompt_id and presence == "missing":
+                    detail = (
+                        "ComfyUI 工作已超過 stale 門檻且 prompt 不在 history/queue 中；"
+                        "可能已被 interrupt、後端重啟或 ComfyUI 清空佇列。"
+                    )
+                    terminal_progress = {
+                        **progress,
+                        "phase": "error",
+                        "detail": detail,
+                        "error_message": detail,
+                        "completed": False,
+                        "terminal_reason": "comfyui_prompt_missing_from_queue_history",
+                        "stale_seconds": stale_seconds,
+                        "prompt_runtime_presence": presence,
+                        "prompt_runtime_presence_meta": presence_meta,
+                    }
+                    _update_generation_job_progress(job["job_id"], terminal_progress)
+                    _update_generation_job(job["job_id"], status="error", error=detail, result=job.get("result"))
+                    payload["status"] = "error"
+                    payload["error"] = detail
+                    payload["progress"] = terminal_progress
+                    return payload
                 is_diffusers = str(progress.get("backend_kind") or "").strip().lower() == "diffusers"
                 if is_diffusers:
                     progress_step = str(progress.get("step") or "")

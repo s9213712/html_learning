@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 import shutil
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageChops, ImageDraw, ImageStat
 from playwright.sync_api import sync_playwright
 
 from ai_agent_real_i2i_edit_audit import (
@@ -54,6 +54,79 @@ VISUAL_SCORING_POLICY = {
     ),
     "pass_threshold": "No hard defect and prompt achievement rate >= 80%.",
 }
+
+
+def write_progress(out_dir: Path, **payload: Any) -> None:
+    progress_path = out_dir / "progress.json"
+    current: dict[str, Any] = {}
+    if progress_path.exists():
+        try:
+            current = json.loads(progress_path.read_text(encoding="utf-8"))
+        except Exception:
+            current = {}
+    current.update(payload)
+    current["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    progress_path.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def make_job_progress_writer(out_dir: Path, *, case_id: str, job_id: str):
+    def _write(poll: dict[str, Any], job: dict[str, Any]) -> None:
+        progress = job.get("progress") if isinstance(job.get("progress"), dict) else {}
+        write_progress(
+            out_dir,
+            stage="waiting_comfyui_job",
+            case_id=case_id,
+            job_id=job_id,
+            job_status=job.get("status") or poll.get("job_status"),
+            job_phase=progress.get("phase") or poll.get("phase"),
+            job_percent=progress.get("percent") if progress.get("percent") is not None else poll.get("percent"),
+            job_detail=progress.get("detail") or progress.get("error_message") or poll.get("detail"),
+            job_unchanged_seconds=poll.get("unchanged_seconds"),
+            job_poll_at=poll.get("at"),
+            job_poll_http_status=poll.get("http_status"),
+        )
+
+    return _write
+
+
+BENIGN_BROWSER_ERROR_PATTERNS = (
+    "net::ERR_NETWORK_CHANGED",
+)
+
+
+def record_browser_error(report: dict[str, Any], message: str) -> None:
+    text = str(message or "").strip()
+    if not text:
+        return
+    target = "browser_warnings" if any(pattern in text for pattern in BENIGN_BROWSER_ERROR_PATTERNS) else "browser_errors"
+    report.setdefault(target, []).append(text)
+
+
+def _write_event_job_id(event: dict[str, Any]) -> str:
+    response = event.get("response") if isinstance(event.get("response"), dict) else {}
+    result = response.get("result") if isinstance(response.get("result"), dict) else {}
+    job = result.get("job") if isinstance(result.get("job"), dict) else {}
+    return str(
+        job.get("job_id")
+        or result.get("job_id")
+        or response.get("job_id")
+        or ""
+    )
+
+
+def _thread_has_gate_result_for_job(text: str, job_id: str) -> bool:
+    if not job_id or job_id not in text:
+        return False
+    tail = text[text.rfind(job_id):]
+    return bool(re.search(r"視覺\s*gate[：:]\s*(PASS|FAIL)|vision\s*gate[：:]\s*(PASS|FAIL)", tail, re.IGNORECASE))
+
+
+def _thread_has_staged_terminal(text: str) -> bool:
+    return (
+        "已達 staged review 嘗試上限" in text
+        or "staged review 未通過且已達上限" in text
+        or "ComfyUI candidate 已通過 vision gate" in text
+    )
 
 
 def _case_scoring_items(case: dict[str, Any]) -> list[str]:
@@ -597,6 +670,117 @@ PERSON_QWEN_EDIT_CASES: list[dict[str, Any]] = [
         ),
     },
     {
+        "case_id": "28h_person_reference_pose_external_pose_only",
+        "artifact_slug": "copy_reference_pose_external_pose_only",
+        "title": "Person edit: copy pose from external reference image without pose wording",
+        "mask_key": None,
+        "reference_pose_key": "external",
+        "expected": "AI agent 必須從 reference image 自行判斷姿勢並套用到 source 人物；不能靠提示詞明示姿勢；人物身份、服裝、髮型、背景與畫風盡量保持。",
+        "scoring_items": [
+            "結果人物姿勢明顯接近 reference image",
+            "自然語言指令沒有明示 reference 的具體姿勢名稱或肢體配置",
+            "source 人物身份大致保持",
+            "source 服裝、髮型、髮飾與背景大致保持",
+            "沒有把 reference 人物身份、服裝或背景整體搬過來",
+            "沒有多手、斷手、缺手指、肢體穿透、文字或水印",
+        ],
+        "natural_language": (
+            "請真的使用本站 ComfyUI 圖生圖語意改圖，不要使用 inpaint mask；請使用 Qwen Image Edit 2509 "
+            "（official_workflow_id=origin_qwen_image_edit_2509），source 使用人像測試原圖。"
+            "我另外提供了一張 pose reference image。請你自己觀察 reference image 的人物姿勢，"
+            "只把 source 中女孩的姿勢改成 reference image 的姿勢；reference_image_ref 只代表姿勢/動作，"
+            "不代表換人、換臉、換髮型、換衣服、換背景或複製 reference 的角色設定。"
+            "請不要要求我把 reference 的動作用文字說出來；你必須根據圖片上下文自行判斷。"
+            "保持 source 的同一人物、同一臉、同一髮型、同一髮飾、同一服裝風格與同一背景；"
+            "不要加入文字、水印、額外人物、多手、斷手或缺手指。解析度 1024x1024，batch 1，steps 4，cfg 1，confirm_billing=true。"
+            "提示詞基礎：by ogipote, anime style, 1girl。"
+        ),
+    },
+    {
+        "case_id": "28i_person_cross_reference_chara_clothes_pose",
+        "artifact_slug": "cross_reference_chara_clothes_pose",
+        "title": "Person edit: cross-reference character, clothes, and pose images",
+        "mask_key": None,
+        "reference_pose_key": "pose",
+        "cross_reference_keys": ["chara", "clothes", "pose"],
+        "expected": "AI agent 必須理解三張 reference image 的不同用途：chara 只作角色外觀/身份參考，clothes 只作服裝參考，pose 只作動作/姿勢參考；輸出要把三者合理融合到 source 人物，不能把三張圖混成無關背景或錯誤人物。",
+        "requires_iterative_review": True,
+        "minimum_candidate_attempts": 3,
+        "scoring_items": [
+            "輸出人物身份/髮型/臉部特徵明顯受到 chara reference 影響",
+            "輸出服裝明顯接近 clothes reference",
+            "輸出姿勢明顯接近 pose reference",
+            "三種參考用途沒有互相污染，例如把 pose 圖角色服裝搬過來或把 clothes 圖姿勢誤當動作",
+            "主體仍是一位清楚人物且構圖合理",
+            "沒有多手、斷手、缺手指、肢體穿透、黑圖、灰框、文字或水印",
+        ],
+        "natural_language": (
+            "請真的使用本站 ComfyUI 圖生圖語意改圖，不要使用 inpaint mask；請使用 Qwen Image Edit 2509 "
+            "（official_workflow_id=origin_qwen_image_edit_2509），source 使用人像測試原圖。"
+            "我另外提供三張不同用途的 reference image：chara reference 只代表角色外觀/臉部氣質/髮型方向，"
+            "clothes reference 只代表服裝設計，pose reference 只代表人物姿勢/動作。"
+            "請你自己觀察三張圖並把三者合理融合到 source 人物：角色外觀參考 chara，服裝參考 clothes，姿勢參考 pose。"
+            "不要要求我把三張參考圖內容用文字說出來；你必須根據圖片上下文自行判斷。"
+            "不要把 pose 圖的服裝、背景或角色身份整體搬過來；不要把 clothes 圖的模特姿勢誤當動作；"
+            "這不是單次產圖就算完成的任務。請你自己建立 staged workflow：先分別描述 source/chara/clothes/pose 四張圖的角色，"
+            "再產生 candidate 1；candidate 完成後必須用 vision 模型目視檢查 scoring_items 與硬性失敗規則。"
+            "若有任一硬傷，例如文字、水印、多手、斷手、缺指、肢體穿透、黑圖、灰框，或 chara/clothes/pose 三者任一未達成，"
+            "請不要宣稱完成，必須修正 edit_instruction、denoise_strength 或 reference emphasis 後再重跑 candidate 2。"
+            "至少要跑到一張 candidate 經 vision review 判定可交付；若連續失敗，請明確回報每次失敗原因與下一輪修改方向。"
+            "不要加入文字、水印、額外人物、多手、斷手或缺手指。解析度 1024x1024，batch 1，steps 4，cfg 1，confirm_billing=true。"
+            "提示詞基礎：by ogipote, anime style, 1girl。"
+        ),
+    },
+    {
+        "case_id": "28j_person_reference_clothes_only",
+        "artifact_slug": "change_reference_clothes_only",
+        "title": "Person edit: copy clothes from reference image only",
+        "mask_key": None,
+        "cross_reference_keys": ["clothes"],
+        "expected": "AI agent 必須自行觀察 clothes reference，只把 source 人物服裝改成 reference 的服裝設計；人物身份、臉、髮型、姿勢與背景盡量保持，不能把 reference 的人物身份、姿勢或背景搬過來。",
+        "scoring_items": [
+            "輸出服裝明顯接近 clothes reference",
+            "source 人物身份、臉部、髮型與姿勢大致保持",
+            "沒有把 clothes reference 的人物身份、姿勢或背景整體搬過來",
+            "沒有多手、斷手、缺指、肢體穿透、黑圖、灰框、文字或水印",
+        ],
+        "natural_language": (
+            "請真的使用本站 ComfyUI 圖生圖語意改圖，不要使用 inpaint mask；請使用 Qwen Image Edit 2509 "
+            "（official_workflow_id=origin_qwen_image_edit_2509），source 使用人像測試原圖。"
+            "我另外提供一張 clothes reference image，這張只代表服裝設計，不代表換人、換臉、換髮型、換姿勢或換背景。"
+            "請你自己觀察 reference image 的服裝，並只把 source 中女孩的衣服改成 reference image 的服裝設計；"
+            "不要要求我把 reference 的衣服用文字說出來，你必須根據圖片上下文自行判斷。"
+            "保持 source 的同一人物、同一臉、同一髮型、同一姿勢、同一構圖與同一背景；"
+            "不要加入文字、水印、額外人物、多手、斷手或缺手指。解析度 1024x1024，batch 1，steps 4，cfg 1，confirm_billing=true。"
+            "提示詞基礎：by ogipote, anime style, 1girl。"
+        ),
+    },
+    {
+        "case_id": "28k_person_reference_background_only",
+        "artifact_slug": "change_reference_background_only",
+        "title": "Person edit: copy background from reference image only",
+        "mask_key": None,
+        "cross_reference_keys": ["background"],
+        "expected": "AI agent 必須自行觀察 background reference，只把 source 的背景/場景/光線改成 reference 的場景特徵；人物身份、臉、髮型、服裝、姿勢與前景主體盡量保持，不能把 reference 的人物、服裝、姿勢或文字搬過來。",
+        "scoring_items": [
+            "輸出背景/場景/光線明顯接近 background reference",
+            "source 人物身份、臉部、髮型、服裝與姿勢大致保持",
+            "沒有把 background reference 的人物身份、服裝、姿勢、文字或水印整體搬過來",
+            "沒有多手、斷手、缺指、肢體穿透、黑圖、灰框、文字或水印",
+        ],
+        "natural_language": (
+            "請真的使用本站 ComfyUI 圖生圖語意改圖，不要使用 inpaint mask；請使用 Qwen Image Edit 2509 "
+            "（official_workflow_id=origin_qwen_image_edit_2509），source 使用人像測試原圖。"
+            "我另外提供一張 background reference image，這張只代表背景、場景、光線、環境氛圍與景深，"
+            "不代表換人、換臉、換髮型、換服裝或換姿勢。"
+            "請你自己觀察 reference image 的背景，並只把 source 中女孩所在背景改成 reference image 的場景特徵；"
+            "不要要求我把 reference 的背景用文字說出來，你必須根據圖片上下文自行判斷。"
+            "保持 source 的同一人物、同一臉、同一髮型、同一服裝、同一姿勢、同一主體比例；"
+            "不要加入文字、水印、額外人物、多手、斷手或缺手指。解析度 1024x1024，batch 1，steps 4，cfg 1，confirm_billing=true。"
+            "提示詞基礎：by ogipote, anime style, 1girl。"
+        ),
+    },
+    {
         "case_id": "29_person_style_watercolor",
         "artifact_slug": "change_watercolor_style",
         "title": "Person edit: watercolor style copy",
@@ -720,8 +904,8 @@ def _write_prompt_diagnostics(write_args: dict[str, Any]) -> dict[str, Any]:
 def make_pose_reference_assets(out_dir: Path, reference_image: Path | None = None) -> dict[str, Path]:
     asset_dir = out_dir / "assets"
     asset_dir.mkdir(parents=True, exist_ok=True)
-    path = asset_dir / "reference_pose_salute_1024x1024.png"
     if reference_image is not None:
+        path = asset_dir / "reference_pose_external_1024x1024.png"
         image = Image.open(reference_image).convert("RGB")
         image.thumbnail((IMAGE_WIDTH, IMAGE_HEIGHT), Image.Resampling.LANCZOS)
         canvas = Image.new("RGB", (IMAGE_WIDTH, IMAGE_HEIGHT), (245, 246, 248))
@@ -729,8 +913,9 @@ def make_pose_reference_assets(out_dir: Path, reference_image: Path | None = Non
         y = (IMAGE_HEIGHT - image.height) // 2
         canvas.paste(image, (x, y))
         canvas.save(path)
-        return {"salute": path}
+        return {"external": path, "salute": path}
 
+    path = asset_dir / "reference_pose_salute_1024x1024.png"
     image = Image.new("RGB", (IMAGE_WIDTH, IMAGE_HEIGHT), (245, 246, 248))
     draw = ImageDraw.Draw(image)
     skin = (238, 182, 145)
@@ -758,8 +943,59 @@ def make_pose_reference_assets(out_dir: Path, reference_image: Path | None = Non
     return {"salute": path}
 
 
-def seed_context_with_reference(page, source: dict[str, Any], mask: dict[str, Any] | None, reference: dict[str, Any] | None, case: dict[str, Any]) -> None:
+def make_named_reference_asset(out_dir: Path, source_path: Path, key: str) -> Path:
+    asset_dir = out_dir / "assets"
+    asset_dir.mkdir(parents=True, exist_ok=True)
+    suffix = source_path.suffix.lower() if source_path.suffix else ".png"
+    source_stem = re.sub(r"[^A-Za-z0-9]+", "_", source_path.stem).strip("_").lower()
+    source_stem = re.sub(r"_+", "_", source_stem)[:96] or "image"
+    path = asset_dir / f"reference_{key}_{source_stem}_1024x1024{suffix}"
+    image = Image.open(source_path).convert("RGB")
+    image.thumbnail((IMAGE_WIDTH, IMAGE_HEIGHT), Image.Resampling.LANCZOS)
+    canvas = Image.new("RGB", (IMAGE_WIDTH, IMAGE_HEIGHT), (245, 246, 248))
+    x = (IMAGE_WIDTH - image.width) // 2
+    y = (IMAGE_HEIGHT - image.height) // 2
+    canvas.paste(image, (x, y))
+    canvas.save(path)
+    return path
+
+
+def seed_context_with_reference(
+    page,
+    source: dict[str, Any],
+    mask: dict[str, Any] | None,
+    reference: dict[str, Any] | None,
+    case: dict[str, Any],
+    extra_references: dict[str, dict[str, Any]] | None = None,
+) -> None:
     seed_context(page, source, mask, case)
+    if extra_references:
+        page.evaluate(
+            """({references, caseInfo}) => {
+              const images = Object.entries(references).map(([key, ref]) => ({
+                image_ref: ref.image_ref,
+                cloud_file_id: ref.cloud_file_id || "",
+                storage_file_id: ref.storage_file_id || "",
+                filename: ref.filename,
+                mime_type: ref.mime_type || "image/png",
+                semantic_key: key,
+              })).filter((item) => item.image_ref && item.filename).slice(0, 4);
+              const descriptions = {
+                chara: "chara reference 只代表角色外觀/臉部氣質/髮型方向",
+                clothes: "clothes reference 只代表服裝設計",
+                background: "background reference 只代表背景/場景/光線/環境氛圍",
+                pose: "pose reference 只代表姿勢/動作",
+              };
+              const detail = images.map((item) => descriptions[item.semantic_key] || `${item.semantic_key} reference 僅代表該 semantic_key 的用途`).join("；");
+              AI_AGENT_STATE.messages.push({
+                role: "assistant",
+                content: `reference images for ${caseInfo.case_id}: ${detail}。請依 semantic_key 分別使用，不要互相污染。`,
+                images,
+              });
+              renderAiAgentThread();
+            }""",
+            {"references": extra_references, "caseInfo": {"case_id": case["case_id"]}},
+        )
     if not reference:
         return
     page.evaluate(
@@ -795,6 +1031,42 @@ def _copy_artifact(src: Path, dst: Path) -> str:
         shutil.copy2(src, dst)
         return str(dst)
     return ""
+
+
+def image_difference_metrics(source_path: Path, result_path: Path) -> dict[str, Any]:
+    try:
+        with Image.open(source_path) as source_image, Image.open(result_path) as result_image:
+            source = source_image.convert("RGB").resize((256, 256), Image.Resampling.LANCZOS)
+            result = result_image.convert("RGB").resize((256, 256), Image.Resampling.LANCZOS)
+            diff = ImageChops.difference(source, result)
+            stat = ImageStat.Stat(diff)
+            mean_abs = sum(float(value) for value in stat.mean) / max(1, len(stat.mean))
+            rms = sum(float(value) ** 2 for value in stat.rms) / max(1, len(stat.rms))
+            rms = rms ** 0.5
+            grayscale = diff.convert("L")
+            histogram = grayscale.histogram()
+            changed_pixels = sum(count for value, count in enumerate(histogram) if value >= 8)
+            total_pixels = max(1, grayscale.width * grayscale.height)
+            changed_ratio = changed_pixels / total_pixels
+            # Character/reference edits can look visually unchanged to a human while
+            # still moving enough pixels to pass a very strict byte-diff gate.
+            # Keep this gate conservative, but fail low-magnitude edits before
+            # they are mislabeled as successful artifacts.
+            no_visible_change = mean_abs < 8.0 and rms < 12.0 and changed_ratio < 0.18
+            return {
+                "ok": True,
+                "mean_abs_diff": round(mean_abs, 3),
+                "rms_diff": round(rms, 3),
+                "changed_pixel_ratio_ge_8": round(changed_ratio, 5),
+                "no_visible_change": no_visible_change,
+                "thresholds": {
+                    "mean_abs_diff_lt": 8.0,
+                    "rms_diff_lt": 12.0,
+                    "changed_pixel_ratio_lt": 0.18,
+                },
+            }
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
 
 
 def _source_asset_name_for_size(width: int, height: int) -> str:
@@ -871,11 +1143,21 @@ def write_case_artifact_pack(
         or case.get("natural_language")
         or ""
     )
+    staged_review_metrics = (
+        case_report.get("staged_review_metrics")
+        if isinstance(case_report.get("staged_review_metrics"), dict)
+        else {}
+    )
+    min_candidates = int(case_report.get("minimum_candidate_attempts") or 1)
+    candidate_count = int(staged_review_metrics.get("unique_candidate_job_count") or 0)
     pass_fail = (
         "pass"
         if case_report.get("job_status") == "completed"
         and (case_report.get("result_preview") or {}).get("ok")
+        and not case_report.get("hard_fail_detected")
+        and not case_report.get("error")
         and not (case_report.get("visual_artifacts") or {}).get("has_blocking_artifact")
+        and (not case_report.get("requires_iterative_review") or candidate_count >= min_candidates)
         else "fail"
     )
     run_label = "run01"
@@ -962,6 +1244,10 @@ def main() -> int:
         default="",
         help="Optional real pose reference image for reference-pose cases; normalized to 1024x1024 assets.",
     )
+    parser.add_argument("--chara-reference-image", default="", help="Optional character reference image for cross-reference cases.")
+    parser.add_argument("--clothes-reference-image", default="", help="Optional clothes reference image for cross-reference cases.")
+    parser.add_argument("--background-reference-image", default="", help="Optional background/scene reference image for cross-reference cases.")
+    parser.add_argument("--pose-reference-image", default="", help="Optional pose reference image for cross-reference cases.")
     parser.add_argument("--mask-preset", default="accepted_v5")
     parser.add_argument("--case-set", choices=["flux-fill", "qwen-edit", "person-qwen", "all"], default="flux-fill")
     parser.add_argument("--case-id", default="", help="Run only one case_id from the selected case set.")
@@ -981,6 +1267,11 @@ def main() -> int:
         type=float,
         default=None,
         help="Optional natural-language denoise_strength hint appended to each generated command.",
+    )
+    parser.add_argument(
+        "--command-resolution",
+        default="",
+        help="Optional WxH resolution override for the natural-language command, e.g. 768x768.",
     )
     parser.add_argument(
         "--instruction-suffix",
@@ -1010,6 +1301,15 @@ def main() -> int:
     reference_image_path = Path(args.reference_image).resolve() if args.reference_image else None
     if reference_image_path is not None and not reference_image_path.is_file():
         raise FileNotFoundError(reference_image_path)
+    cross_reference_input_paths = {
+        "chara": Path(args.chara_reference_image).resolve() if args.chara_reference_image else None,
+        "clothes": Path(args.clothes_reference_image).resolve() if args.clothes_reference_image else None,
+        "background": Path(args.background_reference_image).resolve() if args.background_reference_image else None,
+        "pose": Path(args.pose_reference_image).resolve() if args.pose_reference_image else None,
+    }
+    for key, path in cross_reference_input_paths.items():
+        if path is not None and not path.is_file():
+            raise FileNotFoundError(f"{key} reference image not found: {path}")
 
     source_origin_type = args.source_origin_type or ("diagnostic_fixture" if args.source_fixture else "preexisting_source")
     with Image.open(source_path) as initial_source_image:
@@ -1038,10 +1338,14 @@ def main() -> int:
         "source_label": args.source_label,
         "source_original_path": str(source_path),
         "reference_original_path": str(reference_image_path) if reference_image_path else "",
+        "cross_reference_original_paths": {
+            key: str(path) for key, path in cross_reference_input_paths.items() if path is not None
+        },
         "mask_preset": args.mask_preset,
         "visual_scoring_policy": VISUAL_SCORING_POLICY,
         "cases": [],
         "browser_errors": [],
+        "browser_warnings": [],
     }
     if args.source_fixture == "six-finger-hand":
         report["source_scene_prompt"] = (
@@ -1068,8 +1372,8 @@ def main() -> int:
         ctx = browser.new_context(ignore_https_errors=True, viewport={"width": 1440, "height": 1000})
         page = ctx.new_page()
         page.on("dialog", lambda dialog: dialog.accept())
-        page.on("pageerror", lambda exc: report["browser_errors"].append(str(exc)))
-        page.on("console", lambda msg: report["browser_errors"].append(msg.text) if msg.type == "error" else None)
+        page.on("pageerror", lambda exc: record_browser_error(report, str(exc)))
+        page.on("console", lambda msg: record_browser_error(report, msg.text) if msg.type == "error" else None)
 
         def on_request(request):
             if "/api/ai-agent/chat" in request.url or "/api/ai-agent/write-tools/execute" in request.url:
@@ -1113,17 +1417,32 @@ def main() -> int:
             comfyui_api_url=args.comfyui_api_url,
         )
         open_ai_agent(page, report["base_url"])
+        write_progress(out_dir, stage="opened_ai_agent", case_id="", detail="AI Agent panel is open")
 
         report["ai_agent_status"] = api_fetch(page, "GET", "/api/ai-agent/status").get("body")
         report["ai_agent_models"] = api_fetch(page, "GET", "/api/ai-agent/models").get("body")
         report["comfyui_status"] = api_fetch(page, "GET", "/api/comfyui/status").get("body")
         report["comfyui_models"] = api_fetch(page, "GET", "/api/comfyui/models").get("body")
+        write_progress(
+            out_dir,
+            stage="checked_services",
+            case_id="",
+            ai_agent_status=report["ai_agent_status"],
+            comfyui_status=report["comfyui_status"],
+        )
 
         asset_paths = make_mask_assets_for_source(out_dir, source_path, mask_preset=args.mask_preset)
         asset_paths, source_asset_name, source_resolution_label = _preserve_source_asset_if_needed(out_dir, source_path, asset_paths)
         report["fixed_resolution"] = source_resolution_label
         report["source_image_rel"] = f"assets/{source_asset_name}"
         reference_paths = make_pose_reference_assets(out_dir, reference_image_path)
+        cross_reference_paths = {
+            key: make_named_reference_asset(out_dir, path, key)
+            for key, path in cross_reference_input_paths.items()
+            if path is not None
+        }
+        if "pose" in cross_reference_paths:
+            reference_paths["pose"] = cross_reference_paths["pose"]
         source_imported = _imported_image_record(import_image(page, asset_paths["source"], source_asset_name))
         imported = {
             "source": source_imported,
@@ -1134,11 +1453,28 @@ def main() -> int:
                 key: _imported_image_record(import_image(page, path, path.name))
                 for key, path in reference_paths.items()
             },
+            "cross_references": {
+                key: _imported_image_record(import_image(page, path, path.name))
+                for key, path in cross_reference_paths.items()
+            },
         }
         report["imported_images"] = imported
+        write_progress(
+            out_dir,
+            stage="imported_images",
+            case_id="",
+            imported_image_count=1
+            + sum(1 for value in imported.values() if isinstance(value, dict))
+            + len(imported.get("references") or {})
+            + len(imported.get("cross_references") or {}),
+        )
         report["reference_images"] = {
             key: f"assets/{path.name}"
             for key, path in reference_paths.items()
+        }
+        report["cross_reference_images"] = {
+            key: f"assets/{path.name}"
+            for key, path in cross_reference_paths.items()
         }
         source_visual_artifacts = detect_visual_artifacts(asset_paths["source"])
         report["source_generation"] = {
@@ -1185,16 +1521,43 @@ def main() -> int:
 
         for case in selected_cases:
             artifact_slug = _artifact_slug(case)
+            write_progress(
+                out_dir,
+                stage="case_started",
+                case_id=str(case.get("case_id") or ""),
+                artifact_slug=artifact_slug,
+            )
             before_chat = len(chat_events)
             before_writes = len(write_events)
             mask_key = case.get("mask_key")
             mask = imported.get(mask_key) if mask_key else None
             reference_key = str(case.get("reference_pose_key") or "").strip()
             reference = (imported.get("references") or {}).get(reference_key) if reference_key else None
-            seed_context_with_reference(page, imported["source"], mask, reference, case)
+            cross_reference_keys = [str(key) for key in (case.get("cross_reference_keys") or [])]
+            extra_references = {
+                key: (imported.get("cross_references") or {}).get(key)
+                for key in cross_reference_keys
+                if (imported.get("cross_references") or {}).get(key)
+            }
+            seed_context_with_reference(page, imported["source"], mask, reference, case, extra_references=extra_references)
+            write_progress(
+                out_dir,
+                stage="seeded_agent_context",
+                case_id=str(case.get("case_id") or ""),
+                reference_keys=cross_reference_keys or ([reference_key] if reference_key else []),
+            )
             preflight = ai_agent_preflight(page)
             start = time.perf_counter()
             natural_language = str(case["natural_language"])
+            if args.command_resolution:
+                resolution = str(args.command_resolution).strip().lower()
+                if not re.match(r"^\d{3,4}x\d{3,4}$", resolution):
+                    raise ValueError("--command-resolution must look like 768x768")
+                natural_language = re.sub(
+                    r"解析度\s*\d{3,4}\s*[xX*×＊]\s*\d{3,4}",
+                    f"解析度 {resolution}",
+                    natural_language,
+                )
             if args.denoise_strength is not None:
                 if mask:
                     natural_language += (
@@ -1205,18 +1568,42 @@ def main() -> int:
                     natural_language += (
                         f" 請設定 denoise_strength={args.denoise_strength:g}；"
                         "這是無遮罩 img2img 語意編輯，請大幅套用本次明確指定的目標變更，"
-                        "但非目標元素如同一張臉、髮色、單馬尾、髮飾與夜間街景盡量保持。"
+                        "但未被本次任務指定要改變的身份、畫風、構圖與背景應盡量保持原圖一致。"
                     )
             if args.instruction_suffix:
                 natural_language += f" {args.instruction_suffix}"
+            write_progress(
+                out_dir,
+                stage="sending_agent_message",
+                case_id=str(case.get("case_id") or ""),
+                message_chars=len(natural_language),
+                chat_events_before=before_chat,
+                write_events_before=before_writes,
+            )
             send_result = send_ai_agent_message(page, natural_language)
+            write_progress(
+                out_dir,
+                stage="agent_message_send_returned",
+                case_id=str(case.get("case_id") or ""),
+                send_result=send_result,
+                chat_events_seen=len(chat_events) - before_chat,
+                write_events_seen=len(write_events) - before_writes,
+            )
 
-            deadline = time.time() + 15
+            deadline = time.time() + 60
             while time.time() < deadline and len(write_events) == before_writes:
                 text = thread_text(page)
                 if "需要補充" in text or "未送出" in text:
                     break
                 time.sleep(1)
+            write_progress(
+                out_dir,
+                stage="post_send_observation_complete",
+                case_id=str(case.get("case_id") or ""),
+                chat_events_seen=len(chat_events) - before_chat,
+                write_events_seen=len(write_events) - before_writes,
+                thread_tail=thread_text(page)[-1200:],
+            )
 
             case_writes = write_events[before_writes:]
             case_chats = chat_events[before_chat:]
@@ -1247,18 +1634,132 @@ def main() -> int:
             job: dict[str, Any] = {}
             polls: list[dict[str, Any]] = []
             preview: dict[str, Any] = {}
+            candidate_job_ids: list[str] = []
             if job_id:
+                write_progress(
+                    out_dir,
+                    stage="waiting_comfyui_job",
+                    case_id=str(case.get("case_id") or ""),
+                    job_id=job_id,
+                )
+                candidate_job_ids.append(job_id)
                 job, polls = wait_job(
                     page,
                     job_id,
                     args.job_timeout_seconds,
                     stalled_seconds=args.stalled_job_seconds,
+                    progress_callback=make_job_progress_writer(
+                        out_dir,
+                        case_id=str(case.get("case_id") or ""),
+                        job_id=job_id,
+                    ),
                 )
                 image = first_result_image(job)
                 if image:
                     preview = save_preview_with_retry(page, image["image_ref"], result_dir / f"{artifact_slug}_result.png")
+                write_progress(
+                    out_dir,
+                    stage="comfyui_job_observed",
+                    case_id=str(case.get("case_id") or ""),
+                    job_id=job_id,
+                    job_status=job.get("status"),
+                    preview_ok=bool(preview.get("ok")),
+                )
+
+            min_candidate_attempts = int(case.get("minimum_candidate_attempts") or 1)
+            job_status_for_review = str(job.get("status") or "").lower()
+            can_wait_for_iterative_review = (
+                bool(case.get("requires_iterative_review"))
+                and min_candidate_attempts > 1
+                and job_id
+                and job_status_for_review in {"completed", "running", "queued", "completed_pending_result"}
+            )
+            if can_wait_for_iterative_review:
+                review_deadline = time.time() + max(600, min(args.job_timeout_seconds, 7200))
+                observed_gate_results: set[str] = set()
+                while time.time() < review_deadline and len(set(candidate_job_ids)) < min_candidate_attempts:
+                    for event in write_events[before_writes:]:
+                        event_job_id = _write_event_job_id(event)
+                        if event_job_id and event_job_id not in candidate_job_ids:
+                            candidate_job_ids.append(event_job_id)
+                    text = thread_text(page)
+                    for candidate_id in list(candidate_job_ids):
+                        if candidate_id not in observed_gate_results and _thread_has_gate_result_for_job(text, candidate_id):
+                            observed_gate_results.add(candidate_id)
+                            review_deadline = time.time() + max(300, min(args.job_timeout_seconds, 7200))
+                    if len(set(candidate_job_ids)) >= min_candidate_attempts and len(observed_gate_results) >= len(set(candidate_job_ids)):
+                        break
+                    if _thread_has_staged_terminal(text):
+                        break
+                    time.sleep(2)
+
+                final_job_id = candidate_job_ids[-1] if candidate_job_ids else job_id
+                if final_job_id and final_job_id != job_id:
+                    job_id = final_job_id
+                    job, polls = wait_job(
+                        page,
+                        job_id,
+                        args.job_timeout_seconds,
+                        stalled_seconds=args.stalled_job_seconds,
+                        progress_callback=make_job_progress_writer(
+                            out_dir,
+                            case_id=str(case.get("case_id") or ""),
+                            job_id=job_id,
+                        ),
+                    )
+                    image = first_result_image(job)
+                    preview = {}
+                    if image:
+                        preview = save_preview_with_retry(page, image["image_ref"], result_dir / f"{artifact_slug}_result.png")
+
+                if final_job_id:
+                    gate_deadline = time.time() + max(300, min(args.job_timeout_seconds, 7200))
+                    while time.time() < gate_deadline:
+                        for event in write_events[before_writes:]:
+                            event_job_id = _write_event_job_id(event)
+                            if event_job_id and event_job_id not in candidate_job_ids:
+                                candidate_job_ids.append(event_job_id)
+                                gate_deadline = time.time() + max(300, min(args.job_timeout_seconds, 7200))
+                        latest_job_id = candidate_job_ids[-1] if candidate_job_ids else final_job_id
+                        if latest_job_id != final_job_id:
+                            final_job_id = latest_job_id
+                            job_id = final_job_id
+                            job, polls = wait_job(
+                                page,
+                                job_id,
+                                args.job_timeout_seconds,
+                                stalled_seconds=args.stalled_job_seconds,
+                                progress_callback=make_job_progress_writer(
+                                    out_dir,
+                                    case_id=str(case.get("case_id") or ""),
+                                    job_id=job_id,
+                                ),
+                            )
+                            image = first_result_image(job)
+                            preview = {}
+                            if image:
+                                preview = save_preview_with_retry(page, image["image_ref"], result_dir / f"{artifact_slug}_result.png")
+                            gate_deadline = time.time() + max(300, min(args.job_timeout_seconds, 7200))
+                            continue
+                        text = thread_text(page)
+                        if _thread_has_gate_result_for_job(text, final_job_id) or _thread_has_staged_terminal(text):
+                            break
+                        time.sleep(2)
+
+            case_writes = write_events[before_writes:]
+            if case_writes:
+                write = case_writes[-1]
+                write_response = write.get("response") if isinstance(write.get("response"), dict) else {}
+                write_request = write.get("request") if isinstance(write.get("request"), dict) else {}
+                write_args = write_request.get("arguments") if isinstance(write_request.get("arguments"), dict) else write_args
+                tool = write_request.get("tool") or tool
 
             visual_artifacts = detect_visual_artifacts(preview["path"]) if preview.get("ok") else {}
+            image_diff_metrics = (
+                image_difference_metrics(asset_paths["source"], Path(preview["path"]))
+                if preview.get("ok")
+                else {}
+            )
             write_failed = bool(
                 case_writes
                 and isinstance(write_response, dict)
@@ -1290,8 +1791,18 @@ def main() -> int:
             usage = chat_response.get("usage") if isinstance(chat_response.get("usage"), dict) else {}
             planner_elapsed = case_chats[-1].get("elapsed_seconds") if case_chats else None
             messages = thread_messages(page)
+            final_thread_text = thread_text(page)
+            staged_review_metrics = {
+                "candidate_mentions": len(re.findall(r"candidate\s+\d+", final_thread_text, re.IGNORECASE)),
+                "vision_gate_mentions": len(re.findall(r"視覺\s*gate|vision\s*gate", final_thread_text, re.IGNORECASE)),
+                "pass_mentions": len(re.findall(r"\bPASS\b|通過", final_thread_text, re.IGNORECASE)),
+                "fail_mentions": len(re.findall(r"\bFAIL\b|未通過", final_thread_text, re.IGNORECASE)),
+                "candidate_job_ids": candidate_job_ids,
+                "unique_candidate_job_count": len(set(candidate_job_ids)),
+            }
             scoring_items = _case_scoring_items(case)
-            hard_fail_detected = bool(visual_artifacts.get("has_blocking_artifact"))
+            no_visible_change_detected = bool(image_diff_metrics.get("no_visible_change"))
+            hard_fail_detected = bool(visual_artifacts.get("has_blocking_artifact") or no_visible_change_detected)
             case_report = {
                 "case_id": case["case_id"],
                 "artifact_slug": artifact_slug,
@@ -1318,18 +1829,27 @@ def main() -> int:
                 "result_image_rel": str(Path(preview.get("path", "")).relative_to(out_dir)) if preview.get("ok") else "",
                 "mask_overlay_rel": f"assets/mask_{mask_key}_overlay.png" if mask_key else "",
                 "reference_image_rel": f"assets/{reference_paths[reference_key].name}" if reference_key and reference_key in reference_paths else "",
+                "cross_reference_image_rels": {
+                    key: f"assets/{cross_reference_paths[key].name}"
+                    for key in cross_reference_keys
+                    if key in cross_reference_paths
+                },
                 "chat_events": case_chats,
                 "write_events": case_writes,
-                "thread_tail": thread_text(page)[-6000:],
+                "thread_tail": final_thread_text[-6000:],
                 "thread_anomaly_metrics": anomaly_metrics(messages),
+                "staged_review_metrics": staged_review_metrics,
                 "visual_artifacts": visual_artifacts,
+                "image_difference_metrics": image_diff_metrics,
                 "scoring_policy": VISUAL_SCORING_POLICY,
                 "scoring_items": scoring_items,
+                "requires_iterative_review": bool(case.get("requires_iterative_review")),
+                "minimum_candidate_attempts": int(case.get("minimum_candidate_attempts") or 1),
                 "hard_fail_detected": hard_fail_detected,
                 "prompt_achievement_rate": "0%" if hard_fail_detected else "待人工逐項判定",
                 "prompt_achievement_scoring_note": (
                     "硬性瑕疵優先：若有六指/多指、肢體或衣物不合理穿越、必須出現部位裁切、嚴重解剖錯誤、黑灰空圖等，直接不合格。"
-                    "無硬性瑕疵時才按 scoring_items 達成率計分。"
+                    "若結果與 source 幾乎無可見差異，也視為未執行使用者要求而不合格。無硬性瑕疵時才按 scoring_items 達成率計分。"
                 ),
                 "preflight": preflight,
                 "send_result": send_result,
@@ -1344,24 +1864,32 @@ def main() -> int:
                     else (
                         "自動檢測到大面積灰色 artifact；結果不合格。"
                         if visual_artifacts.get("has_blocking_artifact")
-                        else "待人工視覺判定"
+                        else (
+                            "自動檢測到結果與 source 幾乎無可見差異；結果不合格。"
+                            if no_visible_change_detected
+                            else "待人工視覺判定"
+                        )
                     )
                 ),
             }
             reference_asset_path = reference_paths.get(reference_key) if reference_key and reference_key in reference_paths else None
             result_asset_path = Path(preview["path"]) if preview.get("ok") else None
-            artifact_pack = write_case_artifact_pack(
-                out_dir=out_dir,
-                case=case,
-                source_path=asset_paths["source"],
-                reference_path=reference_asset_path,
-                result_path=result_asset_path,
-                case_report=case_report,
-            )
-            case_report["artifact_pack"] = {
-                key: _artifact_report_path(value, out_dir)
-                for key, value in artifact_pack.items()
-            }
+            try:
+                artifact_pack = write_case_artifact_pack(
+                    out_dir=out_dir,
+                    case=case,
+                    source_path=asset_paths["source"],
+                    reference_path=reference_asset_path,
+                    result_path=result_asset_path,
+                    case_report=case_report,
+                )
+                case_report["artifact_pack"] = {
+                    key: _artifact_report_path(value, out_dir)
+                    for key, value in artifact_pack.items()
+                }
+            except Exception as exc:
+                case_report["artifact_pack"] = {}
+                case_report["artifact_pack_error"] = str(exc)
             if not job_id:
                 if write_failed:
                     case_report["error"] = {
@@ -1385,6 +1913,22 @@ def main() -> int:
                 case_report["error"] = {"reason": "result image preview failed", "preview": preview}
             elif visual_artifacts.get("has_blocking_artifact"):
                 case_report["error"] = {"reason": "blocking visual artifact detected", "visual_artifacts": visual_artifacts}
+            elif no_visible_change_detected:
+                case_report["error"] = {
+                    "reason": "result image is nearly unchanged from source",
+                    "image_difference_metrics": image_diff_metrics,
+                }
+            elif case_report["requires_iterative_review"] and staged_review_metrics["unique_candidate_job_count"] < min_candidate_attempts:
+                case_report["error"] = {
+                    "reason": "staged review did not generate the required candidate count",
+                    "minimum_candidate_attempts": min_candidate_attempts,
+                    "staged_review_metrics": staged_review_metrics,
+                }
+            elif case_report["requires_iterative_review"] and staged_review_metrics["vision_gate_mentions"] < 1:
+                case_report["error"] = {
+                    "reason": "staged review did not visibly run a vision gate",
+                    "staged_review_metrics": staged_review_metrics,
+                }
             report["cases"].append(case_report)
             write_report(out_dir, {**report, "finished_at": time.strftime("%Y-%m-%d %H:%M:%S")})
 
@@ -1398,6 +1942,7 @@ def main() -> int:
         case.get("job_status") == "completed"
         and case.get("result_preview", {}).get("ok")
         and not (case.get("visual_artifacts") or {}).get("has_blocking_artifact")
+        and not case.get("error")
         for case in report["cases"]
     ) and not report["browser_errors"]
     md_path = write_report(out_dir, report)

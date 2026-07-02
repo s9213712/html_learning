@@ -1784,6 +1784,60 @@ def test_ai_agent_comfyui_write_tool_extracts_inline_qwen_edit_instruction(tmp_p
     )
 
 
+def test_ai_agent_comfyui_write_tool_sanitizes_duplicated_stage_instruction_style_context(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "write",
+            "ai_agent_allowed_tools": "write_comfyui_generate",
+        },
+    )
+    captured = _register_fake_comfyui_workflow_routes(
+        app,
+        workflow_id="origin_qwen_image_edit_2509",
+        preset_id=75,
+    )
+
+    @app.route("/api/comfyui/models", methods=["GET"])
+    def fake_comfyui_models():
+        return _json_resp({"ok": True, "models": ["JANKUTrainedChenkinNoobai_v777.safetensors"]})
+
+    instruction = (
+        "stage 1 chara merge: visibly change the source character appearance to these target traits: "
+        "blonde hair; execute this as a direct text edit; keep the source outfit unchanged."
+    )
+    source_ref = {"filename": "source.png", "subfolder": "", "type": "input", "cloud_file_id": "cloud-source-1"}
+    response = app.test_client().post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_comfyui_generate",
+        "confirm": "EXECUTE",
+        "arguments": {
+            "prompt": f"{instruction}\n\nStyle and preservation context: {instruction}",
+            "edit_instruction": instruction,
+            "official_workflow_id": "origin_qwen_image_edit_2509",
+            "generation_mode": "img2img",
+            "source_image_ref": source_ref,
+            "confirm_billing": True,
+        },
+    })
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    prompt = captured["user_inputs"]["494"]["prompt"]
+    assert prompt.count("stage 1 chara merge") == 1
+    assert "Style and preservation context: by ogipote, anime style, 1girl" in prompt
+    assert "Style and preservation context: stage 1" not in prompt
+    assert prompt.count("do not render words") == 1
+    assert prompt.count("no visible artist name") == 1
+    assert any(
+        item.get("code") == "qwen_edit_style_context_sanitized"
+        for item in payload["result"].get("workflow_bridge_adjustments", [])
+    )
+
+
 @pytest.mark.parametrize(
     ("prompt", "expected_prefix", "expected_fragment"),
     [
@@ -2176,6 +2230,242 @@ def test_ai_agent_comfyui_write_tool_assigns_qwen_reference_image_without_link_u
         item.get("code") == "qwen_edit_reference_image_link_expected"
         for item in payload["result"].get("workflow_bridge_adjustments", [])
     )
+
+
+def test_ai_agent_comfyui_write_tool_overrides_stale_instruction_for_clothes_reference(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "write",
+            "ai_agent_allowed_tools": "write_comfyui_generate",
+        },
+    )
+    captured = _register_fake_comfyui_workflow_routes(
+        app,
+        workflow_id="origin_qwen_image_edit_2509",
+        preset_id=73,
+    )
+
+    @app.route("/api/comfyui/models", methods=["GET"])
+    def fake_comfyui_models_for_clothes_reference_override():
+        return _json_resp({"ok": True, "models": ["JANKUTrainedChenkinNoobai_v777.safetensors"]})
+
+    source_ref = {"filename": "source.png", "subfolder": "", "type": "input", "cloud_file_id": "cloud-source-1"}
+    clothes_ref = {
+        "filename": "reference_clothes_1024x1024.png",
+        "subfolder": "",
+        "type": "input",
+        "cloud_file_id": "cloud-clothes-1",
+        "semantic_key": "clothes",
+    }
+    response = app.test_client().post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_comfyui_generate",
+        "confirm": "EXECUTE",
+        "arguments": {
+            "prompt": "by ogipote, anime style, 1girl",
+            "edit_instruction": (
+                "change only the girl's face identity to a different anime character face with a slightly more mature face shape "
+                "and different eye shape; preserve hairstyle, hair color, outfit, hands, pose, body, composition, and background."
+            ),
+            "official_workflow_id": "origin_qwen_image_edit_2509",
+            "generation_mode": "img2img",
+            "source_image_ref": source_ref,
+            "reference_image_ref": clothes_ref,
+            "confirm_billing": True,
+        },
+    })
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    qwen_prompt = captured["user_inputs"]["494"]["prompt"].lower()
+    assert "outfit design" in qwen_prompt
+    assert "change only the source girl's clothes" in qwen_prompt
+    assert "face identity" not in qwen_prompt
+    assert captured["image_field_assignments"]["78"] == "cloud-source-1"
+    assert captured["image_field_assignments"].get("79") != "cloud-clothes-1"
+    assert any(
+        item.get("code") == "qwen_single_reference_image2_stripped"
+        for item in payload["result"].get("workflow_bridge_adjustments", [])
+    )
+
+
+def test_ai_agent_comfyui_write_tool_preserves_guarded_qwen_reference_image2_and_profile(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "write",
+            "ai_agent_allowed_tools": "write_comfyui_generate",
+        },
+    )
+    captured = _register_fake_comfyui_workflow_routes(
+        app,
+        workflow_id="origin_qwen_image_edit_2509",
+        preset_id=73,
+    )
+
+    @app.route("/api/comfyui/models", methods=["GET"])
+    def fake_comfyui_models_for_guarded_qwen_reference():
+        return _json_resp({"ok": True, "models": ["JANKUTrainedChenkinNoobai_v777.safetensors"]})
+
+    source_ref = {"filename": "source.png", "subfolder": "", "type": "input", "cloud_file_id": "cloud-source-1"}
+    clothes_ref = {
+        "filename": "reference_clothes_1024x1024.png",
+        "subfolder": "",
+        "type": "input",
+        "cloud_file_id": "cloud-clothes-1",
+        "semantic_key": "clothes",
+    }
+    response = app.test_client().post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_comfyui_generate",
+        "confirm": "EXECUTE",
+        "arguments": {
+            "prompt": "by ogipote, anime style, 1girl",
+            "edit_instruction": (
+                "stage 2 clothes merge: visibly change only the outfit to a blue towel wrap; "
+                "preserve the passed character face, hair, pose, framing, and background."
+            ),
+            "official_workflow_id": "origin_qwen_image_edit_2509",
+            "generation_mode": "img2img",
+            "source_image_ref": source_ref,
+            "reference_image_ref": clothes_ref,
+            "qwen_reference_mode": "stage_guarded_image2",
+            "qwen_reference_image2": True,
+            "qwen_edit_profile": "base",
+            "confirm_billing": True,
+        },
+    })
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert captured["image_field_assignments"]["78"] == "cloud-source-1"
+    assert captured["image_field_assignments"]["79"] == "cloud-clothes-1"
+    assert captured["user_inputs"]["494"]["prompt"].startswith("stage 2 clothes merge")
+    assert captured["user_inputs"]["483"]["switch"] is False
+    assert captured["user_inputs"]["484"]["switch"] is False
+    assert captured["user_inputs"]["485"]["switch"] is False
+    adjustments = payload["result"].get("workflow_bridge_adjustments", [])
+    assert any(item.get("code") == "qwen_single_reference_image2_stage_guarded" for item in adjustments)
+    assert any(item.get("code") == "qwen_edit_base_branch_selected" for item in adjustments)
+
+
+def test_ai_agent_comfyui_write_tool_text_traits_only_strips_qwen_reference_image2(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "write",
+            "ai_agent_allowed_tools": "write_comfyui_generate",
+        },
+    )
+    captured = _register_fake_comfyui_workflow_routes(
+        app,
+        workflow_id="origin_qwen_image_edit_2509",
+        preset_id=73,
+    )
+
+    @app.route("/api/comfyui/models", methods=["GET"])
+    def fake_comfyui_models_for_text_traits_qwen_reference():
+        return _json_resp({"ok": True, "models": ["JANKUTrainedChenkinNoobai_v777.safetensors"]})
+
+    source_ref = {"filename": "source.png", "subfolder": "", "type": "input", "cloud_file_id": "cloud-source-1"}
+    clothes_ref = {
+        "filename": "blue_towel_onsen_cat_ears_outfit.png",
+        "subfolder": "",
+        "type": "input",
+        "cloud_file_id": "cloud-clothes-1",
+        "semantic_key": "clothes",
+    }
+    response = app.test_client().post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_comfyui_generate",
+        "confirm": "EXECUTE",
+        "arguments": {
+            "prompt": "by ogipote, anime style, 1girl",
+            "edit_instruction": (
+                "stage 2 clothes merge: visibly change only the outfit to a blue towel wrap; "
+                "preserve the passed character face, hair, pose, framing, and background; "
+                "use the reference image only as guarded visual evidence; do not copy the reference identity."
+            ),
+            "official_workflow_id": "origin_qwen_image_edit_2509",
+            "generation_mode": "img2img",
+            "source_image_ref": source_ref,
+            "reference_image_ref": clothes_ref,
+            "qwen_reference_mode": "vision_text_traits_only",
+            "qwen_reference_image2": False,
+            "confirm_billing": True,
+        },
+    })
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert captured["image_field_assignments"]["78"] == "cloud-source-1"
+    assert captured["image_field_assignments"].get("79") != "cloud-clothes-1"
+    adjustments = payload["result"].get("workflow_bridge_adjustments", [])
+    assert any(item.get("code") == "qwen_single_reference_image2_text_traits_only" for item in adjustments)
+
+
+def test_ai_agent_comfyui_cross_reference_prompt_overrides_stale_hair_instruction(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "write",
+            "ai_agent_allowed_tools": "write_comfyui_generate",
+        },
+    )
+    captured = _register_fake_comfyui_workflow_routes(
+        app,
+        workflow_id="origin_qwen_image_edit_2509",
+        preset_id=73,
+    )
+
+    @app.route("/api/comfyui/models", methods=["GET"])
+    def fake_comfyui_models_for_cross_reference():
+        return _json_resp({"ok": True, "models": ["JANKUTrainedChenkinNoobai_v777.safetensors"]})
+
+    source_ref = {"filename": "source.png", "subfolder": "", "type": "input", "cloud_file_id": "cloud-source-1"}
+    pose_ref = {"filename": "squat_double_v_sign_pose.png", "subfolder": "", "type": "input", "cloud_file_id": "cloud-pose-1"}
+    response = app.test_client().post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_comfyui_generate",
+        "confirm": "EXECUTE",
+        "arguments": {
+            "prompt": (
+                "請真的使用本站 ComfyUI 圖生圖語意改圖，不要使用 inpaint mask；"
+                "我另外提供三張不同用途的 reference image：chara reference 只代表角色外觀/臉部氣質/髮型方向，"
+                "clothes reference 只代表服裝設計，pose reference 只代表人物姿勢/動作。"
+                "請你自己觀察三張圖並把三者合理融合到 source 人物；提示詞基礎：by ogipote, anime style, 1girl。"
+            ),
+            "edit_instruction": "change only the hair color to silver-white; preserve face, expression, outfit, hands, pose, body, and background.",
+            "official_workflow_id": "origin_qwen_image_edit_2509",
+            "generation_mode": "img2img",
+            "source_image_ref": source_ref,
+            "reference_image_ref": pose_ref,
+            "confirm_billing": True,
+        },
+    })
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    qwen_prompt = captured["user_inputs"]["494"]["prompt"]
+    assert qwen_prompt.startswith("use the character reference only")
+    assert "clothes reference" in qwen_prompt
+    assert "pose reference" in qwen_prompt
+    assert "silver-white" not in qwen_prompt
+    assert captured["image_field_assignments"]["78"] == "cloud-source-1"
+    assert captured["image_field_assignments"]["79"] == "cloud-pose-1"
 
 
 def test_ai_agent_comfyui_write_tool_does_not_fallback_source_into_qwen_reference(tmp_path):

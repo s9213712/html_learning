@@ -232,6 +232,46 @@ def test_json_request_preserves_string_error_payload(monkeypatch):
     assert exc.value.payload == {"error": "vision-cloud-model was retired at 2026-06-16"}
 
 
+def test_json_request_retries_transient_ai_backend_502(monkeypatch):
+    calls = []
+
+    class FakeResponse:
+        def __init__(self):
+            self._payload = json.dumps({"choices": [{"message": {"content": "ok"}}], "model": "qwen3.5"}).encode("utf-8")
+
+        def read(self, _size):
+            payload = self._payload
+            self._payload = b""
+            return payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def fake_urlopen(_req, timeout=5):
+        calls.append(timeout)
+        if len(calls) == 1:
+            body = json.dumps({"error": {"message": "temporary cloud vision gateway failure"}}).encode("utf-8")
+            raise urllib_error.HTTPError("http://127.0.0.1:11434/v1/chat/completions", 502, "Bad Gateway", {}, io.BytesIO(body))
+        return FakeResponse()
+
+    monkeypatch.setattr(hermes_client.urllib_request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(hermes_client, "sleep", lambda _seconds: None)
+
+    result = hermes_client._json_request(
+        {"ai_agent_api_base_url": "http://127.0.0.1:11434/v1"},
+        "POST",
+        "/chat/completions",
+        {"stream": False},
+        timeout=60,
+    )
+
+    assert result["choices"][0]["message"]["content"] == "ok"
+    assert len(calls) == 2
+
+
 def test_ai_agent_health_checks_base_path_when_present(monkeypatch):
     class FakeResponse:
         def __init__(self, payload):

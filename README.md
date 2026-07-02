@@ -67,9 +67,15 @@ GGUF / Anything2Real / SDXL inpaint workflow profile 與 ComfyUI 設定分區都
   1080x1920 後處理、髮色/髮型/表情/配飾/一般服裝替換、背景保留、進度追蹤。
 - 部分可用：高強度服裝 + 體態混合修改。`denoise=0.85` 能把和服換成白色蕾絲
   長裙並改體態，但會改變原本雙手 clasped 姿勢，且容易漂到高開衩旗袍感。
+- 已新增候選工具：`write_comfyui_background_composite` 可在使用者明確要求
+  「完全/原樣/exact 複製背景」時，改走站內 exact background plate composite，
+  避免假裝 Qwen Edit 能像素級重畫背景。前台會把 LLM 回傳的圖片檔名字串解析回
+  `image_ref`，因此自然語言 planner 不必硬塞完整 JSON 物件。此工具輸出一律標記
+  `delivery_pass=false`、`review_required=true`，必須經 vision/human review 才能
+  當作該階段通過。
 - 仍需修正：高強度 i2i 時的姿勢保真、negative prompt 合併、透明/高開衩/
-  qipao/cheongsam 漂移，以及 workflow run `params_json` 中 width/height /
-  denoise 記錄與實際 queue 參數不一致。
+  qipao/cheongsam 漂移、exact background reference 若本身含人物/物件時的前景移除，
+  以及 workflow run `params_json` 中 width/height / denoise 記錄與實際 queue 參數不一致。
 
 本輪關鍵測試參數摘要：
 
@@ -78,6 +84,7 @@ GGUF / Anything2Real / SDXL inpaint workflow profile 與 ComfyUI 設定分區都
 | v5 body/lace/proportions | source 被錯誤壓成 `1024x1024`，要求 output `1080x1920` | `origin_qwen_image_edit_2509` | `qwen_image_edit_2509_fp8_e4m3fn.safetensors` + Lightning 4-step LoRA | steps 4, cfg 1, denoise 0.55 | FAIL。測試工具先破壞比例，產生上下模糊延展帶，不能當模型能力判定。 |
 | v6 body/lace/proportions | source `1080x1920`，final output `1080x1920` | `origin_qwen_image_edit_2509` | 同上 | steps 4, cfg 1, denoise 0.55 | FAIL。比例修好，但模型過度保守，仍保留和服，服裝/體態目標未達成。 |
 | v7 body/lace/proportions | source `1080x1920`，final output `1080x1920` | `origin_qwen_image_edit_2509` | 同上 | steps 4, cfg 1, denoise 0.85, strengthened English edit prompt | PARTIAL / FAIL。服裝與體態有改，但動作被改、裙子漂到高開衩旗袍感，不符合保真規則。 |
+| exact background composite | source `1024x1024` + background reference `1080x1920` | `write_comfyui_background_composite` | no model queue | LLM planner: 25.291s, 8620 tokens; tool: 8.728s | ROUTING PASS / VISUAL FAIL。Agent 會選正確工具且不走 Qwen Edit；但參考圖含前景人物，無乾淨背景板或 background inpaint 時不能視為通過。完整 artifacts 在 `/mnt/c/share/ComfyUI/output/i2i/exact_background_composite_20260702/`。 |
 
 下一輪建議測試：`denoise=0.70-0.75`，明確加入 `keep both hands clasped in front
 of chest`，並補強 negative prompt：`qipao, cheongsam, high slit, exposed leg,

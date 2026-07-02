@@ -59,7 +59,7 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert 'id="ai-agent-comfyui-vae"' in html
     assert 'id="ai-agent-comfyui-generate-btn"' in html
     assert 'id="s-module-ai-agent-min-role"' in html
-    _warn_if_asset_cache_version_changed(html, "/js/37-ai-agent.js", "20260629-ai-agent-conversation-retry")
+    _warn_if_asset_cache_version_changed(html, "/js/37-ai-agent.js", "20260702-ai-agent-background-reference-v25")
     _warn_if_asset_cache_version_changed(html, "/js/90-bootstrap.js", "20260611-ai-agent-comfyui-write-tool")
 
     assert '"ai-agent": "feature_ai_agent_enabled"' in core_js
@@ -136,6 +136,9 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert "function aiAgentMarkModelUnavailable" in ai_agent_js
     assert "json?.status || status" in ai_agent_js
     assert "圖片理解模型不可用或已下架" in ai_agent_js
+    assert "圖片理解模型目前無權限或額度不足" in ai_agent_js
+    assert "requires a subscription" in ai_agent_js
+    assert "upgrade for access" in ai_agent_js
     assert "aiAgentMarkModelUnavailable(selectedModel" in ai_agent_js
     assert "function aiAgentImageAnalysisError" in ai_agent_js
     assert "function aiAgentImageTransportError" in ai_agent_js
@@ -144,6 +147,11 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert "aiAgentMessageWithTokenStats" in ai_agent_js
     assert "total tokens" in ai_agent_js
     assert "tokens/s" in ai_agent_js
+    assert "function aiAgentIsTransientChatFailure" in ai_agent_js
+    assert "async function aiAgentVisionGateChatFetch" in ai_agent_js
+    assert "attempts: 3" in ai_agent_js
+    assert "vision gate 第 ${reviewFetch.attempt} 次嘗試成功" in ai_agent_js
+    assert "暫時性 vision/cloud/route 錯誤" in ai_agent_js
     assert "function aiAgentNormalizeReadonlyScope" in ai_agent_js
     assert "async function aiAgentRunReadonlyQuery" in ai_agent_js
     assert "describe.*image" in ai_agent_js
@@ -159,6 +167,10 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert "圖片分析與生圖參數生成中" in ai_agent_js
     assert "ComfyUI 產圖送出失敗（HTTP ${res.status}）" in ai_agent_js
     assert "function aiAgentWatchComfyuiJob" in ai_agent_js
+    assert "function aiAgentSetComfyuiIdleSuspend" in ai_agent_js
+    assert "function aiAgentStopWatchingComfyuiJob" in ai_agent_js
+    assert 'setInactivitySuspendState(' in ai_agent_js
+    assert '"AI Agent 產圖追蹤中"' in ai_agent_js
     assert 'toolName === "write_comfyui_generate"' in ai_agent_js
     assert "function aiAgentPollComfyuiJob" in ai_agent_js
     assert "function aiAgentComfyuiRetryDelayMsFromError" in ai_agent_js
@@ -192,7 +204,9 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert "reference_image_ref" in ai_agent_js
     assert "denoise_strength" in ai_agent_js
     assert "edit_instruction: source.edit_instruction || source.edit_prompt || \"\"" in ai_agent_js
-    assert "edit_instruction: aiAgentStripFieldValue(source?.edit_instruction || source?.edit_prompt || \"\")" in ai_agent_js
+    assert "let editInstruction = aiAgentStripFieldValue(source?.edit_instruction || source?.edit_prompt || \"\")" in ai_agent_js
+    assert "aiAgentLooksLikeUnrelatedImageEditInstruction(editInstruction, userText)" in ai_agent_js
+    assert "edit_instruction: editInstruction" in ai_agent_js
     assert "Qwen Image Edit / origin_qwen_image_edit_2509 時，edit_instruction 必須是短英文直接編輯命令" in ai_agent_js
     assert "prompt 只放 style/preservation context" in ai_agent_js
     assert "不得把整段中文自然語言任務" in ai_agent_js
@@ -224,7 +238,7 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert "前幾個版本" in ai_agent_js
     assert "vae\" && autoLike.test(value)" in ai_agent_js
     assert "comfyuiAttemptHistory" in ai_agent_js
-    assert 'throw new Error("目前沒有可用的圖片理解模型。請在 AI Agent 模型允許清單加入 /models 回傳且支援圖片的模型後再試。")' in ai_agent_js
+    assert 'throw new Error("目前沒有可嘗試圖片理解的模型。請確認允許清單至少包含一個 /models 回傳的 cloud 模型，或開啟圖片輸入。")' in ai_agent_js
     assert 'const selectedModel = mode === "image" ? aiAgentVisionModel() : aiAgentSelectedTextModel();' in ai_agent_js
     assert 'return "";' in ai_agent_js
     assert 'action === "readonly" || action === "comfyui_status"' in ai_agent_js
@@ -274,6 +288,63 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert "function aiAgentComfyuiCompletionMessage" in ai_agent_js
     assert "function aiAgentHydrateComfyuiMessageImages" in ai_agent_js
     assert "function aiAgentRenderMessageImages" in ai_agent_js
+    assert "function aiAgentComfyuiSubmitArgs" in ai_agent_js
+    assert 'key.startsWith("agent_review_")' in ai_agent_js
+    assert "function aiAgentNormalizeVisionReviewText" in ai_agent_js
+    assert "vision review did not return valid JSON" in ai_agent_js
+    assert "Return one plain JSON object only" in ai_agent_js
+    assert "This is not private raw data" in ai_agent_js
+    assert "function aiAgentApplyPairwiseCrossReferenceStage" in ai_agent_js
+    assert "function aiAgentSingleReferenceStageFromText" in ai_agent_js
+    assert "function aiAgentLooksLikeWrongSingleReferenceInstruction" in ai_agent_js
+    assert "clothes reference" in ai_agent_js
+    assert "background reference" in ai_agent_js
+    assert "if (semanticKey && semanticKey !== key)" in ai_agent_js
+    assert "return { item, score: -10000 }" in ai_agent_js
+    assert "face|identity|eye shape|mature face|hair color|hairstyle|pose|body pose" in ai_agent_js
+    assert "referenceDescriptionCache" in ai_agent_js
+    assert "function aiAgentDescribeReferenceForEdit" in ai_agent_js
+    assert "function aiAgentPrepareComfyuiArgsForStrategy" in ai_agent_js
+    assert "semanticStageKey" in ai_agent_js
+    assert ai_agent_js.count("args = await aiAgentPrepareComfyuiArgsForStrategy(args);") >= 2
+    assert "function aiAgentBuildReferenceAwareStageInstruction" in ai_agent_js
+    assert "function aiAgentCleanStageTargetText" in ai_agent_js
+    assert "AI_AGENT_QWEN_EDIT_STYLE_FALLBACK" in ai_agent_js
+    assert "function aiAgentStartComfyuiIdleKeepalive" in ai_agent_js
+    assert "idleKeepaliveTimer" in ai_agent_js
+    assert "stageContract" in ai_agent_js
+    assert "Vision suggested refinement, but do not drop the active" in ai_agent_js
+    assert "Stay on the ${stageKey} stage until this gate passes" in ai_agent_js
+    assert 'next.qwen_edit_profile = "base"' in ai_agent_js
+    assert "Do not submit a near-identical preservation pass" in ai_agent_js
+    assert "停止同一路徑重送以避免浪費算力" in ai_agent_js
+    assert "function aiAgentImagePixelDelta" in ai_agent_js
+    assert "function aiAgentDownscaleDataUrlForVision" in ai_agent_js
+    assert "aiAgentReferenceDescriptionLooksUnusable" in ai_agent_js
+    assert "aiAgentAssertUsableReferenceDescription" in ai_agent_js
+    assert "rejectUnusableVision" in ai_agent_js
+    assert "pixel_near_identical" in ai_agent_js
+    assert "此結果不會被視為通過，也不會消耗 vision token" in ai_agent_js
+    assert "function aiAgentScheduleStagedReviewRetry" in ai_agent_js
+    assert "candidate-only review" in ai_agent_js
+    assert "args.confirm_billing" in ai_agent_js
+    assert "請真的使用" in ai_agent_js
+    assert "cat\\s+ears?" in ai_agent_js
+    assert "visible garment type, fabric, color, drape, and outfit silhouette only" in ai_agent_js
+    assert "vision extract current reference traits" in ai_agent_js
+    assert "delete next.reference_image_ref;" in ai_agent_js
+    assert "vision_text_traits_only" in ai_agent_js
+    assert "qwen_reference_force_image2" in ai_agent_js
+    assert "stage_guarded_image2" in ai_agent_js
+    assert "qwen_reference_image2" in ai_agent_js
+    assert "use the extracted reference traits only as guarded visual evidence" in ai_agent_js
+    assert "agent_review_reference_image_ref" in ai_agent_js
+    assert "開始用 vision 模型讀取" in ai_agent_js
+    assert "不要只寫 use this reference" in ai_agent_js
+    assert "不要只提高 denoise 重送，要改走 pose/control workflow" in ai_agent_js
+    assert "pairwise_reference_merge" in ai_agent_js
+    assert "stage 1 chara merge" in ai_agent_js
+    assert "For the active stage, also fail if the candidate is nearly unchanged from SOURCE" in ai_agent_js
     assert "comfyui/image-preview" in ai_agent_js
     assert "接下來要我怎麼處理？" in ai_agent_js
     assert "修改參數重跑" in ai_agent_js
@@ -329,6 +400,7 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert ".ai-agent-tool-panel" in css
     assert ".ai-agent-message-meta" in css
     assert "@media (max-width: 640px)" in css
+    assert "37-ai-agent.js?v=20260702-ai-agent-background-reference-v25" in html
 
 
 def test_ai_agent_root_quick_settings_use_reserved_pricing_key():

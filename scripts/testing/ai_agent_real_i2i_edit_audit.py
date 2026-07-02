@@ -29,6 +29,19 @@ SOURCE_SCENE_PROMPT = (
     "wide empty gap between the apple and the mug, no other tabletop objects, clean anime line art, detailed SDXL illustration, no text, no watermark, no logo, no symbols, no object pattern"
 )
 
+BENIGN_BROWSER_ERROR_PATTERNS = (
+    "net::ERR_NETWORK_CHANGED",
+)
+
+
+def record_browser_error(report: dict[str, Any], message: str) -> None:
+    text = str(message or "").strip()
+    if not text:
+        return
+    target = "browser_warnings" if any(pattern in text for pattern in BENIGN_BROWSER_ERROR_PATTERNS) else "browser_errors"
+    report.setdefault(target, []).append(text)
+
+
 SOURCE_GENERATION_CASE: dict[str, Any] = {
     "case_id": "00_txt2img_source",
     "title": "Text-to-image source generation",
@@ -504,17 +517,37 @@ def api_fetch(page, method: str, path: str, body: dict[str, Any] | None = None) 
     }
 
 
+def safe_goto(page, url: str, *, wait_until: str = "domcontentloaded", attempts: int = 4) -> None:
+    last_error = ""
+    transient_patterns = (
+        "ERR_NETWORK_CHANGED",
+        "ERR_CONNECTION_RESET",
+        "ERR_CONNECTION_CLOSED",
+        "ERR_EMPTY_RESPONSE",
+    )
+    for attempt in range(attempts):
+        try:
+            page.goto(url, wait_until=wait_until)
+            return
+        except Exception as exc:
+            last_error = str(exc)
+            if not any(pattern in last_error for pattern in transient_patterns) or attempt >= attempts - 1:
+                raise
+            time.sleep(1 + attempt)
+    raise RuntimeError(last_error or f"failed to navigate to {url}")
+
+
 def login(page, base_url: str, username: str, password: str) -> None:
-    page.goto(base_url + "/", wait_until="domcontentloaded")
+    safe_goto(page, base_url + "/", wait_until="domcontentloaded")
     page.evaluate("() => fetch('/api/csrf-token', {credentials: 'same-origin'}).catch(() => null)")
     result = api_fetch(page, "POST", "/api/login", {"username": username, "password": password})
     if result["status"] != 200 or not result["body"].get("ok"):
         raise RuntimeError(f"login failed for {username}: {result}")
-    page.goto(base_url + "/", wait_until="domcontentloaded")
+    safe_goto(page, base_url + "/", wait_until="domcontentloaded")
 
 
 def open_ai_agent(page, base_url: str) -> None:
-    page.goto(base_url + "/", wait_until="domcontentloaded")
+    safe_goto(page, base_url + "/", wait_until="domcontentloaded")
     try:
         page.wait_for_function(
             """() => (
@@ -856,6 +889,7 @@ def wait_job(
     timeout_seconds: int,
     *,
     stalled_seconds: int = 1800,
+    progress_callback=None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     deadline = time.time() + timeout_seconds
     polls: list[dict[str, Any]] = []
@@ -863,6 +897,7 @@ def wait_job(
     completed_phase_seen_at: float | None = None
     last_signature: tuple[Any, ...] | None = None
     last_signature_changed_at = time.time()
+    auth_error_count = 0
     while time.time() < deadline:
         result = api_fetch(page, "GET", f"/api/comfyui/jobs/{job_id}")
         last_job = (result.get("body") or {}).get("job") or {}
@@ -873,7 +908,7 @@ def wait_job(
             last_signature = signature
             last_signature_changed_at = now
         unchanged_seconds = max(0.0, now - last_signature_changed_at)
-        polls.append({
+        poll_snapshot = {
             "at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "http_status": result.get("status"),
             "ok": result.get("ok"),
@@ -882,7 +917,20 @@ def wait_job(
             "percent": progress.get("percent"),
             "detail": progress.get("detail") or progress.get("error_message") or last_job.get("error"),
             "unchanged_seconds": round(unchanged_seconds, 3),
-        })
+        }
+        polls.append(poll_snapshot)
+        if callable(progress_callback):
+            progress_callback(poll_snapshot, last_job)
+        if int(result.get("status") or 0) in {401, 403}:
+            auth_error_count += 1
+            if auth_error_count >= 2:
+                last_job["status"] = "auth_lost"
+                last_job["error"] = f"job polling returned HTTP {result.get('status')} twice; refusing to wait silently"
+                last_job["job_id"] = job_id
+                return last_job, polls
+            time.sleep(2)
+            continue
+        auth_error_count = 0
         status = str(last_job.get("status") or "").lower()
         phase = str(progress.get("phase") or "").lower()
         if status in {"completed", "error", "failed", "cancelled"} or phase in {"error", "failed", "cancelled"}:
@@ -1274,6 +1322,7 @@ def main() -> int:
         "source_instruction_suffix": args.source_instruction_suffix,
         "cases": [],
         "browser_errors": [],
+        "browser_warnings": [],
     }
 
     request_starts: dict[int, float] = {}
@@ -1285,8 +1334,8 @@ def main() -> int:
         ctx = browser.new_context(ignore_https_errors=True, viewport={"width": 1440, "height": 1000})
         page = ctx.new_page()
         page.on("dialog", lambda dialog: dialog.accept())
-        page.on("pageerror", lambda exc: report["browser_errors"].append(str(exc)))
-        page.on("console", lambda msg: report["browser_errors"].append(msg.text) if msg.type == "error" else None)
+        page.on("pageerror", lambda exc: record_browser_error(report, str(exc)))
+        page.on("console", lambda msg: record_browser_error(report, msg.text) if msg.type == "error" else None)
 
         def on_request(request):
             if "/api/ai-agent/chat" in request.url or "/api/ai-agent/write-tools/execute" in request.url:

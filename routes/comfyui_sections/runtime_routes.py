@@ -886,7 +886,7 @@ def register_comfyui_runtime_routes(app, ctx):
         job, err = _assert_generation_job_owner(job_id, actor)
         if err:
             return err
-        public_job = _generation_job_payload(job) if _generation_job_payload else {
+        public_job = _generation_job_payload(job, actor=actor) if _generation_job_payload else {
             "job_id": job["job_id"],
             "status": job["status"],
             "progress": job.get("progress") or {},
@@ -965,6 +965,195 @@ def register_comfyui_runtime_routes(app, ctx):
                 "data_url": f"data:{mime_type};base64,{base64.b64encode(data_bytes).decode('ascii')}",
             },
         })
+
+    @app.route("/api/comfyui/background-composite", methods=["POST"])
+    @require_csrf
+    def comfyui_background_composite():
+        actor, err = _actor_or_401()
+        if err:
+            return err
+        try:
+            data = request.get_json(force=True)
+        except Exception:
+            return json_resp({"ok": False, "msg": "請求 JSON 格式錯誤"}), 400
+        data = data if isinstance(data, dict) else {}
+        source_ref = data.get("source_image_ref") or data.get("source_image_ref_json")
+        background_ref = (
+            data.get("background_image_ref")
+            or data.get("background_image_ref_json")
+            or data.get("reference_image_ref")
+            or data.get("reference_image_ref_json")
+        )
+        if not isinstance(source_ref, dict):
+            return json_resp({"ok": False, "msg": "缺少來源圖片引用 source_image_ref"}), 400
+        if not isinstance(background_ref, dict):
+            return json_resp({"ok": False, "msg": "缺少背景參考圖片引用 background_image_ref"}), 400
+        try:
+            width = int(float(data.get("width") or 0))
+            height = int(float(data.get("height") or 0))
+        except Exception:
+            width = 0
+            height = 0
+        if width and (width < 64 or width > 4096):
+            return json_resp({"ok": False, "msg": "width 超出允許範圍 64-4096"}), 400
+        if height and (height < 64 or height > 4096):
+            return json_resp({"ok": False, "msg": "height 超出允許範圍 64-4096"}), 400
+
+        active_client = _client_for_url(_comfyui_binding(actor).get("url"))
+        params = {
+            "source_image_ref": source_ref,
+            "reference_image_ref": background_ref,
+            "seed": 0,
+            "model": "exact_background_plate_composite",
+            "batch_size": 1,
+        }
+        mask_ref = data.get("mask_image_ref") or data.get("mask_image_ref_json")
+        if isinstance(mask_ref, dict):
+            params["mask_image_ref"] = mask_ref
+        try:
+            params = _hydrate_generation_assets(actor, active_client, params, {})
+            source_file = active_client.fetch_image(params["source_image_ref"])
+            background_file = active_client.fetch_image(params["reference_image_ref"])
+            mask_file = active_client.fetch_image(params["mask_image_ref"]) if isinstance(params.get("mask_image_ref"), dict) else None
+        except ComfyUIError as exc:
+            return _json_error_from_comfy(exc, active_client)
+        except Exception as exc:
+            return json_resp({"ok": False, "msg": f"背景合成圖片讀取失敗：{exc}"}), 503
+
+        try:
+            import hashlib
+            from io import BytesIO
+            from PIL import Image, ImageDraw, ImageFilter, ImageOps
+
+            source_image = Image.open(BytesIO(getattr(source_file, "data", b"") or b"")).convert("RGBA")
+            background_image = Image.open(BytesIO(getattr(background_file, "data", b"") or b"")).convert("RGB")
+            target_width = width or source_image.width
+            target_height = height or source_image.height
+
+            def _cover_resize(image, size):
+                tw, th = size
+                scale = max(tw / max(1, image.width), th / max(1, image.height))
+                resized = image.resize(
+                    (max(1, round(image.width * scale)), max(1, round(image.height * scale))),
+                    Image.Resampling.LANCZOS,
+                )
+                left = max(0, (resized.width - tw) // 2)
+                top = max(0, (resized.height - th) // 2)
+                return resized.crop((left, top, left + tw, top + th))
+
+            background_plate = _cover_resize(background_image, (target_width, target_height)).convert("RGBA")
+            source_layer = _cover_resize(source_image, (target_width, target_height)).convert("RGBA")
+            segmentation_method = "heuristic_center_subject_mask"
+            if mask_file is not None:
+                mask_image = Image.open(BytesIO(getattr(mask_file, "data", b"") or b"")).convert("L")
+                subject_mask = _cover_resize(mask_image, (target_width, target_height)).convert("L")
+                segmentation_method = "provided_mask_image_ref"
+            elif source_layer.getextrema()[3][0] < 255:
+                subject_mask = source_layer.getchannel("A")
+                segmentation_method = "source_alpha_channel"
+            else:
+                subject_mask = Image.new("L", (target_width, target_height), 0)
+                draw = ImageDraw.Draw(subject_mask)
+                w, h = target_width, target_height
+                draw.ellipse((int(w * 0.18), int(h * 0.02), int(w * 0.82), int(h * 0.50)), fill=255)
+                draw.rounded_rectangle(
+                    (int(w * 0.23), int(h * 0.26), int(w * 0.77), int(h * 0.98)),
+                    radius=max(8, int(w * 0.08)),
+                    fill=255,
+                )
+                draw.polygon([
+                    (int(w * 0.28), int(h * 0.34)),
+                    (int(w * 0.05), int(h * 0.88)),
+                    (int(w * 0.25), int(h * 0.96)),
+                    (int(w * 0.44), int(h * 0.46)),
+                ], fill=255)
+                draw.polygon([
+                    (int(w * 0.72), int(h * 0.34)),
+                    (int(w * 0.95), int(h * 0.88)),
+                    (int(w * 0.75), int(h * 0.96)),
+                    (int(w * 0.56), int(h * 0.46)),
+                ], fill=255)
+                subject_mask = subject_mask.filter(ImageFilter.GaussianBlur(max(6, int(min(w, h) * 0.018))))
+                subject_mask = ImageOps.autocontrast(subject_mask)
+
+            output_image = background_plate.copy()
+            output_image.paste(source_layer, (0, 0), subject_mask)
+            output_rgb = output_image.convert("RGB")
+            out = BytesIO()
+            output_rgb.save(out, format="PNG", optimize=True)
+            output_bytes = out.getvalue()
+            digest = hashlib.sha1(output_bytes).hexdigest()[:12]
+            filename = f"exact_background_composite_{target_width}x{target_height}_{digest}.png"
+            uploaded_ref = active_client.upload_image_bytes(
+                output_bytes,
+                filename,
+                image_type="output",
+                overwrite=False,
+                subfolder=f"hackme/{_actor_value(actor, 'id', '')}".strip("/"),
+            )
+        except Exception as exc:
+            return json_resp({"ok": False, "msg": f"背景合成失敗：{exc}"}), 500
+
+        result = {
+            "prompt_id": f"background-composite-{digest}",
+            "image_ref": uploaded_ref,
+            "mime_type": "image/png",
+            "data": output_bytes,
+            "images": [{
+                "prompt_id": f"background-composite-{digest}",
+                "image_ref": uploaded_ref,
+                "mime_type": "image/png",
+                "size_bytes": len(output_bytes),
+                "seed": 0,
+                "model": "exact_background_plate_composite",
+                "batch_size": 1,
+                "batch_index": 0,
+                "output_label": "Exact background plate composite",
+            }],
+        }
+        images = _finalize_generation_records(
+            actor,
+            params,
+            result,
+            backend_url=getattr(active_client, "base_url", ""),
+            notify=False,
+        )
+        payload = {
+            "ok": True,
+            "method": "exact_background_plate_composite",
+            "segmentation_method": segmentation_method,
+            "delivery_pass": False,
+            "review_required": True,
+            "quality_gate": {
+                "status": "candidate_requires_visual_review",
+                "reason": (
+                    "Exact background plate compositing can preserve pixels from the reference, "
+                    "but it cannot prove that the reference background is clean or that subject masking is acceptable. "
+                    "A human or vision gate must review foreground residue, old-background halos, and reference-subject leakage."
+                ),
+            },
+            "image": images[0] if images else result["images"][0],
+            "images": images or result["images"],
+            "source_image_ref": params.get("source_image_ref"),
+            "background_image_ref": params.get("reference_image_ref"),
+            "width": target_width,
+            "height": target_height,
+            "limitations": [
+                "background plate is copied from the reference crop instead of model-redrawn",
+                "without a supplied mask, foreground segmentation uses a conservative center-subject heuristic",
+                "reference foreground objects outside the source subject mask may remain because exact copy and object removal are conflicting goals",
+            ],
+            "msg": "已產生 exact background plate composite 候選圖；此結果需目視 review，不能直接視為通過。若需要去除參考圖中的人物/物件，請提供乾淨背景板、背景 mask，或改走下一輪 inpaint。",
+        }
+        audit(
+            "COMFYUI_BACKGROUND_COMPOSITE",
+            get_client_ip(),
+            user=_actor_value(actor, "username", "-"),
+            success=True,
+            ua=get_ua(),
+            detail=f"file={uploaded_ref.get('filename')},size={target_width}x{target_height},segmentation={segmentation_method}",
+        )
+        return json_resp(payload)
 
     @app.route("/api/comfyui/history", methods=["GET"])
     @require_csrf_safe

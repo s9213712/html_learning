@@ -21,6 +21,9 @@ const AI_AGENT_STATE = {
   comfyuiSubmittedJobs: {},
   comfyuiAttemptHistory: [],
   comfyuiAnnouncedJobs: {},
+  comfyuiStagedReviews: {},
+  comfyuiStagedReviewRetryTimers: {},
+  referenceDescriptionCache: {},
   lastComfyuiJob: null,
   lastComfyuiArgs: null,
   comfyuiPreviewLoads: {},
@@ -441,6 +444,46 @@ async function aiAgentChatFetch(payload, options = {}) {
   }
 }
 
+function aiAgentIsTransientChatFailure(status, message = "") {
+  const code = Number(status || 0);
+  if ([502, 503, 504].includes(code)) return true;
+  const text = String(message || "").toLowerCase();
+  return /timeout|逾時|temporar|暫時|backend.*(unavailable|無法連線)|cloud vision|connection|fetch failed|non-visual|refusal content|無法.*(?:查看|分析).*圖片/.test(text);
+}
+
+async function aiAgentVisionGateChatFetch(payload, options = {}) {
+  const attempts = Math.max(1, Math.min(5, Number(options.attempts || 3) || 3));
+  let lastError = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      const res = await aiAgentChatFetch(payload, options);
+      const json = await res.json().catch(() => ({}));
+      const content = json?.message?.content || json?.msg || "";
+      if (res.ok && json.ok && !isMockAiAgentReply(content)) {
+        if (options.rejectUnusableVision && aiAgentReferenceDescriptionLooksUnusable(content)) {
+          const err = new Error(`vision model returned non-visual/refusal content: ${String(content || "").slice(0, 240)}`);
+          err.status = res.status;
+          err.payload = json;
+          lastError = err;
+          throw err;
+        } else {
+          return { res, json, content, attempt };
+        }
+      }
+      const message = aiAgentImageAnalysisError(json, res.status);
+      lastError = new Error(message);
+      lastError.status = res.status;
+      lastError.payload = json;
+      if (!aiAgentIsTransientChatFailure(res.status, message) || attempt >= attempts) throw lastError;
+    } catch (err) {
+      lastError = err;
+      if (!aiAgentIsTransientChatFailure(err?.status, err?.message || err) || attempt >= attempts) throw err;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1200 * attempt));
+  }
+  throw lastError || new Error("vision gate chat failed");
+}
+
 function aiAgentCanViewConversationHistory() {
   const actor = AI_AGENT_STATE.actor || {};
   return actor.username === "root" || actor.role === "super_admin";
@@ -761,6 +804,43 @@ function aiAgentCleanComfyuiArgs(args = {}) {
   return cleaned;
 }
 
+function aiAgentComfyuiSubmitArgs(args = {}) {
+  const cleaned = aiAgentCleanComfyuiArgs(aiAgentApplyQwenEditInstructionPrompt(args));
+  Object.keys(cleaned).forEach((key) => {
+    if (key.startsWith("agent_review_")) delete cleaned[key];
+  });
+  return cleaned;
+}
+
+function aiAgentBackgroundCompositeSubmitArgs(args = {}) {
+  const next = { ...(args || {}) };
+  const resolveRef = (value, kind = "source", exclude = null) => {
+    if (value && typeof value === "object") return value;
+    const resolved = aiAgentResolveRecentImageRef(value);
+    if (resolved) return resolved;
+    return aiAgentInferRecentImageRef(kind, exclude ? { exclude } : {});
+  };
+  next.source_image_ref = resolveRef(next.source_image_ref || next.source_image_ref_json, "source");
+  next.background_image_ref = resolveRef(
+    next.background_image_ref
+      || next.background_image_ref_json
+      || next.reference_image_ref
+      || next.reference_image_ref_json,
+    "reference",
+    next.source_image_ref,
+  );
+  if (!next.background_image_ref) {
+    next.background_image_ref = aiAgentInferSemanticImageRef("background")?.image_ref || null;
+  }
+  if (next.mask_image_ref || next.mask_image_ref_json) {
+    next.mask_image_ref = resolveRef(next.mask_image_ref || next.mask_image_ref_json, "mask");
+  }
+  ["source_image_ref_json", "background_image_ref_json", "reference_image_ref", "reference_image_ref_json", "mask_image_ref_json"].forEach((key) => {
+    delete next[key];
+  });
+  return next;
+}
+
 function aiAgentNormalizeComfyuiGenerationMode(value = "") {
   const raw = String(value || "").trim().toLowerCase();
   if (!raw) return "";
@@ -807,9 +887,11 @@ function aiAgentRecentImageRefs(limit = 8) {
         storage_file_id: String(image?.storage_file_id || ref?.storage_file_id || "").slice(0, 160),
         prompt_id: String(image?.prompt_id || "").slice(0, 160),
         mime_type: String(image?.mime_type || "").slice(0, 80),
+        semantic_key: String(image?.semantic_key || ref?.semantic_key || "").slice(0, 80),
         context,
         image_ref: {
           ...ref,
+          ...(image?.semantic_key || ref?.semantic_key ? { semantic_key: image?.semantic_key || ref?.semantic_key } : {}),
           ...(image?.cloud_file_id || ref?.cloud_file_id ? { cloud_file_id: image?.cloud_file_id || ref?.cloud_file_id } : {}),
           ...(image?.storage_file_id || ref?.storage_file_id ? { storage_file_id: image?.storage_file_id || ref?.storage_file_id } : {}),
         },
@@ -840,6 +922,30 @@ function aiAgentTextSuggestsReferenceImage(text = "") {
   const raw = String(text || "").toLowerCase();
   if (!raw) return false;
   return /reference|ref image|pose ref|pose reference|參考圖|參考影像|參考圖片|參考姿勢|姿勢參考|動作參考|第二張|第\s*2\s*張|另一張|second image|2nd image|copy pose|像第二張|照第二張|姿勢|動作|pose/.test(raw);
+}
+
+function aiAgentTextSuggestsCrossReferenceImages(text = "") {
+  const raw = aiAgentNormalizeUserText(text).toLowerCase();
+  if (!raw) return false;
+  const hasRoleRefs = /chara\s+reference|character\s+reference|角色.*參考|角色外觀/.test(raw)
+    && /clothes\s+reference|clothing\s+reference|outfit\s+reference|服裝.*參考/.test(raw)
+    && /pose\s+reference|姿勢.*參考|動作.*參考/.test(raw);
+  const hasBackgroundRef = /background\s+reference|scene\s+reference|背景.*參考|場景.*參考/.test(raw);
+  return hasRoleRefs || hasBackgroundRef || /交叉.*參考|三張.*reference|多參考圖/.test(raw);
+}
+
+function aiAgentSingleReferenceStageFromText(text = "") {
+  const raw = aiAgentNormalizeUserText(text).toLowerCase();
+  if (!raw) return "";
+  const noChara = /不要測\s*chara|skip\s*chara|no\s*chara|不是\s*chara|不要.*角色/.test(raw);
+  const noPose = /不要測\s*pose|skip\s*pose|no\s*pose|不是\s*pose|不要.*姿勢|不要.*動作/.test(raw);
+  const noClothes = /不要測\s*clothes|skip\s*clothes|no\s*clothes|不是\s*clothes|不要.*服裝/.test(raw);
+  const noBackground = /不要測\s*background|skip\s*background|no\s*background|不是\s*background|不要.*背景|不要.*場景/.test(raw);
+  if (!noBackground && /只測\s*background|background\s+reference|scene\s+reference|只.*背景.*參考|背景.*參考|場景.*參考/.test(raw)) return "background";
+  if (!noClothes && /只測\s*clothes|clothes\s+reference|clothing\s+reference|outfit\s+reference|只.*服裝.*參考|服裝.*參考/.test(raw)) return "clothes";
+  if (!noChara && /只測\s*chara|chara\s+reference|character\s+reference|只.*角色.*參考|角色.*參考/.test(raw)) return "chara";
+  if (!noPose && /只測\s*pose|pose\s+reference|只.*姿勢.*參考|姿勢.*參考|動作.*參考/.test(raw)) return "pose";
+  return "";
 }
 
 function aiAgentTextSuggestsImageEdit(text = "") {
@@ -881,6 +987,667 @@ function aiAgentInferRecentImageRef(kind = "source", options = {}) {
   return best && best.score > 0 && best.item?.image_ref ? best.item.image_ref : null;
 }
 
+function aiAgentInferSemanticImageRef(kind = "") {
+  const key = String(kind || "").trim().toLowerCase();
+  if (!key) return null;
+  const refs = aiAgentRecentImageRefs(16);
+  const matches = refs
+    .map((item, index) => {
+      const semanticKey = String(item.semantic_key || item.image_ref?.semantic_key || "").toLowerCase();
+      const filename = String(item.filename || item.image_ref?.filename || "").toLowerCase();
+      const context = String(item.context || "").toLowerCase();
+      let score = Math.max(0, 100 - index);
+      if (semanticKey && semanticKey !== key) {
+        return { item, score: -10000 };
+      }
+      if (semanticKey === key) score += 1000;
+      if (filename.includes(key)) score += 300;
+      if (context.includes(`${key} reference`)) score += 200;
+      if (key === "clothes" && /outfit|clothing|服裝/.test(filename + " " + context)) score += 80;
+      if (key === "chara" && /character|chara|角色/.test(filename + " " + context)) score += 80;
+      if (key === "pose" && /pose|姿勢|動作/.test(filename + " " + context)) score += 80;
+      if (key === "background" && /background|scene|背景|場景/.test(filename + " " + context)) score += 80;
+      return { item, score };
+    })
+    .filter((entry) => entry.item?.image_ref && entry.score > 100)
+    .sort((a, b) => b.score - a.score);
+  return matches[0]?.item || null;
+}
+
+function aiAgentReferenceDescription(item, fallback = "the provided reference") {
+  const filename = String(item?.filename || item?.image_ref?.filename || "").split(/[\\/]/).pop();
+  const stem = filename.replace(/\.[A-Za-z0-9]+$/, "");
+  const readable = stem
+    .replace(/^reference_(?:chara|clothes|pose)_/i, "")
+    .replace(/^reference_background_/i, "")
+    .replace(/_\d{3,4}x\d{3,4}$/i, "")
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return readable || fallback;
+}
+
+function aiAgentBuildCrossReferenceEditInstruction() {
+  const chara = aiAgentInferSemanticImageRef("chara");
+  const clothes = aiAgentInferSemanticImageRef("clothes");
+  const background = aiAgentInferSemanticImageRef("background");
+  const pose = aiAgentInferSemanticImageRef("pose");
+  if (!chara && !clothes && !background && !pose) return "";
+  const charaDesc = aiAgentReferenceDescription(chara, "the character reference");
+  const clothesDesc = aiAgentReferenceDescription(clothes, "the clothes reference");
+  const backgroundDesc = aiAgentReferenceDescription(background, "the background reference");
+  const poseDesc = aiAgentReferenceDescription(pose, "the pose reference");
+  return [
+    `use the character reference only for the main character appearance, face mood, hairstyle direction, and color cues (${charaDesc})`,
+    `use the clothes reference only for outfit design and garment details (${clothesDesc})`,
+    `use the background reference only for scene, setting, lighting, and environmental details (${backgroundDesc})`,
+    `use the pose reference only for body pose, limb placement, and composition (${poseDesc})`,
+    "apply those references to the source character as one coherent anime girl",
+    "do not copy the reference backgrounds, do not copy unrelated identities, do not add text or watermark",
+    "avoid extra limbs, broken hands, missing fingers, body penetration, or mixed-up clothes and pose roles",
+  ].join("; ") + ".";
+}
+
+function aiAgentCrossReferenceStageItems() {
+  return [
+    { key: "chara", item: aiAgentInferSemanticImageRef("chara") },
+    { key: "clothes", item: aiAgentInferSemanticImageRef("clothes") },
+    { key: "background", item: aiAgentInferSemanticImageRef("background") },
+    { key: "pose", item: aiAgentInferSemanticImageRef("pose") },
+  ].filter((stage) => stage.item?.image_ref);
+}
+
+function aiAgentCrossReferenceStageInstruction(key, item) {
+  const desc = aiAgentReferenceDescription(item, `the ${key} reference`);
+  if (key === "chara") {
+    return [
+      `stage 1 chara merge: use this reference only for character appearance, face mood, hair direction, and color cues (${desc})`,
+      "keep the source composition and outfit mostly unchanged at this stage",
+      "do not copy the reference background, full pose, or unrelated clothing",
+      "no visible text, watermark, signature, logo, extra limbs, broken hands, missing fingers, or body penetration",
+    ].join("; ") + ".";
+  }
+  if (key === "clothes") {
+    return [
+      `stage 2 clothes merge: use this reference only for outfit design and garment details (${desc})`,
+      "preserve the passed character appearance from the previous candidate",
+      "do not copy the clothes reference pose, background, or unrelated identity",
+      "fit the outfit naturally on the existing body with no clothing/body penetration",
+      "no visible text, watermark, signature, logo, extra limbs, broken hands, or missing fingers",
+    ].join("; ") + ".";
+  }
+  if (key === "background") {
+    return [
+      `stage background merge: use this reference only for scene, setting, lighting, depth, and environmental details (${desc})`,
+      "preserve the passed character appearance, outfit, pose, body proportions, and foreground subject",
+      "do not copy the background reference identity, clothing, pose, or extra people unless explicitly requested",
+      "blend the source character naturally into the new scene with plausible lighting and no gray frame",
+      "no visible text, watermark, signature, logo, extra limbs, broken hands, or missing fingers",
+    ].join("; ") + ".";
+  }
+  return [
+    `stage 3 pose merge: use this reference only for body pose, limb placement, and composition (${desc})`,
+    "preserve the passed character appearance and outfit from the previous candidate as much as possible",
+    "do not copy the pose reference background, clothing, or unrelated identity",
+    "make the pose anatomically plausible with visible correct hands and fingers",
+    "no visible text, watermark, signature, logo, extra limbs, broken hands, missing fingers, or body penetration",
+  ].join("; ") + ".";
+}
+
+function aiAgentReferenceDescriptionCacheKey(stageKey = "", imageRef = {}) {
+  const refKey = aiAgentImageRefKey(imageRef);
+  return `${String(stageKey || "reference").toLowerCase()}::${refKey}`;
+}
+
+function aiAgentNormalizeReferenceDescriptionValue(value, limit = 800) {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item || "").trim()).filter(Boolean).join(", ").slice(0, limit);
+  }
+  if (value && typeof value === "object") {
+    return Object.values(value).map((item) => aiAgentNormalizeReferenceDescriptionValue(item, 180)).filter(Boolean).join(", ").slice(0, limit);
+  }
+  return String(value || "").replace(/\s+/g, " ").trim().slice(0, limit);
+}
+
+function aiAgentReferenceDescriptionLooksUnusable(content = "") {
+  const text = String(content || "").replace(/\s+/g, " ").trim().toLowerCase();
+  if (!text) return true;
+  return /(?:cannot|can't|unable to|do not have|don't have|no ability|not able).*?(?:view|see|inspect|analy[sz]e|process).*?(?:image|picture|photo)|(?:無法|不能|沒辦法|沒有能力|無法在此|無法查看|無法檢查|無法分析|無法讀取).*?(?:圖片|圖像|影像|附加)|我沒有視覺|沒有視覺|需要您描述|由您描述圖片|請您描述/.test(text);
+}
+
+function aiAgentReferenceDescriptionPrompt(stageKey = "reference", fallback = "") {
+  const key = String(stageKey || "reference").toLowerCase();
+  const focus = key === "chara"
+    ? "hair color, hair length/style, highlights, eye color, face mood/expression, and distinctive character appearance. Ignore clothing, background, and full-body pose unless they are inseparable from the character identity."
+    : key === "clothes"
+      ? "body clothing only: garment type, wrap/drape, fabric, colors, exposed shoulders/arms/legs, collar/sleeve/skirt/towel shape, and outfit silhouette. Ignore model identity, face, hair color, hairstyle, hair accessories, cat ears/animal ears, background, and pose unless the user explicitly asks for those as clothes."
+      : key === "pose"
+        ? "body pose, camera framing, torso direction, head direction, arm/hand positions, leg positions, standing/sitting/kneeling/lying state, and person count. Ignore identity, clothing, and background."
+        : key === "background"
+          ? "scene setting, location type, background objects, lighting, atmosphere, depth, camera environment, and environmental colors. Ignore identity, clothing, hairstyle, face, body pose, and extra people unless the user explicitly asks to add people."
+        : "visible traits needed for an image edit command.";
+  const forbidden = key === "chara"
+    ? "clothing, towel, outfit, background, full pose, camera angle"
+    : key === "clothes"
+      ? "hair color, hairstyle, cat ears, animal ears, face identity, expression, background, pose, model body identity"
+      : key === "pose"
+        ? "hair color, hairstyle, clothing, towel, outfit, face identity, background style"
+        : key === "background"
+          ? "face identity, hair, hairstyle, clothing, body pose, gesture, person identity, text, signage words"
+        : "unrelated reference traits";
+  return [
+    "You are preparing a ComfyUI image-edit command from a reference image.",
+    "Inspect the attached reference image and return one plain JSON object only. No markdown, table, prose, or code fence.",
+    "The JSON must be concise English, because it will be inserted into an edit_instruction.",
+    `Stage: ${key}. Describe only this focus: ${focus}`,
+    `Forbidden leakage for this stage: ${forbidden}. If those traits are visible, put them in negative_keywords instead of edit_keywords.`,
+    "Schema: {\"summary\": string, \"edit_keywords\": [string], \"preserve_warning\": string, \"negative_keywords\": [string]}.",
+    "Do not mention uncertainty unless the image is unreadable. Do not copy visible text or watermarks as desired content.",
+    `Filename hint, only as fallback context: ${fallback || "-"}`,
+  ].join("\n");
+}
+
+function aiAgentNormalizeReferenceDescription(content = "", stageKey = "reference", fallback = "") {
+  const parsed = aiAgentExtractJsonObject(content);
+  if (parsed && typeof parsed === "object") {
+    const summary = aiAgentNormalizeReferenceDescriptionValue(parsed.summary || parsed.description || parsed.caption || fallback, 900);
+    const keywords = aiAgentNormalizeReferenceDescriptionValue(
+      parsed.edit_keywords
+        || parsed.allowed_traits
+        || parsed.target_traits
+        || parsed.garment_traits
+        || parsed.pose_traits
+        || parsed.character_traits
+        || parsed.keywords
+        || parsed.features
+        || summary,
+      900
+    );
+    const preserveWarning = aiAgentNormalizeReferenceDescriptionValue(parsed.preserve_warning || parsed.preserve || "", 500);
+    const negativeKeywords = aiAgentNormalizeReferenceDescriptionValue(
+      parsed.negative_keywords || parsed.forbidden_leakage || parsed.forbidden_traits || parsed.avoid || "",
+      500
+    );
+    return {
+      stage_key: String(stageKey || "reference"),
+      summary: summary || fallback,
+      edit_keywords: keywords || summary || fallback,
+      preserve_warning: preserveWarning,
+      negative_keywords: negativeKeywords,
+      source: "vision_json",
+    };
+  }
+  const text = aiAgentNormalizeReferenceDescriptionValue(content, 900);
+  const unusable = aiAgentReferenceDescriptionLooksUnusable(text);
+  return {
+    stage_key: String(stageKey || "reference"),
+    summary: text || fallback,
+    edit_keywords: text || fallback,
+    preserve_warning: "",
+    negative_keywords: "",
+    source: text ? "vision_text" : "filename_fallback",
+    unusable,
+  };
+}
+
+function aiAgentAssertUsableReferenceDescription(desc = {}, stageKey = "reference") {
+  if (!desc || desc.unusable || desc.error) {
+    const reason = desc?.error || desc?.summary || "reference vision extraction did not return usable visual traits";
+    throw new Error(`${stageKey} reference vision extraction failed: ${String(reason).slice(0, 240)}`);
+  }
+}
+
+async function aiAgentDescribeReferenceForEdit(stage = {}, args = {}) {
+  const stageKey = String(stage?.key || "reference").toLowerCase();
+  const imageRef = stage?.reference_image_ref || args.reference_image_ref || args.agent_review_reference_image_ref || null;
+  const fallback = aiAgentReferenceDescription({
+    image_ref: imageRef,
+    filename: imageRef?.filename || stage?.description || `${stageKey} reference`,
+  }, `${stageKey} reference`);
+  const cacheKey = aiAgentReferenceDescriptionCacheKey(stageKey, imageRef || {});
+  if (cacheKey && AI_AGENT_STATE.referenceDescriptionCache[cacheKey]) {
+    return AI_AGENT_STATE.referenceDescriptionCache[cacheKey];
+  }
+  if (!imageRef) {
+    return aiAgentNormalizeReferenceDescription("", stageKey, fallback);
+  }
+  try {
+    let dataUrl = await aiAgentPreviewDataUrlForRef(imageRef);
+    if (!dataUrl) throw new Error("reference preview unavailable");
+    dataUrl = await aiAgentDownscaleDataUrlForVision(dataUrl, 512, 0.85);
+    await aiAgentRefreshModelState();
+    const model = aiAgentVisionModel();
+    if (!model) throw new Error("no vision model available for reference extraction");
+    AI_AGENT_STATE.messages.push({
+      role: "assistant",
+      content: `開始用 vision 模型讀取 ${stageKey} reference，先抽出可執行特徵再送 ComfyUI，避免只把參考圖丟給 2509 後沒有真的 edit。`,
+    });
+    renderAiAgentThread();
+    const gate = await aiAgentVisionGateChatFetch({
+      session_id: aiAgentEnsureSessionId(),
+      model,
+      mode: "image",
+      messages: [{ role: "user", content: aiAgentReferenceDescriptionPrompt(stageKey, fallback) }],
+      image_data_url: dataUrl,
+    }, {
+      mode: "image",
+      timeoutMs: 180000,
+      attempts: 4,
+      rejectUnusableVision: true,
+    });
+    if (Number(gate.attempt || 1) > 1) {
+      AI_AGENT_STATE.messages.push({
+        role: "assistant",
+        content: `reference 視覺抽取第 ${gate.attempt} 次重試後成功，會使用抽出的特徵送 ComfyUI，不直接視為人工標註。`,
+      });
+      renderAiAgentThread();
+    }
+    const normalized = aiAgentNormalizeReferenceDescription(gate.content || "", stageKey, fallback);
+    if (normalized.unusable) {
+      throw new Error(`vision model returned a non-visual/refusal answer for ${stageKey} reference: ${String(gate.content || "").slice(0, 240)}`);
+    }
+    AI_AGENT_STATE.referenceDescriptionCache[cacheKey] = normalized;
+    return normalized;
+  } catch (err) {
+    const payload = err?.payload || {};
+    if (aiAgentImageModelUnavailable(payload, err?.status)) {
+      aiAgentMarkModelUnavailable(aiAgentVisionModel(), aiAgentImageAnalysisError(payload, err?.status));
+    }
+    const fallbackDesc = aiAgentNormalizeReferenceDescription("", stageKey, fallback);
+    fallbackDesc.error = String(err?.message || err || "reference extraction failed").slice(0, 300);
+    fallbackDesc.unusable = true;
+    AI_AGENT_STATE.referenceDescriptionCache[cacheKey] = fallbackDesc;
+    AI_AGENT_STATE.messages.push({
+      role: "assistant",
+      content: `reference 視覺抽取失敗，改用檔名/上下文 fallback，不把這次視為成功證據。\nStage：${stageKey}\n錯誤：${fallbackDesc.error}`,
+    });
+    renderAiAgentThread();
+    return fallbackDesc;
+  }
+}
+
+const AI_AGENT_QWEN_EDIT_STYLE_FALLBACK = "by ogipote, anime style, 1girl, style tag only, do not render words, no visible text, no watermark, no signature, no logo, no visible artist name";
+
+function aiAgentLooksLikeEditInstructionText(text = "") {
+  return /stage\s+\d+|merge:|visibly change|direct text edit|source character|reference traits|target traits|apply these reference traits|current pairwise stage|use this reference only|candidate|agent_review|vision gate/i.test(String(text || ""));
+}
+
+function aiAgentCleanStageTargetText(text = "", stageKey = "reference") {
+  let cleaned = String(text || "")
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const key = String(stageKey || "reference").toLowerCase();
+  const replaceAll = (patterns) => {
+    patterns.forEach((pattern) => {
+      cleaned = cleaned.replace(pattern, " ");
+    });
+  };
+  if (key === "chara") {
+    replaceAll([
+      /\b(?:schoolgirl|school\s+uniform|sailor\s+uniform|uniform|outfit|clothes?|clothing|garments?)\b/gi,
+      /\b(?:white\s+t\s*shirt|white\s+tee|t\s*shirt|tee\s+shirt|shirt|blouse|skirt|shorts?|dress|kimono|bikini|swimsuit|towel|bath\s+towel)\b/gi,
+      /\b(?:full\s*body|fullbody|background|scene|pose|squat|kneel(?:ing)?|standing|sitting|lying|v\s*sign|peace\s+sign|cat\s+ears?|animal\s+ears?)\b/gi,
+    ]);
+    cleaned = cleaned.replace(/\s+/g, " ").replace(/\s*,\s*/g, ", ").trim();
+    if (/\b(?:blonde|golden|yellow)\b/i.test(cleaned) && !/\bhair\b/i.test(cleaned)) {
+      cleaned = `${cleaned} hair`.trim();
+    }
+    if (cleaned && !/\b(?:hair|face|eye|eyes|expression|mood|character|identity|highlight|bangs|bob|short hair|long hair)\b/i.test(cleaned)) {
+      cleaned = `${cleaned}; character hair, face mood, and color cues only`;
+    }
+    return cleaned || "character hair, face mood, eye/expression, and color cues only";
+  }
+  if (key === "clothes") {
+    replaceAll([
+      /\b(?:hair|hairstyle|hair\s+color|blonde|golden|black\s+hair|blue\s+hair|face|identity|eyes?|expression|mood|pose|squat|kneel(?:ing)?|standing|sitting|lying|v\s*sign|peace\s+sign|background|scene)\b/gi,
+      /\b(?:cat\s+ears?|animal\s+ears?|fox\s+ears?|bunny\s+ears?)\b/gi,
+    ]);
+    cleaned = cleaned.replace(/\s+/g, " ").replace(/\s*,\s*/g, ", ").trim();
+    return cleaned || "visible garment type, fabric, color, drape, and outfit silhouette only";
+  }
+  if (key === "pose") {
+    replaceAll([
+      /\b(?:hair|hairstyle|hair\s+color|blonde|golden|black\s+hair|blue\s+hair|face|identity|eyes?|expression|mood|outfit|clothes?|clothing|garments?|towel|kimono|bikini|swimsuit|shirt|skirt|dress|background|scene)\b/gi,
+      /\b(?:cat\s+ears?|animal\s+ears?)\b/gi,
+    ]);
+    cleaned = cleaned.replace(/\s+/g, " ").replace(/\s*,\s*/g, ", ").trim();
+    return cleaned || "body pose, limb placement, hand gesture, camera framing, and composition only";
+  }
+  if (key === "background") {
+    replaceAll([
+      /\b(?:hair|hairstyle|hair\s+color|blonde|golden|black\s+hair|blue\s+hair|face|identity|eyes?|expression|mood|outfit|clothes?|clothing|garments?|towel|kimono|bikini|swimsuit|shirt|skirt|dress|pose|gesture|standing|sitting|kneel(?:ing)?|lying)\b/gi,
+      /\b(?:cat\s+ears?|animal\s+ears?)\b/gi,
+    ]);
+    cleaned = cleaned.replace(/\s+/g, " ").replace(/\s*,\s*/g, ", ").trim();
+    return cleaned || "scene setting, location, background objects, lighting, depth, and environmental atmosphere only";
+  }
+  return cleaned;
+}
+
+function aiAgentReferenceTargetText(desc = {}, fallback = "", stageKey = "reference") {
+  const candidates = [
+    aiAgentNormalizeReferenceDescriptionValue(desc.edit_keywords, 900),
+    aiAgentNormalizeReferenceDescriptionValue(desc.summary, 700),
+    fallback,
+  ].map((item) => String(item || "").trim()).filter(Boolean);
+  for (const candidate of candidates) {
+    const cleaned = aiAgentCleanStageTargetText(candidate, stageKey);
+    if (cleaned) return cleaned;
+  }
+  return aiAgentCleanStageTargetText("the visible reference traits", stageKey);
+}
+
+function aiAgentQwenEditStyleContext(prompt = "") {
+  const text = String(prompt || "").trim();
+  const marker = text.match(/Style and preservation context\s*:\s*([\s\S]+)/i);
+  if (marker) {
+    const markerText = aiAgentNormalizeReferenceDescriptionValue(marker[1], 1200);
+    const looksLikeUserTask = /解析度|尺寸|batch|steps?|cfg|confirm_billing|不要加入|請真的|使用本站|reference image|參考圖|服裝設計|姿勢|動作|測試/i.test(markerText);
+    return markerText && !aiAgentLooksLikeEditInstructionText(markerText) && !looksLikeUserTask
+      ? markerText
+      : AI_AGENT_QWEN_EDIT_STYLE_FALLBACK;
+  }
+  if (aiAgentLooksLikeEditInstructionText(text)) {
+    return AI_AGENT_QWEN_EDIT_STYLE_FALLBACK;
+  }
+  const styleParts = text
+    .split(/\n{2,}|[;；]/)
+    .map((part) => part.trim())
+    .filter((part) => /by\s+ogipote|anime style|1girl|style tag only|do not render words|no visible text|watermark|signature|logo/i.test(part))
+    .filter((part) => !aiAgentLooksLikeEditInstructionText(part));
+  const style = styleParts.join(", ");
+  return style || AI_AGENT_QWEN_EDIT_STYLE_FALLBACK;
+}
+
+function aiAgentShouldUseQwenEditInstructionPrompt(args = {}) {
+  const workflowId = String(args.official_workflow_id || args.workflow_id || "").toLowerCase();
+  const mode = aiAgentNormalizeComfyuiGenerationMode(args.generation_mode || "");
+  return String(args.edit_instruction || args.edit_prompt || "").trim()
+    && (
+      args.agent_review_strategy === "pairwise_reference_merge"
+      || workflowId.includes("qwen_image_edit_2509")
+      || workflowId.includes("qwen-image-edit-2509")
+      || (mode === "img2img" && workflowId.includes("qwen"))
+    );
+}
+
+function aiAgentApplyQwenEditInstructionPrompt(args = {}) {
+  const next = args && typeof args === "object" ? { ...args } : {};
+  if (!aiAgentShouldUseQwenEditInstructionPrompt(next)) return next;
+  const instruction = String(next.edit_instruction || next.edit_prompt || "").trim();
+  if (!instruction) return next;
+  const styleCandidate = aiAgentQwenEditStyleContext(next.prompt);
+  const style = aiAgentLooksLikeEditInstructionText(styleCandidate) ? AI_AGENT_QWEN_EDIT_STYLE_FALLBACK : styleCandidate;
+  next.prompt = [
+    instruction,
+    style ? `Style and preservation context: ${style}` : "",
+  ].filter(Boolean).join("\n\n");
+  return next;
+}
+
+function aiAgentStageNegativePrompt(stageKey = "", desc = {}) {
+  const base = "text, watermark, signature, logo, extra limbs, broken hands, missing fingers, body penetration, distorted anatomy";
+  const descNeg = aiAgentNormalizeReferenceDescriptionValue(desc.negative_keywords, 500);
+  if (stageKey === "chara") return aiAgentMergeCommaList(base, aiAgentMergeCommaList(descNeg, "unchanged hair, unchanged face, wrong hair color, wrong hairstyle, dark blue hair, navy hair, black hair, changed outfit, changed clothes"));
+  if (stageKey === "clothes") return aiAgentMergeCommaList(base, aiAgentMergeCommaList(descNeg, "unchanged outfit, wrong clothes, copied background, copied hair, copied hairstyle, copied hair color, cat ears, animal ears, copied face, copied pose"));
+  if (stageKey === "background") return aiAgentMergeCommaList(base, aiAgentMergeCommaList(descNeg, "unchanged background, wrong scene, copied identity, copied outfit, copied pose, extra main character, readable text, signs with words"));
+  if (stageKey === "pose") return aiAgentMergeCommaList(base, aiAgentMergeCommaList(descNeg, "unchanged pose, wrong pose, copied outfit, copied identity"));
+  return aiAgentMergeCommaList(base, descNeg);
+}
+
+function aiAgentBuildReferenceAwareStageInstruction(stageKey = "", desc = {}, fallbackInstruction = "") {
+  const key = String(stageKey || "reference").toLowerCase();
+  const target = aiAgentReferenceTargetText(desc, fallbackInstruction, key);
+  if (key === "chara") {
+    return [
+      `stage 1 chara merge: visibly change the source character appearance to these target traits: ${target}`,
+      "this stage is invalid if the output remains visually near-identical to the source; make the requested hair/face/eye changes obvious",
+      "if the target says blonde/golden hair, change the dominant hair color to blonde/golden while keeping only requested highlights/tips; dark/navy/black source hair is a failure",
+      "use the extracted reference traits only as guarded visual evidence for hair, face, eye, and character appearance; do not copy its clothes, pose, or background",
+      "keep the source outfit, accessories, body pose, framing, and background mostly unchanged at this stage; do not introduce off-shoulder/cardigan/dress changes unless requested",
+      "do not render any style tag, filename, watermark, logo, or explanatory words into the image",
+      "no extra limbs, broken hands, missing fingers, body penetration, or severe anatomy distortion",
+    ].join("; ") + ".";
+  }
+  if (key === "clothes") {
+    return [
+      `stage 2 clothes merge: visibly change only the outfit/accessories to these target traits: ${target}`,
+      "preserve the already passed character face, hair, pose, framing, and background",
+      "use the extracted reference traits only as guarded visual evidence for clothing silhouette, fabric, drape, color, and garment details",
+      "do not copy the reference identity, hairstyle, hair color, cat ears, animal ears, pose, or background",
+      "fit the clothes naturally on the body with no cloth/body penetration",
+      "do not render visible text, watermark, logo, or signature",
+    ].join("; ") + ".";
+  }
+  if (key === "pose") {
+    return [
+      `stage 3 pose merge: change the body pose and composition to these target pose traits: ${target}`,
+      "preserve the already passed character identity, hair, outfit, and scene as much as possible",
+      "if direct Qwen Edit cannot visibly change pose, this stage must be treated as failed and switched to pose/control workflow rather than blindly rerun",
+      "do not copy the reference identity, outfit, or background",
+      "hands, fingers, limbs, and torso must be anatomically plausible; no visible text or watermark",
+    ].join("; ") + ".";
+  }
+  if (key === "background") {
+    return [
+      `stage background merge: visibly change only the scene/background to these target background traits: ${target}`,
+      "preserve the already passed character identity, hair, outfit, body pose, body proportions, and foreground subject",
+      "use the extracted reference traits only as guarded visual evidence for location, environment, lighting, depth, and atmosphere",
+      "do not copy the reference identity, outfit, pose, extra people, text, signage words, watermark, logo, or signature",
+      "blend the character naturally into the new scene; no gray frame, no pasted cutout, no warped body",
+    ].join("; ") + ".";
+  }
+  return [
+    fallbackInstruction,
+    `Apply these reference traits explicitly: ${target}`,
+  ].filter(Boolean).join(" ");
+}
+
+async function aiAgentPreparePairwiseReferenceArgs(args = {}) {
+  const next = args && typeof args === "object" ? { ...args } : {};
+  if (next.agent_review_strategy !== "pairwise_reference_merge") return next;
+  const sequence = Array.isArray(next.agent_review_stage_sequence) ? next.agent_review_stage_sequence : [];
+  const stageIndex = Math.max(0, Number(next.agent_review_stage_index || 0) || 0);
+  const stage = sequence[stageIndex];
+  if (!stage?.reference_image_ref) return next;
+  const stageKey = String(stage.key || "reference").toLowerCase();
+  next.agent_review_reference_image_ref = stage.reference_image_ref;
+  next.agent_review_stage_key = stageKey;
+  const alreadyPrepared = next.agent_review_reference_text_ready === true
+    && String(next.agent_review_stage_key_prepared || "") === stageKey
+    && String(next.agent_review_reference_summary || "").trim();
+  if (!alreadyPrepared) {
+    const desc = await aiAgentDescribeReferenceForEdit(stage, next);
+    aiAgentAssertUsableReferenceDescription(desc, stageKey);
+    const fallbackInstruction = aiAgentCrossReferenceStageInstruction(stageKey, {
+      image_ref: stage.reference_image_ref,
+      filename: stage.reference_image_ref?.filename || stage.description || `${stageKey} reference`,
+    });
+    next.edit_instruction = aiAgentBuildReferenceAwareStageInstruction(stageKey, desc, fallbackInstruction);
+    next.agent_review_reference_summary = aiAgentReferenceTargetText(desc, stage.description || "", stageKey);
+    next.agent_review_reference_text_ready = true;
+    next.agent_review_stage_key_prepared = stageKey;
+    next.negative_prompt = aiAgentMergeCommaList(next.negative_prompt, aiAgentStageNegativePrompt(stageKey, desc));
+  }
+  if (["chara", "clothes", "background"].includes(stageKey)) {
+    next.reference_image_ref = stage.reference_image_ref;
+    if (next.qwen_reference_force_image2 === true) {
+      next.qwen_reference_mode = "stage_guarded_image2";
+      next.qwen_reference_image2 = true;
+    } else {
+      next.qwen_reference_mode = "vision_text_traits_only";
+      next.qwen_reference_image2 = false;
+    }
+  } else if (stageKey === "pose") {
+    delete next.reference_image_ref;
+  }
+  if (stageKey === "chara") {
+    next.denoise_strength = Math.max(Number(next.denoise_strength || 0.95) || 0.95, 0.95);
+  } else if (stageKey === "clothes") {
+    next.denoise_strength = Math.max(Number(next.denoise_strength || 0.88) || 0.88, 0.88);
+  } else if (stageKey === "background") {
+    next.denoise_strength = Math.max(Number(next.denoise_strength || 0.92) || 0.92, 0.92);
+  } else if (stageKey === "pose") {
+    next.denoise_strength = Math.max(Number(next.denoise_strength || 0.95) || 0.95, 0.95);
+  }
+  next.official_workflow_id = next.official_workflow_id || "origin_qwen_image_edit_2509";
+  next.generation_mode = "img2img";
+  return aiAgentApplyQwenEditInstructionPrompt(next);
+}
+
+async function aiAgentPrepareSingleSemanticReferenceArgs(args = {}) {
+  const next = args && typeof args === "object" ? { ...args } : {};
+  if (next.agent_review_strategy === "pairwise_reference_merge") return next;
+  const workflowId = String(next.official_workflow_id || next.workflow_id || "").trim();
+  const mode = aiAgentNormalizeComfyuiGenerationMode(next.generation_mode || "");
+  if (!(workflowId === "origin_qwen_image_edit_2509" || workflowId.startsWith("origin_qwen_image_edit_2509_") || mode === "img2img")) return next;
+  if (!next.reference_image_ref) return next;
+  const semanticStageKey = String(next.reference_image_ref?.semantic_key || "").trim().toLowerCase();
+  const stageKey = ["chara", "clothes", "background", "pose"].includes(semanticStageKey) ? semanticStageKey : aiAgentSingleReferenceStageFromText([
+    next.prompt,
+    next.edit_instruction,
+    next.edit_prompt,
+    next.reference_image_ref?.semantic_key,
+    next.reference_image_ref?.filename,
+  ].filter(Boolean).join(" "));
+  if (!["chara", "clothes", "background", "pose"].includes(stageKey)) return next;
+  const desc = await aiAgentDescribeReferenceForEdit({
+    key: stageKey,
+    reference_image_ref: next.reference_image_ref,
+    description: `${stageKey} reference`,
+  }, next);
+  aiAgentAssertUsableReferenceDescription(desc, stageKey);
+  const fallbackInstruction = aiAgentCrossReferenceStageInstruction(stageKey, {
+    image_ref: next.reference_image_ref,
+    filename: next.reference_image_ref?.filename || `${stageKey} reference`,
+  });
+  next.agent_review_reference_image_ref = next.reference_image_ref;
+  next.agent_review_stage_key = stageKey;
+  next.agent_review_reference_summary = aiAgentReferenceTargetText(desc, `${stageKey} reference`, stageKey);
+  next.agent_review_reference_text_ready = true;
+  next.edit_instruction = aiAgentBuildReferenceAwareStageInstruction(stageKey, desc, fallbackInstruction);
+  next.negative_prompt = aiAgentMergeCommaList(next.negative_prompt, aiAgentStageNegativePrompt(stageKey, desc));
+  if (["chara", "clothes", "background"].includes(stageKey)) {
+    if (next.qwen_reference_force_image2 === true) {
+      next.qwen_reference_mode = "stage_guarded_image2";
+      next.qwen_reference_image2 = true;
+    } else {
+      next.qwen_reference_mode = "vision_text_traits_only";
+      next.qwen_reference_image2 = false;
+    }
+  } else {
+    delete next.reference_image_ref;
+  }
+  if (stageKey === "chara") {
+    next.denoise_strength = Math.max(Number(next.denoise_strength || 0.95) || 0.95, 0.95);
+  } else if (stageKey === "clothes") {
+    next.denoise_strength = Math.max(Number(next.denoise_strength || 0.88) || 0.88, 0.88);
+  } else if (stageKey === "background") {
+    next.denoise_strength = Math.max(Number(next.denoise_strength || 0.92) || 0.92, 0.92);
+  } else if (stageKey === "pose") {
+    next.denoise_strength = Math.max(Number(next.denoise_strength || 0.95) || 0.95, 0.95);
+  }
+  next.official_workflow_id = next.official_workflow_id || "origin_qwen_image_edit_2509";
+  next.generation_mode = "img2img";
+  return aiAgentApplyQwenEditInstructionPrompt(next);
+}
+
+async function aiAgentPrepareComfyuiArgsForStrategy(args = {}) {
+  let next = args && typeof args === "object" ? { ...args } : {};
+  next = await aiAgentPreparePairwiseReferenceArgs(next);
+  next = await aiAgentPrepareSingleSemanticReferenceArgs(next);
+  return aiAgentCleanComfyuiArgs(aiAgentApplyQwenEditInstructionPrompt(next));
+}
+
+function aiAgentApplyPairwiseCrossReferenceStage(args = {}) {
+  const next = args && typeof args === "object" ? { ...args } : {};
+  const stages = aiAgentCrossReferenceStageItems();
+  if (!stages.length) return next;
+  const sequence = stages.map((stage) => ({
+    key: stage.key,
+    reference_image_ref: stage.item.image_ref,
+    description: aiAgentReferenceDescription(stage.item, `${stage.key} reference`),
+  }));
+  const first = sequence[0];
+  next.reference_image_ref = first.reference_image_ref;
+  next.edit_instruction = aiAgentCrossReferenceStageInstruction(first.key, stages[0].item);
+  next.agent_review_required = true;
+  next.agent_review_mode = "vision_iterative_gate";
+  next.agent_review_strategy = "pairwise_reference_merge";
+  next.agent_review_stage_index = 0;
+  next.agent_review_stage_attempt = 1;
+  next.agent_review_stage_sequence = sequence;
+  next.agent_review_pass_threshold = 0.8;
+  next.agent_review_min_candidates = 1;
+  next.agent_review_max_attempts = Math.max(2, Number(next.agent_review_max_attempts || 3) || 3);
+  next.agent_review_plan = sequence
+    .map((stage, index) => `stage_${index + 1}_${stage.key}: merge only ${stage.key} reference after previous stage passes`)
+    .join(" | ");
+  return next;
+}
+
+function aiAgentTextSuggestsStagedImageEdit(text = "") {
+  const raw = String(text || "");
+  if (!raw.trim()) return false;
+  return aiAgentTextSuggestsCrossReferenceImages(raw)
+    || /多參考|多張參考|階段|分階段|自評|目視|視覺檢查|重跑|直到|候選圖|candidate|review|iterate|iteration/i.test(raw)
+    || /(姿勢|pose).*(服裝|clothes|outfit).*(角色|chara|character)/i.test(raw)
+    || /(角色|chara|character).*(服裝|clothes|outfit).*(姿勢|pose)/i.test(raw);
+}
+
+function aiAgentAttachStagedImageEditMetadata(args = {}, userText = "") {
+  const next = args && typeof args === "object" ? { ...args } : {};
+  const raw = [
+    userText,
+    next.prompt,
+    next.edit_instruction,
+    next.edit_prompt,
+  ].filter(Boolean).join(" ");
+  if (!aiAgentTextSuggestsStagedImageEdit(raw)) return next;
+  next.agent_review_required = true;
+  next.agent_review_mode = "vision_iterative_gate";
+  next.agent_review_pass_threshold = 0.8;
+  next.agent_review_min_candidates = Math.max(1, Number(next.agent_review_min_candidates || 1) || 1);
+  next.agent_review_max_attempts = Math.max(2, Number(next.agent_review_max_attempts || 3) || 3);
+  next.agent_review_plan = [
+    "stage_1_parse_references: identify source, chara, clothes, and pose roles; do not mix identities/backgrounds",
+    "stage_2_generate_candidate: create one candidate with Qwen Image Edit using only the current stage reference as image2",
+    "stage_3_vision_review: inspect candidate image against scoring items and hard-fail anatomy/text/artifact rules",
+    "stage_4_revise_or_pass: if any gate fails, revise edit_instruction/denoise/reference emphasis and rerun; only pass when all gates are acceptable",
+  ].join(" | ");
+  return next;
+}
+
+function aiAgentLooksLikeUnrelatedImageEditInstruction(instruction = "", userText = "") {
+  const current = aiAgentPromptFingerprint(instruction);
+  if (!current || !aiAgentTextSuggestsCrossReferenceImages(userText)) return false;
+  const mentionsCrossReference = /\b(chara|character|clothes|clothing|outfit|pose|reference)\b/.test(current)
+    || /參考|姿勢|服裝|角色/.test(current);
+  if (mentionsCrossReference) return false;
+  return /\b(hair\s+color|silver-white|silver|髮色|銀髮|銀白)\b/.test(current)
+    || /\bchange\s+only\b/.test(current);
+}
+
+function aiAgentLooksLikeWrongSingleReferenceInstruction(instruction = "", stageKey = "") {
+  const current = aiAgentPromptFingerprint(instruction);
+  const key = String(stageKey || "").toLowerCase();
+  if (!current || !key) return true;
+  if (key === "clothes") {
+    if (/\b(face|identity|eye shape|mature face|hair color|hairstyle|pose|body pose)\b/.test(current) && !/\b(clothes|clothing|outfit|garment|dress|uniform|kimono|swimsuit|bikini|sailor)\b/.test(current)) return true;
+    return !/\b(clothes|clothing|outfit|garment|dress|uniform|kimono|swimsuit|bikini|sailor)\b/.test(current);
+  }
+  if (key === "chara") {
+    if (/\b(outfit|garment|clothes|body pose|pose)\b/.test(current) && !/\b(face|identity|character|hair|eye)\b/.test(current)) return true;
+    return !/\b(face|identity|character|hair|eye|appearance)\b/.test(current);
+  }
+  if (key === "pose") {
+    if (/\b(face|identity|outfit|garment|clothes)\b/.test(current) && !/\b(pose|body|arm|leg|hand|composition|kneel|sit|stand|lying)\b/.test(current)) return true;
+    return !/\b(pose|body|arm|leg|hand|composition|kneel|sit|stand|lying)\b/.test(current);
+  }
+  return false;
+}
+
 function aiAgentEnsureComfyuiImageRefs(args = {}) {
   const next = args && typeof args === "object" ? { ...args } : {};
   const generationMode = aiAgentNormalizeComfyuiGenerationMode(
@@ -901,6 +1668,10 @@ function aiAgentEnsureComfyuiImageRefs(args = {}) {
   if (!next.reference_image_ref && aiAgentTextSuggestsReferenceImage(String(next.prompt || next.edit_instruction || next.edit_prompt || ""))) {
     const inferred = aiAgentInferRecentImageRef("reference", { exclude: next.source_image_ref });
     if (inferred) next.reference_image_ref = inferred;
+  }
+  if (!next.reference_image_ref && aiAgentTextSuggestsCrossReferenceImages(String(next.prompt || next.edit_instruction || next.edit_prompt || ""))) {
+    const firstStage = aiAgentCrossReferenceStageItems()[0];
+    if (firstStage?.item?.image_ref) next.reference_image_ref = firstStage.item.image_ref;
   }
   return next;
 }
@@ -1137,6 +1908,8 @@ function aiAgentPlannerNeedles(userText = "") {
     ["接手", "handoff"],
     ["生圖", "comfyui", "generate", "image"],
     ["圖片", "comfyui", "image", "avatar"],
+    ["背景", "background", "composite", "comfyui"],
+    ["完全複製", "exact", "copy", "composite"],
     ["頭像", "avatar", "member"],
   ].forEach(([pattern, ...extra]) => {
     if (raw.includes(pattern)) extra.forEach((item) => needles.add(item));
@@ -1330,6 +2103,15 @@ function aiAgentFallbackExtractToolArgs(userText = "", toolName = "") {
     args.priority = /緊急|urgent|立刻|馬上/i.test(raw) ? "urgent" : "normal";
     args.context = { source: "ai_agent_fallback_planner", user_text: raw.slice(0, 4000) };
     args.requested_artifacts = ["implementation_summary", "test_results"];
+  } else if (toolName === "write_comfyui_background_composite") {
+    args.source_image_ref = aiAgentInferRecentImageRef("source");
+    args.background_image_ref = aiAgentInferSemanticImageRef("background")?.image_ref
+      || aiAgentInferRecentImageRef("reference", { exclude: args.source_image_ref });
+    const width = raw.match(/(?:寬|width|解析度)\s*[=:：]?\s*(\d{3,4})/i);
+    const height = raw.match(/(?:高|height|解析度\s*\d{3,4}\s*x)\s*[=:：]?\s*(\d{3,4})/i);
+    if (width) args.width = Number(width[1]);
+    if (height) args.height = Number(height[1]);
+    args.prompt = raw.slice(0, 1000);
   } else if (toolName === "write_comfyui_generate") {
     const positiveMatch = raw.match(/正向提示詞請(?:以|包含)?(.+?)(?:負面提示詞請包含|請依語意|$)/s);
     const negativeMatch = raw.match(/負面提示詞請包含(.+?)(?:請依語意|$)/s);
@@ -1418,6 +2200,7 @@ function aiAgentDeterministicToolName(userText = "", context = {}) {
     if (has("write_moderation_proposal_execute")) return "write_moderation_proposal_execute";
   }
   if (/聊天室|chat.*room|建立聊天室/i.test(lower) && has("write_chat_create_room")) return "write_chat_create_room";
+  if (/(完全|exact|像素|原樣).{0,12}(複製|copy).{0,16}(背景|background)|(?:背景|background).{0,16}(完全|exact|像素|原樣).{0,12}(複製|copy)/i.test(lower) && has("write_comfyui_background_composite")) return "write_comfyui_background_composite";
   return "";
 }
 
@@ -1519,7 +2302,7 @@ function aiAgentDeterministicToolPlan(userText = "", context = {}, error = null)
 }
 
 function aiAgentLocalFastPathAllowed(plan = {}, userText = "") {
-  if (!plan || plan.action !== "write_tool" || !plan.tool || !aiAgentPlanConfirmedWrite(plan)) return false;
+  if (!plan || plan.action !== "write_tool" || !plan.tool || !aiAgentPlanConfirmedWrite(plan, userText)) return false;
   const raw = String(userText || "");
   const explicitMarkers = [
     /\b[A-Z]{2,12}-PC0\b/,
@@ -1813,15 +2596,19 @@ async function aiAgentPlanToolAction(userText, options = {}) {
     "若使用者目的不明或缺少必要資料，action=clarify 並用 question 提出一個具體反問。",
     "若使用者以短句詢問某件事是否開始、完成、跑出結果或目前進度，請先依 recent_messages 與 submitted_comfyui_jobs 判斷目標；若仍不確定，action=readonly 並 readonly_scope=all，讓前端回報真實可見任務狀態。",
     "若使用者要求修改、重繪、風格化、套風格、以圖生圖或把上一張/剛剛那張圖再加工，action=comfyui_generate、execute_write=true，並用 context.recent_image_refs 或 last_comfyui_job.images 的 image_ref 填 source_image_ref；recent_image_refs[].context 會描述該圖片在對話中的語意，例如原圖、遮罩、上一張結果、pose reference 或特定物件遮罩，請依語意選 source_image_ref、mask_image_ref 與 reference_image_ref；風格化/以圖生圖 generation_mode=img2img，局部重繪 generation_mode=inpaint 且需要 mask_image_ref，向外延展 generation_mode=outpaint 且填 outpaint_* 邊界。",
+    "若使用者明確要求「完全複製背景」、「exact background copy」、「像素級/原樣複製背景」且 context.effective_tools 有 write_comfyui_background_composite，請用 action=write_tool、tool=write_comfyui_background_composite、execute_write=true；args.source_image_ref 用目前要保留人物的 source，args.background_image_ref 用 background reference。這不是一般 Qwen Edit 生圖，不能用 comfyui_generate 假裝能精確複製背景。write_comfyui_background_composite 產生的是候選圖，不代表品質通過；若回傳 delivery_pass=false 或 review_required=true，必須明確說還要 vision/human review，不能宣稱已通過。若使用者只是要背景風格或場景特徵，才用 Qwen Edit background reference。",
     "comfyui_generate 的 prompt 不可空白；文字生圖 prompt 寫完整畫面，Qwen Image Edit / origin_qwen_image_edit_2509 語意改圖則必須另外提供 edit_instruction。",
     "Qwen Image Edit / origin_qwen_image_edit_2509 時，edit_instruction 必須是短英文直接編輯命令；prompt 只放 style/preservation context，例如 by ogipote, anime style, 1girl。不得把整段中文自然語言任務、測試說明或完整目標場景描述塞進 prompt。",
     "Qwen Image Edit 的複合人物/物件任務不可刪減使用者明確指定的互動、相對位置、保持項目與禁止項目；例如新增第二人互動時，edit_instruction 要保留 hand on shoulder、both look at camera、smile、no merged bodies、no body penetration 等關鍵語意。新增人物是高重構任務，edit_instruction 要明說 create a new full separate character occupying the left/right third of the image、make enough visible space、slightly shift or scale the original girl if needed，且 denoise_strength 建議 0.88-0.95，避免模型過度保留原圖而完全忽略第二人。新增人物也要保留場景服裝語境，例如原圖是 festival kimono/yukata、和服、制服或泳裝時，第二人應穿協調的同場景服裝與配件，除非使用者明確要求對比服裝。",
+    "若 recent_image_refs 或訊息中同時有 chara reference、clothes reference、background reference、pose reference，禁止一次把多張 reference 塞進同一個 Qwen Edit job；必須用 pairwise staged workflow：stage 1 source+chara 只合併角色外觀/臉/髮型方向；vision gate 通過後 stage 2 以上一張 candidate 當 source+clothes 只合併服裝；若有 background reference，stage 3 只合併背景/場景/光線；最後才 stage pose 只合併姿勢/構圖。每階段要先用 vision 模型把當前 reference 圖轉成明確英文 edit traits，再把那些 traits 寫入 edit_instruction；不要只寫 use this reference。Qwen Image Edit 2509 對 chara/clothes/background/pose staged merge 預設使用單圖 text edit，reference 圖只保留給 vision extraction 與 review sheet，比直接把 reference_image_ref 當 image2 更可靠。",
+    "單項測試時只執行該單項：只測 background 就不得順手改衣服、髮色、表情、配件或姿勢；只測 clothes 就不得順手改背景、人物身份、髮型或姿勢。若使用者同時列出後續項目，先完成當前項目，再等待下一輪或在報告中列為 pending。",
+    "多參考圖、高難度 i2i、姿勢/服裝/角色/背景交叉融合、或使用者要求目視確認/直到成功時，不要把單次生圖當最終答案；請把 args 加上 agent_review_required=true、agent_review_mode='vision_iterative_gate'、agent_review_strategy='pairwise_reference_merge'、agent_review_max_attempts>=2，並在 reason 中說明 staged workflow：逐階段合併 chara -> clothes -> background -> pose，每階段產 candidate，用 vision 檢查 hard fail 與達成率，未達 80% 或有硬傷就修改 edit_instruction/denoise/reference emphasis 後重跑；該階段通過才進下一階段。",
     "圖生圖/風格化/外延/局部重繪時，prompt 或 edit_instruction 必須描述本輪要修改的方向；不可只複製 context.last_comfyui_args.prompt，除非使用者明確要求完全沿用原 prompt。",
     "以圖生圖前要先檢查來源圖是否適合使用者目標：臉部/表情需要完整可見臉、嘴與下巴；服裝需要可見肩膀/上半身；姿勢複製需要可見四肢與軀幹；物件替換需要目標物不要被嚴重裁切或遮擋。若來源圖明顯不適合且使用者不是要求硬測，action=clarify 或先建議重生更適合的來源圖，不要假裝能高可信完成。",
     "若來源圖有多個相似目標物或局部裁切物，例如兩個杯子、上方杯與前景裁切杯，edit_instruction 必須逐一指定每個可見目標的處理方式，例如「replace the upper mug with one plush, remove the cropped foreground mug, keep the girl and apple unchanged」；不要只寫 all/one 這種會造成歧義的句子。",
     "若 inpaint 缺少可用 mask_image_ref，action=clarify，question 只問使用者要提供 mask 或改用 img2img/outpaint；不要假裝能局部重繪。",
     "若 outpaint 未指定方向或像素，可用 128px 與 feathering 48 作安全預設；若 style change 未指定 denoise_strength，可用 0.55-0.75。",
-    "圖片模型選擇：若使用者明確指定 official_workflow_id/workflow_id，必須原樣保留；若使用者要求 Qwen Image txt2img/Qwen Image 文字生圖，official_workflow_id=origin_qwen_image_txt2img；一般 img2img/語意改圖優先 official_workflow_id=origin_qwen_image_edit_2509，且必須把具體修改命令放在 edit_instruction，不可只放風格詞或只填 prompt；局部重繪 inpaint 優先 origin_sdxl_checkpoint_inpaint；向外延展 outpaint 優先 origin_flux_fill_outpaint_gguf_q3。若依賴缺失，應讓工具回報缺模型，不要退回會產生灰色遮罩塊的快捷 workflow。",
+    "圖片模型選擇：若使用者明確指定 official_workflow_id/workflow_id，必須原樣保留；若使用者要求 Qwen Image txt2img/Qwen Image 文字生圖，official_workflow_id=origin_qwen_image_txt2img；一般 img2img/語意改圖優先 official_workflow_id=origin_qwen_image_edit_2509，且必須把具體修改命令放在 edit_instruction，不可只放風格詞或只填 prompt；局部重繪 inpaint 優先 origin_sdxl_checkpoint_inpaint；向外延展 outpaint 優先 origin_flux_fill_outpaint_gguf_q3。若 reference pose 經 vision gate 判定沒有真的改姿勢，不要只提高 denoise 重送，要改走 pose/control workflow（sdpose pose map -> origin_qwen_image_controlnet_2512）。若依賴缺失，應讓工具回報缺模型，不要退回會產生灰色遮罩塊的快捷 workflow。",
     "若 input_mode=image，請用語意判斷使用者是要圖片問答、圖片分析產 prompt，還是要求用附圖執行生圖；只有明確要求執行寫入的情況才可輸出 comfyui_generate 並設 execute_write=true。",
     "若 input_mode=image 且使用者明確要求用附圖執行生圖，即使未提供 prompt、尺寸或步數，也應輸出 comfyui_generate 並設 execute_write=true；前端會先用 vision 模型分析圖片並補齊安全預設參數。",
     "若 input_mode=image 且使用者意圖依上下文仍不明，請輸出 chat 或 clarify；不得設定 execute_write=true，也不得暗示已送出任何寫入工具。",
@@ -1953,8 +2740,16 @@ function aiAgentPlannerRerunArgs(plan = {}, userText = "") {
   return merged;
 }
 
-function aiAgentPlanConfirmedWrite(plan = {}) {
-  return plan?.execute_write === true || String(plan?.execute_write || "").toLowerCase() === "true";
+function aiAgentPlanConfirmedWrite(plan = {}, userText = "") {
+  const raw = String(userText || "");
+  if (/(不要|別|不可|不准|停止|只是|只要|只需).{0,18}(執行|送出|寫入|下載|生圖|產圖|下單|轉帳|治理|修改|刪除|run|execute|submit|write)/i.test(raw)) {
+    return false;
+  }
+  if (plan?.execute_write === true || String(plan?.execute_write || "").toLowerCase() === "true") return true;
+  const args = plan?.args && typeof plan.args === "object" ? plan.args : {};
+  if (args.confirm_billing === true || String(args.confirm_billing || "").toLowerCase() === "true") return true;
+  if (plan?.confirm_billing === true || String(plan?.confirm_billing || "").toLowerCase() === "true") return true;
+  return /(confirm_billing\s*[=:：]\s*true|請真的使用|請真的用|真的使用本站\s*ComfyUI|送出|執行|開始生圖|開始產圖|run\s+it|execute\s+it|submit)/i.test(raw);
 }
 
 function aiAgentWriteToolResultSummary(toolName, json = {}, elapsedMs = 0) {
@@ -2016,6 +2811,9 @@ async function aiAgentRunGenericWriteTool(plan, userText, input) {
   try {
     if (toolName === "write_comfyui_generate") {
       args = aiAgentNormalizeAnalysisArgs(args, userText);
+      args = await aiAgentPrepareComfyuiArgsForStrategy(args);
+    } else if (toolName === "write_comfyui_background_composite") {
+      args = aiAgentBackgroundCompositeSubmitArgs(args);
     }
   } catch (err) {
     const msg = err?.message || "ComfyUI 參數不完整";
@@ -2040,7 +2838,7 @@ async function aiAgentRunGenericWriteTool(plan, userText, input) {
   try {
     const result = await aiAgentPostWriteToolExecute({
         tool: toolName,
-        arguments: args,
+        arguments: toolName === "write_comfyui_generate" ? aiAgentComfyuiSubmitArgs(args) : args,
         confirm: "EXECUTE",
         elevate_once: elevateOnce ? "ALLOW_WRITE_ONCE" : undefined,
       },
@@ -2051,6 +2849,16 @@ async function aiAgentRunGenericWriteTool(plan, userText, input) {
     const elapsed = result?.elapsed || Math.round(performance.now() - started);
     const retryNote = result?.attempt > 1 ? `\n重試次數：${result.attempt - 1}` : "";
     AI_AGENT_STATE.messages.push({ role: "assistant", content: `${aiAgentWriteToolResultSummary(toolName, json, elapsed)}${retryNote}` });
+    if (toolName !== "write_comfyui_generate" && json.ok && res.ok) {
+      const images = aiAgentImagesFromWriteToolResult(json);
+      if (images.length) {
+        AI_AGENT_STATE.messages.push({
+          role: "assistant",
+          content: `${toolName} 回傳了可繼續使用的站內圖片結果。後續圖片任務可把這張當 source image。`,
+          images,
+        });
+      }
+    }
     renderAiAgentThread();
     setAiAgentMessage(json.ok && res.ok ? `${toolName} 已完成` : `${toolName} 失敗`, json.ok && res.ok ? "ok" : "err");
     if (toolName === "write_comfyui_generate" && json.ok && res.ok) {
@@ -2133,7 +2941,7 @@ async function aiAgentExecuteToolPlan(plan, userText, input, options = {}) {
     return true;
   }
   if (action === "write_tool") {
-    if (!aiAgentPlanConfirmedWrite(plan)) {
+    if (!aiAgentPlanConfirmedWrite(plan, userText)) {
       const toolName = String(plan?.tool || "").trim();
       AI_AGENT_STATE.messages.push({ role: "user", content: userText });
       AI_AGENT_STATE.messages.push({
@@ -2148,7 +2956,7 @@ async function aiAgentExecuteToolPlan(plan, userText, input, options = {}) {
     return aiAgentRunGenericWriteTool(plan, userText, input);
   }
   if (action === "comfyui_generate" || action === "comfyui_rerun") {
-    if (options.hasImage && action === "comfyui_generate" && !aiAgentPlanConfirmedWrite(plan)) {
+    if (options.hasImage && action === "comfyui_generate" && !aiAgentPlanConfirmedWrite(plan, userText)) {
       AI_AGENT_STATE.messages.push({ role: "user", content: `${userText}\n[已附加圖片]` });
       renderAiAgentThread();
       if (input) input.value = "";
@@ -2303,6 +3111,12 @@ function aiAgentNormalizeAnalysisArgs(parsed, userText) {
     prompt = aiAgentStripFieldValue(userText || prompt);
   }
   if (!prompt) throw new Error("圖片分析沒有產生可用提示詞");
+  const singleReferenceStage = aiAgentSingleReferenceStageFromText([
+    userText,
+    prompt,
+    source?.edit_instruction,
+    source?.edit_prompt,
+  ].filter(Boolean).join(" "));
   if (!referenceImageRef && aiAgentTextSuggestsReferenceImage([
     userText,
     prompt,
@@ -2311,10 +3125,41 @@ function aiAgentNormalizeAnalysisArgs(parsed, userText) {
   ].filter(Boolean).join(" "))) {
     referenceImageRef = aiAgentInferRecentImageRef("reference", { exclude: sourceImageRef });
   }
+  if (!referenceImageRef && singleReferenceStage) {
+    const semanticRef = aiAgentInferSemanticImageRef(singleReferenceStage);
+    if (semanticRef?.image_ref) referenceImageRef = semanticRef.image_ref;
+  }
+  if (!referenceImageRef && aiAgentTextSuggestsCrossReferenceImages([
+    userText,
+    prompt,
+    source?.edit_instruction,
+    source?.edit_prompt,
+  ].filter(Boolean).join(" "))) {
+    const firstStage = aiAgentCrossReferenceStageItems()[0];
+    if (firstStage?.item?.image_ref) referenceImageRef = firstStage.item.image_ref;
+  }
+  let editInstruction = aiAgentStripFieldValue(source?.edit_instruction || source?.edit_prompt || "");
+  if (
+    aiAgentTextSuggestsCrossReferenceImages(userText)
+    && (!editInstruction || aiAgentLooksLikeUnrelatedImageEditInstruction(editInstruction, userText))
+  ) {
+    const firstStage = aiAgentCrossReferenceStageItems()[0];
+    editInstruction = firstStage ? aiAgentCrossReferenceStageInstruction(firstStage.key, firstStage.item) : (aiAgentBuildCrossReferenceEditInstruction() || editInstruction);
+  }
+  if (
+    singleReferenceStage
+    && referenceImageRef
+    && (!editInstruction || aiAgentLooksLikeWrongSingleReferenceInstruction(editInstruction, singleReferenceStage))
+  ) {
+    editInstruction = aiAgentCrossReferenceStageInstruction(singleReferenceStage, {
+      image_ref: referenceImageRef,
+      filename: referenceImageRef.filename || `${singleReferenceStage} reference`,
+    });
+  }
   const shouldDefaultImageEditSize = ["img2img", "inpaint", "outpaint", "upscale"].includes(generationMode) && sourceImageRef;
   const args = {
     prompt,
-    edit_instruction: aiAgentStripFieldValue(source?.edit_instruction || source?.edit_prompt || ""),
+    edit_instruction: editInstruction,
     edit_prompt: aiAgentStripFieldValue(source?.edit_prompt || ""),
     negative_prompt: aiAgentStripFieldValue(source?.negative_prompt || source?.negative || ""),
     width: source?.width || (shouldDefaultImageEditSize ? 1024 : undefined),
@@ -2346,7 +3191,14 @@ function aiAgentNormalizeAnalysisArgs(parsed, userText) {
   Object.keys(args).forEach((key) => {
     if (args[key] === "" || args[key] === undefined || args[key] === null) delete args[key];
   });
-  return aiAgentCleanComfyuiArgs(aiAgentEnsureComfyuiImageRefs(args));
+  const stagedArgs = aiAgentTextSuggestsCrossReferenceImages([
+    userText,
+    prompt,
+    editInstruction,
+  ].filter(Boolean).join(" "))
+    ? aiAgentApplyPairwiseCrossReferenceStage(args)
+    : aiAgentAttachStagedImageEditMetadata(args, userText);
+  return aiAgentCleanComfyuiArgs(aiAgentEnsureComfyuiImageRefs(stagedArgs));
 }
 
 async function aiAgentAnalyzeImageForComfyui(userText) {
@@ -2354,7 +3206,7 @@ async function aiAgentAnalyzeImageForComfyui(userText) {
   const selectedModel = aiAgentVisionModel();
   const selectableModels = aiAgentSelectableModels();
   if (!selectedModel) {
-    throw new Error("目前沒有可用的圖片理解模型。請在 AI Agent 模型允許清單加入 /models 回傳且支援圖片的模型後再試。");
+    throw new Error("目前沒有可嘗試圖片理解的模型。請確認允許清單至少包含一個 /models 回傳的 cloud 模型，或開啟圖片輸入。");
   }
   if (selectableModels.length && !selectableModels.includes(selectedModel)) {
     throw new Error("請從模型選單選擇可用模型後再做圖片分析。");
@@ -2407,11 +3259,13 @@ async function aiAgentAnalyzeTextForComfyui(userText) {
   const analysisPrompt = [
     "請把使用者的自然語言需求轉成 ComfyUI write-tool 參數，可支援 text-to-image、img2img、inpaint、outpaint。",
     "請只輸出 JSON，不要 Markdown，不要表格，不要操作教學。",
-    "JSON 欄位：prompt, negative_prompt, width, height, steps, cfg_scale, cfg, batch_size, seed, checkpoint, vae, sampler, sampler_name, scheduler, official_workflow_id, generation_mode, source_image_ref, mask_image_ref, reference_image_ref, denoise_strength, outpaint_left, outpaint_top, outpaint_right, outpaint_bottom, outpaint_feathering。",
+    "JSON 欄位：prompt, edit_instruction, edit_prompt, negative_prompt, width, height, steps, cfg_scale, cfg, batch_size, seed, checkpoint, vae, sampler, sampler_name, scheduler, official_workflow_id, generation_mode, source_image_ref, mask_image_ref, reference_image_ref, denoise_strength, outpaint_left, outpaint_top, outpaint_right, outpaint_bottom, outpaint_feathering, agent_review_required, agent_review_mode, agent_review_strategy, agent_review_min_candidates, agent_review_max_attempts, agent_review_plan。",
     "若使用者要求修改、重繪、風格化、以圖生圖或外延站內圖片，請保留 source_image_ref/mask_image_ref/reference_image_ref/outpaint/denoise 欄位；風格化 generation_mode=img2img。",
     "如果使用者提到 Qwen Image T2I、Qwen Image txt2img 或 Qwen Image 文字生圖，official_workflow_id 設為 origin_qwen_image_txt2img。",
     "如果使用者提到 SDXL T2I、SDXL txt2img 或 SDXL 文字生圖，official_workflow_id 設為 origin_sdxl_txt2img。",
     "如果使用者要求一般圖片修改、風格化或語意改圖，official_workflow_id 設為 origin_qwen_image_edit_2509；若要求局部重繪 inpaint，official_workflow_id 設為 origin_sdxl_checkpoint_inpaint；若要求 outpaint/外延，official_workflow_id 設為 origin_flux_fill_outpaint_gguf_q3。",
+    "若是 Qwen Image Edit / origin_qwen_image_edit_2509，prompt 只放 style/preservation context，具體修改放 edit_instruction；多參考圖任務必須保留 chara/clothes/background/pose 的分工，不可回覆不相干的舊任務。",
+    "若是多參考圖、高難度 i2i 或使用者要求目視確認/直到成功，請加入 agent_review_required=true、agent_review_mode='vision_iterative_gate'、agent_review_strategy='pairwise_reference_merge'、agent_review_max_attempts 至少 2；agent_review_plan 要列出 parse references -> vision extract current reference traits -> stage source+chara text edit -> vision gate -> stage candidate+clothes text edit -> vision gate -> stage candidate+pose/control decision -> final gate。不要只輸出 use this reference，因為 2509 可能完成 job 卻沒有真的 edit。",
     "如果使用者指定模型、Checkpoint、VAE、尺寸、CFG、步數或張數，必須保留。",
     "checkpoint 只能填使用者明確提供的實際 checkpoint 名稱；如果只提到 SDXL、SDXL T2I 或泛稱，不要填 sdxl_base_1.0.ckpt，請省略 checkpoint。",
     "prompt 欄位要是可直接送 ComfyUI 的正向提示詞，不要包含解釋文字。",
@@ -2803,6 +3657,7 @@ async function runAiAgentComfyuiGenerate(overrides = null) {
   let attempt = null;
   try {
     args = aiAgentComfyuiToolArguments(overrides);
+    args = await aiAgentPrepareComfyuiArgsForStrategy(args);
     if (!args.prompt) throw new Error("請先輸入提示詞");
     attempt = aiAgentRememberComfyuiAttempt(args, { status: "sending" });
   } catch (err) {
@@ -2818,7 +3673,7 @@ async function runAiAgentComfyuiGenerate(overrides = null) {
   try {
     const result = await aiAgentPostWriteToolExecute({
         tool: "write_comfyui_generate",
-        arguments: args,
+        arguments: aiAgentComfyuiSubmitArgs(args),
         confirm: "EXECUTE",
         elevate_once: elevateOnce ? "ALLOW_WRITE_ONCE" : "",
       },
@@ -2898,6 +3753,39 @@ function aiAgentComfyuiResultSummary(job = {}) {
   return lines.join("\n");
 }
 
+function aiAgentComfyuiNeedsVisionReview(job = {}) {
+  const jobId = String(job.job_id || "").trim();
+  const submitted = jobId ? AI_AGENT_STATE.comfyuiSubmittedJobs[jobId] : null;
+  const args = submitted?.args || AI_AGENT_STATE.lastComfyuiArgs || {};
+  return !!args.agent_review_required || aiAgentTextSuggestsStagedImageEdit([
+    args.prompt,
+    args.edit_instruction,
+    args.edit_prompt,
+  ].filter(Boolean).join(" "));
+}
+
+function aiAgentComfyuiStagedReviewSummary(job = {}) {
+  const base = aiAgentComfyuiResultSummary(job);
+  const jobId = String(job.job_id || "").trim();
+  const submitted = jobId ? AI_AGENT_STATE.comfyuiSubmittedJobs[jobId] : null;
+  const args = submitted?.args || AI_AGENT_STATE.lastComfyuiArgs || {};
+  const plan = String(args.agent_review_plan || "").trim();
+  const lines = [
+    base,
+    "",
+    "這張先標記為 candidate，不等於最終通過。",
+    "下一步我需要用 vision 模型目視檢查：",
+    "1. chara reference 是否只影響角色外觀/臉/髮型方向",
+    "2. clothes reference 是否只影響服裝設計",
+    "3. background reference 是否只影響背景/場景/光線",
+    "4. pose reference 是否只影響姿勢/構圖",
+    "5. 是否有文字、水印、多手、斷手、缺指、肢體穿透、黑圖或灰框",
+    "若任一 gate 未通過，我應該修正 edit_instruction、denoise 或參考圖強調後再重跑；只有 vision review 通過才可回報完成。",
+  ];
+  if (plan) lines.push(`內部 staged plan：${plan}`);
+  return lines.join("\n");
+}
+
 function aiAgentComfyuiImagesFromJob(job = {}) {
   const result = job.result || {};
   const rawImages = Array.isArray(result.images) ? result.images : (result.image ? [result.image] : []);
@@ -2919,14 +3807,757 @@ function aiAgentComfyuiImagesFromJob(job = {}) {
     .slice(0, 4);
 }
 
+function aiAgentImagesFromWriteToolResult(json = {}) {
+  const result = json.result || json.payload || {};
+  const nested = result.result || result.payload || result;
+  const rawImages = Array.isArray(nested.images) ? nested.images : (nested.image ? [nested.image] : []);
+  return rawImages
+    .map((item) => {
+      const imageRef = item?.image_ref || item?.file_ref || null;
+      const filename = imageRef?.filename || item?.filename || "";
+      if (!imageRef || !filename) return null;
+      return {
+        image_ref: imageRef,
+        cloud_file_id: item?.cloud_file_id || imageRef?.cloud_file_id || "",
+        storage_file_id: item?.storage_file_id || imageRef?.storage_file_id || "",
+        prompt_id: item?.prompt_id || nested?.prompt_id || "",
+        filename,
+        mime_type: item?.mime_type || "image/png",
+      };
+    })
+    .filter(Boolean)
+    .slice(0, 4);
+}
+
 function aiAgentComfyuiCompletionMessage(job = {}) {
   const jobId = String(job.job_id || "").trim();
   if (jobId) AI_AGENT_STATE.comfyuiAnnouncedJobs[jobId] = "completed";
   return {
     role: "assistant",
-    content: aiAgentComfyuiResultSummary(job),
+    comfyui_job_id: jobId,
+    comfyui_staged_review: aiAgentComfyuiNeedsVisionReview(job),
+    content: aiAgentComfyuiNeedsVisionReview(job)
+      ? aiAgentComfyuiStagedReviewSummary(job)
+      : aiAgentComfyuiResultSummary(job),
     images: aiAgentComfyuiImagesFromJob(job),
   };
+}
+
+function aiAgentComfyuiReviewArgsForMessage(message = {}) {
+  const jobId = String(message.comfyui_job_id || "").trim();
+  const submitted = jobId ? AI_AGENT_STATE.comfyuiSubmittedJobs[jobId] : null;
+  return submitted?.args || AI_AGENT_STATE.lastComfyuiArgs || {};
+}
+
+function aiAgentStageSpecificReviewRules(stageKey = "") {
+  const key = String(stageKey || "").toLowerCase();
+  if (key === "chara") {
+    return [
+      "Active chara hard rules:",
+      "- FAIL if the requested dominant blonde/golden hair remains dark, navy, blue, or black.",
+      "- FAIL if the candidate keeps the source character nearly unchanged.",
+      "- FAIL if this stage changes the source outfit/accessories/pose/background in a major way.",
+      "- PASS only when character appearance changes are visible and non-chara attributes are mostly preserved.",
+    ].join("\n");
+  }
+  if (key === "clothes") {
+    return [
+      "Active clothes hard rules:",
+      "- Judge only garment/outfit transfer from CURRENT REFERENCE.",
+      "- FAIL if the target clothes are missing or the source outfit is nearly unchanged.",
+      "- FAIL if hair color, hairstyle, cat ears, animal ears, face identity, pose, or background leaked from the clothes reference.",
+      "- PASS only when the outfit is visibly changed while the already-passed character identity and pose are preserved.",
+    ].join("\n");
+  }
+  if (key === "pose") {
+    return [
+      "Active pose hard rules:",
+      "- Judge only body pose/composition transfer from CURRENT REFERENCE.",
+      "- FAIL if the body pose is nearly unchanged or misses the reference pose's main limb/hand arrangement.",
+      "- FAIL if outfit, identity, hair, or background are copied from the pose reference.",
+      "- If direct edit cannot achieve the pose, recommend switching to pose/control workflow instead of another blind rerun.",
+    ].join("\n");
+  }
+  if (key === "background") {
+    return [
+      "Active background hard rules:",
+      "- Judge only scene/background transfer from CURRENT REFERENCE.",
+      "- FAIL if the background/scene is nearly unchanged or misses the reference scene's main setting/lighting.",
+      "- FAIL if identity, hair, outfit, body pose, or extra people are copied from the background reference.",
+      "- FAIL if readable text/signage/watermark appears because of the background reference.",
+      "- PASS only when the scene changes visibly while the already-passed character, outfit, and pose are preserved.",
+    ].join("\n");
+  }
+  return "";
+}
+
+function aiAgentComfyuiReviewPrompt(args = {}, attemptIndex = 1, maxAttempts = 2) {
+  const prompt = String(args.prompt || "").slice(0, 2500);
+  const editInstruction = String(args.edit_instruction || args.edit_prompt || "").slice(0, 2500);
+  const threshold = Number(args.agent_review_pass_threshold || 0.8) || 0.8;
+  const sequence = Array.isArray(args.agent_review_stage_sequence) ? args.agent_review_stage_sequence : [];
+  const stageIndex = Math.max(0, Number(args.agent_review_stage_index || 0) || 0);
+  const stage = sequence[stageIndex] || {};
+  const stageLine = stage?.key
+    ? `Current pairwise stage: ${stageIndex + 1}/${sequence.length} (${stage.key}). Only judge this stage and previously passed stages; do not fail because future stages are not yet merged.`
+    : "";
+  return [
+    "You are the AI Agent visual gate for a ComfyUI image-edit candidate.",
+    "Inspect the attached generated candidate image. Do not assume it passed just because a job completed.",
+    "The attached image may be a review sheet with SOURCE, CURRENT REFERENCE, and CANDIDATE panels. Ignore panel labels and borders; judge the candidate against the source/reference panels.",
+    "Return one plain JSON object only. This is not private raw data; it is the required public validation result for automation. No markdown, tables, prose, code fences, or safety disclaimers.",
+    "JSON schema: {\"pass\": boolean, \"score\": number, \"hard_fail\": boolean, \"issues\": [string], \"passed_gates\": [string], \"failed_gates\": [string], \"revised_edit_instruction\": string, \"revised_prompt\": string, \"revised_negative_prompt\": string, \"revised_denoise_strength\": number}.",
+    `Gate threshold: pass only if score >= ${threshold} and hard_fail=false.`,
+    stageLine,
+    "Hard fail examples: visible unwanted text/watermark/signature, black/blank/gray-block image, extra limbs, broken hands, missing fingers, severe body penetration, heavily distorted anatomy, source/reference role mix-up.",
+    "For the active stage, also fail if the candidate is nearly unchanged from SOURCE or ignores CURRENT REFERENCE; a completed job with no visible requested change is not acceptable.",
+    "For pairwise multi-reference edits, judge only the active stage: chara affects character appearance/face/hair direction, clothes affects outfit only, pose affects body pose/composition only.",
+    aiAgentStageSpecificReviewRules(stage?.key),
+    "If it fails, provide a concise revised_edit_instruction that fixes the visible issue and strengthens the missing gate. Do not put style tags or explanatory text into the image.",
+    `Attempt: ${attemptIndex}/${maxAttempts}`,
+    `Positive/style prompt: ${prompt || "-"}`,
+    `Edit instruction: ${editInstruction || "-"}`,
+    `Negative prompt: ${String(args.negative_prompt || "-").slice(0, 1200)}`,
+  ].join("\n");
+}
+
+function aiAgentLoadDataUrlImage(dataUrl) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error("review sheet image load failed"));
+    img.src = dataUrl;
+  });
+}
+
+function aiAgentDrawComparableImage(ctx, img, width, height) {
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, width, height);
+  const imageW = Math.max(1, img.naturalWidth || img.width || 1);
+  const imageH = Math.max(1, img.naturalHeight || img.height || 1);
+  const scale = Math.min(width / imageW, height / imageH);
+  const drawW = Math.max(1, Math.round(imageW * scale));
+  const drawH = Math.max(1, Math.round(imageH * scale));
+  const drawX = Math.round((width - drawW) / 2);
+  const drawY = Math.round((height - drawH) / 2);
+  ctx.drawImage(img, drawX, drawY, drawW, drawH);
+}
+
+async function aiAgentDownscaleDataUrlForVision(dataUrl = "", maxSide = 768, quality = 0.86) {
+  if (!dataUrl) return "";
+  try {
+    const img = await aiAgentLoadDataUrlImage(dataUrl);
+    const imageW = Math.max(1, img.naturalWidth || img.width || 1);
+    const imageH = Math.max(1, img.naturalHeight || img.height || 1);
+    const side = Math.max(imageW, imageH);
+    if (side <= maxSide && String(dataUrl).length <= 3_000_000) return dataUrl;
+    const scale = Math.min(1, Math.max(64, Number(maxSide || 768)) / side);
+    const width = Math.max(1, Math.round(imageW * scale));
+    const height = Math.max(1, Math.round(imageH * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, width, height);
+    ctx.drawImage(img, 0, 0, width, height);
+    return canvas.toDataURL("image/jpeg", Math.max(0.6, Math.min(0.95, Number(quality || 0.86))));
+  } catch (_) {
+    return dataUrl;
+  }
+}
+
+async function aiAgentImagePixelDelta(sourceDataUrl = "", candidateDataUrl = "") {
+  if (!sourceDataUrl || !candidateDataUrl) return null;
+  const [sourceImg, candidateImg] = await Promise.all([
+    aiAgentLoadDataUrlImage(sourceDataUrl),
+    aiAgentLoadDataUrlImage(candidateDataUrl),
+  ]);
+  const size = 64;
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size * 2;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  aiAgentDrawComparableImage(ctx, sourceImg, size, size);
+  aiAgentDrawComparableImage(ctx, candidateImg, size, size);
+  const source = ctx.getImageData(0, 0, size, size).data;
+  const candidate = ctx.getImageData(0, size, size, size).data;
+  let total = 0;
+  let changedPixels = 0;
+  const pixels = size * size;
+  for (let i = 0; i < source.length; i += 4) {
+    const diff = (
+      Math.abs(source[i] - candidate[i])
+      + Math.abs(source[i + 1] - candidate[i + 1])
+      + Math.abs(source[i + 2] - candidate[i + 2])
+    ) / (255 * 3);
+    total += diff;
+    if (diff >= 0.035) changedPixels += 1;
+  }
+  return {
+    mean_delta: total / Math.max(1, pixels),
+    changed_pixel_ratio: changedPixels / Math.max(1, pixels),
+  };
+}
+
+async function aiAgentPreviewDataUrlForRef(imageRef) {
+  if (!imageRef) return "";
+  const preview = await aiAgentFetchComfyuiPreview({ image_ref: imageRef });
+  return preview?.data_url || "";
+}
+
+async function aiAgentDetectNearIdenticalCandidate(args = {}, candidateImage = {}) {
+  if (!args.source_image_ref || !candidateImage?.data_url) return null;
+  let sourceDataUrl = "";
+  try {
+    sourceDataUrl = await aiAgentPreviewDataUrlForRef(args.source_image_ref);
+  } catch (_) {
+    sourceDataUrl = "";
+  }
+  if (!sourceDataUrl) return null;
+  const delta = await aiAgentImagePixelDelta(sourceDataUrl, candidateImage.data_url);
+  if (!delta) return null;
+  const sequence = Array.isArray(args.agent_review_stage_sequence) ? args.agent_review_stage_sequence : [];
+  const stageIndex = Math.max(0, Number(args.agent_review_stage_index || 0) || 0);
+  const stageKey = String((sequence[stageIndex] || {})?.key || args.agent_review_stage_key || "").toLowerCase();
+  const threshold = Math.max(0.004, Math.min(0.08, Number(args.agent_review_min_pixel_delta || (stageKey === "pose" ? 0.018 : 0.022)) || 0.022));
+  const ratioThreshold = Math.max(0.01, Math.min(0.2, Number(args.agent_review_min_changed_pixel_ratio || 0.035) || 0.035));
+  const nearIdentical = delta.mean_delta < threshold && delta.changed_pixel_ratio < ratioThreshold;
+  return {
+    ...delta,
+    threshold,
+    ratio_threshold: ratioThreshold,
+    near_identical: nearIdentical,
+    review: nearIdentical ? {
+      pass: false,
+      score: 0.05,
+      hard_fail: true,
+      issues: [
+        "no_visible_change",
+        `source_candidate_pixel_delta=${delta.mean_delta.toFixed(4)}`,
+        `changed_pixel_ratio=${delta.changed_pixel_ratio.toFixed(4)}`,
+      ],
+      passed_gates: [],
+      failed_gates: ["pixel_near_identical", "no_visible_change"],
+      revised_edit_instruction: [
+        String(args.edit_instruction || args.edit_prompt || "").trim(),
+        "Previous candidate was rejected before LLM review because it was pixel-near-identical to SOURCE. Do not resubmit the same weak route; switch workflow/model strategy or produce a visibly different active-stage edit.",
+      ].filter(Boolean).join(" "),
+    } : null,
+  };
+}
+
+function aiAgentDrawReviewPanel(ctx, img, x, y, width, height, label) {
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(x, y, width, height);
+  ctx.fillStyle = "#111827";
+  ctx.font = "24px sans-serif";
+  ctx.fillText(label, x + 18, y + 34);
+  const imageY = y + 52;
+  const imageH = height - 64;
+  const scale = Math.min(width / Math.max(1, img.naturalWidth || img.width), imageH / Math.max(1, img.naturalHeight || img.height));
+  const drawW = Math.max(1, Math.round((img.naturalWidth || img.width) * scale));
+  const drawH = Math.max(1, Math.round((img.naturalHeight || img.height) * scale));
+  const drawX = x + Math.round((width - drawW) / 2);
+  const drawY = imageY + Math.round((imageH - drawH) / 2);
+  ctx.drawImage(img, drawX, drawY, drawW, drawH);
+}
+
+async function aiAgentBuildComfyuiReviewImageDataUrl(args = {}, candidateImage = {}) {
+  const candidateDataUrl = candidateImage?.data_url || "";
+  if (!candidateDataUrl) return "";
+  const refs = [
+    { label: "SOURCE", dataUrl: "" },
+    { label: "CURRENT REFERENCE", dataUrl: "" },
+    { label: "CANDIDATE", dataUrl: candidateDataUrl },
+  ];
+  try {
+    refs[0].dataUrl = await aiAgentPreviewDataUrlForRef(args.source_image_ref);
+  } catch (_) {
+    refs[0].dataUrl = "";
+  }
+  try {
+    refs[1].dataUrl = await aiAgentPreviewDataUrlForRef(args.agent_review_reference_image_ref || args.reference_image_ref);
+  } catch (_) {
+    refs[1].dataUrl = "";
+  }
+  const available = refs.filter((item) => item.dataUrl);
+  if (available.length <= 1) return candidateDataUrl;
+  const loaded = [];
+  for (const item of refs) {
+    if (!item.dataUrl) continue;
+    try {
+      loaded.push({ ...item, image: await aiAgentLoadDataUrlImage(item.dataUrl) });
+    } catch (_) {
+      // Ignore one failed reference panel; a candidate-only review is still better than no review.
+    }
+  }
+  if (loaded.length <= 1) return candidateDataUrl;
+  const panelW = 512;
+  const panelH = 600;
+  const canvas = document.createElement("canvas");
+  canvas.width = panelW * loaded.length;
+  canvas.height = panelH;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#e5e7eb";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  loaded.forEach((item, index) => {
+    aiAgentDrawReviewPanel(ctx, item.image, panelW * index, 0, panelW, panelH, item.label);
+  });
+  return canvas.toDataURL("image/jpeg", 0.92);
+}
+
+function aiAgentNormalizeVisionReview(content = "", args = {}) {
+  const parsed = aiAgentExtractJsonObject(content);
+  if (!parsed || typeof parsed !== "object") {
+    return aiAgentNormalizeVisionReviewText(content, args);
+  }
+  const issues = Array.isArray(parsed.issues) ? parsed.issues.map((item) => String(item || "").trim()).filter(Boolean) : [];
+  const failedGates = Array.isArray(parsed.failed_gates) ? parsed.failed_gates.map((item) => String(item || "").trim()).filter(Boolean) : [];
+  const passedGates = Array.isArray(parsed.passed_gates) ? parsed.passed_gates.map((item) => String(item || "").trim()).filter(Boolean) : [];
+  return {
+    pass: parsed.pass === true || String(parsed.pass || "").toLowerCase() === "true",
+    score: Math.max(0, Math.min(1, Number(parsed.score || 0) || 0)),
+    hard_fail: parsed.hard_fail === true || String(parsed.hard_fail || "").toLowerCase() === "true",
+    issues,
+    passed_gates: passedGates,
+    failed_gates: failedGates,
+    revised_edit_instruction: String(parsed.revised_edit_instruction || "").trim(),
+    revised_prompt: String(parsed.revised_prompt || "").trim(),
+    revised_negative_prompt: String(parsed.revised_negative_prompt || "").trim(),
+    revised_denoise_strength: Number(parsed.revised_denoise_strength),
+  };
+}
+
+function aiAgentNormalizeVisionReviewText(content = "", args = {}) {
+  const text = String(content || "");
+  const lower = text.toLowerCase();
+  const scoreMatch = text.match(/score(?:_0_to_100)?[^0-9]{0,24}([0-9]+(?:\.[0-9]+)?)/i)
+    || text.match(/分數[^0-9]{0,24}([0-9]+(?:\.[0-9]+)?)/i);
+  let score = scoreMatch ? Number(scoreMatch[1]) : 0;
+  if (score > 1) score /= 100;
+  score = Math.max(0, Math.min(1, score || 0));
+  const passFalse = /\bpass\b[\s|:：`*-]*(false|no|fail|不通過|未通過)/i.test(text)
+    || /needs_regeneration[\s|:：`*-]*(true|yes)/i.test(text)
+    || /必須重新|需要重新|需重新|不合格|缺失|缺少|missing|wrong|failed/i.test(text);
+  const passTrue = /\bpass\b[\s|:：`*-]*(true|yes|通過)/i.test(text)
+    || /已通過|合格/i.test(text);
+  const issues = [];
+  const issuePatterns = [
+    ["missing_object", /missing|缺失|缺少|未出現|沒有/i],
+    ["wrong_aspect_ratio", /aspect ratio|比例|尺寸/i],
+    ["text_or_watermark", /text|文字|watermark|logo|signature|水印/i],
+    ["anatomy_artifact", /extra limb|broken|finger|hand|anatomy|肢體|手指|解剖|穿透/i],
+    ["no_visible_change", /unchanged|沒有變|無變化|忽略.*reference|忽略.*參考/i],
+  ];
+  issuePatterns.forEach(([label, pattern]) => {
+    if (pattern.test(text)) issues.push(label);
+  });
+  if (!issues.length) issues.push("vision review did not return valid JSON");
+  const hardFail = passFalse || /black|blank|gray|全黑|空白|灰框|嚴重|hard_fail/i.test(lower);
+  return {
+    pass: passTrue && !passFalse && !hardFail && score >= 0.8,
+    score,
+    hard_fail: hardFail || !passTrue,
+    issues,
+    passed_gates: [],
+    failed_gates: ["review_parse", ...issues],
+    revised_edit_instruction: [
+      String(args.edit_instruction || args.edit_prompt || "").trim(),
+      "Retry with explicit visible changes matching the active reference, correct aspect ratio, no visible text, correct anatomy, and stronger source/reference role separation.",
+    ].filter(Boolean).join(" "),
+  };
+}
+
+function aiAgentComfyuiReviewPassed(review = {}, args = {}) {
+  const threshold = Number(args.agent_review_pass_threshold || 0.8) || 0.8;
+  return review.pass === true && review.hard_fail !== true && Number(review.score || 0) >= threshold;
+}
+
+function aiAgentBuildComfyuiReviewRerunArgs(args = {}, review = {}, attemptIndex = 1) {
+  const next = { ...args };
+  const baseInstruction = String(args.edit_instruction || args.edit_prompt || "").trim();
+  const revisedInstruction = String(review.revised_edit_instruction || "").trim();
+  const issueText = (Array.isArray(review.issues) ? review.issues : []).join("; ").slice(0, 900);
+  const noVisibleChange = /no[_\s-]?visible[_\s-]?change|nearly unchanged|unchanged|沒有變|無變化|幾乎.*原圖|忽略.*reference|忽略.*參考/i.test(issueText)
+    || (Array.isArray(review.failed_gates) && review.failed_gates.some((gate) => /no[_\s-]?visible[_\s-]?change|unchanged/i.test(String(gate || ""))));
+  const isPairwiseReview = args.agent_review_strategy === "pairwise_reference_merge";
+  const sequence = Array.isArray(args.agent_review_stage_sequence) ? args.agent_review_stage_sequence : [];
+  const stageIndex = Math.max(0, Number(args.agent_review_stage_index || 0) || 0);
+  const stage = sequence[stageIndex] || null;
+  const stageKey = String(stage?.key || "").toLowerCase();
+  const stageContract = baseInstruction || (
+    stage?.reference_image_ref
+      ? aiAgentCrossReferenceStageInstruction(stageKey, {
+        image_ref: stage.reference_image_ref,
+        filename: stage.reference_image_ref?.filename || stage.description || `${stageKey || "reference"} reference`,
+      })
+      : ""
+  );
+  if (isPairwiseReview) {
+    next.edit_instruction = [
+      stageContract,
+      issueText ? `Fix these visual gate failures: ${issueText}.` : "",
+      revisedInstruction ? `Vision suggested refinement, but do not drop the active ${stageKey || "current"} stage contract: ${revisedInstruction}` : "",
+      stageKey ? `Stay on the ${stageKey} stage until this gate passes; do not advance to other reference roles in this rerun.` : "",
+      "Keep chara/clothes/background/pose reference roles separated; remove any visible text; preserve correct anatomy and hands.",
+    ].filter(Boolean).join(" ");
+  } else {
+    next.edit_instruction = revisedInstruction || [
+      baseInstruction,
+      issueText ? `Fix these visual gate failures: ${issueText}.` : "",
+      "Keep chara/clothes/background/pose reference roles separated; remove any visible text; preserve correct anatomy and hands.",
+    ].filter(Boolean).join(" ");
+  }
+  if (review.revised_prompt) next.prompt = review.revised_prompt;
+  if (review.revised_negative_prompt) next.negative_prompt = aiAgentMergeCommaList(next.negative_prompt, review.revised_negative_prompt);
+  else next.negative_prompt = aiAgentMergeCommaList(next.negative_prompt, "text, watermark, signature, logo, extra limbs, broken hands, missing fingers, body penetration, distorted anatomy");
+  if (Number.isFinite(review.revised_denoise_strength) && review.revised_denoise_strength > 0) {
+    next.denoise_strength = Math.max(0.2, Math.min(0.98, review.revised_denoise_strength));
+  } else if (/(chara|character|appearance|identity|face|hair|髮|臉|角色|外觀|不像|未變|沒有變|unchanged|no visible change|ignored reference)/i.test(issueText)) {
+    next.denoise_strength = Math.max(Number(next.denoise_strength || 0.6), noVisibleChange ? 0.98 : 0.95);
+    next.edit_instruction = [
+      next.edit_instruction,
+      "Make the active reference visibly affect the requested character appearance gate; do not leave the candidate nearly unchanged from the source.",
+    ].filter(Boolean).join(" ");
+  } else if (/(clothes|clothing|outfit|garment|服裝|衣服|未換|沒有換)/i.test(issueText)) {
+    next.denoise_strength = Math.max(Number(next.denoise_strength || 0.6), noVisibleChange ? 0.95 : 0.88);
+    next.edit_instruction = [
+      next.edit_instruction,
+      "Make the active clothes reference visibly affect the outfit while preserving already passed identity gates.",
+    ].filter(Boolean).join(" ");
+  } else if (/(pose|姿勢|動作|composition|limb|body)/i.test(issueText)) {
+    next.denoise_strength = Math.max(Number(next.denoise_strength || 0.88), noVisibleChange ? 0.98 : 0.95);
+  } else if (/(background|scene|scenery|environment|lighting|背景|場景|環境|光線)/i.test(issueText)) {
+    next.denoise_strength = Math.max(Number(next.denoise_strength || 0.88), noVisibleChange ? 0.97 : 0.92);
+    next.edit_instruction = [
+      next.edit_instruction,
+      "Make the active background reference visibly affect only the scene and lighting while preserving the already passed subject/outfit/pose gates.",
+    ].filter(Boolean).join(" ");
+  } else if (noVisibleChange) {
+    next.denoise_strength = Math.max(Number(next.denoise_strength || 0.88), 0.98);
+  }
+  if (isPairwiseReview && noVisibleChange) {
+    next.qwen_edit_profile = "base";
+    next.steps = Math.max(Number(next.steps || 0) || 0, 20);
+    next.cfg = Math.max(Number(next.cfg || 0) || 0, 4);
+    next.edit_instruction = [
+      next.edit_instruction,
+      "Do not submit a near-identical preservation pass; this rerun must visibly change the active stage target or fail fast.",
+    ].filter(Boolean).join(" ");
+  }
+  next.seed = Math.floor(Math.random() * 9007199254740991);
+  next.agent_review_required = true;
+  next.agent_review_mode = "vision_iterative_gate";
+  next.agent_review_attempt_index = attemptIndex + 1;
+  next.agent_review_min_candidates = Math.max(1, Number(args.agent_review_min_candidates || 1) || 1);
+  next.agent_review_max_attempts = Math.max(next.agent_review_min_candidates, 2, Number(args.agent_review_max_attempts || 2) || 2);
+  next.agent_review_plan = args.agent_review_plan || "generate candidate -> vision review -> revise/rerun until gate passes";
+  return next;
+}
+
+function aiAgentBuildNextPairwiseStageArgs(args = {}, image = {}, stageIndex = 0) {
+  const sequence = Array.isArray(args.agent_review_stage_sequence) ? args.agent_review_stage_sequence : [];
+  const nextStageIndex = stageIndex + 1;
+  const stage = sequence[nextStageIndex];
+  if (!stage?.reference_image_ref || !image?.image_ref) return null;
+  const next = { ...args };
+  next.source_image_ref = image.image_ref;
+  next.reference_image_ref = stage.reference_image_ref;
+  next.agent_review_reference_image_ref = stage.reference_image_ref;
+  delete next.agent_review_reference_text_ready;
+  delete next.agent_review_stage_key_prepared;
+  delete next.agent_review_reference_summary;
+  next.edit_instruction = aiAgentCrossReferenceStageInstruction(stage.key, {
+    image_ref: stage.reference_image_ref,
+    filename: stage.reference_image_ref?.filename || stage.description || `${stage.key} reference`,
+  });
+  next.seed = Math.floor(Math.random() * 9007199254740991);
+  next.agent_review_required = true;
+  next.agent_review_mode = "vision_iterative_gate";
+  next.agent_review_strategy = "pairwise_reference_merge";
+  next.agent_review_stage_index = nextStageIndex;
+  next.agent_review_stage_attempt = 1;
+  next.agent_review_attempt_index = 1;
+  next.agent_review_min_candidates = 1;
+  next.agent_review_max_attempts = Math.max(2, Number(args.agent_review_max_attempts || 3) || 3);
+  next.agent_review_plan = args.agent_review_plan || "pairwise reference merge: chara -> clothes -> background -> pose, each gated by vision";
+  return next;
+}
+
+function aiAgentScheduleStagedReviewRetry(message = {}, jobId = "", err = {}) {
+  const existing = AI_AGENT_STATE.comfyuiStagedReviews[jobId] || {};
+  const retryCount = Math.max(0, Number(existing.transientRetryCount || 0) || 0) + 1;
+  const maxRetries = 3;
+  if (retryCount > maxRetries) {
+    AI_AGENT_STATE.comfyuiStagedReviews[jobId] = {
+      status: "error",
+      error: String(err?.message || err),
+      http_status: err?.status || null,
+      payload: err?.payload || null,
+      transientRetryCount: retryCount - 1,
+      updatedAt: Date.now(),
+    };
+    AI_AGENT_STATE.messages.push({
+      role: "assistant",
+      content: [
+        "candidate vision gate 暫時性錯誤已達重試上限。",
+        `Job ID：${jobId}`,
+        `錯誤：${err?.message || err}`,
+        "此 candidate 不得視為通過；流程已停止，避免在沒有審核結果時繼續消耗生圖算力。",
+      ].join("\n"),
+    });
+    renderAiAgentThread();
+    setAiAgentMessage("ComfyUI staged review 暫時性錯誤達上限", "err");
+    return;
+  }
+  const delayMs = Math.min(90000, 15000 * retryCount);
+  const retryToken = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  AI_AGENT_STATE.comfyuiStagedReviews[jobId] = {
+    status: "transient_error",
+    error: String(err?.message || err),
+    http_status: err?.status || null,
+    payload: err?.payload || null,
+    transientRetryCount: retryCount,
+    retryAt: Date.now() + delayMs,
+    retryToken,
+    candidateOnlyReview: retryCount >= 2,
+    updatedAt: Date.now(),
+  };
+  if (AI_AGENT_STATE.comfyuiStagedReviewRetryTimers[jobId]) {
+    clearTimeout(AI_AGENT_STATE.comfyuiStagedReviewRetryTimers[jobId]);
+  }
+  AI_AGENT_STATE.messages.push({
+    role: "assistant",
+    content: [
+      "candidate vision gate 遇到暫時性 cloud/route 錯誤，已排程自動補審核。",
+      `Job ID：${jobId}`,
+      `重試：${retryCount}/${maxRetries}`,
+      `等待：約 ${Math.round(delayMs / 1000)} 秒`,
+      retryCount >= 2 ? "策略：改用 candidate-only review，並保留 pixel-delta guard 防止近似原圖通過。" : "策略：重試完整 source/reference/candidate review sheet。",
+    ].join("\n"),
+  });
+  renderAiAgentThread();
+  AI_AGENT_STATE.comfyuiStagedReviewRetryTimers[jobId] = setTimeout(() => {
+    const state = AI_AGENT_STATE.comfyuiStagedReviews[jobId] || {};
+    if (state.status !== "transient_error" || state.retryToken !== retryToken) return;
+    delete AI_AGENT_STATE.comfyuiStagedReviewRetryTimers[jobId];
+    aiAgentMaybeRunStagedComfyuiReview(message, {
+      allowTransientRetry: true,
+      candidateOnlyReview: Boolean(state.candidateOnlyReview),
+    }).catch(() => undefined);
+  }, delayMs);
+}
+
+async function aiAgentMaybeRunStagedComfyuiReview(message = {}, options = {}) {
+  if (!message?.comfyui_staged_review) return;
+  const jobId = String(message.comfyui_job_id || "").trim();
+  if (!jobId) return;
+  const existingReview = AI_AGENT_STATE.comfyuiStagedReviews[jobId];
+  if (existingReview && !(options.allowTransientRetry && existingReview.status === "transient_error")) return;
+  const args = aiAgentComfyuiReviewArgsForMessage(message);
+  if (!args.agent_review_required && !aiAgentTextSuggestsStagedImageEdit([
+    args.prompt,
+    args.edit_instruction,
+    args.edit_prompt,
+  ].filter(Boolean).join(" "))) return;
+  const attemptIndex = Math.max(1, Number(args.agent_review_attempt_index || 1) || 1);
+  const minCandidates = Math.max(1, Number(args.agent_review_min_candidates || 1) || 1);
+  const maxAttempts = Math.max(minCandidates, 2, Number(args.agent_review_max_attempts || 2) || 2);
+  const stageIndex = Math.max(0, Number(args.agent_review_stage_index || 0) || 0);
+  const sequence = Array.isArray(args.agent_review_stage_sequence) ? args.agent_review_stage_sequence : [];
+  const stage = sequence[stageIndex] || null;
+  const image = (Array.isArray(message.images) ? message.images : []).find((item) => item?.data_url && !item.error);
+  if (!image?.data_url) {
+    const imageErrors = (Array.isArray(message.images) ? message.images : [])
+      .map((item) => item?.error || "")
+      .filter(Boolean)
+      .join("；");
+    AI_AGENT_STATE.comfyuiStagedReviews[jobId] = {
+      status: "error",
+      error: imageErrors || "candidate image preview is unavailable",
+      updatedAt: Date.now(),
+    };
+    AI_AGENT_STATE.messages.push({
+      role: "assistant",
+      content: [
+        `${stage ? `stage ${stageIndex + 1}/${sequence.length} (${stage.key}) ` : ""}candidate 視覺 gate 無法執行。`,
+        `Job ID：${jobId}`,
+        `錯誤：${imageErrors || "沒有可供 vision 模型檢查的 candidate 圖片預覽"}`,
+        "此結果不得視為通過，請修正圖片預覽/任務結果回收後再重跑。",
+      ].join("\n"),
+    });
+    renderAiAgentThread();
+    setAiAgentMessage("ComfyUI staged review 無法取得 candidate 圖片", "err");
+    return;
+  }
+  const previousTransientRetryCount = Math.max(0, Number(existingReview?.transientRetryCount || 0) || 0);
+  AI_AGENT_STATE.comfyuiStagedReviews[jobId] = {
+    status: "reviewing",
+    startedAt: Date.now(),
+    transientRetryCount: previousTransientRetryCount,
+  };
+  AI_AGENT_STATE.messages.push({
+    role: "assistant",
+    content: `開始 ${stage ? `stage ${stageIndex + 1}/${sequence.length} (${stage.key}) ` : ""}candidate ${attemptIndex}/${maxAttempts} 視覺 gate 檢查。\nJob ID：${jobId}`,
+  });
+  renderAiAgentThread();
+  try {
+    await aiAgentRefreshModelState();
+    const model = aiAgentVisionModel();
+    if (!model) throw new Error("沒有可嘗試圖片理解的模型，無法自動目視檢查候選圖");
+    const pixelGuard = await aiAgentDetectNearIdenticalCandidate(args, image).catch(() => null);
+    let reviewFetch = null;
+    let content = "";
+    if (pixelGuard?.near_identical) {
+      content = JSON.stringify(pixelGuard.review || {});
+      AI_AGENT_STATE.messages.push({
+        role: "assistant",
+        content: [
+          "candidate 在送 vision 模型前已被 pixel-delta guard 擋下：結果與 source 近乎相同。",
+          `mean_delta=${Number(pixelGuard.mean_delta || 0).toFixed(4)} / threshold=${Number(pixelGuard.threshold || 0).toFixed(4)}`,
+          `changed_pixel_ratio=${Number(pixelGuard.changed_pixel_ratio || 0).toFixed(4)} / threshold=${Number(pixelGuard.ratio_threshold || 0).toFixed(4)}`,
+          "此結果不會被視為通過，也不會消耗 vision token。",
+        ].join("\n"),
+      });
+      renderAiAgentThread();
+    } else {
+      const reviewImageDataUrl = options.candidateOnlyReview
+        ? image.data_url
+        : await aiAgentBuildComfyuiReviewImageDataUrl(args, image);
+      reviewFetch = await aiAgentVisionGateChatFetch({
+        session_id: aiAgentEnsureSessionId(),
+        model,
+        mode: "image",
+        messages: [{ role: "user", content: aiAgentComfyuiReviewPrompt(args, attemptIndex, maxAttempts) }],
+        image_data_url: reviewImageDataUrl || image.data_url,
+      }, {
+        mode: "image",
+        timeoutMs: 180000,
+        attempts: 3,
+      });
+      content = reviewFetch.content || "";
+    }
+    if (reviewFetch?.attempt > 1) {
+      AI_AGENT_STATE.messages.push({
+        role: "assistant",
+        content: `vision gate 第 ${reviewFetch.attempt} 次嘗試成功；前一次可能是暫時性 cloud/route 錯誤。`,
+      });
+      renderAiAgentThread();
+    }
+    const review = aiAgentNormalizeVisionReview(content, args);
+    const passed = aiAgentComfyuiReviewPassed(review, args);
+    const issues = review.issues?.length ? review.issues.join("；") : "-";
+    const gates = review.failed_gates?.length ? review.failed_gates.join(", ") : "-";
+    AI_AGENT_STATE.comfyuiStagedReviews[jobId] = { status: passed ? "passed" : "failed", review, updatedAt: Date.now() };
+    AI_AGENT_STATE.messages.push({
+      role: "assistant",
+      content: [
+        `${stage ? `stage ${stageIndex + 1}/${sequence.length} (${stage.key}) ` : ""}candidate ${attemptIndex}/${maxAttempts} 視覺 gate：${passed ? "PASS" : "FAIL"}`,
+        `分數：${Number(review.score || 0).toFixed(2)} / hard_fail=${review.hard_fail ? "true" : "false"}`,
+        `失敗 gate：${gates}`,
+        `問題：${issues}`,
+      ].join("\n"),
+    });
+    renderAiAgentThread();
+    if (passed && args.agent_review_strategy === "pairwise_reference_merge" && stageIndex + 1 < sequence.length) {
+      const nextStageArgs = aiAgentBuildNextPairwiseStageArgs(args, image, stageIndex);
+      if (nextStageArgs) {
+        const nextStage = sequence[stageIndex + 1];
+        AI_AGENT_STATE.messages.push({
+          role: "assistant",
+          content: `stage ${stageIndex + 1}/${sequence.length} 已通過；放行下一階段 stage ${stageIndex + 2}/${sequence.length} (${nextStage.key})。下一階段只合併 ${nextStage.key} reference，以上一張候選圖作為 source。`,
+        });
+        renderAiAgentThread();
+        await runAiAgentComfyuiGenerate(nextStageArgs);
+        return;
+      }
+    }
+    if (passed && attemptIndex < minCandidates) {
+      const nextArgs = aiAgentBuildComfyuiReviewRerunArgs(args, review, attemptIndex);
+      nextArgs.edit_instruction = [
+        String(args.edit_instruction || args.edit_prompt || "").trim(),
+        "Candidate passed the current gate; create the next refinement candidate while preserving all passed gates, improving reference role separation, and avoiding text/anatomy artifacts.",
+      ].filter(Boolean).join(" ");
+      AI_AGENT_STATE.messages.push({
+        role: "assistant",
+        content: `candidate ${attemptIndex} 已通過，但此任務要求至少 ${minCandidates} 張候選圖；自動放行 candidate ${attemptIndex + 1}/${maxAttempts} 作第二階段細化。`,
+      });
+      renderAiAgentThread();
+      await runAiAgentComfyuiGenerate(nextArgs);
+      return;
+    }
+    if (passed) {
+      setAiAgentMessage("ComfyUI candidate 已通過 vision gate", "ok");
+      return;
+    }
+    if (attemptIndex >= maxAttempts) {
+      AI_AGENT_STATE.messages.push({
+        role: "assistant",
+        content: "已達 staged review 嘗試上限，先停止自動重跑；我會把此輪列為未通過，等待人工決定是否換 workflow、模型或參考圖。",
+      });
+      renderAiAgentThread();
+      setAiAgentMessage("ComfyUI staged review 未通過且已達上限", "err");
+      return;
+    }
+    const noVisibleChange = /no[_\s-]?visible[_\s-]?change|nearly unchanged|unchanged|沒有變|無變化|幾乎.*原圖|忽略.*reference|忽略.*參考/i.test(issues)
+      || (Array.isArray(review.failed_gates) && review.failed_gates.some((gate) => /no[_\s-]?visible[_\s-]?change|unchanged/i.test(String(gate || ""))));
+    const stageAttempt = Math.max(1, Number(args.agent_review_stage_attempt || 1) || 1);
+    const pixelNearIdentical = Array.isArray(review.failed_gates) && review.failed_gates.some((gate) => /pixel_near_identical/i.test(String(gate || "")));
+    if (args.agent_review_strategy === "pairwise_reference_merge" && noVisibleChange && (stageAttempt >= 2 || pixelNearIdentical)) {
+      AI_AGENT_STATE.messages.push({
+        role: "assistant",
+        content: [
+          `stage ${stageIndex + 1}/${sequence.length || 1} (${stage?.key || "reference"}) 連續產生近乎原圖的結果，已停止同一路徑重送以避免浪費算力。`,
+          "下一步應改換 workflow 或模型路徑，例如改走 base/quality 以外的控制式流程、重新生成更適合作為 source 的人物圖，或對 pose 階段改走 sdpose/controlnet。",
+        ].join("\n"),
+      });
+      renderAiAgentThread();
+      setAiAgentMessage("ComfyUI staged review 停止同一路徑重送：結果近乎原圖", "err");
+      return;
+    }
+    const nextArgs = aiAgentBuildComfyuiReviewRerunArgs(args, review, attemptIndex);
+    if (args.agent_review_strategy === "pairwise_reference_merge") {
+      nextArgs.agent_review_strategy = "pairwise_reference_merge";
+      nextArgs.agent_review_stage_index = stageIndex;
+      nextArgs.agent_review_stage_sequence = sequence;
+      nextArgs.agent_review_stage_attempt = Math.max(1, Number(args.agent_review_stage_attempt || 1) || 1) + 1;
+      nextArgs.agent_review_attempt_index = attemptIndex + 1;
+    }
+    AI_AGENT_STATE.messages.push({
+      role: "assistant",
+      content: `candidate ${attemptIndex} 未通過，依 vision 意見自動送出 candidate ${attemptIndex + 1}/${maxAttempts}。\n修正 edit_instruction：${String(nextArgs.edit_instruction || "").slice(0, 1200)}`,
+    });
+    renderAiAgentThread();
+    await runAiAgentComfyuiGenerate(nextArgs);
+  } catch (err) {
+    const transient = aiAgentIsTransientChatFailure(err?.status, err?.message || err);
+    if (transient) {
+      aiAgentScheduleStagedReviewRetry(message, jobId, err);
+      setAiAgentMessage(`ComfyUI staged review 暫時失敗，已排程補審核：${err?.message || err}`, "err");
+      return;
+    }
+    AI_AGENT_STATE.comfyuiStagedReviews[jobId] = {
+      status: "error",
+      error: String(err?.message || err),
+      http_status: err?.status || null,
+      payload: err?.payload || null,
+      updatedAt: Date.now(),
+    };
+    AI_AGENT_STATE.messages.push({
+      role: "assistant",
+      content: [
+        `candidate 視覺 gate 檢查失敗。`,
+        `Job ID：${jobId}`,
+        `錯誤：${err?.message || err}`,
+        transient
+          ? "分類：暫時性 vision/cloud/route 錯誤；此 candidate 不得視為通過，也不應當成模型判讀 FAIL。請稍後重試 vision gate 或改用 candidate-only review。"
+          : "分類：非暫時性 review 錯誤；此 candidate 不得視為通過。",
+      ].join("\n"),
+    });
+    renderAiAgentThread();
+    setAiAgentMessage(`ComfyUI staged review 失敗：${err?.message || err}`, "err");
+  }
 }
 
 function aiAgentComfyuiImageKey(image = {}) {
@@ -2951,23 +4582,25 @@ async function aiAgentFetchComfyuiPreview(image = {}) {
 async function aiAgentHydrateComfyuiMessageImages(message) {
   const images = Array.isArray(message?.images) ? message.images : [];
   const pending = images.filter((image) => image?.image_ref && !image.data_url && !image.error);
-  if (!pending.length) return;
-  await Promise.all(pending.map(async (image) => {
-    const key = aiAgentComfyuiImageKey(image);
-    if (AI_AGENT_STATE.comfyuiPreviewLoads[key]) return;
-    AI_AGENT_STATE.comfyuiPreviewLoads[key] = true;
-    try {
-      const preview = await aiAgentFetchComfyuiPreview(image);
-      image.data_url = preview.data_url || "";
-      image.mime_type = preview.mime_type || image.mime_type || "image/png";
-      image.size_bytes = preview.size_bytes || 0;
-    } catch (err) {
-      image.error = err?.message || String(err || "圖片預覽讀取失敗");
-    } finally {
-      delete AI_AGENT_STATE.comfyuiPreviewLoads[key];
-    }
-  }));
-  renderAiAgentThread();
+  if (pending.length) {
+    await Promise.all(pending.map(async (image) => {
+      const key = aiAgentComfyuiImageKey(image);
+      if (AI_AGENT_STATE.comfyuiPreviewLoads[key]) return;
+      AI_AGENT_STATE.comfyuiPreviewLoads[key] = true;
+      try {
+        const preview = await aiAgentFetchComfyuiPreview(image);
+        image.data_url = preview.data_url || "";
+        image.mime_type = preview.mime_type || image.mime_type || "image/png";
+        image.size_bytes = preview.size_bytes || 0;
+      } catch (err) {
+        image.error = err?.message || String(err || "圖片預覽讀取失敗");
+      } finally {
+        delete AI_AGENT_STATE.comfyuiPreviewLoads[key];
+      }
+    }));
+    renderAiAgentThread();
+  }
+  aiAgentMaybeRunStagedComfyuiReview(message).catch(() => undefined);
 }
 
 function aiAgentHydratePersistedComfyuiImages() {
@@ -3091,13 +4724,62 @@ function aiAgentWatchComfyuiJob(jobId) {
     lastQueuedNotifiedAt: Date.now(),
     lastBusyNotifiedAt: 0,
     busyRetryCount: 0,
+    authErrorCount: 0,
+    idleKeepaliveTimer: null,
   };
+  aiAgentSetComfyuiIdleSuspend(id, true);
+  aiAgentStartComfyuiIdleKeepalive(id);
   aiAgentPollComfyuiJob(id);
+}
+
+function aiAgentComfyuiIdleSuspendReason(jobId) {
+  return `ai_agent_comfyui:${String(jobId || "").trim() || "unknown"}`;
+}
+
+function aiAgentSetComfyuiIdleSuspend(jobId, active) {
+  if (typeof setInactivitySuspendState !== "function") return;
+  setInactivitySuspendState(
+    aiAgentComfyuiIdleSuspendReason(jobId),
+    !!active,
+    "AI Agent 產圖追蹤中"
+  );
+}
+
+function aiAgentStartComfyuiIdleKeepalive(jobId) {
+  const id = String(jobId || "").trim();
+  const watch = id ? AI_AGENT_STATE.comfyuiWatchJobs[id] : null;
+  if (!watch) return;
+  if (watch.idleKeepaliveTimer) clearInterval(watch.idleKeepaliveTimer);
+  watch.idleKeepaliveTimer = setInterval(() => {
+    if (!AI_AGENT_STATE.comfyuiWatchJobs[id]) {
+      clearInterval(watch.idleKeepaliveTimer);
+      return;
+    }
+    aiAgentSetComfyuiIdleSuspend(id, true);
+  }, 15000);
+}
+
+function aiAgentStopWatchingComfyuiJob(jobId) {
+  const id = String(jobId || "").trim();
+  if (id) {
+    const watch = AI_AGENT_STATE.comfyuiWatchJobs[id];
+    if (watch?.idleKeepaliveTimer) clearInterval(watch.idleKeepaliveTimer);
+    delete AI_AGENT_STATE.comfyuiWatchJobs[id];
+    aiAgentSetComfyuiIdleSuspend(id, false);
+    return;
+  }
+  Object.keys(AI_AGENT_STATE.comfyuiWatchJobs || {}).forEach((watchId) => {
+    const watch = AI_AGENT_STATE.comfyuiWatchJobs[watchId];
+    if (watch?.idleKeepaliveTimer) clearInterval(watch.idleKeepaliveTimer);
+    delete AI_AGENT_STATE.comfyuiWatchJobs[watchId];
+    aiAgentSetComfyuiIdleSuspend(watchId, false);
+  });
 }
 
 async function aiAgentPollComfyuiJob(jobId) {
   const watch = AI_AGENT_STATE.comfyuiWatchJobs[jobId];
   if (!watch) return;
+  aiAgentSetComfyuiIdleSuspend(jobId, true);
   try {
     const job = await aiAgentFetchComfyuiJob(jobId);
     AI_AGENT_STATE.lastComfyuiJob = job;
@@ -3113,7 +4795,7 @@ async function aiAgentPollComfyuiJob(jobId) {
       AI_AGENT_STATE.messages.push({ role: "assistant", content: aiAgentComfyuiFailureSummary(job) });
       renderAiAgentThread();
       setAiAgentMessage(`ComfyUI 產圖失敗：${progress.error_message || progress.detail || job.error || "未知錯誤"}`, "err");
-      delete AI_AGENT_STATE.comfyuiWatchJobs[jobId];
+      aiAgentStopWatchingComfyuiJob(jobId);
       return;
     }
     if (status === "completed") {
@@ -3121,7 +4803,7 @@ async function aiAgentPollComfyuiJob(jobId) {
       AI_AGENT_STATE.messages.push(message);
       renderAiAgentThread();
       setAiAgentMessage("ComfyUI 產圖完成", "ok");
-      delete AI_AGENT_STATE.comfyuiWatchJobs[jobId];
+      aiAgentStopWatchingComfyuiJob(jobId);
       aiAgentHydrateComfyuiMessageImages(message).catch(() => undefined);
       await loadAiAgentReadOnly({ scope: "all", limit: 20, silent: true, force: true }).catch(() => undefined);
       return;
@@ -3159,12 +4841,28 @@ async function aiAgentPollComfyuiJob(jobId) {
       });
       renderAiAgentThread();
       setAiAgentMessage("ComfyUI 任務追蹤已超過 2 小時", "info");
-      delete AI_AGENT_STATE.comfyuiWatchJobs[jobId];
+      aiAgentStopWatchingComfyuiJob(jobId);
       return;
     }
     const delay = elapsed < 15000 ? 2000 : 5000;
     setTimeout(() => aiAgentPollComfyuiJob(jobId), delay);
   } catch (err) {
+    if ([401, 403].includes(Number(err?.status || 0))) {
+      watch.authErrorCount = (watch.authErrorCount || 0) + 1;
+      AI_AGENT_STATE.messages.push({
+        role: "assistant",
+        content: [
+          "ComfyUI 任務狀態確認被拒絕，不能靜默等待。",
+          `Job ID：${jobId}`,
+          `HTTP：${err.status}`,
+          "這通常代表登入狀態失效、權限被撤回，或測試端 cookie 過期；請重新登入或要求我用後端任務摘要接回。",
+        ].join("\n"),
+      });
+      renderAiAgentThread();
+      setAiAgentMessage(`ComfyUI 任務狀態確認被拒絕：HTTP ${err.status}`, "err");
+      aiAgentStopWatchingComfyuiJob(jobId);
+      return;
+    }
     const retryDelay = aiAgentComfyuiRetryDelayMsFromError(err, (watch.busyRetryCount || 0) + 1);
     if (retryDelay > 0) {
       watch.busyRetryCount = (watch.busyRetryCount || 0) + 1;
@@ -3189,7 +4887,7 @@ async function aiAgentPollComfyuiJob(jobId) {
     });
     renderAiAgentThread();
     setAiAgentMessage(`ComfyUI 任務狀態確認失敗：${err?.message || err}`, "err");
-    delete AI_AGENT_STATE.comfyuiWatchJobs[jobId];
+    aiAgentStopWatchingComfyuiJob(jobId);
   }
 }
 
@@ -3513,12 +5211,21 @@ function aiAgentSelectedTextModel() {
 function aiAgentVisionModel() {
   const options = aiAgentSelectableModels();
   const selected = ($("ai-agent-model")?.value || "").trim();
+  if (AI_AGENT_STATE.settings?.allow_image_input === false) return "";
   const vision = options.find((id) => /(?:^|[-_:])vl(?:[-_:]|$)|vision|multimodal/i.test(id));
   if (vision) {
     const select = $("ai-agent-model");
     if (select && select.value !== vision) select.value = vision;
     return vision;
   }
+  if (selected && options.includes(selected)) return selected;
+  const cloudFallback = options.find((id) => /cloud/i.test(id));
+  if (cloudFallback) {
+    const select = $("ai-agent-model");
+    if (select && select.value !== cloudFallback) select.value = cloudFallback;
+    return cloudFallback;
+  }
+  if (options[0]) return options[0];
   return "";
 }
 
@@ -3540,10 +5247,29 @@ function aiAgentImageAnalysisError(json = {}, status = 0) {
   const raw = String(json?.msg || json?.error || json?.message?.content || "").trim();
   const lowered = raw.toLowerCase();
   const effectiveStatus = Number(json?.status || status || 0);
-  if (effectiveStatus === 410 || lowered.includes("retired") || lowered.includes("not found") || lowered.includes("unavailable") || lowered.includes("已下架")) {
+  if (
+    effectiveStatus === 410
+    || lowered.includes("retired")
+    || lowered.includes("not found")
+    || lowered.includes("unavailable")
+    || lowered.includes("已下架")
+  ) {
     return raw
       ? `圖片理解模型不可用或已下架：${raw}`
       : "圖片理解模型不可用或已下架。請改用目前 /models 可呼叫的 cloud vision 模型。";
+  }
+  if (
+    effectiveStatus === 401
+    || effectiveStatus === 403
+    || lowered.includes("requires a subscription")
+    || lowered.includes("upgrade for access")
+    || lowered.includes("forbidden")
+    || lowered.includes("unauthorized")
+    || lowered.includes("quota")
+  ) {
+    return raw
+      ? `圖片理解模型目前無權限或額度不足：${raw}`
+      : `圖片理解模型目前無權限或額度不足（HTTP ${effectiveStatus || status || "-"}）。`;
   }
   if (lowered.includes("does not support image input") || lowered.includes("不支援圖片")) {
     return "目前選用模型不支援圖片分析，請改用 /models 回傳且支援圖片的模型後再試。";
@@ -3557,7 +5283,19 @@ function aiAgentImageAnalysisError(json = {}, status = 0) {
 function aiAgentImageModelUnavailable(json = {}, status = 0) {
   const raw = String(json?.msg || json?.error || json?.payload?.error || "").toLowerCase();
   const effectiveStatus = Number(json?.status || status || 0);
-  return effectiveStatus === 410 || raw.includes("http 410") || raw.includes("retired") || raw.includes("not found") || raw.includes("unavailable") || raw.includes("已下架");
+  return effectiveStatus === 410
+    || effectiveStatus === 401
+    || effectiveStatus === 403
+    || raw.includes("http 410")
+    || raw.includes("retired")
+    || raw.includes("not found")
+    || raw.includes("unavailable")
+    || raw.includes("已下架")
+    || raw.includes("requires a subscription")
+    || raw.includes("upgrade for access")
+    || raw.includes("forbidden")
+    || raw.includes("unauthorized")
+    || raw.includes("quota");
 }
 
 function aiAgentMarkModelUnavailable(modelId, reason = "") {

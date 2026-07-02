@@ -4451,6 +4451,81 @@ def test_comfyui_backend_unresponsive_stale_job_is_marked_error(tmp_path, monkey
     assert stored_progress["terminal_reason"] == "backend_unresponsive_timeout"
 
 
+def test_comfyui_stale_prompt_missing_from_queue_and_history_is_marked_error(tmp_path, monkeypatch):
+    class PromptMissingComfyUIClient(FakeComfyUIClient):
+        def _json_request(self, path, *, method="GET", payload=None, timeout=None, allow_non_json=False):
+            if path.startswith("/history/"):
+                return {}
+            if path == "/queue":
+                return {"queue_running": [], "queue_pending": []}
+            return {}
+
+    monkeypatch.setattr(comfyui_routes, "COMFYUI_JOB_STALE_SECONDS", 0)
+    db_path = tmp_path / "comfyui.db"
+    storage_root = tmp_path / "storage"
+    storage_root.mkdir()
+    _init_db(db_path)
+    client = _build_app(
+        db_path,
+        storage_root,
+        comfyui_client=PromptMissingComfyUIClient(),
+    ).test_client()
+    assert client.get("/api/comfyui/jobs/missing-job").status_code == 404
+
+    old_ts = time.time() - 10
+    progress = {
+        "phase": "running",
+        "prompt_id": "missing-prompt-1",
+        "percent": 45,
+        "detail": "正在執行節點 494",
+        "completed": False,
+        "updated_at": old_ts,
+    }
+    conn = connect_sqlite(db_path, timeout=15, row_factory=True, foreign_keys=True, wal=True)
+    try:
+        conn.execute(
+            """
+            INSERT INTO comfyui_generation_jobs (
+                job_id, owner_user_id, owner_username, status, error,
+                progress_json, result_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "missing-runtime-job",
+                1,
+                "alice",
+                "running",
+                "",
+                json.dumps(progress, ensure_ascii=False),
+                None,
+                old_ts - 120,
+                old_ts,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    polled = client.get("/api/comfyui/jobs/missing-runtime-job")
+    payload = polled.get_json()
+    assert polled.status_code == 200
+    assert payload["job"]["status"] == "error"
+    assert payload["job"]["progress"]["phase"] == "error"
+    assert payload["job"]["progress"]["terminal_reason"] == "comfyui_prompt_missing_from_queue_history"
+    assert "不在 history/queue" in payload["job"]["error"]
+
+    conn = connect_sqlite(db_path, timeout=15, row_factory=True, foreign_keys=True, wal=True)
+    try:
+        row = conn.execute(
+            "SELECT status, error, progress_json FROM comfyui_generation_jobs WHERE job_id='missing-runtime-job'"
+        ).fetchone()
+    finally:
+        conn.close()
+    stored_progress = json.loads(row["progress_json"])
+    assert row["status"] == "error"
+    assert stored_progress["terminal_reason"] == "comfyui_prompt_missing_from_queue_history"
+
+
 def test_comfyui_diffusers_failure_reports_reason_and_python_log_tail(tmp_path):
     class FailingDiffusersBackendClient(FakeDiffusersBackendClient):
         def generate_image(self, params, *, timeout_seconds=180, progress_callback=None, extra_data=None):

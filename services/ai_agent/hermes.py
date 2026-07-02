@@ -6,7 +6,7 @@ import threading
 from collections import Counter
 from datetime import datetime, timedelta
 import shutil
-from time import monotonic, time
+from time import monotonic, sleep, time
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 from urllib.parse import urljoin, urlparse
@@ -22,6 +22,7 @@ RETIRED_AI_AGENT_MODELS = {
     "qwen3-vl:235b-instruct-cloud",
 }
 MAX_AI_AGENT_IMAGE_DATA_URL_CHARS = 12 * 1024 * 1024
+AI_AGENT_TRANSIENT_HTTP_STATUSES = {502, 503, 504}
 AI_AGENT_AUDIT_INTERVAL_MINUTES_DEFAULT = 5
 AI_AGENT_AUDIT_INTERVAL_MINUTES_MAX = 60
 AI_AGENT_OPERATION_MODES = {"readonly", "assist", "write", "audit"}
@@ -389,6 +390,12 @@ AI_AGENT_TOOL_BLUEPRINT = {
         "min_role": "super_admin",
         "data_scope": "write_tool:comfyui",
     },
+    "write_comfyui_background_composite": {
+        "label": "精確背景合成",
+        "description": "root 專用白名單寫入工具：使用站內 ComfyUI 圖片引用，把來源人物保留並以參考圖作為 exact background plate 合成；適合明確要求完全複製背景時使用。",
+        "min_role": "super_admin",
+        "data_scope": "write_tool:comfyui",
+    },
     "write_chess_create_practice": {
         "label": "建立西洋棋練習",
         "description": "root 專用白名單寫入工具：建立電腦對局練習。",
@@ -563,6 +570,7 @@ AI_AGENT_TOOL_BLUEPRINT.update({
 
 AI_AGENT_TOOL_ARGUMENT_HINTS = {
     "write_community_create_thread": "canonical args: board_id,title,content,post_type；把 forum_id/討論版/版面 ID 轉成 board_id。",
+    "write_comfyui_background_composite": "canonical args: source_image_ref,background_image_ref,width,height,mask_image_ref,prompt,confirm_billing；只有使用者明確要求完全/原樣/exact/像素級複製背景時使用。source_image_ref 是要保留人物的來源圖，background_image_ref 是背景板參考圖。這是後處理合成，不是 Qwen Edit；工具輸出是候選圖，若 result.delivery_pass=false 或 review_required=true，必須明確回報仍需 vision/human review，不能宣稱品質通過。若只是要求背景風格/場景特徵，改用 write_comfyui_generate 的 Qwen Edit background reference。單項背景測試不得順手改衣服、表情、配件、髮型或姿勢。",
     "write_comfyui_generate": "canonical args: prompt,edit_instruction,negative_prompt,width,height,steps,batch_size,confirm_billing,generation_mode,source_image_ref,mask_image_ref,reference_image_ref,control_image_ref,controlnet,controlnet_type,controlnet_model,controlnet_preprocessor,control_strength,control_start,control_end,denoise_strength,outpaint_left,outpaint_top,outpaint_right,outpaint_bottom,outpaint_feathering,official_workflow_id；文字生圖 generation_mode=txt2img，風格化/以圖生圖=img2img，局部重繪=inpaint 且必須有 mask_image_ref，外延=outpaint；以圖生圖前先判斷來源圖是否適合目標：臉/表情需完整臉嘴下巴，服裝需可見肩膀上半身，姿勢需可見四肢軀幹，目標物不能嚴重遮擋或裁切；不適合時應反問或建議重生來源圖。Qwen Image Edit / origin_qwen_image_edit_2509 是語意改圖，必須提供 edit_instruction，且 edit_instruction 必須是短英文直接編輯命令，例如「replace the red apple with a small potted plant, keep the girl, cup, desk and background unchanged」；複合人物/物件任務不得刪減使用者明確指定的互動、相對位置、保持項目與禁止項目，例如新增第二人時要保留 hand on shoulder、both look at camera、smile、no merged bodies、no body penetration 等語意；新增人物是高重構任務，edit_instruction 必須明說 create a new full separate character occupying the left/right third of the image、make enough visible space、slightly shift or scale the original girl if needed、second girl visible from head to upper body or full body；denoise_strength 建議 0.88-0.95，避免過度保留導致第二人被忽略；新增人物還必須保留場景服裝語境，例如原圖是 festival kimono/yukata、和服、制服或泳裝時，第二人應穿協調的同場景服裝與配件，除非使用者明確要求對比服裝；anime/illustration 轉 realistic photograph、photoreal、Anything2Real、anything to real 時使用 official_workflow_id=origin_qwen_image_edit_2509_anything2real，edit_instruction 以「transform the image to realistic photograph; preserve ...」開頭；prompt 只放 style/preservation context 或留空，不得把整段中文自然語言任務、測試說明、解析度、batch、steps、cfg 或完整目標場景描述塞進 prompt；若使用者指定 by ogipote 這類 artist/style tag，正向 prompt 要保留作畫風，但必須同時加入 style tag only、do not render words、no visible text/signature/logo/watermark 等防文字 guard，避免模型把署名畫成文字。若使用 pose/reference image，source_image_ref 必須是要保留身份的原圖，reference_image_ref 必須是姿勢/構圖參考圖，edit_instruction 要明說 reference 只用於姿勢不可換臉換人；若普通 Qwen Edit 反覆無法跟隨 reference pose，應明確改走兩步 pose/control workflow，不要靜默重送同一弱路徑：第一步 official_workflow_id=origin_sdpose_multi_person、generation_mode=img2img、source_image_ref=姿勢參考圖、prompt=person，輸出 pose map；第二步 official_workflow_id=origin_qwen_image_controlnet_2512、generation_mode=txt2img、control_image_ref=pose map、controlnet_type=pose、controlnet_model=QWEN\\\\Qwen-Image-2512-Fun-Controlnet-Union-2602.safetensors、prompt 寫完整目標人物/服裝/場景/保留限制、negative_prompt 排除 reference 身份與動物元素；不要把 pose ref 直接丟給 2509 期待硬姿勢複製。若有多個相似目標物，edit_instruction 必須逐一指定每個可見目標的處理，例如 replace upper mug and remove cropped foreground mug，避免 all/one 歧義；inpaint 預設官方 workflow 為 origin_sdxl_checkpoint_inpaint；outpaint 預設官方 workflow 為 origin_flux_fill_outpaint_gguf_q3；生圖請保留 batch_size 與 confirm_billing；可作為視覺參考重建的一輪產圖步驟，但不要把多輪創作硬套成固定流程。",
     "write_member_update_user": "canonical args: user_id,nickname,role,status,member_level,base_level,level_update_reason,sanction_status,sanction_until；即使目前模式不能執行，也要辨識此工具。",
     "write_member_set_avatar_from_cloud": "canonical args: user_id,cloud_file_id,crop,rotation,zoom,decision_reason；裁切/旋轉/縮放必須使用 crop/rotation/zoom。",
@@ -1226,54 +1234,87 @@ def _json_request(settings, method, path, payload=None, *, session_key="", timeo
     body = None
     if payload is not None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    req = urllib_request.Request(
-        url,
-        data=body,
-        headers=_backend_headers(settings, session_key=session_key),
-        method=method.upper(),
-    )
-    try:
-        with urllib_request.urlopen(req, timeout=effective_timeout) as resp:
-            try:
-                resp.fp.raw._sock.settimeout(read_timeout)
-            except Exception:
-                pass
-            chunks = []
-            total = 0
-            max_bytes = 10 * 1024 * 1024
-            while True:
-                if monotonic() > deadline:
-                    raise TimeoutError(f"AI Agent backend request exceeded {effective_timeout}s")
-                chunk = resp.read(64 * 1024)
-                if not chunk:
-                    break
-                chunks.append(chunk)
-                total += len(chunk)
-                if total > max_bytes:
-                    raise AiAgentError("AI Agent backend 回應超過大小上限")
-            raw = b"".join(chunks)
-            if not raw:
-                return {}
-            return json.loads(raw.decode("utf-8"))
-    except urllib_error.HTTPError as exc:
-        raw = exc.read(512 * 1024)
-        payload = {}
+    max_attempts = 3
+    last_transient_error = None
+
+    for attempt in range(max_attempts):
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            break
+        req = urllib_request.Request(
+            url,
+            data=body,
+            headers=_backend_headers(settings, session_key=session_key),
+            method=method.upper(),
+        )
         try:
-            payload = json.loads(raw.decode("utf-8")) if raw else {}
-        except Exception:
-            payload = {"raw": raw.decode("utf-8", "replace")}
-        error_value = payload.get("error") if isinstance(payload, dict) else None
-        if isinstance(error_value, dict):
-            message = error_value.get("message")
-        elif isinstance(error_value, str):
-            message = error_value
-        else:
-            message = payload.get("msg") or payload.get("message")
-        raise AiAgentError(message or f"AI Agent backend HTTP {exc.code}", status=exc.code, payload=payload)
-    except (urllib_error.URLError, TimeoutError, OSError) as exc:
-        raise AiAgentError(f"AI Agent backend 無法連線：{exc}") from exc
-    except json.JSONDecodeError as exc:
-        raise AiAgentError(f"AI Agent backend 回傳不是有效 JSON：{exc}") from exc
+            with urllib_request.urlopen(req, timeout=max(1, min(effective_timeout, remaining))) as resp:
+                try:
+                    resp.fp.raw._sock.settimeout(read_timeout)
+                except Exception:
+                    pass
+                chunks = []
+                total = 0
+                max_bytes = 10 * 1024 * 1024
+                while True:
+                    if monotonic() > deadline:
+                        raise TimeoutError(f"AI Agent backend request exceeded {effective_timeout}s")
+                    chunk = resp.read(64 * 1024)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise AiAgentError("AI Agent backend 回應超過大小上限")
+                raw = b"".join(chunks)
+                if not raw:
+                    return {}
+                return json.loads(raw.decode("utf-8"))
+        except urllib_error.HTTPError as exc:
+            raw = exc.read(512 * 1024)
+            error_payload = {}
+            try:
+                error_payload = json.loads(raw.decode("utf-8")) if raw else {}
+            except Exception:
+                error_payload = {"raw": raw.decode("utf-8", "replace")}
+            error_value = error_payload.get("error") if isinstance(error_payload, dict) else None
+            if isinstance(error_value, dict):
+                message = error_value.get("message")
+            elif isinstance(error_value, str):
+                message = error_value
+            else:
+                message = error_payload.get("msg") or error_payload.get("message")
+            retryable = exc.code in AI_AGENT_TRANSIENT_HTTP_STATUSES and attempt + 1 < max_attempts and monotonic() < deadline
+            if retryable:
+                last_transient_error = AiAgentError(
+                    message or f"AI Agent backend HTTP {exc.code}",
+                    status=exc.code,
+                    payload={"attempt": attempt + 1, "upstream": error_payload},
+                )
+                sleep(min(1.5 * (attempt + 1), max(0.0, deadline - monotonic())))
+                continue
+            if attempt > 0 and exc.code in AI_AGENT_TRANSIENT_HTTP_STATUSES:
+                error_payload = {
+                    "attempts": attempt + 1,
+                    "last_error": error_payload,
+                    "transient": True,
+                }
+            raise AiAgentError(message or f"AI Agent backend HTTP {exc.code}", status=exc.code, payload=error_payload)
+        except TimeoutError as exc:
+            raise AiAgentError(str(exc)) from exc
+        except (urllib_error.URLError, OSError) as exc:
+            retryable = attempt + 1 < max_attempts and monotonic() < deadline
+            if retryable:
+                last_transient_error = exc
+                sleep(min(1.5 * (attempt + 1), max(0.0, deadline - monotonic())))
+                continue
+            raise AiAgentError(f"AI Agent backend 無法連線：{exc}") from exc
+        except json.JSONDecodeError as exc:
+            raise AiAgentError(f"AI Agent backend 回傳不是有效 JSON：{exc}") from exc
+
+    if last_transient_error:
+        raise AiAgentError(f"AI Agent backend 暫時不可用：{last_transient_error}") from last_transient_error
+    raise AiAgentError(f"AI Agent backend request exceeded {effective_timeout}s")
 
 
 def _safe_percent(value):

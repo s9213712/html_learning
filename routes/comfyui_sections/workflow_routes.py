@@ -31,6 +31,10 @@ from services.comfyui.template.run_gate import (
     RunGateFailure,
     run_workflow_through_gates,
 )
+from services.comfyui.template.remap import (
+    SafetyError,
+    remap_load_image_to_cloud_file,
+)
 from services.comfyui.workflow.compat import apply_workflow_compatibility_fixes
 from services.platform.settings import is_feature_enabled
 
@@ -499,7 +503,13 @@ def register_comfyui_workflow_routes(app, ctx):
                     params["seed"] = inputs.get("noise_seed")
                 elif inputs.get("seed") is not None:
                     params["seed"] = inputs.get("seed")
-                for src, dst in (("steps", "steps"), ("cfg", "cfg"), ("sampler_name", "sampler_name"), ("scheduler", "scheduler")):
+                for src, dst in (
+                    ("steps", "steps"),
+                    ("cfg", "cfg"),
+                    ("sampler_name", "sampler_name"),
+                    ("scheduler", "scheduler"),
+                    ("denoise", "denoise_strength"),
+                ):
                     if inputs.get(src) is not None:
                         params[dst] = inputs.get(src)
             if class_type == "EmptyLatentImage":
@@ -1225,6 +1235,7 @@ def register_comfyui_workflow_routes(app, ctx):
             elif user_inputs:
                 workflow_json = _apply_legacy_workflow_user_inputs(workflow_json, user_inputs)
                 workflow_json = apply_workflow_compatibility_fixes(workflow_json)
+            media_remap_run_id = ""
             if not strict_mode:
                 workflow_json = rewrite_workflow_model_inputs_to_local_options(
                     workflow_json,
@@ -1249,6 +1260,41 @@ def register_comfyui_workflow_routes(app, ctx):
                         "stage": stage,
                         "dependency_status": final_dependency_status,
                     }), 409
+                if image_field_assignments:
+                    media_remap_run_id = secrets.token_hex(16)
+                    try:
+                        workflow_json = remap_load_image_to_cloud_file(
+                            workflow_json,
+                            image_field_assignments=dict(image_field_assignments or {}),
+                            actor=actor,
+                            conn=conn,
+                            run_id=media_remap_run_id,
+                            upload_callback=_default_upload_callback(
+                                active_client,
+                                storage_root=storage_root,
+                                resolve_file_storage_path=resolve_file_storage_path,
+                            ),
+                            fetch_file_row=lambda gate_conn, cloud_file_id: _workflow_template_fetch_file_row(
+                                gate_conn,
+                                cloud_file_id,
+                                actor=actor,
+                            ),
+                        )
+                    except SafetyError as exc:
+                        audit(
+                            "COMFYUI_TEMPLATE_MEDIA_REMAP_FAIL",
+                            get_client_ip(),
+                            user=actor_value(actor, "username") or "-",
+                            success=False,
+                            ua=get_ua(),
+                            detail=f"preset_id={preset_id} reason={str(exc)[:180]}",
+                        )
+                        return json_resp({
+                            "ok": False,
+                            "msg": str(exc),
+                            "stage": "media_remap_failed",
+                            "image_field_assignments": image_field_assignments,
+                        }), 400
 
             prompt_extra_data = {}
             if comfyui_paid_api_policy:
@@ -1260,6 +1306,33 @@ def register_comfyui_workflow_routes(app, ctx):
                     return paid_api_error
 
             workflow_run_params = _workflow_snapshot_params(default_params, workflow_json)
+            for key in (
+                "prompt",
+                "edit_instruction",
+                "edit_prompt",
+                "negative_prompt",
+                "denoise_strength",
+                "steps",
+                "cfg",
+                "cfg_scale",
+                "sampler_name",
+                "scheduler",
+                "seed",
+                "width",
+                "height",
+                "batch_size",
+                "official_workflow_id",
+                "workflow_id",
+                "generation_mode",
+            ):
+                value = body.get(key)
+                if value is None:
+                    continue
+                if isinstance(value, str) and not value.strip():
+                    continue
+                workflow_run_params[key] = value
+            if workflow_run_params.get("edit_instruction") and not workflow_run_params.get("effective_edit_instruction"):
+                workflow_run_params["effective_edit_instruction"] = workflow_run_params.get("edit_instruction")
             requested_width = _workflow_request_int(
                 body.get("requested_width") or body.get("output_width") or body.get("width"),
                 0,
@@ -1283,6 +1356,23 @@ def register_comfyui_workflow_routes(app, ctx):
             workflow_run_params["workflow_preset_id"] = int(preset_id)
             workflow_run_params["workflow_preset_title"] = row["title"] or "Workflow"
             workflow_run_params["workflow_system_bundle_id"] = row["system_bundle_id"] or ""
+            for key in (
+                "source_image_ref",
+                "source_image_ref_json",
+                "mask_image_ref",
+                "mask_image_ref_json",
+                "reference_image_ref",
+                "reference_image_ref_json",
+                "pose_reference_image_ref",
+                "control_image_ref",
+                "control_image_ref_json",
+            ):
+                if isinstance(body.get(key), dict):
+                    workflow_run_params[key] = body.get(key)
+            if image_field_assignments:
+                workflow_run_params["image_field_assignments"] = dict(image_field_assignments)
+            if media_remap_run_id:
+                workflow_run_params["media_remap_run_id"] = media_remap_run_id
             run_id = create_workflow_run(
                 conn,
                 preset_id=preset_id,

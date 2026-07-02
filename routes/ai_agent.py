@@ -78,9 +78,25 @@ AI_AGENT_WRITE_TOOL_SPECS = {
             "outpaint_right", "outpaint_bottom", "outpaint_feathering",
             "workflow", "workflow_id", "official_workflow_id", "template_id", "lora",
             "loras", "vae", "vae_name", "timeout_seconds", "confirm_billing",
-            "backend_url", "comfyui_backend_url",
+            "backend_url", "comfyui_backend_url", "qwen_edit_profile", "qwen_profile",
+            "profile", "qwen_reference_mode", "qwen_reference_image2",
         },
         "required": {"prompt"},
+        "write": True,
+    },
+    "write_comfyui_background_composite": {
+        "label": "精確背景合成",
+        "description": "使用站內 ComfyUI 圖片引用，把來源人物保留並以參考圖作為 exact background plate 合成；適合使用者明確要求完全複製背景時使用，不走模型重畫。",
+        "method": "POST",
+        "path": "/api/comfyui/background-composite",
+        "path_params": {},
+        "body_fields": {
+            "source_image_ref", "source_image_ref_json", "background_image_ref",
+            "background_image_ref_json", "reference_image_ref", "reference_image_ref_json",
+            "mask_image_ref", "mask_image_ref_json", "width", "height",
+            "background_fit", "mask_mode", "prompt", "confirm_billing",
+        },
+        "required": {"source_image_ref", "background_image_ref"},
         "write": True,
     },
     "write_chess_create_practice": {
@@ -2411,6 +2427,162 @@ def register_ai_agent_routes(app, deps):
             return value
         return None
 
+    def _image_ref_semantic_stage(ref):
+        if not isinstance(ref, dict):
+            return ""
+        text = " ".join(
+            str(ref.get(key) or "")
+            for key in ("semantic_key", "context", "filename", "name", "label", "description")
+        ).lower()
+        if not text.strip():
+            return ""
+        if re.search(r"\b(clothes|clothing|outfit|garment|uniform|kimono|swimsuit|bikini|sailor)\b|服裝|衣服", text):
+            return "clothes"
+        if re.search(r"\b(chara|character|face|identity|hair|eyes?)\b|角色|臉|髮", text):
+            return "chara"
+        if re.search(r"\b(pose|posture|gesture|kneel|sit|stand|lying|arms?|legs?)\b|姿勢|動作", text):
+            return "pose"
+        if re.search(r"\b(background|scene|scenery|environment|location|lighting)\b|背景|場景|環境", text):
+            return "background"
+        return ""
+
+    def _qwen_single_reference_stage_instruction(stage):
+        if stage == "clothes":
+            return (
+                "use the extracted reference clothing traits only for outfit design, garment silhouette, colors, and clothing details; "
+                "change only the source girl's clothes to match those clothing traits; preserve the source face, identity, "
+                "hair color, hairstyle, expression, pose, hands, body proportions, composition, and background; "
+                "do not copy the reference identity, pose, face, hair, hairstyle, hair color, cat ears, animal ears, hair accessories, or background; "
+                "fit the outfit naturally with no body or cloth penetration."
+            )
+        if stage == "chara":
+            return (
+                "use the extracted reference character traits only for character appearance, face mood, eye shape, hair direction, and color cues; "
+                "preserve the source outfit, pose, body, composition, and background; do not copy the reference clothing or background."
+            )
+        if stage == "pose":
+            return (
+                "use the reference image only for body pose, limb placement, and composition; preserve the source identity, "
+                "face, hairstyle, clothing, colors, and background as much as possible; do not copy the reference identity, outfit, or background."
+            )
+        if stage == "background":
+            return (
+                "use the extracted reference background traits only for scene, setting, location, lighting, depth, and environmental details; "
+                "change only the source background/scene to match those traits; preserve the source girl, face, identity, "
+                "hair color, hairstyle, expression, clothing, pose, hands, body proportions, and foreground subject; "
+                "do not copy reference people, identity, outfit, pose, text, signage words, watermark, logo, or signature."
+            )
+        return ""
+
+    def _qwen_instruction_wrong_for_single_reference_stage(instruction, stage):
+        text = str(instruction or "").lower()
+        if not text.strip() or not stage:
+            return False
+        if stage == "clothes":
+            if re.search(r"\b(face identity|different anime character face|eye shape|mature face)\b", text):
+                return True
+            has_clothes_action = re.search(
+                r"\b(change|replace|edit|modify|turn|convert)\b.{0,80}\b(clothes|clothing|outfit|garment|dress|uniform|kimono|swimsuit|bikini|sailor)\b",
+                text,
+            )
+            stale_other = re.search(r"\b(hair color|hairstyle|body pose|pose)\b", text)
+            return bool(stale_other and not has_clothes_action)
+        if stage == "chara":
+            has_chara = re.search(r"\b(face|identity|character|hair|eye|appearance)\b", text)
+            stale_other = re.search(r"\b(clothes|clothing|outfit|garment|body pose|pose)\b", text)
+            return bool(stale_other and not has_chara)
+        if stage == "pose":
+            has_pose = re.search(r"\b(pose|posture|body|arm|leg|hand|composition|kneel|sit|stand|lying)\b", text)
+            stale_other = re.search(r"\b(face|identity|clothes|clothing|outfit|garment)\b", text)
+            return bool(stale_other and not has_pose)
+        if stage == "background":
+            has_background = re.search(r"\b(background|scene|scenery|environment|location|lighting|atmosphere)\b", text)
+            stale_other = re.search(r"\b(face|identity|hair|hairstyle|clothes|clothing|outfit|garment|pose|posture)\b", text)
+            return bool(stale_other and not has_background)
+        return False
+
+    def _normalize_qwen_single_reference_instruction(normalized):
+        workflow_id = str(
+            normalized.get("official_workflow_id")
+            or normalized.get("workflow_id")
+            or normalized.get("template_id")
+            or ""
+        ).strip()
+        mode = str(normalized.get("generation_mode") or "").strip().lower()
+        if not (_is_qwen_edit_workflow_id(workflow_id) or mode == "img2img"):
+            return
+        reference_ref = normalized.get("reference_image_ref")
+        stage = _image_ref_semantic_stage(reference_ref)
+        if not stage:
+            return
+        current_instruction = str(
+            normalized.get("edit_instruction")
+            or normalized.get("edit_prompt")
+            or ""
+        ).strip()
+        if current_instruction and _qwen_instruction_wrong_for_single_reference_stage(current_instruction, stage):
+            instruction = _qwen_single_reference_stage_instruction(stage)
+            if instruction:
+                normalized["edit_instruction"] = instruction
+                normalized.pop("edit_prompt", None)
+
+    def _strip_qwen_single_semantic_reference_image(body):
+        workflow_id = _official_workflow_id_from_body(body)
+        if not _is_qwen_edit_workflow_id(workflow_id):
+            return body, []
+        reference_ref = _image_ref_from_body(body, "reference_image_ref")
+        if not isinstance(reference_ref, dict) or not str(reference_ref.get("semantic_key") or "").strip():
+            return body, []
+        stage = _image_ref_semantic_stage(reference_ref)
+        if stage not in {"chara", "clothes", "background", "pose"}:
+            return body, []
+        reference_mode = str((body or {}).get("qwen_reference_mode") or "").strip().lower()
+        instruction_text = str(
+            (body or {}).get("edit_instruction")
+            or (body or {}).get("edit_prompt")
+            or ""
+        ).lower()
+        guarded_contract = (
+            stage in {"chara", "clothes", "background"}
+            and "use the reference image only" in instruction_text
+            and "preserve the source" in instruction_text
+            and "do not copy the reference" in instruction_text
+        )
+        explicit_image2_flag = "qwen_reference_image2" in (body or {})
+        text_traits_only = (
+            reference_mode in {"text_traits_only", "vision_text_traits_only", "reference_text_traits_only"}
+            or (explicit_image2_flag and not bool((body or {}).get("qwen_reference_image2")))
+        )
+        if text_traits_only:
+            next_body = dict(body or {})
+            next_body.pop("reference_image_ref", None)
+            next_body.pop("reference_image_ref_json", None)
+            next_body.pop("pose_reference_image_ref", None)
+            return next_body, [{
+                "code": "qwen_single_reference_image2_text_traits_only",
+                "stage": stage,
+                "reason": "vision extracted the active reference traits; image2 is disabled to avoid low-VRAM stalls and reference leakage",
+            }]
+        allow_guarded_image2 = (
+            bool((body or {}).get("qwen_reference_image2"))
+            or reference_mode in {"stage_guarded_image2", "guarded_image2", "image2_stage_guarded"}
+        )
+        if allow_guarded_image2 and stage in {"chara", "clothes", "background"}:
+            return body, [{
+                "code": "qwen_single_reference_image2_stage_guarded" if not guarded_contract else "qwen_single_reference_image2_contract_guarded",
+                "stage": stage,
+                "reason": "stage contract explicitly restricts image2 to the active reference role",
+            }]
+        next_body = dict(body or {})
+        next_body.pop("reference_image_ref", None)
+        next_body.pop("reference_image_ref_json", None)
+        next_body.pop("pose_reference_image_ref", None)
+        return next_body, [{
+            "code": "qwen_single_reference_image2_stripped",
+            "stage": stage,
+            "reason": "single semantic reference is used for agent/vision text traits only; direct image2 over-copies identity/background",
+        }]
+
     def _normalize_comfyui_write_args(args):
         normalized = dict(args or {})
         prompt_text = str(
@@ -2510,6 +2682,7 @@ def register_ai_agent_routes(app, deps):
                 if normalized.get(field) is None:
                     normalized[field] = expand
         _normalize_qwen_edit_inline_instruction(normalized)
+        _normalize_qwen_single_reference_instruction(normalized)
         return normalized
 
     def _extract_inline_edit_instruction(prompt):
@@ -2556,18 +2729,41 @@ def register_ai_agent_routes(app, deps):
             return ", ".join(parts) or "by ogipote, anime style, 1girl"
         return ""
 
+    QWEN_EDIT_STYLE_FALLBACK = (
+        "by ogipote, anime style, 1girl, style tag only, do not render words, "
+        "no visible text, no watermark, no signature, no logo, no visible artist name"
+    )
+
+    def _looks_like_qwen_edit_instruction_text(text):
+        return bool(re.search(
+            r"stage\s+\d+|merge:|visibly change|direct text edit|source character|"
+            r"reference traits|target traits|apply these reference traits|current pairwise stage|"
+            r"use this reference only|agent_review|vision gate|candidate",
+            str(text or ""),
+            re.IGNORECASE,
+        ))
+
     def _sanitize_qwen_edit_style_context(style_context):
-        style = re.sub(r"\s+", " ", str(style_context or "")).strip(" \t\r\n\"'`")
+        raw = str(style_context or "").strip()
+        marker_match = re.search(r"Style and preservation context\s*:\s*([\s\S]+)$", raw, re.IGNORECASE)
+        if marker_match:
+            marker_style = re.sub(r"\s+", " ", marker_match.group(1)).strip(" \t\r\n\"'`")
+            style = marker_style if marker_style and not _looks_like_qwen_edit_instruction_text(marker_style) else QWEN_EDIT_STYLE_FALLBACK
+        elif _looks_like_qwen_edit_instruction_text(raw):
+            style = QWEN_EDIT_STYLE_FALLBACK
+        else:
+            style = re.sub(r"\s+", " ", raw).strip(" \t\r\n\"'`")
         if not style:
-            return ""
+            style = QWEN_EDIT_STYLE_FALLBACK
         style = re.sub(r"\s*,\s*,+", ", ", style).strip(" ,")
         if not style:
-            style = "by ogipote, anime style, 1girl"
+            style = QWEN_EDIT_STYLE_FALLBACK
         guards = (
             "style tag only, do not render words, no visible text, no watermark, "
             "no signature, no logo, no visible artist name"
         )
-        if "no text" not in style.lower():
+        style_lower = style.lower()
+        if not any(marker in style_lower for marker in ("no text", "no visible text", "do not render words")):
             style = f"{style}, {guards}"
         return style[:700]
 
@@ -2637,6 +2833,20 @@ def register_ai_agent_routes(app, deps):
             text,
             re.IGNORECASE,
         ))
+        wants_cross_reference_blend = (
+            bool(re.search(r"chara\s+reference|character\s+reference|角色.*參考|角色外觀", text, re.IGNORECASE))
+            and bool(re.search(r"clothes\s+reference|clothing\s+reference|outfit\s+reference|服裝.*參考", text, re.IGNORECASE))
+            and bool(re.search(r"pose\s+reference|姿勢.*參考|動作.*參考", text, re.IGNORECASE))
+        ) or bool(re.search(r"交叉.*參考|三張.*reference|多參考圖", text, re.IGNORECASE))
+        if wants_cross_reference_blend:
+            return (
+                "use the character reference only for the main character appearance, face mood, hairstyle direction, and color cues; "
+                "use the clothes reference only for outfit design, garment shape, colors, and details; "
+                "use the pose reference only for body pose, limb placement, and composition; "
+                "apply those three references to the source character as one coherent anime girl while preserving the source image as the base; "
+                "do not copy reference backgrounds, do not copy unrelated identities, do not mix up clothes and pose roles, and do not add text or watermark; "
+                "avoid extra limbs, broken hands, missing fingers, body penetration, or black/gray failure output."
+            )
         if wants_remove_hairclips and wants_scarf and wants_yandere and wants_lace and wants_larger_bust:
             hairstyle_clause = (
                 "change the hairstyle to clear high twin tails while keeping the same dark blue hair color; "
@@ -2876,6 +3086,20 @@ def register_ai_agent_routes(app, deps):
         derived = str(derived_instruction or "").strip().lower()
         if not current or not derived:
             return False
+        derived_is_cross_reference = (
+            "character reference" in derived
+            and "clothes reference" in derived
+            and "pose reference" in derived
+        )
+        if derived_is_cross_reference:
+            current_is_cross_reference = (
+                "character reference" in current
+                and ("clothes reference" in current or "outfit reference" in current)
+                and "pose reference" in current
+            )
+            if current_is_cross_reference:
+                return False
+            return bool(re.search(r"\b(change\s+only|hair\s+color|silver|silver-white)\b|髮色|銀髮|銀白", current, re.IGNORECASE))
         strict_preservation_terms = (
             "garment wearing state",
             "exposure",
@@ -3000,6 +3224,15 @@ def register_ai_agent_routes(app, deps):
             args = _normalize_comfyui_write_args(args)
             if _is_missing_arg(args.get("edit_instruction")) and not _is_missing_arg(args.get("edit_prompt")):
                 args["edit_instruction"] = args.get("edit_prompt")
+        if tool_name == "write_comfyui_background_composite":
+            if _is_missing_arg(args.get("source_image_ref")) and not _is_missing_arg(args.get("source_image_ref_json")):
+                args["source_image_ref"] = args.get("source_image_ref_json")
+            if _is_missing_arg(args.get("background_image_ref")) and not _is_missing_arg(args.get("reference_image_ref")):
+                args["background_image_ref"] = args.get("reference_image_ref")
+            if _is_missing_arg(args.get("background_image_ref_json")) and not _is_missing_arg(args.get("reference_image_ref_json")):
+                args["background_image_ref_json"] = args.get("reference_image_ref_json")
+            if _is_missing_arg(args.get("background_image_ref")) and not _is_missing_arg(args.get("background_image_ref_json")):
+                args["background_image_ref"] = args.get("background_image_ref_json")
         missing = [
             key for key in sorted(spec.get("required") or [])
             if _is_missing_arg(args.get(key))
@@ -3804,16 +4037,31 @@ def register_ai_agent_routes(app, deps):
                 "msg": "Qwen Image Edit 需要明確的語意編輯命令；請提供 edit_instruction，或把 prompt 寫成 replace/remove/change/fix 類的直接編輯指令。",
                 "stage": "missing_qwen_edit_instruction",
             }
+        body, single_reference_adjustments = _strip_qwen_single_semantic_reference_image(body)
         image_assignments, image_assignment_error = _workflow_protected_media_assignments(preset, body)
         if image_assignment_error:
             return 400, image_assignment_error
         user_inputs, workflow_adjustments = _workflow_user_inputs_from_generate_body(preset, body)
+        workflow_adjustments = list(workflow_adjustments or []) + list(single_reference_adjustments or [])
         run_body = {
             "user_inputs": user_inputs,
             "image_field_assignments": image_assignments,
             "run_count": body.get("batch_size") or body.get("run_count") or 1,
             "seed_after_generate": "fixed",
         }
+        for key in (
+            "source_image_ref",
+            "source_image_ref_json",
+            "mask_image_ref",
+            "mask_image_ref_json",
+            "reference_image_ref",
+            "reference_image_ref_json",
+            "pose_reference_image_ref",
+            "control_image_ref",
+            "control_image_ref_json",
+        ):
+            if isinstance((body or {}).get(key), dict):
+                run_body[key] = body.get(key)
         for source_key, target_key in (
             ("width", "width"),
             ("height", "height"),
