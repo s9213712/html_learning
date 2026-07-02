@@ -808,6 +808,7 @@ function aiAgentComfyuiSubmitArgs(args = {}) {
   const cleaned = aiAgentCleanComfyuiArgs(aiAgentApplyQwenEditInstructionPrompt(args));
   Object.keys(cleaned).forEach((key) => {
     if (key.startsWith("agent_review_")) delete cleaned[key];
+    if (key.startsWith("agent_followup_")) delete cleaned[key];
   });
   return cleaned;
 }
@@ -988,6 +989,10 @@ function aiAgentApplyExactReferenceClothesIntent(args = {}, userText = "") {
   next.qwen_reference_mode = "stage_guarded_image2";
   next.qwen_reference_image2 = true;
   next.qwen_reference_force_image2 = true;
+  next.agent_review_required = true;
+  next.agent_review_mode = "vision_iterative_gate";
+  next.agent_review_pass_threshold = Math.max(Number(next.agent_review_pass_threshold || 0) || 0, 0.93);
+  next.agent_review_max_attempts = Math.max(2, Number(next.agent_review_max_attempts || 2) || 2);
   next.qwen_edit_profile = next.qwen_edit_profile || next.qwen_profile || next.profile || "fast";
   if (String(next.qwen_edit_profile || "").trim().toLowerCase() === "fast") {
     next.steps = 4;
@@ -998,6 +1003,7 @@ function aiAgentApplyExactReferenceClothesIntent(args = {}, userText = "") {
   const exactInstruction = [
     "Use the reference image only as the exact outfit/garment geometry source.",
     "Put that reference outfit on the source character.",
+    "This exact-outfit request fails if the result only copies rough color/style or misses major garment structure.",
     "Preserve the source identity, face, hair, pose, body, framing, and background unless the user explicitly asks otherwise.",
     "Do not copy the reference face, hair, pose, body, background, text, watermark, logo, or signature.",
   ].join(" ");
@@ -1006,6 +1012,12 @@ function aiAgentApplyExactReferenceClothesIntent(args = {}, userText = "") {
     ? `${current} ${exactInstruction}`
     : `stage 2 clothes merge: transfer the exact reference outfit onto the source character. ${exactInstruction}`;
   return next;
+}
+
+function aiAgentRequiresExactReferenceClothes(args = {}) {
+  return args?.qwen_reference_force_image2 === true
+    || args?.qwen_reference_image2 === true
+    || String(args?.qwen_reference_mode || "").trim().toLowerCase() === "stage_guarded_image2";
 }
 
 function aiAgentTextSuggestsImageEdit(text = "") {
@@ -1615,6 +1627,12 @@ async function aiAgentPrepareSingleSemanticReferenceArgs(args = {}) {
     }
   } else {
     delete next.reference_image_ref;
+  }
+  if (stageKey === "pose") {
+    return aiAgentBuildPoseControlFallbackArgs(next, { image_ref: next.source_image_ref }, {
+      issues: ["single pose reference requests should use pose/control workflow"],
+      failed_gates: ["pose_control_required"],
+    }) || next;
   }
   if (stageKey === "chara") {
     next.denoise_strength = Math.max(Number(next.denoise_strength || 0.95) || 0.95, 0.95);
@@ -3986,6 +4004,15 @@ function aiAgentComfyuiReviewPrompt(args = {}, attemptIndex = 1, maxAttempts = 2
   const sequence = Array.isArray(args.agent_review_stage_sequence) ? args.agent_review_stage_sequence : [];
   const stageIndex = Math.max(0, Number(args.agent_review_stage_index || 0) || 0);
   const stage = sequence[stageIndex] || {};
+  const exactClothesRules = aiAgentRequiresExactReferenceClothes(args)
+    ? [
+      "Exact reference clothes hard rules:",
+      "- The user asked for exact reference outfit transfer, not loose inspiration.",
+      "- HARD FAIL if the result only approximates color/style or misses major garment geometry.",
+      "- Check collar/neckline shape, sleeve shape/length, bow/tie/tassel/cord details, waistband/belt, skirt/pants silhouette, fabric drape, trim/lace, and visible accessories from the reference outfit.",
+      "- Score <= 0.70 for style-only transfer even if the outfit color changed; pass only for highly consistent garment structure while preserving source identity/pose/background.",
+    ].join("\n")
+    : "";
   const stageLine = stage?.key
     ? `Current pairwise stage: ${stageIndex + 1}/${sequence.length} (${stage.key}). Only judge this stage and previously passed stages; do not fail because future stages are not yet merged.`
     : "";
@@ -4001,6 +4028,7 @@ function aiAgentComfyuiReviewPrompt(args = {}, attemptIndex = 1, maxAttempts = 2
     "For the active stage, also fail if the candidate is nearly unchanged from SOURCE or ignores CURRENT REFERENCE; a completed job with no visible requested change is not acceptable.",
     "For pairwise multi-reference edits, judge only the active stage: chara affects character appearance/face/hair direction, clothes affects outfit only, pose affects body pose/composition only.",
     aiAgentStageSpecificReviewRules(stage?.key),
+    exactClothesRules,
     "If it fails, provide a concise revised_edit_instruction that fixes the visible issue and strengthens the missing gate. Do not put style tags or explanatory text into the image.",
     `Attempt: ${attemptIndex}/${maxAttempts}`,
     `Positive/style prompt: ${prompt || "-"}`,
@@ -4262,6 +4290,81 @@ function aiAgentComfyuiReviewPassed(review = {}, args = {}) {
   return review.pass === true && review.hard_fail !== true && Number(review.score || 0) >= threshold;
 }
 
+function aiAgentBuildPoseControlPrompt(args = {}, reason = "") {
+  const basePrompt = String(args.prompt || "").trim();
+  const summary = String(args.agent_review_reference_summary || "").trim();
+  return [
+    basePrompt || "by ogipote, anime style, 1girl, high quality anime illustration",
+    "match the supplied pose control map as closely as possible",
+    "preserve the current character identity, face, hair, outfit, and scene from the previous accepted candidate as much as possible",
+    summary ? `pose target notes: ${summary}` : "",
+    reason ? `previous pose failure to fix: ${reason}` : "",
+    "full visible coherent body, correct hands and fingers, no visible text",
+  ].filter(Boolean).join(", ");
+}
+
+function aiAgentBuildPoseControlFallbackArgs(args = {}, currentImage = {}, review = {}) {
+  const sequence = Array.isArray(args.agent_review_stage_sequence) ? args.agent_review_stage_sequence : [];
+  const stageIndex = Math.max(0, Number(args.agent_review_stage_index || 0) || 0);
+  const stage = sequence[stageIndex] || {};
+  const poseRef = args.agent_review_reference_image_ref || args.reference_image_ref || stage.reference_image_ref;
+  const sourceRef = currentImage?.image_ref || args.source_image_ref || null;
+  if (!poseRef) return null;
+  const issueText = [
+    ...(Array.isArray(review.issues) ? review.issues : []),
+    ...(Array.isArray(review.failed_gates) ? review.failed_gates : []),
+  ].join("; ").slice(0, 600);
+  const followupArgs = {
+    prompt: aiAgentBuildPoseControlPrompt(args, issueText),
+    negative_prompt: aiAgentMergeCommaList(args.negative_prompt, "wrong pose, unchanged pose, copied reference identity, copied reference outfit, visible text, watermark, logo, signature, extra limbs, broken hands, missing fingers, body penetration, distorted anatomy"),
+    width: args.width || 1024,
+    height: args.height || 1024,
+    steps: Math.max(4, Number(args.steps || 4) || 4),
+    cfg: Number(args.cfg || args.cfg_scale || 1) || 1,
+    cfg_scale: Number(args.cfg_scale || args.cfg || 1) || 1,
+    batch_size: 1,
+    generation_mode: "txt2img",
+    official_workflow_id: "origin_qwen_image_controlnet_2512",
+    controlnet_type: "pose",
+    controlnet_preprocessor: "none",
+    controlnet_model: "QWEN\\Qwen-Image-2512-Fun-Controlnet-Union-2602.safetensors",
+    control_strength: 0.95,
+    control_start: 0,
+    control_end: 1,
+    confirm_billing: true,
+    source_image_ref: sourceRef,
+    agent_review_required: true,
+    agent_review_mode: "vision_iterative_gate",
+    agent_review_strategy: args.agent_review_strategy || "pairwise_reference_merge",
+    agent_review_stage_sequence: sequence,
+    agent_review_stage_index: stageIndex,
+    agent_review_stage_key: "pose",
+    agent_review_stage_attempt: Math.max(1, Number(args.agent_review_stage_attempt || 1) || 1) + 1,
+    agent_review_attempt_index: Math.max(1, Number(args.agent_review_attempt_index || 1) || 1) + 1,
+    agent_review_reference_image_ref: poseRef,
+    agent_review_pass_threshold: Math.max(Number(args.agent_review_pass_threshold || 0.8) || 0.8, 0.86),
+    agent_review_min_candidates: 1,
+    agent_review_max_attempts: Math.max(2, Number(args.agent_review_max_attempts || 3) || 3),
+    agent_review_plan: "pose/control fallback: extract pose map from reference -> run Qwen Image ControlNet pose -> vision gate",
+  };
+  return {
+    prompt: "person pose keypoints, full body pose map",
+    negative_prompt: "",
+    width: args.width || 1024,
+    height: args.height || 1024,
+    batch_size: 1,
+    generation_mode: "img2img",
+    official_workflow_id: "origin_sdpose_multi_person",
+    source_image_ref: poseRef,
+    confirm_billing: true,
+    agent_followup_after_completion: {
+      kind: "pose_control",
+      args: followupArgs,
+    },
+    agent_followup_notice: "pose stage failed direct edit; extracting SDPose map before Qwen controlnet pose run",
+  };
+}
+
 function aiAgentBuildComfyuiReviewRerunArgs(args = {}, review = {}, attemptIndex = 1) {
   const next = { ...args };
   const baseInstruction = String(args.edit_instruction || args.edit_prompt || "").trim();
@@ -4312,7 +4415,9 @@ function aiAgentBuildComfyuiReviewRerunArgs(args = {}, review = {}, attemptIndex
     next.denoise_strength = Math.max(Number(next.denoise_strength || 0.6), noVisibleChange ? 0.95 : 0.88);
     next.edit_instruction = [
       next.edit_instruction,
-      "Make the active clothes reference visibly affect the outfit while preserving already passed identity gates.",
+      aiAgentRequiresExactReferenceClothes(args)
+        ? "Do not accept a rough style transfer: reproduce the active clothes reference garment structure, collar, sleeves, bow/tie/tassel/cord, belt/waistband, trim/lace, and silhouette while preserving already passed identity gates."
+        : "Make the active clothes reference visibly affect the outfit while preserving already passed identity gates.",
     ].filter(Boolean).join(" ");
   } else if (/(pose|姿勢|動作|composition|limb|body)/i.test(issueText)) {
     next.denoise_strength = Math.max(Number(next.denoise_strength || 0.88), noVisibleChange ? 0.98 : 0.95);
@@ -4349,6 +4454,25 @@ function aiAgentBuildNextPairwiseStageArgs(args = {}, image = {}, stageIndex = 0
   const nextStageIndex = stageIndex + 1;
   const stage = sequence[nextStageIndex];
   if (!stage?.reference_image_ref || !image?.image_ref) return null;
+  if (String(stage.key || "").toLowerCase() === "pose") {
+    const poseArgs = {
+      ...args,
+      source_image_ref: image.image_ref,
+      reference_image_ref: stage.reference_image_ref,
+      agent_review_reference_image_ref: stage.reference_image_ref,
+      agent_review_strategy: "pairwise_reference_merge",
+      agent_review_stage_sequence: sequence,
+      agent_review_stage_index: nextStageIndex,
+      agent_review_stage_attempt: 1,
+      agent_review_attempt_index: 1,
+      agent_review_pass_threshold: Math.max(Number(args.agent_review_pass_threshold || 0.8) || 0.8, 0.86),
+      agent_review_plan: args.agent_review_plan || "pairwise reference merge: chara -> clothes -> background -> pose/control, each gated by vision",
+    };
+    return aiAgentBuildPoseControlFallbackArgs(poseArgs, image, {
+      issues: ["direct pose edit is skipped for reference pose copy; use pose/control workflow"],
+      failed_gates: ["pose_control_required"],
+    });
+  }
   const next = { ...args };
   next.source_image_ref = image.image_ref;
   next.reference_image_ref = stage.reference_image_ref;
@@ -4592,6 +4716,21 @@ async function aiAgentMaybeRunStagedComfyuiReview(message = {}, options = {}) {
       || (Array.isArray(review.failed_gates) && review.failed_gates.some((gate) => /no[_\s-]?visible[_\s-]?change|unchanged/i.test(String(gate || ""))));
     const stageAttempt = Math.max(1, Number(args.agent_review_stage_attempt || 1) || 1);
     const pixelNearIdentical = Array.isArray(review.failed_gates) && review.failed_gates.some((gate) => /pixel_near_identical/i.test(String(gate || "")));
+    if (args.agent_review_strategy === "pairwise_reference_merge" && String(stage?.key || args.agent_review_stage_key || "").toLowerCase() === "pose") {
+      const poseFallbackArgs = aiAgentBuildPoseControlFallbackArgs(args, image, review);
+      if (poseFallbackArgs) {
+        AI_AGENT_STATE.messages.push({
+          role: "assistant",
+          content: [
+            `stage ${stageIndex + 1}/${sequence.length || 1} (pose) 未通過，停止普通 Qwen Edit rerun。`,
+            "改走 pose/control workflow：先用姿勢參考圖抽 SDPose pose map，完成後自動拿 pose map 送 Qwen Image ControlNet。",
+          ].join("\n"),
+        });
+        renderAiAgentThread();
+        await runAiAgentComfyuiGenerate(poseFallbackArgs);
+        return;
+      }
+    }
     if (args.agent_review_strategy === "pairwise_reference_merge" && noVisibleChange && (stageAttempt >= 2 || pixelNearIdentical)) {
       AI_AGENT_STATE.messages.push({
         role: "assistant",
@@ -4646,6 +4785,56 @@ async function aiAgentMaybeRunStagedComfyuiReview(message = {}, options = {}) {
     renderAiAgentThread();
     setAiAgentMessage(`ComfyUI staged review 失敗：${err?.message || err}`, "err");
   }
+}
+
+async function aiAgentMaybeRunComfyuiFollowup(message = {}) {
+  const jobId = String(message?.comfyui_job_id || "").trim();
+  if (!jobId) return false;
+  const submitted = AI_AGENT_STATE.comfyuiSubmittedJobs[jobId];
+  const followup = submitted?.args?.agent_followup_after_completion;
+  if (!followup || submitted.followupStartedAt) return false;
+  const image = (Array.isArray(message.images) ? message.images : []).find((item) => item?.image_ref);
+  if (!image?.image_ref) {
+    AI_AGENT_STATE.messages.push({
+      role: "assistant",
+      content: `後續任務無法啟動：Job ${jobId} 完成但沒有可作為下一步輸入的圖片引用。`,
+    });
+    renderAiAgentThread();
+    return false;
+  }
+  submitted.followupStartedAt = Date.now();
+  if (followup.kind === "pose_control") {
+    const nextArgs = {
+      ...(followup.args || {}),
+      control_image_ref: image.image_ref,
+      controlnet: {
+        image_ref: image.image_ref,
+        type: "pose",
+        model: (followup.args || {}).controlnet_model || "QWEN\\Qwen-Image-2512-Fun-Controlnet-Union-2602.safetensors",
+        preprocessor: "none",
+        strength: (followup.args || {}).control_strength || 0.95,
+        start: (followup.args || {}).control_start || 0,
+        end: (followup.args || {}).control_end || 1,
+      },
+    };
+    AI_AGENT_STATE.messages.push({
+      role: "assistant",
+      content: [
+        "pose map 已完成，開始第二步 Qwen Image ControlNet pose 生成。",
+        `Pose map job：${jobId}`,
+        `控制圖：${image.image_ref.filename || "-"}`,
+      ].join("\n"),
+    });
+    renderAiAgentThread();
+    await runAiAgentComfyuiGenerate(nextArgs);
+    return true;
+  }
+  AI_AGENT_STATE.messages.push({
+    role: "assistant",
+    content: `未知後續任務類型：${String(followup.kind || "-")}`,
+  });
+  renderAiAgentThread();
+  return false;
 }
 
 function aiAgentComfyuiImageKey(image = {}) {
@@ -4893,6 +5082,13 @@ async function aiAgentPollComfyuiJob(jobId) {
       setAiAgentMessage("ComfyUI 產圖完成", "ok");
       aiAgentStopWatchingComfyuiJob(jobId);
       aiAgentHydrateComfyuiMessageImages(message).catch(() => undefined);
+      aiAgentMaybeRunComfyuiFollowup(message).catch((err) => {
+        AI_AGENT_STATE.messages.push({
+          role: "assistant",
+          content: `ComfyUI 後續任務啟動失敗：${err?.message || err}`,
+        });
+        renderAiAgentThread();
+      });
       await loadAiAgentReadOnly({ scope: "all", limit: 20, silent: true, force: true }).catch(() => undefined);
       return;
     }

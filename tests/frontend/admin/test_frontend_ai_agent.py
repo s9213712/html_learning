@@ -59,7 +59,7 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert 'id="ai-agent-comfyui-vae"' in html
     assert 'id="ai-agent-comfyui-generate-btn"' in html
     assert 'id="s-module-ai-agent-min-role"' in html
-    _warn_if_asset_cache_version_changed(html, "/js/37-ai-agent.js", "20260702-ai-agent-exact-clothes-v29")
+    _warn_if_asset_cache_version_changed(html, "/js/37-ai-agent.js", "20260703-ai-agent-pose-control-v30")
     _warn_if_asset_cache_version_changed(html, "/js/90-bootstrap.js", "20260611-ai-agent-comfyui-write-tool")
 
     assert '"ai-agent": "feature_ai_agent_enabled"' in core_js
@@ -344,11 +344,21 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert "qwen_edit_profile = next.qwen_edit_profile || next.qwen_profile || next.profile || \"fast\"" in ai_agent_js
     assert "next.steps = 4;" in ai_agent_js
     assert "next.cfg_scale = 1;" in ai_agent_js
+    assert "agent_review_pass_threshold = Math.max(Number(next.agent_review_pass_threshold || 0) || 0, 0.93)" in ai_agent_js
+    assert "This exact-outfit request fails if the result only copies rough color/style" in ai_agent_js
+    assert "Score <= 0.70 for style-only transfer" in ai_agent_js
+    assert "Do not accept a rough style transfer" in ai_agent_js
     assert "use the extracted reference traits only as guarded visual evidence" in ai_agent_js
     assert "agent_review_reference_image_ref" in ai_agent_js
     assert "開始用 vision 模型讀取" in ai_agent_js
     assert "不要只寫 use this reference" in ai_agent_js
     assert "不要只提高 denoise 重送，要改走 pose/control workflow" in ai_agent_js
+    assert "function aiAgentBuildPoseControlFallbackArgs" in ai_agent_js
+    assert "agent_followup_after_completion" in ai_agent_js
+    assert "origin_sdpose_multi_person" in ai_agent_js
+    assert "origin_qwen_image_controlnet_2512" in ai_agent_js
+    assert "pose map 已完成，開始第二步 Qwen Image ControlNet pose 生成" in ai_agent_js
+    assert "if (key.startsWith(\"agent_followup_\")) delete cleaned[key];" in ai_agent_js
     assert "pairwise_reference_merge" in ai_agent_js
     assert "stage 1 chara merge" in ai_agent_js
     assert "For the active stage, also fail if the candidate is nearly unchanged from SOURCE" in ai_agent_js
@@ -407,7 +417,7 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert ".ai-agent-tool-panel" in css
     assert ".ai-agent-message-meta" in css
     assert "@media (max-width: 640px)" in css
-    assert "37-ai-agent.js?v=20260702-ai-agent-exact-clothes-v29" in html
+    assert "37-ai-agent.js?v=20260703-ai-agent-pose-control-v30" in html
 
 
 def test_ai_agent_root_quick_settings_use_reserved_pricing_key():
