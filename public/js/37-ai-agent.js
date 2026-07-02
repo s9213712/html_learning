@@ -942,10 +942,70 @@ function aiAgentSingleReferenceStageFromText(text = "") {
   const noClothes = /不要測\s*clothes|skip\s*clothes|no\s*clothes|不是\s*clothes|不要.*服裝/.test(raw);
   const noBackground = /不要測\s*background|skip\s*background|no\s*background|不是\s*background|不要.*背景|不要.*場景/.test(raw);
   if (!noBackground && /只測\s*background|background\s+reference|scene\s+reference|只.*背景.*參考|背景.*參考|場景.*參考/.test(raw)) return "background";
+  if (!noClothes && aiAgentTextRequestsExactReferenceClothes(raw)) return "clothes";
   if (!noClothes && /只測\s*clothes|clothes\s+reference|clothing\s+reference|outfit\s+reference|只.*服裝.*參考|服裝.*參考/.test(raw)) return "clothes";
   if (!noChara && /只測\s*chara|chara\s+reference|character\s+reference|只.*角色.*參考|角色.*參考/.test(raw)) return "chara";
   if (!noPose && /只測\s*pose|pose\s+reference|只.*姿勢.*參考|姿勢.*參考|動作.*參考/.test(raw)) return "pose";
   return "";
+}
+
+function aiAgentTextRequestsExactReferenceClothes(text = "", stageKey = "") {
+  const stage = String(stageKey || "").trim().toLowerCase();
+  if (stage && stage !== "clothes") return false;
+  const raw = aiAgentNormalizeUserText(text).toLowerCase();
+  if (!raw) return false;
+  const ref = "(?:ref(?:erence)?|參考圖|參考圖片|參考影像|第二張|第\\s*2\\s*張)";
+  const clothes = "(?:衣服|服裝|穿搭|套裝|整套|outfit|clothes|clothing|garment)";
+  return new RegExp(`(?:把|將).{0,24}${ref}.{0,36}${clothes}.{0,24}(?:穿|套|套到|穿到|放到|移植)`, "i").test(raw)
+    || new RegExp(`(?:穿|套上|換上|穿到|套到).{0,24}${ref}.{0,32}(?:身上|角色|source|character|girl|人物)?`, "i").test(raw)
+    || new RegExp(`${clothes}.{0,24}(?:完全|完整|原樣|整套|一整套|exact|copy|match|identical).{0,32}${ref}`, "i").test(raw)
+    || new RegExp(`(?:完全|完整|原樣|整套|一整套|exact|copy|match|identical).{0,32}${ref}.{0,40}${clothes}`, "i").test(raw)
+    || /不是.{0,24}參考.{0,24}(?:元素|特徵).{0,40}(?:衣服|服裝|穿搭|outfit|clothes|clothing)/i.test(raw);
+}
+
+function aiAgentApplyExactReferenceClothesIntent(args = {}, userText = "") {
+  const next = args && typeof args === "object" ? { ...args } : {};
+  const combined = [
+    userText,
+    next.prompt,
+    next.edit_instruction,
+    next.edit_prompt,
+    next.reference_image_ref?.semantic_key,
+    next.reference_image_ref?.filename,
+  ].filter(Boolean).join(" ");
+  const stageKey = String(next.reference_image_ref?.semantic_key || "").trim().toLowerCase()
+    || aiAgentSingleReferenceStageFromText(combined);
+  if (!aiAgentTextRequestsExactReferenceClothes(combined, stageKey || "clothes")) return next;
+  if (!next.reference_image_ref) {
+    const semanticRef = aiAgentInferSemanticImageRef("clothes");
+    if (semanticRef?.image_ref) next.reference_image_ref = semanticRef.image_ref;
+  }
+  if (!next.reference_image_ref) return next;
+  next.reference_image_ref = {
+    ...(next.reference_image_ref || {}),
+    semantic_key: "clothes",
+  };
+  next.qwen_reference_mode = "stage_guarded_image2";
+  next.qwen_reference_image2 = true;
+  next.qwen_reference_force_image2 = true;
+  next.qwen_edit_profile = next.qwen_edit_profile || next.qwen_profile || next.profile || "fast";
+  if (String(next.qwen_edit_profile || "").trim().toLowerCase() === "fast") {
+    next.steps = 4;
+    next.cfg = 1;
+    next.cfg_scale = 1;
+  }
+  next.denoise_strength = Math.max(Number(next.denoise_strength || 0.9) || 0.9, 0.9);
+  const exactInstruction = [
+    "Use the reference image only as the exact outfit/garment geometry source.",
+    "Put that reference outfit on the source character.",
+    "Preserve the source identity, face, hair, pose, body, framing, and background unless the user explicitly asks otherwise.",
+    "Do not copy the reference face, hair, pose, body, background, text, watermark, logo, or signature.",
+  ].join(" ");
+  const current = String(next.edit_instruction || next.edit_prompt || "").trim();
+  next.edit_instruction = current
+    ? `${current} ${exactInstruction}`
+    : `stage 2 clothes merge: transfer the exact reference outfit onto the source character. ${exactInstruction}`;
+  return next;
 }
 
 function aiAgentTextSuggestsImageEdit(text = "") {
@@ -1470,9 +1530,18 @@ async function aiAgentPreparePairwiseReferenceArgs(args = {}) {
     next.agent_review_stage_key_prepared = stageKey;
     next.negative_prompt = aiAgentMergeCommaList(next.negative_prompt, aiAgentStageNegativePrompt(stageKey, desc));
   }
+  Object.assign(next, aiAgentApplyExactReferenceClothesIntent(next, [
+    next.prompt,
+    next.edit_instruction,
+    stage.description,
+    stage.reference_image_ref?.filename,
+  ].filter(Boolean).join(" ")));
   if (["chara", "clothes", "background"].includes(stageKey)) {
     next.reference_image_ref = stage.reference_image_ref;
-    if (next.qwen_reference_force_image2 === true) {
+    const wantsGuardedImage2 = next.qwen_reference_force_image2 === true
+      || next.qwen_reference_image2 === true
+      || ["stage_guarded_image2", "guarded_image2", "image2_stage_guarded"].includes(String(next.qwen_reference_mode || "").trim().toLowerCase());
+    if (wantsGuardedImage2) {
       next.qwen_reference_mode = "stage_guarded_image2";
       next.qwen_reference_image2 = true;
     } else {
@@ -1528,8 +1597,16 @@ async function aiAgentPrepareSingleSemanticReferenceArgs(args = {}) {
   next.agent_review_reference_text_ready = true;
   next.edit_instruction = aiAgentBuildReferenceAwareStageInstruction(stageKey, desc, fallbackInstruction);
   next.negative_prompt = aiAgentMergeCommaList(next.negative_prompt, aiAgentStageNegativePrompt(stageKey, desc));
+  Object.assign(next, aiAgentApplyExactReferenceClothesIntent(next, [
+    next.prompt,
+    next.edit_instruction,
+    next.reference_image_ref?.filename,
+  ].filter(Boolean).join(" ")));
   if (["chara", "clothes", "background"].includes(stageKey)) {
-    if (next.qwen_reference_force_image2 === true) {
+    const wantsGuardedImage2 = next.qwen_reference_force_image2 === true
+      || next.qwen_reference_image2 === true
+      || ["stage_guarded_image2", "guarded_image2", "image2_stage_guarded"].includes(String(next.qwen_reference_mode || "").trim().toLowerCase());
+    if (wantsGuardedImage2) {
       next.qwen_reference_mode = "stage_guarded_image2";
       next.qwen_reference_image2 = true;
     } else {
@@ -2579,7 +2656,7 @@ async function aiAgentPlanToolAction(userText, options = {}) {
     "可用 action：chat、clarify、readonly、comfyui_status、comfyui_generate、comfyui_rerun、write_tool、community_post_draft。",
     "JSON 欄位：action, confidence, reason, question, readonly_scope, merge_strategy, execute_write, tool, args。",
     "readonly_scope 必須從 context.readonly_tools 的 scope 中選最貼近使用者目的的一項；除非使用者明確要求全站總覽，否則不可使用 all。",
-    "args 對 comfyui_generate 可含：prompt, edit_instruction, edit_prompt, negative_prompt, width, height, steps, cfg_scale, cfg, batch_size, seed, checkpoint, vae, sampler, sampler_name, scheduler, official_workflow_id, generation_mode, source_image_ref, mask_image_ref, reference_image_ref, denoise_strength, outpaint_left, outpaint_top, outpaint_right, outpaint_bottom, outpaint_feathering。",
+    "args 對 comfyui_generate 可含：prompt, edit_instruction, edit_prompt, negative_prompt, width, height, steps, cfg_scale, cfg, batch_size, seed, checkpoint, vae, sampler, sampler_name, scheduler, official_workflow_id, generation_mode, source_image_ref, mask_image_ref, reference_image_ref, denoise_strength, outpaint_left, outpaint_top, outpaint_right, outpaint_bottom, outpaint_feathering, qwen_reference_mode, qwen_reference_image2, qwen_reference_force_image2。",
     "context.effective_tools[] 是依使用者語意檢索出的候選站內工具，會提供每個工具的 domain, label, description, method, required, path_params, body_fields, query_fields, arg_hint；請依 schema 選工具與參數。",
     "args 對 write_tool 必須只使用 context.effective_tools 中該工具 schema 的 required/path_params/body_fields/query_fields canonical 欄位；不得創造未列出的欄位，除非 arg_hint 明確要求同義詞轉換。",
     "args 對 write_tool 應依 context.effective_tools 的工具語意填入站內欄位；例如頭像工具可填 user_id, cloud_file_id, crop{x,y,width,height,rotation}, zoom, decision_reason。",
@@ -2601,6 +2678,7 @@ async function aiAgentPlanToolAction(userText, options = {}) {
     "Qwen Image Edit / origin_qwen_image_edit_2509 時，edit_instruction 必須是短英文直接編輯命令；prompt 只放 style/preservation context，例如 by ogipote, anime style, 1girl。不得把整段中文自然語言任務、測試說明或完整目標場景描述塞進 prompt。",
     "Qwen Image Edit 的複合人物/物件任務不可刪減使用者明確指定的互動、相對位置、保持項目與禁止項目；例如新增第二人互動時，edit_instruction 要保留 hand on shoulder、both look at camera、smile、no merged bodies、no body penetration 等關鍵語意。新增人物是高重構任務，edit_instruction 要明說 create a new full separate character occupying the left/right third of the image、make enough visible space、slightly shift or scale the original girl if needed，且 denoise_strength 建議 0.88-0.95，避免模型過度保留原圖而完全忽略第二人。新增人物也要保留場景服裝語境，例如原圖是 festival kimono/yukata、和服、制服或泳裝時，第二人應穿協調的同場景服裝與配件，除非使用者明確要求對比服裝。",
     "若 recent_image_refs 或訊息中同時有 chara reference、clothes reference、background reference、pose reference，禁止一次把多張 reference 塞進同一個 Qwen Edit job；必須用 pairwise staged workflow：stage 1 source+chara 只合併角色外觀/臉/髮型方向；vision gate 通過後 stage 2 以上一張 candidate 當 source+clothes 只合併服裝；若有 background reference，stage 3 只合併背景/場景/光線；最後才 stage pose 只合併姿勢/構圖。每階段要先用 vision 模型把當前 reference 圖轉成明確英文 edit traits，再把那些 traits 寫入 edit_instruction；不要只寫 use this reference。Qwen Image Edit 2509 對 chara/clothes/background/pose staged merge 預設使用單圖 text edit，reference 圖只保留給 vision extraction 與 review sheet，比直接把 reference_image_ref 當 image2 更可靠。",
+    "但若使用者明確要求衣服要完全符合 reference、把 ref 圖衣服穿到角色身上、不是只參考元素、或明確指定 qwen_reference_image2=true / qwen_reference_mode=stage_guarded_image2，則 clothes 單項測試必須保留 reference_image_ref，並輸出 qwen_reference_mode='stage_guarded_image2'、qwen_reference_image2=true、qwen_reference_force_image2=true；edit_instruction 要說明 reference image only supplies the outfit and garment geometry, preserve source identity/hair/pose/background, do not copy reference face/hair/pose/background。",
     "單項測試時只執行該單項：只測 background 就不得順手改衣服、髮色、表情、配件或姿勢；只測 clothes 就不得順手改背景、人物身份、髮型或姿勢。若使用者同時列出後續項目，先完成當前項目，再等待下一輪或在報告中列為 pending。",
     "多參考圖、高難度 i2i、姿勢/服裝/角色/背景交叉融合、或使用者要求目視確認/直到成功時，不要把單次生圖當最終答案；請把 args 加上 agent_review_required=true、agent_review_mode='vision_iterative_gate'、agent_review_strategy='pairwise_reference_merge'、agent_review_max_attempts>=2，並在 reason 中說明 staged workflow：逐階段合併 chara -> clothes -> background -> pose，每階段產 candidate，用 vision 檢查 hard fail 與達成率，未達 80% 或有硬傷就修改 edit_instruction/denoise/reference emphasis 後重跑；該階段通過才進下一階段。",
     "圖生圖/風格化/外延/局部重繪時，prompt 或 edit_instruction 必須描述本輪要修改的方向；不可只複製 context.last_comfyui_args.prompt，除非使用者明確要求完全沿用原 prompt。",
@@ -2687,6 +2765,10 @@ function aiAgentPlannerArgs(plan = {}, userText = "") {
     source_image_ref: aiAgentResolveRecentImageRef(source.source_image_ref || source.source_image_ref_json || source.image_ref || source.source_ref),
     mask_image_ref: aiAgentResolveRecentImageRef(source.mask_image_ref || source.mask_image_ref_json || source.mask_ref),
     reference_image_ref: aiAgentResolveRecentImageRef(source.reference_image_ref || source.reference_image_ref_json || source.reference_ref || source.pose_reference_image_ref || source.pose_ref),
+    qwen_reference_mode: source.qwen_reference_mode,
+    qwen_reference_image2: source.qwen_reference_image2,
+    qwen_reference_force_image2: source.qwen_reference_force_image2,
+    qwen_edit_profile: source.qwen_edit_profile || source.qwen_profile || source.profile,
     denoise_strength: source.denoise_strength ?? source.denoise ?? source.strength,
     outpaint_left: source.outpaint_left ?? source.outpaint?.left,
     outpaint_top: source.outpaint_top ?? source.outpaint?.top,
@@ -3179,6 +3261,10 @@ function aiAgentNormalizeAnalysisArgs(parsed, userText) {
     source_image_ref: sourceImageRef,
     mask_image_ref: maskImageRef,
     reference_image_ref: referenceImageRef,
+    qwen_reference_mode: source?.qwen_reference_mode,
+    qwen_reference_image2: source?.qwen_reference_image2,
+    qwen_reference_force_image2: source?.qwen_reference_force_image2,
+    qwen_edit_profile: source?.qwen_edit_profile || source?.qwen_profile || source?.profile,
     denoise_strength: source?.denoise_strength ?? source?.denoise ?? source?.strength,
     outpaint_left: source?.outpaint_left ?? source?.outpaint?.left,
     outpaint_top: source?.outpaint_top ?? source?.outpaint?.top,
@@ -3191,13 +3277,14 @@ function aiAgentNormalizeAnalysisArgs(parsed, userText) {
   Object.keys(args).forEach((key) => {
     if (args[key] === "" || args[key] === undefined || args[key] === null) delete args[key];
   });
+  const intentArgs = aiAgentApplyExactReferenceClothesIntent(args, userText);
   const stagedArgs = aiAgentTextSuggestsCrossReferenceImages([
     userText,
     prompt,
     editInstruction,
   ].filter(Boolean).join(" "))
-    ? aiAgentApplyPairwiseCrossReferenceStage(args)
-    : aiAgentAttachStagedImageEditMetadata(args, userText);
+    ? aiAgentApplyPairwiseCrossReferenceStage(intentArgs)
+    : aiAgentAttachStagedImageEditMetadata(intentArgs, userText);
   return aiAgentCleanComfyuiArgs(aiAgentEnsureComfyuiImageRefs(stagedArgs));
 }
 
@@ -3259,13 +3346,14 @@ async function aiAgentAnalyzeTextForComfyui(userText) {
   const analysisPrompt = [
     "請把使用者的自然語言需求轉成 ComfyUI write-tool 參數，可支援 text-to-image、img2img、inpaint、outpaint。",
     "請只輸出 JSON，不要 Markdown，不要表格，不要操作教學。",
-    "JSON 欄位：prompt, edit_instruction, edit_prompt, negative_prompt, width, height, steps, cfg_scale, cfg, batch_size, seed, checkpoint, vae, sampler, sampler_name, scheduler, official_workflow_id, generation_mode, source_image_ref, mask_image_ref, reference_image_ref, denoise_strength, outpaint_left, outpaint_top, outpaint_right, outpaint_bottom, outpaint_feathering, agent_review_required, agent_review_mode, agent_review_strategy, agent_review_min_candidates, agent_review_max_attempts, agent_review_plan。",
+    "JSON 欄位：prompt, edit_instruction, edit_prompt, negative_prompt, width, height, steps, cfg_scale, cfg, batch_size, seed, checkpoint, vae, sampler, sampler_name, scheduler, official_workflow_id, generation_mode, source_image_ref, mask_image_ref, reference_image_ref, denoise_strength, outpaint_left, outpaint_top, outpaint_right, outpaint_bottom, outpaint_feathering, qwen_reference_mode, qwen_reference_image2, qwen_reference_force_image2, agent_review_required, agent_review_mode, agent_review_strategy, agent_review_min_candidates, agent_review_max_attempts, agent_review_plan。",
     "若使用者要求修改、重繪、風格化、以圖生圖或外延站內圖片，請保留 source_image_ref/mask_image_ref/reference_image_ref/outpaint/denoise 欄位；風格化 generation_mode=img2img。",
     "如果使用者提到 Qwen Image T2I、Qwen Image txt2img 或 Qwen Image 文字生圖，official_workflow_id 設為 origin_qwen_image_txt2img。",
     "如果使用者提到 SDXL T2I、SDXL txt2img 或 SDXL 文字生圖，official_workflow_id 設為 origin_sdxl_txt2img。",
     "如果使用者要求一般圖片修改、風格化或語意改圖，official_workflow_id 設為 origin_qwen_image_edit_2509；若要求局部重繪 inpaint，official_workflow_id 設為 origin_sdxl_checkpoint_inpaint；若要求 outpaint/外延，official_workflow_id 設為 origin_flux_fill_outpaint_gguf_q3。",
     "若是 Qwen Image Edit / origin_qwen_image_edit_2509，prompt 只放 style/preservation context，具體修改放 edit_instruction；多參考圖任務必須保留 chara/clothes/background/pose 的分工，不可回覆不相干的舊任務。",
     "若是多參考圖、高難度 i2i 或使用者要求目視確認/直到成功，請加入 agent_review_required=true、agent_review_mode='vision_iterative_gate'、agent_review_strategy='pairwise_reference_merge'、agent_review_max_attempts 至少 2；agent_review_plan 要列出 parse references -> vision extract current reference traits -> stage source+chara text edit -> vision gate -> stage candidate+clothes text edit -> vision gate -> stage candidate+pose/control decision -> final gate。不要只輸出 use this reference，因為 2509 可能完成 job 卻沒有真的 edit。",
+    "若使用者明確要求把 reference 的衣服完整穿到 source 角色身上、完全符合 ref outfit、不是只參考元素，請設定 qwen_reference_mode='stage_guarded_image2'、qwen_reference_image2=true、qwen_reference_force_image2=true，並在 edit_instruction 說明 reference image only supplies the outfit/garment geometry，source identity/hair/pose/background must be preserved。",
     "如果使用者指定模型、Checkpoint、VAE、尺寸、CFG、步數或張數，必須保留。",
     "checkpoint 只能填使用者明確提供的實際 checkpoint 名稱；如果只提到 SDXL、SDXL T2I 或泛稱，不要填 sdxl_base_1.0.ckpt，請省略 checkpoint。",
     "prompt 欄位要是可直接送 ComfyUI 的正向提示詞，不要包含解釋文字。",

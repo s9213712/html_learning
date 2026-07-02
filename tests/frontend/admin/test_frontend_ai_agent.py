@@ -59,7 +59,7 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert 'id="ai-agent-comfyui-vae"' in html
     assert 'id="ai-agent-comfyui-generate-btn"' in html
     assert 'id="s-module-ai-agent-min-role"' in html
-    _warn_if_asset_cache_version_changed(html, "/js/37-ai-agent.js", "20260702-ai-agent-background-reference-v25")
+    _warn_if_asset_cache_version_changed(html, "/js/37-ai-agent.js", "20260702-ai-agent-exact-clothes-v29")
     _warn_if_asset_cache_version_changed(html, "/js/90-bootstrap.js", "20260611-ai-agent-comfyui-write-tool")
 
     assert '"ai-agent": "feature_ai_agent_enabled"' in core_js
@@ -337,6 +337,13 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert "qwen_reference_force_image2" in ai_agent_js
     assert "stage_guarded_image2" in ai_agent_js
     assert "qwen_reference_image2" in ai_agent_js
+    assert "function aiAgentTextRequestsExactReferenceClothes" in ai_agent_js
+    assert "function aiAgentApplyExactReferenceClothesIntent" in ai_agent_js
+    assert "Put that reference outfit on the source character" in ai_agent_js
+    assert "穿到|套到" in ai_agent_js
+    assert "qwen_edit_profile = next.qwen_edit_profile || next.qwen_profile || next.profile || \"fast\"" in ai_agent_js
+    assert "next.steps = 4;" in ai_agent_js
+    assert "next.cfg_scale = 1;" in ai_agent_js
     assert "use the extracted reference traits only as guarded visual evidence" in ai_agent_js
     assert "agent_review_reference_image_ref" in ai_agent_js
     assert "開始用 vision 模型讀取" in ai_agent_js
@@ -400,7 +407,7 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert ".ai-agent-tool-panel" in css
     assert ".ai-agent-message-meta" in css
     assert "@media (max-width: 640px)" in css
-    assert "37-ai-agent.js?v=20260702-ai-agent-background-reference-v25" in html
+    assert "37-ai-agent.js?v=20260702-ai-agent-exact-clothes-v29" in html
 
 
 def test_ai_agent_root_quick_settings_use_reserved_pricing_key():

@@ -387,6 +387,11 @@ def test_ai_agent_write_tools_can_return_full_catalog_for_root_selector(tmp_path
     assert "board_id" in thread_tool["required"]
     assert "title" in thread_tool["body_fields"]
     assert "canonical args" in thread_tool["arg_hint"]
+    comfyui_tool = next(tool for tool in payload["catalog_tools"] if tool["name"] == "write_comfyui_generate")
+    assert "qwen_reference_mode" in comfyui_tool["body_fields"]
+    assert "qwen_reference_image2" in comfyui_tool["body_fields"]
+    assert "qwen_reference_force_image2" in comfyui_tool["body_fields"]
+    assert "qwen_reference_force_image2" in comfyui_tool["arg_hint"]
 
 
 def test_ai_agent_write_tools_none_sentinel_disables_all_tools(tmp_path):

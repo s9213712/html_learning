@@ -81,6 +81,11 @@ def test_ai_agent_comfyui_hint_requires_structured_qwen_edit_instruction():
     assert "origin_qwen_image_controlnet_2512" in hint
     assert "Qwen-Image-2512-Fun-Controlnet-Union-2602.safetensors" in hint
     assert "control_image_ref=pose map" in hint
+    assert "qwen_reference_force_image2" in hint
+    assert "把 ref 圖衣服穿到 source 角色身上" in hint
+    assert "qwen_reference_mode=stage_guarded_image2" in hint
+    assert "qwen_edit_profile=fast" in hint
+    assert "fast/Lightning" in hint
 
 
 def test_ai_agent_base_url_rejects_credentials_query_and_fragment():

@@ -79,7 +79,7 @@ AI_AGENT_WRITE_TOOL_SPECS = {
             "workflow", "workflow_id", "official_workflow_id", "template_id", "lora",
             "loras", "vae", "vae_name", "timeout_seconds", "confirm_billing",
             "backend_url", "comfyui_backend_url", "qwen_edit_profile", "qwen_profile",
-            "profile", "qwen_reference_mode", "qwen_reference_image2",
+            "profile", "qwen_reference_mode", "qwen_reference_image2", "qwen_reference_force_image2",
         },
         "required": {"prompt"},
         "write": True,
