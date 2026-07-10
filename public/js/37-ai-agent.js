@@ -805,7 +805,7 @@ function aiAgentCleanComfyuiArgs(args = {}) {
 }
 
 function aiAgentComfyuiSubmitArgs(args = {}) {
-  const cleaned = aiAgentCleanComfyuiArgs(aiAgentApplyQwenEditInstructionPrompt(args));
+  const cleaned = aiAgentCleanComfyuiArgs(aiAgentEnsureComfyuiImageRefs(aiAgentPromoteExistingPoseMapControlArgs(aiAgentApplyQwenEditInstructionPrompt(args))));
   Object.keys(cleaned).forEach((key) => {
     if (key.startsWith("agent_review_")) delete cleaned[key];
     if (key.startsWith("agent_followup_")) delete cleaned[key];
@@ -932,7 +932,9 @@ function aiAgentTextSuggestsCrossReferenceImages(text = "") {
     && /clothes\s+reference|clothing\s+reference|outfit\s+reference|服裝.*參考/.test(raw)
     && /pose\s+reference|姿勢.*參考|動作.*參考/.test(raw);
   const hasBackgroundRef = /background\s+reference|scene\s+reference|背景.*參考|場景.*參考/.test(raw);
-  return hasRoleRefs || hasBackgroundRef || /交叉.*參考|三張.*reference|多參考圖/.test(raw);
+  return hasRoleRefs
+    || hasBackgroundRef
+    || /交叉.*參考|三張.*reference|多參考圖|(?:^|\b)(?:3|three)\s*refs?\b|(?:^|\b)3ref\b|combine\s+(?:the\s+)?refs?|reference\s+combine|參考圖.*合成|合成.*參考圖/.test(raw);
 }
 
 function aiAgentSingleReferenceStageFromText(text = "") {
@@ -1020,10 +1022,178 @@ function aiAgentRequiresExactReferenceClothes(args = {}) {
     || String(args?.qwen_reference_mode || "").trim().toLowerCase() === "stage_guarded_image2";
 }
 
+function aiAgentReferenceLooksLikePoseMap(ref = {}, context = "") {
+  const text = [
+    ref?.filename,
+    ref?.semantic_key,
+    ref?.subfolder,
+    context,
+  ].filter(Boolean).join(" ").toLowerCase();
+  return /(?:sdpose|pose[_\s-]?map|control[_\s-]?image|control_image_ref|keypoints?|skeleton|openpose|骨架|姿勢圖|控制圖)/i.test(text);
+}
+
+function aiAgentPoseControlSourceImageRef(candidateRef = null, poseRef = null) {
+  const semanticKey = String(candidateRef?.semantic_key || "").trim().toLowerCase();
+  const candidateIsPose = !!candidateRef && (
+    semanticKey === "pose"
+    || aiAgentSameImageRef(candidateRef, poseRef)
+    || aiAgentReferenceLooksLikePoseMap(candidateRef)
+  );
+  if (candidateRef && !candidateIsPose) return candidateRef;
+  return aiAgentInferSemanticImageRef("source")?.image_ref
+    || aiAgentInferRecentImageRef("source", { exclude: poseRef });
+}
+
+function aiAgentPoseControlSecondaryReferenceRef(args = {}, poseRef = null) {
+  const candidateRef = args.reference_image_ref || args.agent_review_reference_image_ref || null;
+  const semanticKey = String(candidateRef?.semantic_key || "").trim().toLowerCase();
+  const candidateIsPose = !!candidateRef && (
+    semanticKey === "pose"
+    || aiAgentSameImageRef(candidateRef, poseRef)
+    || aiAgentReferenceLooksLikePoseMap(candidateRef)
+  );
+  if (candidateRef && !candidateIsPose) return candidateRef;
+  const combined = [
+    args.prompt,
+    args.edit_instruction,
+    args.edit_prompt,
+    args.reference_image_ref?.filename,
+  ].filter(Boolean).join(" ");
+  if (aiAgentTextRequestsExactReferenceClothes(combined, "clothes")) {
+    return aiAgentInferSemanticImageRef("clothes")?.image_ref || null;
+  }
+  return null;
+}
+
+function aiAgentPoseControlClothesReferenceRef(args = {}, poseRef = null) {
+  const explicit = aiAgentInferSemanticImageRef("clothes")?.image_ref || null;
+  if (explicit && !aiAgentSameImageRef(explicit, poseRef)) return explicit;
+  const refs = aiAgentRecentImageRefs(12);
+  return refs
+    .map((item) => item.image_ref || item)
+    .find((ref) => {
+      const semanticKey = String(ref?.semantic_key || "").trim().toLowerCase();
+      return semanticKey === "clothes" && !aiAgentSameImageRef(ref, poseRef);
+    }) || null;
+}
+
+function aiAgentApplyPoseControlReferenceRouting(args = {}, poseRef = null) {
+  const next = args && typeof args === "object" ? { ...args } : {};
+  const sourceRef = aiAgentPoseControlSourceImageRef(next.source_image_ref, poseRef);
+  if (sourceRef) next.source_image_ref = sourceRef;
+  else delete next.source_image_ref;
+  const combined = [next.prompt, next.edit_instruction, next.edit_prompt].filter(Boolean).join(" ");
+  const clothesRef = aiAgentPoseControlClothesReferenceRef(next, poseRef);
+  const clothesIntent = aiAgentTextRequestsExactReferenceClothes(combined, "clothes")
+    || (!!clothesRef && /(?:outfit|clothes|clothing|garment|lingerie|purple|衣服|服裝|穿搭|套裝)/i.test(combined));
+  const secondaryRef = clothesIntent
+    ? (clothesRef || aiAgentPoseControlSecondaryReferenceRef(next, poseRef))
+    : aiAgentPoseControlSecondaryReferenceRef(next, poseRef);
+  if (secondaryRef) {
+    next.reference_image_ref = secondaryRef;
+    const semanticKey = String(secondaryRef.semantic_key || "").trim().toLowerCase();
+    if (semanticKey === "clothes" || clothesIntent) {
+      next.reference_image_ref = { ...secondaryRef, semantic_key: "clothes" };
+      next.qwen_reference_mode = "stage_guarded_image2";
+      next.qwen_reference_image2 = true;
+      next.qwen_reference_force_image2 = true;
+      next.qwen_edit_profile = next.qwen_edit_profile || "fast";
+    }
+  } else if (
+    next.reference_image_ref
+    && (aiAgentSameImageRef(next.reference_image_ref, poseRef) || String(next.reference_image_ref?.semantic_key || "").toLowerCase() === "pose")
+  ) {
+    delete next.reference_image_ref;
+  }
+  return next;
+}
+
+function aiAgentRequestedPoseControlRef(args = {}) {
+  const semanticPoseRef = aiAgentInferSemanticImageRef("pose")?.image_ref || null;
+  const controlnet = args.controlnet && typeof args.controlnet === "object" ? args.controlnet : {};
+  const combined = [
+    args.prompt,
+    args.edit_instruction,
+    args.edit_prompt,
+    args.negative_prompt,
+    args.controlnet_type,
+    args.reference_image_ref?.semantic_key,
+    args.reference_image_ref?.filename,
+    args.control_image_ref?.semantic_key,
+    args.control_image_ref?.filename,
+    controlnet?.image_ref?.semantic_key,
+    controlnet?.image_ref?.filename,
+    args.agent_review_reference_image_ref?.semantic_key,
+    args.agent_review_reference_image_ref?.filename,
+  ].filter(Boolean).join(" ");
+  const candidates = [
+    args.control_image_ref,
+    controlnet?.image_ref,
+    args.pose_image_ref,
+    args.pose_reference_image_ref,
+    args.reference_image_ref,
+    args.agent_review_reference_image_ref,
+    semanticPoseRef,
+  ].filter(Boolean);
+  return candidates.find((ref) => {
+    const semanticKey = String(ref?.semantic_key || "").trim().toLowerCase();
+    return semanticKey === "pose"
+      || aiAgentSameImageRef(ref, semanticPoseRef)
+      || aiAgentReferenceLooksLikePoseMap(ref, combined);
+  }) || null;
+}
+
+function aiAgentShouldPreserveRequestedPoseControl(args = {}, poseRef = null) {
+  if (!poseRef) return false;
+  const controlnet = args.controlnet && typeof args.controlnet === "object" ? args.controlnet : {};
+  const workflowId = String(args.official_workflow_id || args.workflow_id || "").trim();
+  const mode = aiAgentNormalizeComfyuiGenerationMode(args.generation_mode || "");
+  const controlType = String(args.controlnet_type || controlnet?.type || "").trim().toLowerCase();
+  const combined = [
+    args.prompt,
+    args.edit_instruction,
+    args.edit_prompt,
+    args.negative_prompt,
+    poseRef?.semantic_key,
+    poseRef?.filename,
+  ].filter(Boolean).join(" ");
+  return workflowId === "origin_qwen_image_controlnet_2512"
+    || controlType === "pose"
+    || ((workflowId === "origin_qwen_image_edit_2509" || workflowId.startsWith("origin_qwen_image_edit_2509_") || mode === "img2img")
+      && /(?:pose|posing|posture|openpose|sdpose|keypoints?|controlnet|control[_\s-]?image|姿勢|動作|骨架|控制圖)/i.test(combined));
+}
+
+function aiAgentApplyRequestedPoseControlArgs(args = {}, poseRef = null, seedArgs = {}) {
+  if (!aiAgentShouldPreserveRequestedPoseControl(seedArgs, poseRef)) return args;
+  const next = args && typeof args === "object" ? { ...args } : {};
+  const seedControlnet = seedArgs.controlnet && typeof seedArgs.controlnet === "object" ? seedArgs.controlnet : {};
+  const nextControlnet = next.controlnet && typeof next.controlnet === "object" ? next.controlnet : {};
+  const controlModel = seedArgs.controlnet_model || seedControlnet?.model || next.controlnet_model || nextControlnet?.model;
+  const controlPreprocessor = seedArgs.controlnet_preprocessor || seedControlnet?.preprocessor || next.controlnet_preprocessor || nextControlnet?.preprocessor;
+  next.control_image_ref = next.control_image_ref || poseRef;
+  next.controlnet = {
+    ...nextControlnet,
+    image_ref: next.control_image_ref,
+    type: "pose",
+    preprocessor: controlPreprocessor || "none",
+    model: controlModel || "QWEN\\Qwen-Image-2512-Fun-Controlnet-Union-2602.safetensors",
+    strength: seedArgs.control_strength ?? seedControlnet?.strength ?? next.control_strength ?? nextControlnet?.strength ?? 0.95,
+    start: seedArgs.control_start ?? seedControlnet?.start ?? next.control_start ?? nextControlnet?.start ?? 0,
+    end: seedArgs.control_end ?? seedControlnet?.end ?? next.control_end ?? nextControlnet?.end ?? 1,
+  };
+  next.controlnet_type = "pose";
+  next.controlnet_preprocessor = next.controlnet_preprocessor || next.controlnet.preprocessor;
+  next.controlnet_model = next.controlnet_model || next.controlnet.model;
+  next.control_strength = next.control_strength ?? next.controlnet.strength;
+  next.control_start = next.control_start ?? next.controlnet.start;
+  next.control_end = next.control_end ?? next.controlnet.end;
+  return aiAgentBuildPoseControlApplyArgs(next, poseRef) || next;
+}
+
 function aiAgentTextSuggestsImageEdit(text = "") {
   const raw = aiAgentNormalizeUserText(text).toLowerCase();
   if (!raw) return false;
-  return /(修改|改成|換成|變成|重繪|加工|編輯|修圖|圖生圖|img2img|第一張|原圖|上一張|這張圖|source image|reference|參考圖|第二張|第\s*2\s*張|another image|second image|pose|姿勢|動作)/i.test(raw);
+  return /(修改|改成|換成|變成|重繪|加工|編輯|修圖|圖生圖|img2img|i2i|image\s*to\s*image|第一張|原圖|上一張|這張圖|source image|reference|參考圖|第二張|第\s*2\s*張|another image|second image|pose|姿勢|動作)/i.test(raw);
 }
 
 function aiAgentInferRecentImageRef(kind = "source", options = {}) {
@@ -1593,6 +1763,14 @@ async function aiAgentPrepareSingleSemanticReferenceArgs(args = {}) {
     next.reference_image_ref?.filename,
   ].filter(Boolean).join(" "));
   if (!["chara", "clothes", "background", "pose"].includes(stageKey)) return next;
+  if (stageKey === "pose" && aiAgentReferenceLooksLikePoseMap(next.reference_image_ref, [
+    next.prompt,
+    next.edit_instruction,
+    next.edit_prompt,
+    next.agent_review_reference_summary,
+  ].filter(Boolean).join(" "))) {
+    return aiAgentBuildPoseControlApplyArgs(next, next.reference_image_ref) || next;
+  }
   const desc = await aiAgentDescribeReferenceForEdit({
     key: stageKey,
     reference_image_ref: next.reference_image_ref,
@@ -1650,8 +1828,14 @@ async function aiAgentPrepareSingleSemanticReferenceArgs(args = {}) {
 
 async function aiAgentPrepareComfyuiArgsForStrategy(args = {}) {
   let next = args && typeof args === "object" ? { ...args } : {};
+  const requestedPoseRef = aiAgentRequestedPoseControlRef(next);
+  const requestedPoseSeedArgs = { ...next };
   next = await aiAgentPreparePairwiseReferenceArgs(next);
   next = await aiAgentPrepareSingleSemanticReferenceArgs(next);
+  if (requestedPoseRef) {
+    next = aiAgentApplyRequestedPoseControlArgs(next, requestedPoseRef, requestedPoseSeedArgs);
+  }
+  next = aiAgentPromoteExistingPoseMapControlArgs(next);
   return aiAgentCleanComfyuiArgs(aiAgentApplyQwenEditInstructionPrompt(next));
 }
 
@@ -1768,6 +1952,72 @@ function aiAgentEnsureComfyuiImageRefs(args = {}) {
     const firstStage = aiAgentCrossReferenceStageItems()[0];
     if (firstStage?.item?.image_ref) next.reference_image_ref = firstStage.item.image_ref;
   }
+  const workflowId = String(next.official_workflow_id || next.workflow_id || "").trim();
+  const controlType = String(next.controlnet_type || next.controlnet?.type || "").trim().toLowerCase();
+  const wantsPoseControl = workflowId === "origin_qwen_image_controlnet_2512" || controlType === "pose";
+  if (wantsPoseControl && !next.control_image_ref && !(next.controlnet && next.controlnet.image_ref)) {
+    const poseRef = (
+      aiAgentReferenceLooksLikePoseMap(next.reference_image_ref, [
+        next.prompt,
+        next.edit_instruction,
+        next.edit_prompt,
+      ].filter(Boolean).join(" "))
+        ? next.reference_image_ref
+        : null
+    ) || aiAgentInferSemanticImageRef("pose")?.image_ref || aiAgentInferRecentImageRef("reference", { exclude: next.source_image_ref });
+    if (poseRef) {
+      next.control_image_ref = poseRef;
+      next.controlnet = {
+        ...(next.controlnet || {}),
+        image_ref: poseRef,
+        type: "pose",
+        preprocessor: "none",
+        model: next.controlnet_model || next.controlnet?.model || "QWEN\\Qwen-Image-2512-Fun-Controlnet-Union-2602.safetensors",
+        strength: next.control_strength || next.controlnet?.strength || 0.95,
+        start: next.control_start ?? next.controlnet?.start ?? 0,
+        end: next.control_end ?? next.controlnet?.end ?? 1,
+      };
+      next.controlnet_type = "pose";
+      next.controlnet_preprocessor = next.controlnet_preprocessor || "none";
+      next.controlnet_model = next.controlnet_model || next.controlnet.model;
+      next.control_strength = next.control_strength || next.controlnet.strength;
+      next.control_start = next.control_start ?? next.controlnet.start;
+      next.control_end = next.control_end ?? next.controlnet.end;
+    }
+  }
+  if (wantsPoseControl) {
+    const poseRef = next.control_image_ref || next.controlnet?.image_ref || aiAgentInferSemanticImageRef("pose")?.image_ref || null;
+    const clothesRef = aiAgentPoseControlClothesReferenceRef(next, poseRef);
+    const combined = [
+      next.prompt,
+      next.edit_instruction,
+      next.edit_prompt,
+      next.negative_prompt,
+      next.qwen_reference_mode,
+    ].filter(Boolean).join(" ");
+    const shouldKeepClothesRef = !!clothesRef && (
+      next.qwen_reference_force_image2 === true
+      || next.qwen_reference_image2 === true
+      || aiAgentTextRequestsExactReferenceClothes(combined, "clothes")
+      || /(?:outfit|clothes|clothing|garment|lingerie|purple|衣服|服裝|穿搭|套裝)/i.test(combined)
+    );
+    if (shouldKeepClothesRef) {
+      next.reference_image_ref = { ...clothesRef, semantic_key: "clothes" };
+      next.qwen_reference_mode = "stage_guarded_image2";
+      next.qwen_reference_image2 = true;
+      next.qwen_reference_force_image2 = true;
+      next.qwen_edit_profile = next.qwen_edit_profile || "fast";
+    } else if (
+      next.reference_image_ref
+      && (
+        aiAgentSameImageRef(next.reference_image_ref, poseRef)
+        || String(next.reference_image_ref?.semantic_key || "").trim().toLowerCase() === "pose"
+        || aiAgentReferenceLooksLikePoseMap(next.reference_image_ref, combined)
+      )
+    ) {
+      delete next.reference_image_ref;
+    }
+  }
   return next;
 }
 
@@ -1796,6 +2046,16 @@ function aiAgentResolveRecentImageRef(value) {
   const normalized = raw.split(/[\\/]/).pop().toLowerCase();
   const refs = aiAgentRecentImageRefs(12);
   const match = refs.find((item) => {
+    const ids = [
+      item.cloud_file_id,
+      item.storage_file_id,
+      item.prompt_id,
+      item.image_ref?.cloud_file_id,
+      item.image_ref?.storage_file_id,
+      item.image_ref?.file_id,
+    ].map((part) => String(part || "").trim().toLowerCase()).filter(Boolean);
+    return ids.includes(normalized);
+  }) || refs.find((item) => {
     const filename = String(item.filename || item.image_ref?.filename || "").split(/[\\/]/).pop().toLowerCase();
     return filename && filename === normalized;
   }) || refs.find((item) => {
@@ -3197,6 +3457,7 @@ function aiAgentNormalizeAnalysisArgs(parsed, userText) {
   let sourceImageRef = aiAgentResolveRecentImageRef(source?.source_image_ref || source?.source_image_ref_json || source?.image_ref || source?.source_ref);
   let maskImageRef = aiAgentResolveRecentImageRef(source?.mask_image_ref || source?.mask_image_ref_json || source?.mask_ref);
   let referenceImageRef = aiAgentResolveRecentImageRef(source?.reference_image_ref || source?.reference_image_ref_json || source?.reference_ref || source?.pose_reference_image_ref || source?.pose_ref);
+  let controlImageRef = aiAgentResolveRecentImageRef(source?.control_image_ref || source?.control_image_ref_json || source?.control_ref || source?.controlnet?.image_ref);
   if (!sourceImageRef && ["img2img", "inpaint", "outpaint", "upscale"].includes(generationMode)) {
     sourceImageRef = aiAgentInferRecentImageRef("source");
   }
@@ -3279,6 +3540,13 @@ function aiAgentNormalizeAnalysisArgs(parsed, userText) {
     source_image_ref: sourceImageRef,
     mask_image_ref: maskImageRef,
     reference_image_ref: referenceImageRef,
+    control_image_ref: controlImageRef,
+    controlnet_type: aiAgentStripFieldValue(source?.controlnet_type || source?.controlnet?.type || ""),
+    controlnet_model: aiAgentStripFieldValue(source?.controlnet_model || source?.controlnet?.model || ""),
+    controlnet_preprocessor: aiAgentStripFieldValue(source?.controlnet_preprocessor || source?.controlnet?.preprocessor || ""),
+    control_strength: source?.control_strength ?? source?.controlnet?.strength,
+    control_start: source?.control_start ?? source?.controlnet?.start,
+    control_end: source?.control_end ?? source?.controlnet?.end,
     qwen_reference_mode: source?.qwen_reference_mode,
     qwen_reference_image2: source?.qwen_reference_image2,
     qwen_reference_force_image2: source?.qwen_reference_force_image2,
@@ -3764,6 +4032,7 @@ async function runAiAgentComfyuiGenerate(overrides = null) {
   try {
     args = aiAgentComfyuiToolArguments(overrides);
     args = await aiAgentPrepareComfyuiArgsForStrategy(args);
+    args = aiAgentEnsureComfyuiImageRefs(args);
     if (!args.prompt) throw new Error("請先輸入提示詞");
     attempt = aiAgentRememberComfyuiAttempt(args, { status: "sending" });
   } catch (err) {
@@ -4290,14 +4559,34 @@ function aiAgentComfyuiReviewPassed(review = {}, args = {}) {
   return review.pass === true && review.hard_fail !== true && Number(review.score || 0) >= threshold;
 }
 
+function aiAgentSanitizePoseControlBasePrompt(prompt = "") {
+  const raw = String(prompt || "").trim();
+  const looksLikeCommand = /(?:official_workflow_id|generation_mode|controlnet_|control_image_ref|confirm_billing|batch_size|steps\s*=|cfg\s*=|請真的使用|必須使用|送出後|不要只回文字|解析度|負面提示詞|正向提示詞)/i.test(raw);
+  if (!raw || looksLikeCommand) return "by ogipote, anime style, 1girl, high quality anime illustration";
+  return raw
+    .replace(/official_workflow_id\s*=\s*\S+/gi, "")
+    .replace(/generation_mode\s*=\s*\S+/gi, "")
+    .replace(/controlnet_[a-z_]+\s*=\s*\S+/gi, "")
+    .replace(/\b(?:steps|cfg|batch_size|confirm_billing)\s*=\s*\S+/gi, "")
+    .replace(/\s+/g, " ")
+    .trim() || "by ogipote, anime style, 1girl, high quality anime illustration";
+}
+
 function aiAgentBuildPoseControlPrompt(args = {}, reason = "") {
-  const basePrompt = String(args.prompt || "").trim();
+  const basePrompt = aiAgentSanitizePoseControlBasePrompt(args.prompt || "");
+  const editContext = aiAgentSanitizePoseControlBasePrompt(args.edit_instruction || args.edit_prompt || "");
+  const stageKey = String(args.agent_review_stage_key || "").trim().toLowerCase();
   const summary = String(args.agent_review_reference_summary || "").trim();
+  const poseSummary = stageKey === "pose" ? summary : "";
+  const nonPoseSummary = stageKey && stageKey !== "pose" && summary ? `${stageKey} reference constraints: ${summary}` : "";
   return [
-    basePrompt || "by ogipote, anime style, 1girl, high quality anime illustration",
+    basePrompt,
+    editContext ? `edit constraints: ${editContext}` : "",
     "match the supplied pose control map as closely as possible",
+    "the pose control map overrides any earlier instruction to preserve the old pose",
     "preserve the current character identity, face, hair, outfit, and scene from the previous accepted candidate as much as possible",
-    summary ? `pose target notes: ${summary}` : "",
+    poseSummary ? `pose target notes: ${poseSummary}` : "",
+    nonPoseSummary,
     reason ? `previous pose failure to fix: ${reason}` : "",
     "full visible coherent body, correct hands and fingers, no visible text",
   ].filter(Boolean).join(", ");
@@ -4308,7 +4597,7 @@ function aiAgentBuildPoseControlFallbackArgs(args = {}, currentImage = {}, revie
   const stageIndex = Math.max(0, Number(args.agent_review_stage_index || 0) || 0);
   const stage = sequence[stageIndex] || {};
   const poseRef = args.agent_review_reference_image_ref || args.reference_image_ref || stage.reference_image_ref;
-  const sourceRef = currentImage?.image_ref || args.source_image_ref || null;
+  const sourceRef = aiAgentPoseControlSourceImageRef(currentImage?.image_ref || args.source_image_ref, poseRef);
   if (!poseRef) return null;
   const issueText = [
     ...(Array.isArray(review.issues) ? review.issues : []),
@@ -4363,6 +4652,110 @@ function aiAgentBuildPoseControlFallbackArgs(args = {}, currentImage = {}, revie
     },
     agent_followup_notice: "pose stage failed direct edit; extracting SDPose map before Qwen controlnet pose run",
   };
+}
+
+function aiAgentBuildPoseControlApplyArgs(args = {}, poseMapRef = null) {
+  const poseRef = poseMapRef || args.control_image_ref || args.reference_image_ref || args.agent_review_reference_image_ref;
+  const sourceRef = aiAgentPoseControlSourceImageRef(args.source_image_ref, poseRef);
+  if (!poseRef) return null;
+  const controlnet = args.controlnet && typeof args.controlnet === "object" ? args.controlnet : {};
+  const profile = String(args.qwen_controlnet_profile || args.qwen_profile || args.profile || "").trim().toLowerCase();
+  const useFastProfile = ["fast", "lightning", "lite", "quick"].includes(profile);
+  const requestedSteps = Number(args.steps || 0) || 0;
+  const requestedCfg = Number(args.cfg || args.cfg_scale || 0) || 0;
+  const steps = useFastProfile ? 4 : Math.max(20, requestedSteps > 4 ? requestedSteps : 28);
+  const cfg = useFastProfile ? 1 : (requestedCfg > 1.2 ? requestedCfg : 4);
+  const controlModel = args.controlnet_model || controlnet?.model || "QWEN\\Qwen-Image-2512-Fun-Controlnet-Union-2602.safetensors";
+  const controlPreprocessor = args.controlnet_preprocessor || controlnet?.preprocessor || "none";
+  const controlStrength = args.control_strength ?? controlnet?.strength ?? 0.95;
+  const controlStart = args.control_start ?? controlnet?.start ?? 0;
+  const controlEnd = args.control_end ?? controlnet?.end ?? 1;
+  return aiAgentApplyPoseControlReferenceRouting({
+    prompt: aiAgentBuildPoseControlPrompt(args, "use the supplied SDPose/control pose map directly; do not re-describe it with vision"),
+    negative_prompt: aiAgentMergeCommaList(args.negative_prompt, "wrong pose, unchanged pose, copied reference identity, copied reference outfit, visible text, watermark, logo, signature, extra limbs, broken hands, missing fingers, body penetration, distorted anatomy"),
+    width: args.width || 1024,
+    height: args.height || 1024,
+    steps,
+    cfg,
+    cfg_scale: cfg,
+    batch_size: 1,
+    generation_mode: "txt2img",
+    official_workflow_id: "origin_qwen_image_controlnet_2512",
+    control_image_ref: poseRef,
+    controlnet: {
+      image_ref: poseRef,
+      type: "pose",
+      model: controlModel,
+      preprocessor: controlPreprocessor,
+      strength: controlStrength,
+      start: controlStart,
+      end: controlEnd,
+    },
+    controlnet_type: "pose",
+    controlnet_preprocessor: controlPreprocessor,
+    controlnet_model: controlModel,
+    control_strength: controlStrength,
+    control_start: controlStart,
+    control_end: controlEnd,
+    qwen_controlnet_profile: useFastProfile ? "fast" : "base",
+    confirm_billing: true,
+    source_image_ref: sourceRef,
+    reference_image_ref: args.reference_image_ref,
+    edit_instruction: args.edit_instruction || args.edit_prompt,
+    agent_review_required: true,
+    agent_review_mode: "vision_iterative_gate",
+    agent_review_stage_key: "pose",
+    agent_review_reference_image_ref: poseRef,
+    agent_review_pass_threshold: Math.max(Number(args.agent_review_pass_threshold || 0.86) || 0.86, 0.86),
+    agent_review_min_candidates: 1,
+    agent_review_max_attempts: Math.max(2, Number(args.agent_review_max_attempts || 2) || 2),
+    agent_review_plan: "pose/control apply: use existing SDPose pose map as control_image_ref -> Qwen Image ControlNet pose -> vision gate",
+  }, poseRef);
+}
+
+function aiAgentPromoteExistingPoseMapControlArgs(args = {}) {
+  const next = args && typeof args === "object" ? { ...args } : {};
+  const combined = [
+    next.prompt,
+    next.edit_instruction,
+    next.edit_prompt,
+    next.negative_prompt,
+    next.reference_image_ref?.semantic_key,
+    next.reference_image_ref?.filename,
+    next.control_image_ref?.semantic_key,
+    next.control_image_ref?.filename,
+    next.agent_review_reference_image_ref?.semantic_key,
+    next.agent_review_reference_image_ref?.filename,
+  ].filter(Boolean).join(" ");
+  const workflowId = String(next.official_workflow_id || next.workflow_id || "").trim();
+  const mode = aiAgentNormalizeComfyuiGenerationMode(next.generation_mode || "");
+  const controlType = String(next.controlnet_type || next.controlnet?.type || "").trim().toLowerCase();
+  const poseIntent = /(?:pose|posing|posture|openpose|sdpose|keypoints?|controlnet|control[_\s-]?image|姿勢|動作|骨架|控制圖)/i.test(combined);
+  const poseCandidates = [
+    next.control_image_ref,
+    next.controlnet?.image_ref,
+    next.reference_image_ref,
+    next.agent_review_reference_image_ref,
+    aiAgentInferSemanticImageRef("pose")?.image_ref,
+  ].filter(Boolean);
+  const poseMapRef = poseCandidates.find((ref) => aiAgentReferenceLooksLikePoseMap(ref, combined));
+  if (!poseMapRef) return next;
+  const shouldPromote = (
+    workflowId === "origin_qwen_image_controlnet_2512"
+    || controlType === "pose"
+    || ((workflowId === "origin_qwen_image_edit_2509" || workflowId.startsWith("origin_qwen_image_edit_2509_") || mode === "img2img") && poseIntent)
+  );
+  if (!shouldPromote) return next;
+  if (
+    workflowId === "origin_qwen_image_controlnet_2512"
+    && next.control_image_ref
+    && /match the supplied pose control map/i.test(String(next.prompt || ""))
+  ) {
+    return aiAgentApplyPoseControlReferenceRouting(next, poseMapRef);
+  }
+  const sourceRef = aiAgentPoseControlSourceImageRef(next.source_image_ref, poseMapRef);
+  const promoted = aiAgentBuildPoseControlApplyArgs({ ...next, source_image_ref: sourceRef }, poseMapRef);
+  return promoted || next;
 }
 
 function aiAgentBuildComfyuiReviewRerunArgs(args = {}, review = {}, attemptIndex = 1) {

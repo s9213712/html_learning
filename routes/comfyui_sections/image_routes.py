@@ -1127,7 +1127,8 @@ def register_comfyui_image_routes(app, ctx):
             raw = path.read_bytes()
         finally:
             conn.close()
-        binding = _comfyui_binding(actor)
+        backend_url = request.form.get("backend_url") or request.form.get("comfyui_backend_url") or ""
+        binding = _comfyui_binding(actor, backend_url=backend_url)
         active_client = _client_for_url(binding["url"])
         try:
             image_ref = active_client.upload_image_bytes(raw, filename, image_type="input", overwrite=False)
@@ -1167,7 +1168,8 @@ def register_comfyui_image_routes(app, ctx):
         filename = payload["filename"]
         mime_type = payload["mime_type"]
         raw = payload["data"]
-        binding = _comfyui_binding(actor)
+        backend_url = request.form.get("backend_url") or request.form.get("comfyui_backend_url") or ""
+        binding = _comfyui_binding(actor, backend_url=backend_url)
         active_client = _client_for_url(binding["url"])
         conn = get_db()
         try:

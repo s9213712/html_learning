@@ -229,6 +229,31 @@ def _register_fake_comfyui_workflow_routes(app, *, workflow_id, preset_id=77, ca
         "483": {"class_type": "ComfySwitchNode", "_meta": {"title": "Switch (Model)"}, "inputs": {"on_false": ["470", 0], "on_true": ["476", 0], "switch": True}},
         "484": {"class_type": "ComfySwitchNode", "_meta": {"title": "Switch (Steps)"}, "inputs": {"on_false": 20, "on_true": 4, "switch": True}},
         "485": {"class_type": "ComfySwitchNode", "_meta": {"title": "Switch (CFG)"}, "inputs": {"on_false": 4, "on_true": 1, "switch": True}},
+        "131": {
+            "class_type": "ControlNetApplyAdvanced",
+            "_meta": {"title": "Apply Qwen ControlNet"},
+            "inputs": {
+                "positive": ["494", 0],
+                "negative": ["492", 0],
+                "control_net": ["120", 0],
+                "image": ["121", 0],
+                "vae": ["109", 0],
+                "strength": 1,
+                "start_percent": 0,
+                "end_percent": 1,
+            },
+        },
+        "123": {"class_type": "ResizeImageMaskNode", "inputs": {"resize_type.megapixels": 1.6, "input": ["121", 0]}},
+        "132": {"class_type": "ComfySwitchNode", "_meta": {"title": "Switch (Steps)"}, "inputs": {"on_false": 50, "on_true": 4, "switch": False}},
+        "133": {"class_type": "ComfySwitchNode", "_meta": {"title": "Switch (CFG)"}, "inputs": {"on_false": 4, "on_true": 1, "switch": False}},
+        "134": {"class_type": "ComfySwitchNode", "_meta": {"title": "Switch (Model)"}, "inputs": {"on_false": ["108", 0], "on_true": ["135", 0], "switch": False}},
+        "141": {
+            "class_type": "UNETLoader",
+            "inputs": {
+                "unet_name": "qwen_image_2512_fp8_e4m3fn.safetensors",
+                "weight_dtype": "default",
+            },
+        },
         "499": {
             "class_type": "KSampler",
             "inputs": {
@@ -1427,6 +1452,47 @@ def test_ai_agent_comfyui_write_tool_preserves_controlnet_pose_args(tmp_path):
     assert captured["control_strength"] == 0.9
 
 
+def test_ai_agent_comfyui_write_tool_img2img_does_not_auto_route_to_qwen(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "write",
+            "ai_agent_allowed_tools": "write_comfyui_generate",
+        },
+    )
+    captured = {}
+
+    @app.route("/api/comfyui/models", methods=["GET"])
+    def fake_comfyui_models():
+        return _json_resp({"ok": True, "models": ["JANKU-V777.safetensors"]})
+
+    @app.route("/api/comfyui/generate", methods=["POST"])
+    def fake_comfyui_generate():
+        captured.update(request.get_json(silent=True) or {})
+        return _json_resp({"ok": True, "job": {"job_id": "job-img2img", "status": "queued"}})
+
+    response = app.test_client().post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_comfyui_generate",
+        "confirm": "EXECUTE",
+        "arguments": {
+            "prompt": "sharp anime girl in an onsen",
+            "generation_mode": "img2img",
+            "source_image_ref": {"filename": "stage1.png", "type": "input"},
+            "checkpoint": "JANKU-V777.safetensors",
+            "confirm_billing": True,
+        },
+    })
+    payload = response.get_json()
+
+    assert response.status_code == 200, payload
+    assert payload["ok"] is True
+    assert captured["generation_mode"] == "img2img"
+    assert "official_workflow_id" not in captured
+
+
 def test_ai_agent_official_qwen_controlnet_run_receives_pose_args(tmp_path):
     db_path = tmp_path / "ai_agent_routes.db"
     _build_db(db_path)
@@ -1463,6 +1529,10 @@ def test_ai_agent_official_qwen_controlnet_run_receives_pose_args(tmp_path):
             "control_strength": 0.9,
             "control_start": 0,
             "control_end": 1,
+            "steps": 4,
+            "cfg": 1,
+            "width": 1024,
+            "height": 1024,
             "confirm_billing": True,
         },
     })
@@ -1477,6 +1547,77 @@ def test_ai_agent_official_qwen_controlnet_run_receives_pose_args(tmp_path):
     assert captured["control_start"] == 0
     assert captured["control_end"] == 1
     assert captured["image_field_assignments"]["78"] == "pose-map-1"
+    assert captured["user_inputs"]["131"]["strength"] == 0.9
+    assert captured["user_inputs"]["131"]["start_percent"] == 0
+    assert captured["user_inputs"]["131"]["end_percent"] == 1
+    assert captured["user_inputs"]["141"]["weight_dtype"] == "fp8_e4m3fn"
+    assert captured["user_inputs"]["132"]["switch"] is True
+    assert captured["user_inputs"]["133"]["switch"] is True
+    assert captured["user_inputs"]["134"]["switch"] is True
+    assert captured["user_inputs"]["123"]["resize_type.megapixels"] == 1.049
+
+
+def test_ai_agent_official_qwen_controlnet_base_profile_does_not_force_fast_branch(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "write",
+            "ai_agent_allowed_tools": "write_comfyui_generate",
+        },
+    )
+    captured = _register_fake_comfyui_workflow_routes(
+        app,
+        workflow_id="origin_qwen_image_controlnet_2512",
+        preset_id=79,
+    )
+
+    @app.route("/api/comfyui/models", methods=["GET"])
+    def fake_comfyui_models_for_base_controlnet():
+        return _json_resp({"ok": True, "models": ["qwen_image_2512_fp8_e4m3fn.safetensors"]})
+
+    control_ref = {"cloud_file_id": "pose-map-1", "filename": "pose_map.png", "type": "input"}
+    response = app.test_client().post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_comfyui_generate",
+        "confirm": "EXECUTE",
+        "arguments": {
+            "prompt": "by ogipote, anime style, 1girl, double v-sign pose",
+            "generation_mode": "txt2img",
+            "official_workflow_id": "origin_qwen_image_controlnet_2512",
+            "control_image_ref": control_ref,
+            "controlnet_type": "pose",
+            "controlnet_preprocessor": "none",
+            "control_strength": 0.82,
+            "control_start": 0,
+            "control_end": 1,
+            "qwen_controlnet_profile": "base",
+            "steps": 28,
+            "cfg": 4,
+            "width": 1024,
+            "height": 1024,
+            "confirm_billing": True,
+        },
+    })
+    payload = response.get_json()
+
+    assert response.status_code == 200, payload
+    assert payload["ok"] is True
+    assert captured["qwen_controlnet_profile"] == "base"
+    assert captured["user_inputs"]["499"]["steps"] == 28
+    assert captured["user_inputs"]["499"]["cfg"] == 4
+    assert captured["image_field_assignments"]["78"] == "pose-map-1"
+    assert captured["user_inputs"]["131"]["strength"] == 0.82
+    assert captured["user_inputs"]["131"]["start_percent"] == 0
+    assert captured["user_inputs"]["131"]["end_percent"] == 1
+    assert captured["user_inputs"]["123"]["resize_type.megapixels"] == 1.049
+    assert captured["user_inputs"]["132"]["on_false"] == 28
+    assert captured["user_inputs"]["133"]["on_false"] == 4
+    assert captured["user_inputs"]["141"]["weight_dtype"] == "fp8_e4m3fn"
+    assert "switch" not in captured["user_inputs"]["132"]
+    assert "switch" not in captured["user_inputs"]["133"]
+    assert "134" not in captured["user_inputs"]
 
 
 def test_ai_agent_comfyui_write_tool_resolves_natural_checkpoint_name(tmp_path):
@@ -2361,6 +2502,61 @@ def test_ai_agent_comfyui_write_tool_preserves_guarded_qwen_reference_image2_and
     assert any(item.get("code") == "qwen_edit_base_branch_selected" for item in adjustments)
 
 
+def test_ai_agent_comfyui_write_tool_force_preserves_pose_qwen_reference_image2(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "write",
+            "ai_agent_allowed_tools": "write_comfyui_generate",
+        },
+    )
+    captured = _register_fake_comfyui_workflow_routes(
+        app,
+        workflow_id="origin_qwen_image_edit_2509",
+        preset_id=73,
+    )
+
+    @app.route("/api/comfyui/models", methods=["GET"])
+    def fake_comfyui_models_for_force_pose_qwen_reference():
+        return _json_resp({"ok": True, "models": ["JANKUTrainedChenkinNoobai_v777.safetensors"]})
+
+    source_ref = {"filename": "source.png", "subfolder": "", "type": "input", "cloud_file_id": "cloud-source-1"}
+    pose_ref = {
+        "filename": "reference_pose_squat_double_v_sign_pose_1024x1024.jpg",
+        "subfolder": "",
+        "type": "input",
+        "cloud_file_id": "cloud-pose-1",
+        "semantic_key": "pose",
+    }
+    response = app.test_client().post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_comfyui_generate",
+        "confirm": "EXECUTE",
+        "arguments": {
+            "prompt": "stage 4 pose merge",
+            "edit_instruction": "stage 4 pose merge: change only the body pose; preserve the source art style and background.",
+            "official_workflow_id": "origin_qwen_image_edit_2509",
+            "generation_mode": "img2img",
+            "source_image_ref": source_ref,
+            "reference_image_ref": pose_ref,
+            "qwen_reference_mode": "stage_guarded_image2",
+            "qwen_reference_image2": True,
+            "qwen_reference_force_image2": True,
+            "confirm_billing": True,
+        },
+    })
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert captured["image_field_assignments"]["78"] == "cloud-source-1"
+    assert captured["image_field_assignments"]["79"] == "cloud-pose-1"
+    adjustments = payload["result"].get("workflow_bridge_adjustments", [])
+    assert any(item.get("code") == "qwen_single_reference_image2_force_guarded" for item in adjustments)
+
+
 def test_ai_agent_comfyui_write_tool_text_traits_only_strips_qwen_reference_image2(tmp_path):
     db_path = tmp_path / "ai_agent_routes.db"
     _build_db(db_path)
@@ -2406,6 +2602,8 @@ def test_ai_agent_comfyui_write_tool_text_traits_only_strips_qwen_reference_imag
             "reference_image_ref": clothes_ref,
             "qwen_reference_mode": "vision_text_traits_only",
             "qwen_reference_image2": False,
+            "backend_url": "http://localhost:8192",
+            "comfyui_backend_url": "http://localhost:8192",
             "confirm_billing": True,
         },
     })
@@ -2415,6 +2613,8 @@ def test_ai_agent_comfyui_write_tool_text_traits_only_strips_qwen_reference_imag
     assert payload["ok"] is True
     assert captured["image_field_assignments"]["78"] == "cloud-source-1"
     assert captured["image_field_assignments"].get("79") != "cloud-clothes-1"
+    assert captured["backend_url"] == "http://localhost:8192"
+    assert captured["comfyui_backend_url"] == "http://localhost:8192"
     adjustments = payload["result"].get("workflow_bridge_adjustments", [])
     assert any(item.get("code") == "qwen_single_reference_image2_text_traits_only" for item in adjustments)
 

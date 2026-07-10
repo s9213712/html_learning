@@ -32,7 +32,6 @@ from services.storage.catalog import create_share_link
 AI_AGENT_CHAT_WORKER_LIMIT = max(1, int(os.environ.get("HACKME_AI_AGENT_CHAT_WORKER_LIMIT", "8") or "8"))
 AI_AGENT_CHAT_WORKERS = threading.BoundedSemaphore(AI_AGENT_CHAT_WORKER_LIMIT)
 AI_AGENT_COMFYUI_SHORTCUT_WORKFLOWS = {
-    "img2img": "origin_qwen_image_edit_2509",
     "inpaint": "origin_sdxl_checkpoint_inpaint",
     "outpaint": "origin_flux_fill_outpaint_gguf_q3",
 }
@@ -78,7 +77,7 @@ AI_AGENT_WRITE_TOOL_SPECS = {
             "outpaint_right", "outpaint_bottom", "outpaint_feathering",
             "workflow", "workflow_id", "official_workflow_id", "template_id", "lora",
             "loras", "vae", "vae_name", "timeout_seconds", "confirm_billing",
-            "backend_url", "comfyui_backend_url", "qwen_edit_profile", "qwen_profile",
+            "backend_url", "comfyui_backend_url", "qwen_edit_profile", "qwen_controlnet_profile", "qwen_profile",
             "profile", "qwen_reference_mode", "qwen_reference_image2", "qwen_reference_force_image2",
         },
         "required": {"prompt"},
@@ -2563,10 +2562,17 @@ def register_ai_agent_routes(app, deps):
                 "stage": stage,
                 "reason": "vision extracted the active reference traits; image2 is disabled to avoid low-VRAM stalls and reference leakage",
             }]
+        force_image2 = bool((body or {}).get("qwen_reference_force_image2"))
         allow_guarded_image2 = (
             bool((body or {}).get("qwen_reference_image2"))
             or reference_mode in {"stage_guarded_image2", "guarded_image2", "image2_stage_guarded"}
         )
+        if force_image2 and allow_guarded_image2:
+            return body, [{
+                "code": "qwen_single_reference_image2_force_guarded",
+                "stage": stage,
+                "reason": "operator explicitly forced image2 for this staged reference role",
+            }]
         if allow_guarded_image2 and stage in {"chara", "clothes", "background"}:
             return body, [{
                 "code": "qwen_single_reference_image2_stage_guarded" if not guarded_contract else "qwen_single_reference_image2_contract_guarded",
@@ -2592,8 +2598,9 @@ def register_ai_agent_routes(app, deps):
             or normalized.get("description")
             or ""
         )
-        mode = _first_present_arg(normalized, ("generation_mode", "mode", "edit_mode", "image_edit_mode", "task_mode"))
-        mode = _normalize_comfyui_generation_mode(mode)
+        raw_mode = _first_present_arg(normalized, ("generation_mode", "mode", "edit_mode", "image_edit_mode", "task_mode"))
+        mode_key = re.sub(r"[\s_-]+", "", str(raw_mode or "").strip().lower())
+        mode = _normalize_comfyui_generation_mode(raw_mode)
         if mode:
             normalized["generation_mode"] = mode
         requested_workflow_id = str(normalized.get("official_workflow_id") or "").strip()
@@ -2602,10 +2609,22 @@ def register_ai_agent_routes(app, deps):
             prompt_text,
             re.IGNORECASE,
         ))
+        wants_legacy_qwen_edit_mode = mode_key in {
+            "style",
+            "styletransfer",
+            "restyle",
+            "風格化",
+            "改風格",
+            "edit",
+            "imageedit",
+            "semanticedit",
+        }
         if wants_anything2real and requested_workflow_id in {"", "origin_qwen_image_edit_2509"}:
             normalized["official_workflow_id"] = "origin_qwen_image_edit_2509_anything2real"
         elif not requested_workflow_id:
             if re.search(r"\bqwen\s+image\s+edit\b|\bqwen\s+edit\b|qwen\s*image\s*edit\s*2509", prompt_text, re.IGNORECASE):
+                normalized["official_workflow_id"] = "origin_qwen_image_edit_2509"
+            elif wants_legacy_qwen_edit_mode:
                 normalized["official_workflow_id"] = "origin_qwen_image_edit_2509"
         size_match = re.search(r"(?<!\d)([1-9]\d{2,4})\s*[x×]\s*([1-9]\d{2,4})(?!\d)", prompt_text, re.IGNORECASE)
         if size_match:
@@ -3379,7 +3398,7 @@ def register_ai_agent_routes(app, deps):
             payload = {"raw": response.get_data(as_text=True)[:4000]}
         return response.status_code, payload
 
-    def _dispatch_internal_image_upload(filename, data, mime_type="image/png"):
+    def _dispatch_internal_image_upload(filename, data, mime_type="image/png", *, backend_url=""):
         headers = {}
         csrf = request.headers.get("X-CSRF-Token") or request.headers.get("X-CSRFToken") or request.cookies.get("csrf_token") or ""
         if csrf:
@@ -3390,10 +3409,14 @@ def register_ai_agent_routes(app, deps):
         with app.test_client() as client:
             for name, value in request.cookies.items():
                 client.set_cookie(str(name), str(value))
+            form_data = {"image": (io.BytesIO(data), filename, mime_type)}
+            if backend_url:
+                form_data["backend_url"] = backend_url
+                form_data["comfyui_backend_url"] = backend_url
             response = client.open(
                 "/api/comfyui/import-uploaded-image",
                 method="POST",
-                data={"image": (io.BytesIO(data), filename, mime_type)},
+                data=form_data,
                 content_type="multipart/form-data",
                 headers=headers,
                 environ_base={"hackme.internal_dispatch": "ai_agent_write_tool"},
@@ -3616,7 +3639,8 @@ def register_ai_agent_routes(app, deps):
         if canvas_msg:
             return None, canvas_msg
         filename = f"qwen_edit_canvas_{width}x{height}_{hashlib.sha1(canvas_bytes).hexdigest()[:12]}.png"
-        status_code, payload = _dispatch_internal_image_upload(filename, canvas_bytes, "image/png")
+        backend_url = str(next_body.get("backend_url") or next_body.get("comfyui_backend_url") or "").strip()
+        status_code, payload = _dispatch_internal_image_upload(filename, canvas_bytes, "image/png", backend_url=backend_url)
         if not (200 <= int(status_code or 500) < 400) or not isinstance(payload, dict) or not payload.get("ok"):
             msg = str((payload or {}).get("msg") or (payload or {}).get("raw") or "").strip() if isinstance(payload, dict) else ""
             return None, f"Qwen Edit 寬畫布來源圖匯入失敗{('：' + msg) if msg else ''}"
@@ -3860,6 +3884,187 @@ def register_ai_agent_routes(app, deps):
                 "requested_cfg": requested_cfg,
             })
 
+    def _workflow_apply_qwen_2512_controlnet_switch_policy(preset, body, user_inputs, adjustments):
+        workflow_id = str((preset or {}).get("system_bundle_id") or "").strip()
+        if workflow_id != "origin_qwen_image_controlnet_2512":
+            return
+        body = body or {}
+        control_type = str(body.get("controlnet_type") or "").strip().lower()
+        preprocessor = str(body.get("controlnet_preprocessor") or "").strip().lower()
+        has_control_ref = bool(
+            _image_ref_from_body(body, "control_image_ref")
+            or (isinstance(body.get("controlnet"), dict) and (body.get("controlnet") or {}).get("image_ref"))
+        )
+        is_pose_control = (
+            control_type in {"pose", "openpose", "sdpose"}
+            or preprocessor in {"pose", "openpose", "sdpose", "none", "passthrough"}
+            or has_control_ref
+        )
+        if not is_pose_control:
+            return
+
+        def _numeric_or_none(value):
+            if value in (None, ""):
+                return None
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        requested_profile = str(
+            body.get("qwen_controlnet_profile")
+            or body.get("qwen_profile")
+            or body.get("profile")
+            or ""
+        ).strip().lower()
+        requested_steps = _numeric_or_none(body.get("steps"))
+        requested_cfg = _numeric_or_none(body.get("cfg") if body.get("cfg") is not None else body.get("cfg_scale"))
+        use_fast_branch = (
+            requested_profile in {"fast", "lightning", "lite", "quick"}
+            or (requested_steps is not None and requested_steps <= 4)
+            or (requested_cfg is not None and requested_cfg <= 1.2)
+        )
+        workflow = _workflow_json_from_preset(preset)
+
+        def _clean_number(value, *, integer=False):
+            if value is None:
+                return None
+            if integer:
+                return int(value)
+            return int(value) if float(value).is_integer() else value
+
+        def _controlnet_switch_nodes(node_ids, titles):
+            matches = []
+            for node_id, node in workflow.items():
+                if not isinstance(node, dict) or str(node.get("class_type") or "") != "ComfySwitchNode":
+                    continue
+                if str(node_id) in node_ids:
+                    matches.append((node_id, node))
+            if matches:
+                return matches
+            for node_id, node in workflow.items():
+                if not isinstance(node, dict) or str(node.get("class_type") or "") != "ComfySwitchNode":
+                    continue
+                meta = node.get("_meta") if isinstance(node.get("_meta"), dict) else {}
+                title = str(meta.get("title") or node.get("title") or "").strip().lower()
+                if title in titles:
+                    matches.append((node_id, node))
+            return matches
+
+        def _patch_switch_false(node_ids, titles, value, code):
+            if value is None:
+                return
+            for node_id, node in _controlnet_switch_nodes(node_ids, titles):
+                inputs = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
+                if "on_false" not in inputs:
+                    continue
+                _workflow_node_input_patch(user_inputs, node_id, "on_false", value)
+                adjustments.append({
+                    "code": code,
+                    "node_id": str(node_id),
+                    "input_name": "on_false",
+                    "value": value,
+                    "reason": "pose_control_base_branch_requested_sampler_value",
+                })
+
+        _patch_switch_false(
+            {"132"},
+            {"switch (steps)"},
+            _clean_number(requested_steps, integer=True),
+            "qwen_2512_controlnet_steps_switch_false_applied",
+        )
+        _patch_switch_false(
+            {"133"},
+            {"switch (cfg)"},
+            _clean_number(requested_cfg),
+            "qwen_2512_controlnet_cfg_switch_false_applied",
+        )
+
+        control_input_map = (
+            ("control_strength", "strength"),
+            ("control_start", "start_percent"),
+            ("control_end", "end_percent"),
+        )
+        for source_key, input_name in control_input_map:
+            if body.get(source_key) in (None, ""):
+                continue
+            for node_id, node in workflow.items():
+                if not isinstance(node, dict):
+                    continue
+                if str(node.get("class_type") or "") != "ControlNetApplyAdvanced":
+                    continue
+                inputs = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
+                if input_name not in inputs:
+                    continue
+                _workflow_node_input_patch(user_inputs, node_id, input_name, body.get(source_key))
+                adjustments.append({
+                    "code": "qwen_2512_controlnet_scalar_applied",
+                    "node_id": str(node_id),
+                    "input_name": input_name,
+                    "value": body.get(source_key),
+                })
+        requested_width = _numeric_or_none(body.get("width") or body.get("output_width") or body.get("requested_width"))
+        requested_height = _numeric_or_none(body.get("height") or body.get("output_height") or body.get("requested_height"))
+        if requested_width and requested_height:
+            megapixels = max(0.25, min(1.05, round((requested_width * requested_height) / 1_000_000, 3)))
+            for node_id, node in workflow.items():
+                if not isinstance(node, dict):
+                    continue
+                if str(node.get("class_type") or "") != "ResizeImageMaskNode":
+                    continue
+                inputs = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
+                if "resize_type.megapixels" not in inputs:
+                    continue
+                _workflow_node_input_patch(user_inputs, node_id, "resize_type.megapixels", megapixels)
+                adjustments.append({
+                    "code": "qwen_2512_controlnet_resize_megapixels_applied",
+                    "node_id": str(node_id),
+                    "input_name": "resize_type.megapixels",
+                    "value": megapixels,
+                    "requested_width": requested_width,
+                    "requested_height": requested_height,
+                })
+        for node_id, node in workflow.items():
+            if not isinstance(node, dict):
+                continue
+            if str(node.get("class_type") or "") != "UNETLoader":
+                continue
+            inputs = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
+            model_name = str(inputs.get("unet_name") or inputs.get("model_name") or "").strip().lower()
+            if "qwen_image_2512" not in model_name or "fp8_e4m3fn" not in model_name:
+                continue
+            if "weight_dtype" not in inputs:
+                continue
+            _workflow_node_input_patch(user_inputs, node_id, "weight_dtype", "fp8_e4m3fn")
+            adjustments.append({
+                "code": "qwen_2512_controlnet_fp8_dtype_applied",
+                "node_id": str(node_id),
+                "input_name": "weight_dtype",
+                "value": "fp8_e4m3fn",
+            })
+        if not use_fast_branch:
+            return
+
+        switch_titles = {
+            "switch (model)": "qwen_2512_controlnet_fast_model_branch_enforced",
+            "switch (steps)": "qwen_2512_controlnet_fast_steps_branch_enforced",
+            "switch (cfg)": "qwen_2512_controlnet_fast_cfg_branch_enforced",
+        }
+        switch_node_ids = {"132", "133", "134"}
+        for node_id, node in workflow.items():
+            if not isinstance(node, dict) or str(node.get("class_type") or "") != "ComfySwitchNode":
+                continue
+            meta = node.get("_meta") if isinstance(node.get("_meta"), dict) else {}
+            title = str(meta.get("title") or node.get("title") or "").strip().lower()
+            if str(node_id) not in switch_node_ids and title not in switch_titles:
+                continue
+            _workflow_node_input_patch(user_inputs, node_id, "switch", True)
+            adjustments.append({
+                "code": switch_titles.get(title, "qwen_2512_controlnet_fast_branch_enforced"),
+                "node_id": str(node_id),
+                "reason": "pose_control_fast_profile",
+            })
+
     def _workflow_qwen_edit_prompt(body):
         workflow_id = _official_workflow_id_from_body(body)
         if not _is_qwen_edit_workflow_id(workflow_id):
@@ -3978,6 +4183,7 @@ def register_ai_agent_routes(app, deps):
         _workflow_apply_analyzed_sampler_fallbacks(preset, user_inputs, scalar_fields, adjustments)
         _workflow_apply_checkpoint_override(preset, body, user_inputs, adjustments)
         _workflow_apply_qwen_edit_switch_policy(preset, body, user_inputs, adjustments)
+        _workflow_apply_qwen_2512_controlnet_switch_policy(preset, body, user_inputs, adjustments)
         workflow_id = str((preset or {}).get("system_bundle_id") or "").strip()
         reference_ref = _image_ref_from_body(body, "reference_image_ref")
         if _is_qwen_edit_workflow_id(workflow_id) and reference_ref:
@@ -4049,6 +4255,9 @@ def register_ai_agent_routes(app, deps):
             "run_count": body.get("batch_size") or body.get("run_count") or 1,
             "seed_after_generate": "fixed",
         }
+        for key in ("backend_url", "comfyui_backend_url"):
+            if body.get(key) not in (None, ""):
+                run_body[key] = body.get(key)
         for key in (
             "source_image_ref",
             "source_image_ref_json",
@@ -4081,6 +4290,7 @@ def register_ai_agent_routes(app, deps):
             "control_strength",
             "control_start",
             "control_end",
+            "qwen_controlnet_profile",
         ):
             if body.get(key) not in (None, ""):
                 run_body[key] = body.get(key)

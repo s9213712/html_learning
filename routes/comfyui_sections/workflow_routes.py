@@ -1026,7 +1026,8 @@ def register_comfyui_workflow_routes(app, ctx):
             row, err_resp = load_workflow_preset(conn, preset_id=preset_id, actor=actor)
             if err_resp:
                 return err_resp
-            comfyui_url = (comfyui_binding(actor) or {}).get("url")
+            requested_backend_url = str(body.get("backend_url") or body.get("comfyui_backend_url") or "").strip()
+            comfyui_url = (comfyui_binding(actor, backend_url=requested_backend_url) or {}).get("url")
             active_client = client_for_url(comfyui_url) if comfyui_url else None
             default_params = parse_json_field(row["default_params_json"], {}) or {}
             preserved_seed = default_params.get("seed")
@@ -1324,6 +1325,8 @@ def register_comfyui_workflow_routes(app, ctx):
                 "official_workflow_id",
                 "workflow_id",
                 "generation_mode",
+                "backend_url",
+                "comfyui_backend_url",
             ):
                 value = body.get(key)
                 if value is None:

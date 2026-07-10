@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import io
 import importlib.util
 import json
@@ -2360,6 +2361,40 @@ def test_comfyui_import_uploaded_image_saves_cloud_file_and_input_ref(tmp_path):
     assert file_row["privacy_mode"] == "standard_plain"
     assert file_row["original_filename_plain_for_public"] == "local_template.png"
     assert storage_row["virtual_path"].startswith("/input/comfyui/")
+
+
+def test_comfyui_import_uploaded_image_honors_backend_url(tmp_path):
+    db_path = tmp_path / "comfyui.db"
+    storage_root = tmp_path / "storage"
+    storage_root.mkdir()
+    _init_db(db_path)
+    FakeComfyUIClient.uploaded_images = []
+    client = _build_app(db_path, storage_root).test_client()
+
+    imported = client.post(
+        "/api/comfyui/import-uploaded-image",
+        data={
+            "backend_url": "http://localhost:8192",
+            "image": (io.BytesIO(b"uploaded-template-png"), "stage1.png", "image/png"),
+        },
+        content_type="multipart/form-data",
+    )
+    assert imported.status_code == 200, imported.get_json()
+    image_ref = imported.get_json()["image"]["image_ref"]
+
+    ref_key = hashlib.sha256(
+        json.dumps(image_ref, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        ref_row = conn.execute(
+            "SELECT backend_url FROM comfyui_image_refs WHERE ref_key=?",
+            (ref_key,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert ref_row["backend_url"] == "http://localhost:8192"
 
 
 def test_comfyui_generate_allows_unsupported_lora_base_model_with_warning_only(tmp_path):

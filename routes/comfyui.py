@@ -3530,6 +3530,10 @@ def register_comfyui_routes(app, deps):
                 default_params = merged_params
             if snapshot_workflow:
                 workflow_json = snapshot_workflow
+        requested_backend_url = str(default_params.get("backend_url") or default_params.get("comfyui_backend_url") or "").strip()
+        if requested_backend_url:
+            backend_binding = _comfyui_binding(actor, backend_url=requested_backend_url)
+            active_client = _client_for_url(backend_binding["url"])
         prompt = str(default_params.get("prompt") or "")
         negative_prompt = str(default_params.get("negative_prompt") or "")
         expected_count = _workflow_expected_image_count(workflow_json, default_params)

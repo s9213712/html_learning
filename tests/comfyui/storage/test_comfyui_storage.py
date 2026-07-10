@@ -5,6 +5,7 @@ from tests.comfyui._integration_suite import (
     test_comfyui_discard_without_file_delete_endpoint_clears_preview_with_warning,
     test_comfyui_frontend_is_wired,
     test_comfyui_image_ref_is_bound_to_generating_user,
+    test_comfyui_import_uploaded_image_honors_backend_url,
     test_comfyui_import_uploaded_image_saves_cloud_file_and_input_ref,
     test_comfyui_interrupt_allows_owned_generation_when_backend_is_not_shared,
     test_comfyui_interrupt_denies_shared_backend_when_other_user_is_generating,

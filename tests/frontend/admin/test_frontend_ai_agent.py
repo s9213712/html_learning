@@ -59,7 +59,7 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert 'id="ai-agent-comfyui-vae"' in html
     assert 'id="ai-agent-comfyui-generate-btn"' in html
     assert 'id="s-module-ai-agent-min-role"' in html
-    _warn_if_asset_cache_version_changed(html, "/js/37-ai-agent.js", "20260703-ai-agent-pose-control-v30")
+    _warn_if_asset_cache_version_changed(html, "/js/37-ai-agent.js", "20260703-ai-agent-pose-control-v35")
     _warn_if_asset_cache_version_changed(html, "/js/90-bootstrap.js", "20260611-ai-agent-comfyui-write-tool")
 
     assert '"ai-agent": "feature_ai_agent_enabled"' in core_js
@@ -190,6 +190,13 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert "function aiAgentRecentImageRefs" in ai_agent_js
     assert "function aiAgentInferRecentImageRef" in ai_agent_js
     assert "function aiAgentEnsureComfyuiImageRefs" in ai_agent_js
+    assert "function aiAgentPromoteExistingPoseMapControlArgs" in ai_agent_js
+    assert "origin_qwen_image_controlnet_2512" in ai_agent_js
+    assert "pose/control apply: use existing SDPose pose map" in ai_agent_js
+    assert "(?:3|three)\\s*refs?" in ai_agent_js
+    assert "(?:^|\\b)3ref\\b" in ai_agent_js
+    assert "combine\\s+(?:the\\s+)?refs?" in ai_agent_js
+    assert "img2img|i2i|image\\s*to\\s*image" in ai_agent_js
     assert 'sourceImageRef = aiAgentInferRecentImageRef("source")' in ai_agent_js
     assert 'maskImageRef = aiAgentInferRecentImageRef("mask")' in ai_agent_js
     assert 'next.source_image_ref = inferred' in ai_agent_js
@@ -354,6 +361,40 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert "不要只寫 use this reference" in ai_agent_js
     assert "不要只提高 denoise 重送，要改走 pose/control workflow" in ai_agent_js
     assert "function aiAgentBuildPoseControlFallbackArgs" in ai_agent_js
+    assert "function aiAgentReferenceLooksLikePoseMap" in ai_agent_js
+    assert "function aiAgentPoseControlSourceImageRef" in ai_agent_js
+    assert "aiAgentSameImageRef(candidateRef, poseRef)" in ai_agent_js
+    assert "aiAgentInferSemanticImageRef(\"source\")?.image_ref" in ai_agent_js
+    assert "function aiAgentPoseControlSecondaryReferenceRef" in ai_agent_js
+    assert "function aiAgentPoseControlClothesReferenceRef" in ai_agent_js
+    assert "function aiAgentApplyPoseControlReferenceRouting" in ai_agent_js
+    assert "function aiAgentRequestedPoseControlRef" in ai_agent_js
+    assert "function aiAgentShouldPreserveRequestedPoseControl" in ai_agent_js
+    assert "function aiAgentApplyRequestedPoseControlArgs" in ai_agent_js
+    assert "const requestedPoseRef = aiAgentRequestedPoseControlRef(next);" in ai_agent_js
+    assert "const requestedPoseSeedArgs = { ...next };" in ai_agent_js
+    assert "next = aiAgentApplyRequestedPoseControlArgs(next, requestedPoseRef, requestedPoseSeedArgs);" in ai_agent_js
+    assert "const clothesRef = aiAgentPoseControlClothesReferenceRef(next, poseRef);" in ai_agent_js
+    assert "next.reference_image_ref = { ...clothesRef, semantic_key: \"clothes\" };" in ai_agent_js
+    assert "item.cloud_file_id" in ai_agent_js
+    assert "source?.control_image_ref || source?.control_image_ref_json || source?.control_ref || source?.controlnet?.image_ref" in ai_agent_js
+    assert "const sourceRef = aiAgentPoseControlSourceImageRef(args.source_image_ref, poseRef);" in ai_agent_js
+    assert "reference_image_ref: args.reference_image_ref" in ai_agent_js
+    assert "function aiAgentSanitizePoseControlBasePrompt" in ai_agent_js
+    assert "function aiAgentBuildPoseControlApplyArgs" in ai_agent_js
+    assert "const useFastProfile = [\"fast\", \"lightning\", \"lite\", \"quick\"].includes(profile);" in ai_agent_js
+    assert "const steps = useFastProfile ? 4 : Math.max(20, requestedSteps > 4 ? requestedSteps : 28);" in ai_agent_js
+    assert "const cfg = useFastProfile ? 1 : (requestedCfg > 1.2 ? requestedCfg : 4);" in ai_agent_js
+    assert "qwen_controlnet_profile: useFastProfile ? \"fast\" : \"base\"" in ai_agent_js
+    assert "use existing SDPose pose map as control_image_ref" in ai_agent_js
+    assert "use the supplied SDPose/control pose map directly; do not re-describe it with vision" in ai_agent_js
+    assert "the pose control map overrides any earlier instruction to preserve the old pose" in ai_agent_js
+    assert "const poseSummary = stageKey === \"pose\" ? summary : \"\";" in ai_agent_js
+    assert "const wantsPoseControl = workflowId === \"origin_qwen_image_controlnet_2512\" || controlType === \"pose\";" in ai_agent_js
+    assert "next.control_image_ref = poseRef;" in ai_agent_js
+    assert "aiAgentInferSemanticImageRef(\"pose\")?.image_ref" in ai_agent_js
+    assert "aiAgentCleanComfyuiArgs(aiAgentEnsureComfyuiImageRefs(aiAgentPromoteExistingPoseMapControlArgs(aiAgentApplyQwenEditInstructionPrompt(args))))" in ai_agent_js
+    assert "args = aiAgentEnsureComfyuiImageRefs(args);" in ai_agent_js
     assert "agent_followup_after_completion" in ai_agent_js
     assert "origin_sdpose_multi_person" in ai_agent_js
     assert "origin_qwen_image_controlnet_2512" in ai_agent_js
@@ -417,7 +458,7 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert ".ai-agent-tool-panel" in css
     assert ".ai-agent-message-meta" in css
     assert "@media (max-width: 640px)" in css
-    assert "37-ai-agent.js?v=20260703-ai-agent-pose-control-v30" in html
+    assert "37-ai-agent.js?v=20260703-ai-agent-pose-control-v35" in html
 
 
 def test_ai_agent_root_quick_settings_use_reserved_pricing_key():
