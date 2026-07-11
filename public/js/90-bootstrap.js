@@ -347,9 +347,15 @@ function bindUiEvents() {
   }
   if (captchaRefresh) captchaRefresh.addEventListener("click", loadCaptchaChallenge);
   if (logoutBtn)  logoutBtn.addEventListener("click",    doLogout);
-  if (bugReportOpenBtn) bugReportOpenBtn.addEventListener("click", showBugReportDialog);
-  if (bugReportSubmitBtn) bugReportSubmitBtn.addEventListener("click", submitBugReport);
-  if (bugReportCancelBtn) bugReportCancelBtn.addEventListener("click", hideBugReportDialog);
+  if (bugReportOpenBtn) bugReportOpenBtn.addEventListener("click", () => {
+    if (typeof showBugReportDialog === "function") showBugReportDialog();
+  });
+  if (bugReportSubmitBtn) bugReportSubmitBtn.addEventListener("click", () => {
+    if (typeof submitBugReport === "function") submitBugReport();
+  });
+  if (bugReportCancelBtn) bugReportCancelBtn.addEventListener("click", () => {
+    if (typeof hideBugReportDialog === "function") hideBugReportDialog();
+  });
   if (notificationToggle) notificationToggle.addEventListener("click", toggleNotificationPanel);
   if (notificationReadAll) notificationReadAll.addEventListener("click", markAllNotificationsRead);
   if (selfEditBtn) selfEditBtn.addEventListener("click", () => {
@@ -709,6 +715,7 @@ if (typeof bindAuthRecoveryControls === "function") bindAuthRecoveryControls();
 (async function init() {
   bindAuthTabEvents();
   bindAuthSubmitEvents();
+  if (typeof bindRegisterFieldHelpers === "function") bindRegisterFieldHelpers();
   await loadSiteConfig();
   setupInactivityTracking();
   startServerConnectionMonitor();

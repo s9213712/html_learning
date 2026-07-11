@@ -239,6 +239,78 @@ class WalletServiceFacade:
             wallet_user_id = actor_user_id
         return int(wallet_user_id)
 
+    def execute_idempotent_locked(
+        self,
+        conn,
+        *,
+        actor_user_id,
+        operation,
+        idempotency_key,
+        request_payload,
+        effect: Callable,
+        wallet_user_id=None,
+        expires_at=None,
+        preflight_replay: Callable | None = None,
+    ):
+        """Execute an idempotent wallet effect inside the caller transaction."""
+
+        operation = str(operation or "").strip()
+        idempotency_key = str(idempotency_key or "").strip()
+        if not operation:
+            raise ValueError("operation required")
+        if not idempotency_key:
+            raise ValueError("idempotency_key required")
+        self.ensure_schema(conn)
+        request_hash = self.request_hash(request_payload)
+        row, created = self._start_idempotency_row(
+            conn,
+            actor_user_id=actor_user_id,
+            operation=operation,
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+            expires_at=expires_at,
+        )
+        if not created:
+            if row["request_hash"] != request_hash:
+                raise WalletFacadeConflict(
+                    actor_user_id=actor_user_id,
+                    operation=operation,
+                    idempotency_key=idempotency_key,
+                )
+            if row["status"] != "completed":
+                raise WalletFacadeInProgress("idempotent wallet operation is not completed yet")
+            return self._completed_payload(row)
+
+        if preflight_replay is not None:
+            existing_result = preflight_replay(conn)
+            if existing_result is not None:
+                if not isinstance(existing_result, dict):
+                    raise ValueError("wallet facade preflight replay must return a dict")
+                completed = self._complete_idempotency_row(conn, row_id=row["id"], result=existing_result)
+                payload = self._completed_payload(completed)
+                payload["deduplicated"] = True
+                return payload
+
+        self._assert_write_allowed(
+            conn,
+            wallet_user_id=self._resolve_wallet_user_id(
+                conn,
+                wallet_user_id=wallet_user_id,
+                actor_user_id=actor_user_id,
+            ),
+            operation=operation,
+        )
+        result = effect(conn)
+        if result is None:
+            result = {}
+        if not isinstance(result, dict):
+            raise ValueError("wallet facade effect must return a dict")
+        completed = self._complete_idempotency_row(conn, row_id=row["id"], result=result)
+        payload = self._completed_payload(completed)
+        payload["created"] = True
+        payload["replayed"] = False
+        return payload
+
     def execute_idempotent(
         self,
         *,
@@ -251,64 +323,23 @@ class WalletServiceFacade:
         expires_at=None,
         preflight_replay: Callable | None = None,
     ):
-        operation = str(operation or "").strip()
-        idempotency_key = str(idempotency_key or "").strip()
-        if not operation:
-            raise ValueError("operation required")
-        if not idempotency_key:
-            raise ValueError("idempotency_key required")
-        request_hash = self.request_hash(request_payload)
         conn = self.get_db()
         try:
             self.ensure_schema(conn)
             conn.commit()
             conn.execute("BEGIN IMMEDIATE")
-            row, created = self._start_idempotency_row(
+            payload = self.execute_idempotent_locked(
                 conn,
                 actor_user_id=actor_user_id,
                 operation=operation,
                 idempotency_key=idempotency_key,
-                request_hash=request_hash,
+                request_payload=request_payload,
+                effect=effect,
+                wallet_user_id=wallet_user_id,
                 expires_at=expires_at,
+                preflight_replay=preflight_replay,
             )
-            if not created:
-                if row["request_hash"] != request_hash:
-                    raise WalletFacadeConflict(
-                        actor_user_id=actor_user_id,
-                        operation=operation,
-                        idempotency_key=idempotency_key,
-                    )
-                if row["status"] != "completed":
-                    raise WalletFacadeInProgress("idempotent wallet operation is not completed yet")
-                conn.commit()
-                return self._completed_payload(row)
-
-            if preflight_replay is not None:
-                existing_result = preflight_replay(conn)
-                if existing_result is not None:
-                    if not isinstance(existing_result, dict):
-                        raise ValueError("wallet facade preflight replay must return a dict")
-                    completed = self._complete_idempotency_row(conn, row_id=row["id"], result=existing_result)
-                    conn.commit()
-                    payload = self._completed_payload(completed)
-                    payload["deduplicated"] = True
-                    return payload
-
-            self._assert_write_allowed(
-                conn,
-                wallet_user_id=self._resolve_wallet_user_id(conn, wallet_user_id=wallet_user_id, actor_user_id=actor_user_id),
-                operation=operation,
-            )
-            result = effect(conn)
-            if result is None:
-                result = {}
-            if not isinstance(result, dict):
-                raise ValueError("wallet facade effect must return a dict")
-            completed = self._complete_idempotency_row(conn, row_id=row["id"], result=result)
             conn.commit()
-            payload = self._completed_payload(completed)
-            payload["created"] = True
-            payload["replayed"] = False
             return payload
         except Exception:
             conn.rollback()

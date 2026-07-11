@@ -13,6 +13,7 @@ ACTION_TYPES = {
 PROPOSAL_STATUSES = {"pending", "approved", "rejected", "expired", "cancelled", "executed"}
 VOTES = {"approve", "reject"}
 HIGH_RISK_ACTION_TYPES = {"suspend", "delete", "downgrade_level"}
+MAX_PROPOSAL_TTL_HOURS = 24 * 365
 
 
 def governance_policy_for_action(action_type, target_role=None):
@@ -187,8 +188,14 @@ def create_moderation_proposal(
     reason = (reason or "").strip()
     if not reason:
         return None, "提案原因不可為空"
+    try:
+        ttl_hours = int(ttl_hours or 72)
+    except Exception:
+        return None, "提案有效期限格式錯誤"
+    if ttl_hours < 1 or ttl_hours > MAX_PROPOSAL_TTL_HOURS:
+        return None, f"提案有效期限需介於 1 到 {MAX_PROPOSAL_TTL_HOURS} 小時"
     now = datetime.now()
-    expires_at = (now + timedelta(hours=max(1, int(ttl_hours or 72)))).isoformat()
+    expires_at = (now + timedelta(hours=ttl_hours)).isoformat()
     cur = conn.execute(
         "INSERT INTO moderation_proposals "
         "(target_user_id, action_type, action_value, proposed_by_user_id, reason, status, required_votes, "

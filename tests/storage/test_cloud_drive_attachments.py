@@ -2553,6 +2553,41 @@ def test_cloud_drive_image_preview_content(tmp_path):
     assert content.mimetype.startswith("image/")
 
 
+def test_cloud_drive_svg_is_inert_text_and_download_only(tmp_path):
+    db_path = tmp_path / "drive-svg.db"
+    storage_root = tmp_path / "storage"
+    storage_root.mkdir()
+    _init_db(db_path)
+    actor_box = {"actor": _actor(1, "alice")}
+    client = _build_app(db_path, storage_root, actor_box).test_client()
+    svg = b'<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"><script>alert(2)</script></svg>'
+
+    uploaded = client.post(
+        "/api/cloud-drive/upload",
+        data={"file": (io.BytesIO(svg), "active.svg", "image/svg+xml")},
+        content_type="multipart/form-data",
+    )
+    assert uploaded.status_code == 200, uploaded.get_json()
+    file_id = uploaded.get_json()["file"]["file_id"]
+
+    metadata = client.get(f"/api/cloud-drive/files/{file_id}/preview")
+    inline = client.get(f"/api/cloud-drive/files/{file_id}/preview/content")
+    download = client.get(f"/api/cloud-drive/files/{file_id}/download")
+
+    assert metadata.status_code == 200, metadata.get_json()
+    preview = metadata.get_json()["preview"]
+    assert preview["category"] == "text"
+    assert preview["mime_type"] == "text/plain"
+    assert "<script>alert(2)</script>" in preview["text"]
+    assert "stream_asset" not in preview
+    assert inline.status_code == 415
+    assert download.status_code == 200
+    assert download.data == svg
+    assert download.mimetype == "application/octet-stream"
+    assert download.headers["Content-Disposition"].startswith("attachment;")
+    assert download.headers["X-Content-Type-Options"] == "nosniff"
+
+
 def test_server_encrypted_preview_handles_rotated_key_without_500(tmp_path):
     from cryptography.fernet import Fernet
 

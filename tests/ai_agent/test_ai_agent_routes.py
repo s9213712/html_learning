@@ -356,12 +356,12 @@ def test_ai_agent_status_includes_role_scope_and_settings(monkeypatch, tmp_path)
     assert payload["actor"]["role"] == "user"
     assert payload["settings"]["role"] == "user"
     assert payload["settings"]["scope"]["label"] == "個別用戶助手"
-    assert payload["settings"]["operation_mode_policy"]["mode"] == "readonly"
+    assert payload["settings"]["operation_mode_policy"]["mode"] == "assist"
     assert payload["settings"]["safety_boundaries"]
     assert "scan" not in payload["audit"]
 
 
-def test_ai_agent_write_tools_root_only_and_lists_allowed_tools(tmp_path):
+def test_ai_agent_write_tools_are_role_scoped_and_list_allowed_tools(tmp_path):
     db_path = tmp_path / "ai_agent_routes.db"
     _build_db(db_path)
     settings = {
@@ -375,16 +375,161 @@ def test_ai_agent_write_tools_root_only_and_lists_allowed_tools(tmp_path):
     root_response = root_app.test_client().get("/api/ai-agent/write-tools")
     payload = root_response.get_json()
 
-    assert user_response.status_code == 403
+    user_payload = user_response.get_json()
+    assert user_response.status_code == 200
+    assert [tool["name"] for tool in user_payload["tools"]] == ["write_community_create_thread"]
+    assert user_payload["role_scoped"] is True
     assert root_response.status_code == 200
     assert payload["ok"] is True
-    assert payload["root_only"] is True
+    assert payload["root_only"] is False
     assert payload["write_enabled"] is True
     assert len(payload["catalog_sha256"]) == 64
     assert [tool["name"] for tool in payload["tools"]] == [
         "write_community_create_thread",
         "write_launch_requirements_check",
     ]
+
+
+def test_ai_agent_user_executes_assist_safe_action_but_not_root_action(tmp_path):
+    clear_ai_agent_audit_scan_state()
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(
+        db_path,
+        {"id": 2, "username": "userA", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "assist",
+            "ai_agent_allowed_tools": "write_community_create_thread,write_server_restart",
+        },
+    )
+    captured = {}
+
+    @app.route("/api/community/boards/<int:board_id>/threads", methods=["POST"])
+    def fake_user_thread_create(board_id):
+        captured["board_id"] = board_id
+        captured.update(request.get_json(silent=True) or {})
+        return _json_resp({"ok": True, "thread_id": 77})
+
+    client = app.test_client()
+    allowed = client.post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_community_create_thread",
+        "confirm": "EXECUTE",
+        "arguments": {"board_id": 3, "title": "AI assisted", "content": "hello"},
+    })
+    denied = client.post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_server_restart",
+        "confirm": "EXECUTE",
+        "arguments": {"reason": "should not run"},
+    })
+
+    assert allowed.status_code == 200
+    assert allowed.get_json()["action_policy"]["assist_safe"] is True
+    assert captured == {"board_id": 3, "title": "AI assisted", "content": "hello"}
+    assert denied.status_code == 403
+    assert "角色範圍" in denied.get_json()["msg"]
+
+
+def test_ai_agent_user_financial_action_requires_write_mode(tmp_path):
+    clear_ai_agent_audit_scan_state()
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(
+        db_path,
+        {"id": 2, "username": "userA", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "assist",
+            "ai_agent_allowed_tools": "write_trading_place_order",
+        },
+    )
+
+    response = app.test_client().post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_trading_place_order",
+        "confirm": "EXECUTE",
+        "arguments": {
+            "market_symbol": "BTC-PC0",
+            "side": "buy",
+            "order_type": "market",
+            "quantity": 1,
+        },
+    })
+    payload = response.get_json()
+
+    assert response.status_code == 409
+    assert payload["action_policy"]["risk_level"] == "high"
+    assert payload["action_policy"]["reason"] == "operation_mode_denied"
+
+
+def test_ai_agent_manager_executes_member_reputation_reward(tmp_path):
+    clear_ai_agent_audit_scan_state()
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(
+        db_path,
+        {"id": 3, "username": "managerA", "role": "manager"},
+        settings={
+            "ai_agent_operation_mode": "write",
+            "ai_agent_allowed_tools": "write_member_reward",
+        },
+    )
+    captured = {}
+
+    @app.route("/api/admin/users/<int:user_id>/reputation-reward", methods=["POST"])
+    def fake_member_reward(user_id):
+        captured["user_id"] = user_id
+        captured["body"] = request.get_json(silent=True) or {}
+        return _json_resp({"ok": True, "reward_type": "reputation", "reputation": 7})
+
+    response = app.test_client().post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_member_reward",
+        "confirm": "EXECUTE",
+        "arguments": {"user_id": 2, "points": 7, "reason": "helpful report"},
+    })
+    payload = response.get_json()
+
+    assert response.status_code == 200, payload
+    assert captured == {
+        "user_id": 2,
+        "body": {"points": 7, "reason": "helpful report"},
+    }
+    assert payload["action_policy"]["min_role"] == "manager"
+    assert payload["result"]["reward_type"] == "reputation"
+
+
+def test_ai_agent_emergency_governance_forces_emergency_flag(tmp_path):
+    clear_ai_agent_audit_scan_state()
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "write",
+            "ai_agent_allowed_tools": "write_emergency_governance_action",
+        },
+    )
+    captured = {}
+
+    @app.route("/api/admin/moderation/proposals", methods=["POST"])
+    def fake_emergency_governance():
+        captured.update(request.get_json(silent=True) or {})
+        return _json_resp({"ok": True, "proposal": {"id": 19, "is_emergency": True}})
+
+    response = app.test_client().post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_emergency_governance_action",
+        "confirm": True,
+        "arguments": {
+            "target_user_id": 2,
+            "action_type": "mute",
+            "action_value": "2026-07-10T18:00:00",
+            "reason": "active abuse",
+            "emergency_execute": False,
+        },
+    })
+
+    assert response.status_code == 200, response.get_json()
+    assert captured["emergency_execute"] is True
+    assert captured["action_type"] == "mute"
+    assert response.get_json()["action_policy"]["root_only"] is True
 
 
 def test_ai_agent_write_tools_can_return_full_catalog_for_root_selector(tmp_path):
@@ -440,7 +585,7 @@ def test_ai_agent_write_tools_none_sentinel_disables_all_tools(tmp_path):
     assert len(payload["catalog_tools"]) == len(AI_AGENT_WRITE_TOOL_SPECS)
 
 
-def test_ai_agent_write_tools_lockdown_blocks_list_and_execute(monkeypatch, tmp_path):
+def test_ai_agent_write_tools_lockdown_allows_recovery_list_but_blocks_execute(monkeypatch, tmp_path):
     db_path = tmp_path / "ai_agent_routes.db"
     _build_db(db_path)
     audit_events = []
@@ -469,14 +614,14 @@ def test_ai_agent_write_tools_lockdown_blocks_list_and_execute(monkeypatch, tmp_
         "arguments": {"board_id": 1, "title": "hello", "content": "world"},
     })
 
-    assert listed.status_code == 423
+    assert listed.status_code == 200
     assert executed.status_code == 423
     assert listed.get_json()["guard"]["blocked"] is True
     lockdown_events = [
         event for event in audit_events
         if event["args"][0] == "AI_AGENT_WRITE_TOOLS_LOCKDOWN"
     ]
-    assert len(lockdown_events) == 2
+    assert len(lockdown_events) == 1
 
 
 def test_ai_agent_write_tools_lockdown_uses_persistent_audit_guard(tmp_path):
@@ -508,7 +653,7 @@ def test_ai_agent_write_tools_lockdown_uses_persistent_audit_guard(tmp_path):
     response = app.test_client().get("/api/ai-agent/write-tools")
     payload = response.get_json()
 
-    assert response.status_code == 423
+    assert response.status_code == 200
     assert payload["guard"]["blocked"] is True
     assert payload["guard"]["source"] == "secure_audit"
     assert payload["guard"]["anomalies"][0]["code"] == "ai_agent.persistent_write_guard"
@@ -665,7 +810,7 @@ def test_ai_agent_codex_handoff_marks_server_path_for_review(tmp_path):
         "tool": "write_codex_handoff_create",
         "confirm": "EXECUTE",
         "arguments": {
-            "objective": "請 Codex 修改 /home/s92137/hackme_web_05_AI_Agent/server.py。",
+            "objective": "請 Codex 修改 /home/qa-user/hackme_web/server.py。",
             "allowed_scope": "requires_root_codex_review",
         },
     })
@@ -685,20 +830,21 @@ def test_ai_agent_write_tool_execute_requires_write_mode_for_mutation(tmp_path):
         {"id": 1, "username": "root", "role": "user"},
         settings={
             "ai_agent_operation_mode": "assist",
-            "ai_agent_allowed_tools": "write_community_create_thread",
+            "ai_agent_allowed_tools": "write_points_wallet_transfer",
         },
     )
 
     response = app.test_client().post("/api/ai-agent/write-tools/execute", json={
-        "tool": "write_community_create_thread",
+        "tool": "write_points_wallet_transfer",
         "confirm": "EXECUTE",
-        "arguments": {"board_id": 1, "title": "hello", "content": "world"},
+        "arguments": {"to_user_id": 2, "amount": 1},
     })
     payload = response.get_json()
 
     assert response.status_code == 409
     assert payload["ok"] is False
-    assert "operation mode" in payload["msg"]
+    assert payload["operation_mode"] == "assist"
+    assert payload["action_policy"]["reason"] == "operation_mode_denied"
 
 
 def test_ai_agent_write_tool_execute_allows_root_elevate_once(tmp_path):
@@ -1861,6 +2007,11 @@ def test_ai_agent_comfyui_write_tool_extracts_denoise_strength_from_prompt_text(
             "official_workflow_id": "origin_qwen_image_edit_2509",
             "generation_mode": "img2img",
             "source_image_ref": source_ref,
+            "agent_review_required": True,
+            "agent_review_mode": "vision_iterative_gate",
+            "agent_review_strategy": "pairwise_reference_merge",
+            "agent_review_max_attempts": 3,
+            "agent_review_plan": "source -> clothes -> vision gate",
             "confirm_billing": True,
         },
     })
@@ -1871,6 +2022,11 @@ def test_ai_agent_comfyui_write_tool_extracts_denoise_strength_from_prompt_text(
     assert captured["user_inputs"]["499"]["denoise"] == 0.55
     assert captured["width"] == 1080
     assert captured["height"] == 1920
+    assert captured["agent_review_required"] is True
+    assert captured["agent_review_mode"] == "vision_iterative_gate"
+    assert captured["agent_review_strategy"] == "pairwise_reference_merge"
+    assert captured["agent_review_max_attempts"] == 3
+    assert captured["agent_review_plan"] == "source -> clothes -> vision gate"
 
 
 def test_ai_agent_comfyui_write_tool_extracts_inline_qwen_edit_instruction(tmp_path):
@@ -3382,7 +3538,7 @@ def test_ai_agent_chat_blocks_os_filesystem_listing_before_llm(tmp_path, monkeyp
         "session_id": "fs-boundary",
         "messages": [{
             "role": "user",
-            "content": "請告訴我伺服器家目錄 /home/s92137 裡面有哪些檔案與資料夾，請直接列出清單。",
+            "content": "請告訴我伺服器家目錄 /home/qa-user 裡面有哪些檔案與資料夾，請直接列出清單。",
         }],
     })
     payload = response.get_json()
@@ -3450,7 +3606,7 @@ def test_ai_agent_chat_blocks_server_filesystem_mutation_before_llm(tmp_path, mo
         "session_id": "fs-mutation",
         "messages": [{
             "role": "user",
-            "content": "幫我直接修改 /home/s92137/hackme_web_05_AI_Agent/server.py，把 debug 打開。",
+            "content": "幫我直接修改 /home/qa-user/hackme_web/server.py，把 debug 打開。",
         }],
     })
     payload = response.get_json()
@@ -3516,7 +3672,7 @@ def test_ai_agent_write_tool_blocks_server_filesystem_path_args(tmp_path):
         "tool": "write_server_restart",
         "arguments": {
             "reason": "test",
-            "path": "/home/s92137/hackme_web_05_AI_Agent/server.py",
+            "path": "/home/qa-user/hackme_web/server.py",
         },
         "confirm": "EXECUTE",
     })

@@ -414,6 +414,7 @@ def test_diffusers_generate_reports_download_preparation_before_heavy_loading(tm
     monkeypatch.setenv("HTML_LEARNING_ALLOW_IN_PROCESS_DIFFUSERS", "1")
     client = DiffusersClient(model_repo="owner/model", storage_root=tmp_path)
     events = []
+    monkeypatch.setattr(client, "_resolve_diffusers_variant", lambda *args, **kwargs: "")
 
     def stop_before_loading(*args, **kwargs):
         logging.getLogger("diffusers").info("loading owner/model with hf_1234567890abcdef")
@@ -472,6 +473,7 @@ def test_diffusers_generate_streams_python_runtime_output_to_progress_log(tmp_pa
     monkeypatch.setenv("HTML_LEARNING_ALLOW_IN_PROCESS_DIFFUSERS", "1")
     client = DiffusersClient(model_repo="owner/model", storage_root=tmp_path)
     events = []
+    monkeypatch.setattr(client, "_resolve_diffusers_variant", lambda *args, **kwargs: "")
 
     def stop_after_runtime_logs(*args, **kwargs):
         print("model_index.json: 100% 712/712 [00:00<00:00, 78.9kB/s]")
@@ -507,6 +509,7 @@ def test_diffusers_generate_cleans_transient_downloads_after_output_save(tmp_pat
     )
     events = []
     transient_paths = []
+    monkeypatch.setattr(client, "_resolve_diffusers_variant", lambda *args, **kwargs: "")
 
     class FakeGenerator:
         def __init__(self, device=None):

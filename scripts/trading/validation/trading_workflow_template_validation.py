@@ -21,7 +21,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -40,7 +40,15 @@ from services.trading.trading_engine import (  # noqa: E402
 REPORT_DIR = ROOT / "security" / "reports"
 WORKFLOW_DIR = ROOT / "workflows" / "trading_bot"
 TRIGGER_CASES = {
+    "auto_search_winner_claude_rev3_return": (
+        {"price": 100000, "ma200": 90000, "rsi": 50, "has_position": False},
+        "buy_percent",
+    ),
     "dip_buy": ({"price": 85000, "window_low_price": 85000, "has_position": False}, "buy_percent"),
+    "dipbuy_rsi35_70_size99_late_tp15_nopyr_codex": (
+        {"price": 100000, "ma200": 90000, "rsi": 50, "has_position": False},
+        "buy_percent",
+    ),
     "breakout_buy": ({"price": 110000, "window_high_price": 110000, "ma50": 100000, "has_position": False}, "buy_percent"),
     "stop_loss": ({"price": 70000, "window_low_price": 70000, "has_position": True, "pnl_percent": -20, "pnl_low_percent": -20}, "close_all"),
     "ma_pullback": ({"price": 100000, "ma50": 90000, "rsi": 40, "has_position": False}, "buy_percent"),
@@ -284,6 +292,8 @@ def main():
     with tempfile.TemporaryDirectory(prefix="hackme-workflow-validation-") as tmp:
         trading = get_test_services(Path(tmp))
         templates = load_templates(trading)
+        if not templates:
+            raise SystemExit(f"no trading workflow templates found under {WORKFLOW_DIR}")
         if args.no_download:
             candles = [
                 {"time": i, "time_iso": f"synthetic-{i:04d}", "open_points": 90000 + i, "high_points": 90500 + i, "low_points": 89500 + i, "close_points": 90000 + i}

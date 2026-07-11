@@ -47,6 +47,8 @@ HLS_DERIVATIVES_QUOTA_EXEMPT = True
 STRICT_E2EE_SERVER_TRANSCODE_DISABLED_REASON = (
     "strict E2EE files cannot generate server-side HLS or server-side transcode derivatives"
 )
+STREAM_AUDIO_EXTENSIONS = {".aac", ".aif", ".aiff", ".flac", ".m4a", ".mp3", ".oga", ".ogg", ".opus", ".wav", ".weba"}
+STREAM_VIDEO_EXTENSIONS = {".avi", ".flv", ".m2ts", ".m4v", ".mkv", ".mov", ".mp4", ".mpeg", ".mpg", ".mts", ".ogv", ".ts", ".webm", ".wmv"}
 
 _REALTIME_PROXY_LOCK = threading.Lock()
 _REALTIME_PROXY_ACTIVE = 0
@@ -436,11 +438,14 @@ def _row_value(row, key, default=None):
 
 
 def _file_media_type(file_row):
-    mime = str(file_row["mime_type_plain_for_public"] or "").lower()
-    filename = str(file_row["original_filename_plain_for_public"] or "").lower()
-    if mime.startswith("audio/") or any(filename.endswith(ext) for ext in (".mp3", ".m4a", ".aac", ".flac", ".wav", ".weba", ".opus", ".oga", ".ogg")):
+    mime = str(_row_value(file_row, "mime_type_plain_for_public", "") or "").lower()
+    filename = str(_row_value(file_row, "original_filename_plain_for_public", "") or "").lower()
+    extension = Path(filename).suffix.lower()
+    if mime.startswith("audio/") or extension in STREAM_AUDIO_EXTENSIONS:
         return "audio"
-    return "video"
+    if mime.startswith("video/") or extension in STREAM_VIDEO_EXTENSIONS:
+        return "video"
+    return ""
 
 
 def _source_filename_ext(file_row):
@@ -568,6 +573,8 @@ def should_auto_prepare_stream(file_row, *, visibility="public"):
     if not file_row or _row_value(file_row, "deleted_at") or is_e2ee_file(file_row):
         return {"enabled": False, "reason": "unavailable"}
     media_type = _file_media_type(file_row)
+    if media_type not in {"audio", "video"}:
+        return {"enabled": False, "reason": "not_media", "media_type": ""}
     privacy_mode = str(_row_value(file_row, "privacy_mode", "standard_plain") or "standard_plain")
     visibility = str(visibility or "public").strip().lower() or "public"
     size_bytes = _safe_int(_row_value(file_row, "size_bytes"), 0)
@@ -756,6 +763,8 @@ def mark_stream_asset_processing(conn, *, file_row, error_message=""):
     ensure_media_stream_schema(conn)
     if not file_row or _row_value(file_row, "deleted_at"):
         raise ValueError("file not found")
+    if _file_media_type(file_row) not in {"audio", "video"}:
+        raise ValueError("file is not an audio or video asset")
     if is_e2ee_file(file_row):
         return _mark_asset_unavailable(conn, file_row=file_row, reason=STRICT_E2EE_SERVER_TRANSCODE_DISABLED_REASON)
     asset = _upsert_asset_row(conn, file_row=file_row, status="processing", error_message=error_message)
@@ -2387,6 +2396,8 @@ def prepare_stream_asset(
     ensure_media_stream_schema(conn)
     if not file_row or _row_value(file_row, "deleted_at"):
         raise ValueError("file not found")
+    if _file_media_type(file_row) not in {"audio", "video"}:
+        raise ValueError("file is not an audio or video asset")
     if is_e2ee_file(file_row):
         return _mark_asset_unavailable(conn, file_row=file_row, reason=STRICT_E2EE_SERVER_TRANSCODE_DISABLED_REASON)
     asset = _upsert_asset_row(conn, file_row=file_row, status="processing")
@@ -2660,11 +2671,14 @@ def get_stream_status(conn, *, file_row, include_segments=True):
     asset = serialize_stream_asset(conn, file_row["id"], include_segments=include_segments)
     if asset:
         return asset
+    media_type = _file_media_type(file_row)
+    if media_type not in {"audio", "video"}:
+        return None
     if is_e2ee_file(file_row):
         return {
             "uploaded_file_id": file_row["id"],
             "source_mode": str(file_row["privacy_mode"] or "e2ee"),
-            "media_type": _file_media_type(file_row),
+            "media_type": media_type,
             "status": "unavailable",
             "storage_mode": MEDIA_STREAM_STORAGE_MODE,
             "master_manifest_path": "",
@@ -2679,7 +2693,7 @@ def get_stream_status(conn, *, file_row, include_segments=True):
     return {
         "uploaded_file_id": file_row["id"],
         "source_mode": str(file_row["privacy_mode"] or "standard_plain"),
-        "media_type": _file_media_type(file_row),
+        "media_type": media_type,
         "status": "pending",
         "storage_mode": MEDIA_STREAM_STORAGE_MODE,
         "master_manifest_path": "",

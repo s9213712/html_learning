@@ -409,7 +409,10 @@ def serialize_video(row, *, actor=None, liked=False):
     data["media_type"] = _cloud_file_media_type(data)
     privacy_mode = str(data.get("cloud_privacy_mode") or "standard_plain").strip().lower()
     data["streaming_modes"] = _normalize_video_streaming_modes(data.get("streaming_modes_json") or ["direct"])
-    data["direct_stream_allowed"] = privacy_mode in {"", "standard_plain", "server_encrypted"}
+    data["direct_stream_allowed"] = (
+        "direct" in data["streaming_modes"]
+        and privacy_mode in {"", "standard_plain", "server_encrypted"}
+    )
     return data
 
 
@@ -1894,7 +1897,18 @@ def calculate_tip_fee(amount, fee_percent):
     return max(0, fee)
 
 
-def tip_video(conn, *, points_service, actor, video_id, amount, fee_percent=5, idempotency_key=None):
+def tip_video(
+    conn,
+    *,
+    points_service,
+    actor,
+    video_id,
+    amount,
+    fee_percent=5,
+    idempotency_key=None,
+    points_conn=None,
+    commit_points_before_record=False,
+):
     ensure_video_schema(conn)
     if not actor:
         raise PermissionError("login required")
@@ -1914,8 +1928,11 @@ def tip_video(conn, *, points_service, actor, video_id, amount, fee_percent=5, i
     owner_is_root = str((owner_user or {})["username"] if owner_user else "").strip().lower() == "root"
     if not points_service or not hasattr(points_service, "rc1_facade"):
         raise RuntimeError("PointsChain service is unavailable")
+    financial_conn = points_conn or conn
+    if commit_points_before_record and financial_conn is conn:
+        raise ValueError("separate points connection required for split-database settlement")
     if hasattr(points_service, "ensure_schema"):
-        points_service.ensure_schema(conn)
+        points_service.ensure_schema(financial_conn)
     points_facade = points_service.rc1_facade()
     fee = calculate_tip_fee(amount, fee_percent)
     net = amount - fee
@@ -1951,60 +1968,89 @@ def tip_video(conn, *, points_service, actor, video_id, amount, fee_percent=5, i
             "official_video_owner": True,
             "creator_revenue_destination": "official_treasury",
         })
-    debit_row, debit_created = points_facade.append_product_ledger_locked(
-        conn,
-        user_id=from_user_id,
-        currency_type=DISPLAY_CURRENCY,
-        direction="debit",
-        amount=amount,
-        action_type="video_tip_debit",
-        reference_type="video",
-        reference_id=str(video_id),
-        idempotency_key=f"{idem}:debit",
-        reason="video tip",
-        public_metadata=common_metadata,
-        actor=actor,
-    )
-    credit_metadata = dict(common_metadata)
-    if owner_is_root:
-        credit_metadata["destination_fund_key"] = "official_treasury"
-    credit_row, credit_created = points_facade.append_product_ledger_locked(
-        conn,
-        user_id=to_user_id,
-        currency_type=DISPLAY_CURRENCY,
-        direction="credit",
-        amount=net,
-        action_type="video_tip_credit",
-        reference_type="video",
-        reference_id=str(video_id),
-        idempotency_key=f"{idem}:credit",
-        reason="video tip revenue",
-        public_metadata=credit_metadata,
-        actor=actor,
-    )
-    fee_row = None
-    fee_created = False
-    if fee > 0:
-        fee_row, fee_created = points_facade.append_product_ledger_locked(
-            conn,
-            user_id=fee_user_id,
+    def settle(finance_conn):
+        debit_row, _debit_created = points_facade.append_product_ledger_locked(
+            finance_conn,
+            user_id=from_user_id,
             currency_type=DISPLAY_CURRENCY,
-            direction="credit",
-            amount=fee,
-            action_type="video_tip_platform_fee",
+            direction="debit",
+            amount=amount,
+            action_type="video_tip_debit",
             reference_type="video",
             reference_id=str(video_id),
-            idempotency_key=f"{idem}:fee",
-            reason="video tip platform fee",
-            public_metadata={
-                **common_metadata,
-                "destination_fund_key": "official_treasury",
-            },
+            idempotency_key=f"{idem}:debit",
+            reason="video tip",
+            public_metadata=common_metadata,
             actor=actor,
         )
+        credit_metadata = dict(common_metadata)
+        if owner_is_root:
+            credit_metadata["destination_fund_key"] = "official_treasury"
+        credit_row, _credit_created = points_facade.append_product_ledger_locked(
+            finance_conn,
+            user_id=to_user_id,
+            currency_type=DISPLAY_CURRENCY,
+            direction="credit",
+            amount=net,
+            action_type="video_tip_credit",
+            reference_type="video",
+            reference_id=str(video_id),
+            idempotency_key=f"{idem}:credit",
+            reason="video tip revenue",
+            public_metadata=credit_metadata,
+            actor=actor,
+        )
+        fee_row = None
+        if fee > 0:
+            fee_row, _fee_created = points_facade.append_product_ledger_locked(
+                finance_conn,
+                user_id=fee_user_id,
+                currency_type=DISPLAY_CURRENCY,
+                direction="credit",
+                amount=fee,
+                action_type="video_tip_platform_fee",
+                reference_type="video",
+                reference_id=str(video_id),
+                idempotency_key=f"{idem}:fee",
+                reason="video tip platform fee",
+                public_metadata={
+                    **common_metadata,
+                    "destination_fund_key": "official_treasury",
+                },
+                actor=actor,
+            )
+        ledger = {
+            "debit_uuid": debit_row["ledger_uuid"],
+            "credit_uuid": credit_row["ledger_uuid"],
+            "fee_uuid": fee_row["ledger_uuid"] if fee_row else None,
+        }
+        return {"ledger": ledger, "ledger_ids": [value for value in ledger.values() if value]}
+
+    settlement = points_facade.execute_idempotent_locked(
+        financial_conn,
+        actor_user_id=from_user_id,
+        operation="video_tip",
+        idempotency_key=idem,
+        request_payload={
+            "video_id": int(video_id),
+            "from_user_id": from_user_id,
+            "to_user_id": to_user_id,
+            "amount_points": amount,
+            "fee_points": fee,
+            "fee_user_id": fee_user_id,
+        },
+        effect=settle,
+        wallet_user_id=from_user_id,
+    )
+    ledger = settlement.get("result", {}).get("ledger") or {}
+    if not ledger.get("debit_uuid") or not ledger.get("credit_uuid") or (fee > 0 and not ledger.get("fee_uuid")):
+        raise RuntimeError("video tip settlement is incomplete")
+    if commit_points_before_record:
+        financial_conn.commit()
+
     cur = conn.execute(
         """
-        INSERT INTO video_tips (
+        INSERT OR IGNORE INTO video_tips (
             video_id, from_user_id, to_user_id, amount_points, fee_points, net_points,
             fee_user_id, ledger_debit_uuid, ledger_credit_uuid, ledger_fee_uuid,
             idempotency_key, created_at
@@ -2018,24 +2064,33 @@ def tip_video(conn, *, points_service, actor, video_id, amount, fee_percent=5, i
             fee,
             net,
             fee_user_id,
-            debit_row["ledger_uuid"],
-            credit_row["ledger_uuid"],
-            fee_row["ledger_uuid"] if fee_row else None,
+            ledger["debit_uuid"],
+            ledger["credit_uuid"],
+            ledger.get("fee_uuid"),
             idem,
             now,
         ),
     )
+    if cur.rowcount == 0:
+        existing = conn.execute("SELECT * FROM video_tips WHERE idempotency_key=?", (idem,)).fetchone()
+        if not existing:
+            raise RuntimeError("video tip record could not be persisted")
+        if (
+            _safe_int(existing["video_id"]) != int(video_id)
+            or _safe_int(existing["from_user_id"]) != from_user_id
+            or _safe_int(existing["to_user_id"]) != to_user_id
+            or _safe_int(existing["amount_points"]) != amount
+        ):
+            raise ValueError("idempotency key conflicts with another video tip")
+        return {"ok": True, "created": False, "tip": serialize_tip(existing), "ledger": ledger}
     conn.execute("UPDATE videos SET coin_total=coin_total+?, updated_at=? WHERE id=?", (amount, now, int(video_id)))
     row = conn.execute("SELECT * FROM video_tips WHERE id=?", (cur.lastrowid,)).fetchone()
     return {
         "ok": True,
-        "created": bool(debit_created or credit_created or fee_created),
+        "created": True,
         "tip": serialize_tip(row),
-        "ledger": {
-            "debit_uuid": debit_row["ledger_uuid"],
-            "credit_uuid": credit_row["ledger_uuid"],
-            "fee_uuid": fee_row["ledger_uuid"] if fee_row else None,
-        },
+        "ledger": ledger,
+        "settlement_replayed": bool(settlement.get("replayed")),
     }
 
 

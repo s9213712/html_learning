@@ -64,7 +64,7 @@ def test_blocked_video_metadata_owner_visible_but_stream_denied():
     assert not can_view_video(actor(1, "owner"), row, for_stream=True)
 
 
-def test_video_payload_marks_server_encrypted_as_not_direct_streamable():
+def test_video_payload_allows_server_decrypted_range_stream_but_not_e2ee():
     conn = video_test_db()
     seed_cloud_file(
         conn,
@@ -88,10 +88,39 @@ def test_video_payload_marks_server_encrypted_as_not_direct_streamable():
         title="Plain video",
         visibility="public",
     )
+    seed_cloud_file(
+        conn,
+        file_id="e2ee-video",
+        owner_user_id=1,
+        mime="video/mp4",
+        privacy_mode="e2ee",
+    )
+    e2ee = publish_video(
+        conn,
+        actor=actor(1, "owner"),
+        cloud_file_id="e2ee-video",
+        title="E2EE video",
+        visibility="private",
+    )
+    seed_cloud_file(conn, file_id="proxy-only-video", owner_user_id=1, mime="video/mp4")
+    proxy_only = publish_video(
+        conn,
+        actor=actor(1, "owner"),
+        cloud_file_id="proxy-only-video",
+        title="Realtime proxy video",
+        visibility="public",
+        streaming_modes=["realtime_proxy"],
+    )
 
     encrypted_payload = get_video(conn, encrypted["id"], actor=actor(2, "viewer"))
     plain_payload = get_video(conn, plain["id"], actor=actor(2, "viewer"))
+    e2ee_payload = get_video(conn, e2ee["id"], actor=actor(1, "owner"))
+    proxy_only_payload = get_video(conn, proxy_only["id"], actor=actor(2, "viewer"))
 
     assert encrypted_payload["cloud_privacy_mode"] == "server_encrypted"
-    assert encrypted_payload["direct_stream_allowed"] is False
+    assert encrypted_payload["direct_stream_allowed"] is True
     assert plain_payload["direct_stream_allowed"] is True
+    assert e2ee_payload["cloud_privacy_mode"] == "e2ee"
+    assert e2ee_payload["direct_stream_allowed"] is False
+    assert proxy_only_payload["streaming_modes"] == ["realtime_proxy"]
+    assert proxy_only_payload["direct_stream_allowed"] is False

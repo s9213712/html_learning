@@ -118,6 +118,19 @@ def test_dev_launcher_shutdown_recognizes_custom_tmp_run_roots():
     assert "-o -path '/tmp/*/hackme_web/runtime/server.pid'" in script
 
 
+def test_dev_launcher_shutdown_emits_distinct_validated_candidate_pids():
+    script = (ROOT / "test_for_develop.sh").read_text(encoding="utf-8")
+    start = script.index("shutdown_candidate_pids_for_port() {")
+    end = script.index("shutdown_dev_servers_for_port() {", start)
+    body = script[start:end]
+
+    assert "local candidate_pids=()" in body
+    assert '[[ "$pid" =~ ^[0-9]+$ ]] || continue' in body
+    assert 'append_unique_array_value candidate_pids "$pid"' in body
+    assert 'printf \'%s\\n\' "${candidate_pids[@]}"' in body
+    assert 'port_pid_list "$port" | tr \' \' \'\\n\'' not in body
+
+
 def test_dev_launcher_dry_run_resolves_cloud_drive_storage_options(tmp_path):
     storage_root = tmp_path / "drive-store"
 
@@ -150,6 +163,8 @@ def test_dev_launcher_dry_run_resolves_cloud_drive_storage_options(tmp_path):
 def test_dev_launcher_dry_run_resolves_cloudflare_tunnel_options(tmp_path):
     helper = tmp_path / "tunnel_helper.py"
     helper.write_text("# helper placeholder\n", encoding="utf-8")
+    tunnel_port = 30000 + (sum(str(tmp_path).encode("utf-8")) % 20000)
+    tunnel_url = f"https://127.0.0.1:{tunnel_port}"
 
     result = subprocess.run(
         [
@@ -161,7 +176,7 @@ def test_dev_launcher_dry_run_resolves_cloudflare_tunnel_options(tmp_path):
             "--no-capacity-probe",
             "--cloudflare-tunnel",
             "--cloudflare-tunnel-url",
-            "https://127.0.0.1:5000",
+            tunnel_url,
             "--cloudflare-tunnel-helper",
             str(helper),
             "--cloudflare-tunnel-protocol",
@@ -179,7 +194,7 @@ def test_dev_launcher_dry_run_resolves_cloudflare_tunnel_options(tmp_path):
 
     assert result.returncode == 0, result.stderr
     assert "cloudflare_tunnel:   1" in result.stdout
-    assert "cloudflare_local:    https://127.0.0.1:5000" in result.stdout
+    assert f"cloudflare_local:    {tunnel_url}" in result.stdout
     assert f"cloudflare_helper:   {helper}" in result.stdout
     assert "cloudflare_proto:    quic timeout=7s tls_verify=1" in result.stdout
     assert "cloudflare_install:  1" in result.stdout

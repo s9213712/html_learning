@@ -57,5 +57,6 @@ def x_accel_response(path, *, storage_root, as_attachment, download_name, mimety
         "attachment" if as_attachment else "inline",
         download_name or Path(path).name or "download.bin",
     )
+    response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers.pop("Content-Length", None)
     return response

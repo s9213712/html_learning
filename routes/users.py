@@ -17,6 +17,7 @@ from services.storage.cloud_drive import (
     store_cloud_upload,
 )
 from services.governance.sanction_notices import record_admin_sanction_notice
+from services.governance.records import add_reputation_event, ensure_user_reputation_columns, record_moderation_action
 from services.governance.violation_fines import (
     FEATURE_LABELS,
     create_user_feature_restriction,
@@ -2646,6 +2647,77 @@ def register_user_routes(app, deps):
         finally:
             if conn is not None:
                 conn.close()
+
+    @app.route("/api/admin/users/<int:user_id>/reputation-reward", methods=["POST"])
+    @require_csrf
+    def admin_user_reputation_reward(user_id):
+        actor = get_current_user_ctx()
+        if not actor:
+            return json_resp({"ok": False, "msg": "未登入"}), 401
+        actor_role = "super_admin" if actor["username"] == "root" else actor["role"]
+        if role_rank(actor_role) < role_rank("manager"):
+            return json_resp({"ok": False, "msg": "需要管理員權限"}), 403
+        try:
+            data = request.get_json(force=True)
+        except Exception:
+            return json_resp({"ok": False, "msg": "請求 JSON 格式錯誤"}), 400
+        if not isinstance(data, dict):
+            return json_resp({"ok": False, "msg": "請求內容格式錯誤"}), 400
+        points = parse_positive_int(data.get("points", 1), default=1, max_value=50)
+        if points is None:
+            return json_resp({"ok": False, "msg": "聲望獎勵必須介於 1 到 50"}), 400
+        reason = normalize_text(data.get("reason"))[:200]
+        if not reason:
+            return json_resp({"ok": False, "msg": "聲望獎勵必須提供原因"}), 400
+
+        conn = get_db()
+        try:
+            target = conn.execute(
+                "SELECT id, username, role, status FROM users WHERE id=?",
+                (int(user_id),),
+            ).fetchone()
+            if not target:
+                return json_resp({"ok": False, "msg": "找不到目標帳號"}), 404
+            if target["username"] == "root":
+                return json_resp({"ok": False, "msg": "不可調整 root 聲望"}), 403
+            if actor_role == "manager" and role_rank(target["role"]) >= role_rank("manager"):
+                return json_resp({"ok": False, "msg": "管理員只能獎勵一般會員"}), 403
+            ensure_user_reputation_columns(conn)
+            add_reputation_event(
+                conn,
+                user_id=target["id"],
+                delta=points,
+                reason=f"admin_member_reward:{reason}",
+                source_user_id=actor["id"],
+            )
+            record_moderation_action(
+                conn,
+                moderator_id=actor["id"],
+                action_type="reward_member_reputation",
+                target_type="user",
+                target_id=target["id"],
+                reason=reason,
+            )
+            row = conn.execute("SELECT reputation FROM users WHERE id=?", (target["id"],)).fetchone()
+            conn.commit()
+            audit(
+                "MEMBER_REPUTATION_REWARD",
+                get_client_ip(),
+                user=actor["username"],
+                success=True,
+                ua=get_ua(),
+                detail=f"target={target['username']},points={points}",
+            )
+            return json_resp({
+                "ok": True,
+                "msg": "已新增會員聲望獎勵",
+                "reward_type": "reputation",
+                "user_id": int(target["id"]),
+                "points": int(points),
+                "reputation": int(row["reputation"] or 0),
+            })
+        finally:
+            conn.close()
 
     # ── 違規計點（系統自動 or 超級管理者手動）─────────────────────────────────────
     @app.route("/api/admin/users/<int:user_id>/violation", methods=["POST"])

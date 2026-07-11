@@ -25,6 +25,7 @@ from services.ai_agent.hermes import (
     _is_mock_chat_reply,
     public_ai_agent_settings,
 )
+from services.ai_agent.action_policy import evaluate_action_execution, resolve_action_policy
 from services.comfyui.template.analyzer import FieldCategory, analyze_workflow_json
 from services.storage.catalog import create_share_link
 
@@ -79,6 +80,10 @@ AI_AGENT_WRITE_TOOL_SPECS = {
             "loras", "vae", "vae_name", "timeout_seconds", "confirm_billing",
             "backend_url", "comfyui_backend_url", "qwen_edit_profile", "qwen_controlnet_profile", "qwen_profile",
             "profile", "qwen_reference_mode", "qwen_reference_image2", "qwen_reference_force_image2",
+            "agent_review_required", "agent_review_mode", "agent_review_strategy",
+            "agent_review_min_candidates", "agent_review_max_attempts", "agent_review_pass_threshold",
+            "agent_review_plan", "agent_review_attempt_index", "agent_review_stage_index",
+            "agent_review_stage_key", "agent_review_stage_attempt", "agent_review_stage_sequence",
         },
         "required": {"prompt"},
         "write": True,
@@ -1032,8 +1037,11 @@ AI_AGENT_WRITE_TOOL_SPECS.update({
         "method": "POST",
         "path": "/api/admin/moderation/proposals",
         "path_params": {},
-        "body_fields": {"target_user_id", "action", "reason", "evidence", "duration_minutes", "points"},
-        "required": {"target_user_id", "action", "reason"},
+        "body_fields": {
+            "target_user_id", "action_type", "action_value", "reason", "evidence",
+            "duration_hours", "restriction_features", "ttl_hours",
+        },
+        "required": {"target_user_id", "action_type", "reason"},
         "write": True,
     },
     "write_moderation_proposal_vote": {
@@ -1042,7 +1050,7 @@ AI_AGENT_WRITE_TOOL_SPECS.update({
         "method": "POST",
         "path": "/api/admin/moderation/proposals/{proposal_id}/vote",
         "path_params": {"proposal_id": "positive_int"},
-        "body_fields": {"vote", "reason"},
+        "body_fields": {"vote", "comment"},
         "required": {"proposal_id", "vote"},
         "write": True,
     },
@@ -1052,7 +1060,7 @@ AI_AGENT_WRITE_TOOL_SPECS.update({
         "method": "POST",
         "path": "/api/admin/moderation/proposals/{proposal_id}/execute",
         "path_params": {"proposal_id": "positive_int"},
-        "body_fields": {"reason"},
+        "body_fields": set(),
         "required": {"proposal_id"},
         "write": True,
     },
@@ -1305,6 +1313,96 @@ AI_AGENT_WRITE_TOOL_SPECS.update({
         "body_fields": {"profile", "concurrency", "duration_seconds", "tool_timeout_seconds", "reason"},
         "required": set(),
         "write": True,
+    },
+})
+
+AI_AGENT_WRITE_TOOL_SPECS.update({
+    "write_member_reward": {
+        "label": "獎勵會員聲望",
+        "description": "新增可審計的會員 reputation 聲望；不會鑄造或轉移 PointsChain 點數。",
+        "method": "POST",
+        "path": "/api/admin/users/{user_id}/reputation-reward",
+        "path_params": {"user_id": "positive_int"},
+        "body_fields": {"points", "reason"},
+        "required": {"user_id", "points", "reason"},
+        "write": True,
+    },
+    "write_member_penalty": {
+        "label": "新增會員違規",
+        "description": "透過既有權限與違規政策新增會員違規紀錄。",
+        "method": "POST",
+        "path": "/api/admin/users/{user_id}/violation",
+        "path_params": {"user_id": "positive_int"},
+        "body_fields": {"points", "reason", "severity"},
+        "required": {"user_id", "reason"},
+        "write": True,
+    },
+    "write_community_reward": {
+        "label": "獎勵主題作者",
+        "description": "獎勵指定主題作者聲望。",
+        "method": "POST",
+        "path": "/api/community/threads/{thread_id}/reward",
+        "path_params": {"thread_id": "positive_int"},
+        "body_fields": {"points", "reason"},
+        "required": {"thread_id", "points"},
+        "write": True,
+    },
+    "write_community_penalty": {
+        "label": "處罰留言作者",
+        "description": "對指定留言新增違規點數。",
+        "method": "POST",
+        "path": "/api/community/posts/{post_id}/penalty",
+        "path_params": {"post_id": "positive_int"},
+        "body_fields": {"points", "reason"},
+        "required": {"post_id", "points"},
+        "write": True,
+    },
+    "write_governance_proposal_create": {
+        "label": "建立會員治理提案",
+        "description": "建立需依政策投票與核准的會員治理提案。",
+        "method": "POST",
+        "path": "/api/admin/moderation/proposals",
+        "path_params": {},
+        "body_fields": {
+            "target_user_id", "action_type", "action_value", "reason", "ttl_hours", "evidence",
+            "duration_hours", "restriction_features",
+        },
+        "required": {"target_user_id", "action_type", "reason"},
+        "write": True,
+    },
+    "write_governance_vote": {
+        "label": "會員治理投票",
+        "description": "對指定會員治理提案投票。",
+        "method": "POST",
+        "path": "/api/admin/moderation/proposals/{proposal_id}/vote",
+        "path_params": {"proposal_id": "positive_int"},
+        "body_fields": {"vote", "comment"},
+        "required": {"proposal_id", "vote"},
+        "write": True,
+    },
+    "write_governance_execute": {
+        "label": "執行會員治理提案",
+        "description": "執行已通過的會員治理提案。",
+        "method": "POST",
+        "path": "/api/admin/moderation/proposals/{proposal_id}/execute",
+        "path_params": {"proposal_id": "positive_int"},
+        "body_fields": set(),
+        "required": {"proposal_id"},
+        "write": True,
+    },
+    "write_emergency_governance_action": {
+        "label": "建立緊急治理提案",
+        "description": "root 建立並依既有政策套用可回復的緊急治理提案。",
+        "method": "POST",
+        "path": "/api/admin/moderation/proposals",
+        "path_params": {},
+        "body_fields": {
+            "target_user_id", "action_type", "action_value", "reason", "evidence",
+            "duration_hours", "restriction_features", "emergency_execute",
+        },
+        "required": {"target_user_id", "action_type", "reason"},
+        "write": True,
+        "fixed_body": {"emergency_execute": True},
     },
 })
 
@@ -1950,9 +2048,10 @@ def register_ai_agent_routes(app, deps):
                 return parts[1]
         return "general"
 
-    def _write_tool_public_spec(name, spec):
+    def _write_tool_public_spec(name, spec, *, actor_role=None, operation_mode=None):
         blueprint = AI_AGENT_TOOL_BLUEPRINT.get(name) or {}
-        return {
+        policy = resolve_action_policy(name, blueprint=blueprint, write=bool(spec.get("write")))
+        payload = {
             "name": name,
             "label": spec.get("label") or name,
             "description": spec.get("description") or "",
@@ -1965,9 +2064,23 @@ def register_ai_agent_routes(app, deps):
             "body_fields": sorted(spec.get("body_fields") or []),
             "query_fields": sorted(spec.get("query_fields") or []),
             "write": bool(spec.get("write")),
-            "root_only": True,
+            "min_role": policy["min_role"],
+            "root_only": policy["root_only"],
+            "assist_safe": policy["assist_safe"],
+            "risk_level": policy["risk_level"],
             "requires_confirm": bool(spec.get("write")),
         }
+        if actor_role is not None and operation_mode is not None:
+            decision = evaluate_action_execution(
+                name,
+                actor_role,
+                operation_mode,
+                blueprint=blueprint,
+                write=bool(spec.get("write")),
+            )
+            payload["can_execute_now"] = bool(decision["allowed"])
+            payload["execution_reason"] = decision["reason"]
+        return payload
 
     def _write_tool_catalog_fingerprint(tools=None):
         if tools is None:
@@ -1986,8 +2099,14 @@ def register_ai_agent_routes(app, deps):
             if tool.get("name")
         }
 
-    def _require_write_tool_actor():
+    def _require_action_actor():
         actor, denied = _actor_or_401()
+        if denied:
+            return None, denied
+        return actor, None
+
+    def _require_write_tool_actor():
+        actor, denied = _require_action_actor()
         if denied:
             return None, denied
         if not _actor_is_super_admin(actor):
@@ -3216,6 +3335,12 @@ def register_ai_agent_routes(app, deps):
                 args["note"] = args.get("review_note")
         if tool_name == "write_appeal_create" and _is_missing_arg(args.get("content")) and not _is_missing_arg(args.get("message")):
             args["content"] = args.get("message")
+        if tool_name in {"write_moderation_proposal_create", "write_governance_proposal_create", "write_emergency_governance_action"}:
+            if _is_missing_arg(args.get("action_type")) and not _is_missing_arg(args.get("action")):
+                args["action_type"] = args.get("action")
+        if tool_name in {"write_moderation_proposal_vote", "write_governance_vote"}:
+            if _is_missing_arg(args.get("comment")) and not _is_missing_arg(args.get("reason")):
+                args["comment"] = args.get("reason")
         if tool_name == "write_storage_quota_override" and _is_missing_arg(args.get("quota_bytes")) and not _is_missing_arg(args.get("quota_mb")):
             try:
                 args["quota_bytes"] = int(float(args.get("quota_mb")) * 1024 * 1024)
@@ -3315,6 +3440,11 @@ def register_ai_agent_routes(app, deps):
             body["source_type"] = "direct"
         if tool_name == "write_cloud_drive_remote_download" and not str(body.get("download_mode") or "").strip():
             body["download_mode"] = "bt" if str(body.get("source_type") or "").strip().lower() in {"bt", "magnet", "torrent_url", "torrent_file"} else "direct"
+        # Policy-owned values are applied last so planner/user arguments cannot
+        # weaken the contract of specialized actions such as emergency governance.
+        fixed_body = spec.get("fixed_body")
+        if isinstance(fixed_body, dict):
+            body.update(fixed_body)
         return path, body, ""
 
     def _prepare_comfyui_write_body(body):
@@ -4294,6 +4424,26 @@ def register_ai_agent_routes(app, deps):
         ):
             if body.get(key) not in (None, ""):
                 run_body[key] = body.get(key)
+        for key in (
+            "agent_review_required",
+            "agent_review_mode",
+            "agent_review_strategy",
+            "agent_review_min_candidates",
+            "agent_review_max_attempts",
+            "agent_review_pass_threshold",
+            "agent_review_plan",
+            "agent_review_attempt_index",
+            "agent_review_stage_index",
+            "agent_review_stage_key",
+            "agent_review_stage_attempt",
+            "agent_review_stage_sequence",
+            "edit_instruction",
+            "edit_prompt",
+            "negative_prompt",
+            "generation_mode",
+        ):
+            if body.get(key) not in (None, ""):
+                run_body[key] = body.get(key)
         run_status, run_payload = _dispatch_internal_api("POST", f"/api/comfyui/workflows/{preset_id}/run", run_body)
         if isinstance(run_payload, dict):
             run_payload.setdefault("official_workflow_id", workflow_id)
@@ -4851,19 +5001,21 @@ def register_ai_agent_routes(app, deps):
     @app.route("/api/ai-agent/write-tools", methods=["GET"])
     @require_csrf_safe
     def ai_agent_write_tools_route():
-        actor, denied = _require_write_tool_actor()
+        actor, denied = _require_action_actor()
         if denied:
             return denied
-        include_all = _parse_bool(request.args.get("include_all")) is True
+        include_all = _parse_bool(request.args.get("include_all")) is True and _actor_is_super_admin(actor)
         guard = ai_agent_write_guard_status(get_db=get_audit_db)
-        guard_denied = _ai_agent_write_guard_denied(actor, endpoint="list") if guard.get("blocked") and not include_all else None
-        if guard_denied:
-            return guard_denied
         settings = get_system_settings() or {}
         public = public_ai_agent_settings(settings, actor=actor)
         effective_names = _write_tool_effective_names(settings, actor)
         tools = [
-            _write_tool_public_spec(name, spec)
+            _write_tool_public_spec(
+                name,
+                spec,
+                actor_role=public.get("role") or "user",
+                operation_mode=public.get("operation_mode") or "readonly",
+            )
             for name, spec in AI_AGENT_WRITE_TOOL_SPECS.items()
             if name in effective_names
         ]
@@ -4880,7 +5032,9 @@ def register_ai_agent_routes(app, deps):
         )
         return json_resp({
             "ok": True,
-            "root_only": True,
+            "root_only": False,
+            "role_scoped": True,
+            "actor_role": public.get("role") or "user",
             "operation_mode": public.get("operation_mode"),
             "write_enabled": bool((public.get("operation_mode_policy") or {}).get("write_enabled")),
             "guard": guard,
@@ -4893,12 +5047,9 @@ def register_ai_agent_routes(app, deps):
     @app.route("/api/ai-agent/write-tools/execute", methods=["POST"])
     @require_csrf
     def ai_agent_write_tool_execute_route():
-        actor, denied = _require_write_tool_actor()
+        actor, denied = _require_action_actor()
         if denied:
             return denied
-        guard_denied = _ai_agent_write_guard_denied(actor, endpoint="execute")
-        if guard_denied:
-            return guard_denied
         data, bad_request = _request_json_dict()
         if bad_request:
             return bad_request
@@ -4907,6 +5058,10 @@ def register_ai_agent_routes(app, deps):
         if not spec:
             _audit_agent_event("AI_AGENT_WRITE_TOOL", actor, success=False, detail=f"tool={tool_name or '-'},error=unsupported_tool")
             return json_resp({"ok": False, "msg": "不支援的 write tool"}), 400
+        if spec.get("write"):
+            guard_denied = _ai_agent_write_guard_denied(actor, endpoint="execute")
+            if guard_denied:
+                return guard_denied
         args = data.get("arguments")
         if args is None:
             args = data.get("params")
@@ -4932,15 +5087,23 @@ def register_ai_agent_routes(app, deps):
             return json_resp({"ok": False, "msg": "此工具未在目前 AI Agent allowed_tools/角色範圍內啟用"}), 403
 
         public = public_ai_agent_settings(settings, actor=actor)
-        write_enabled = bool((public.get("operation_mode_policy") or {}).get("write_enabled"))
         elevate_once = data.get("elevate_once") in {True, "ALLOW_WRITE_ONCE", "allow_write_once"}
-        if spec.get("write") and not write_enabled and not (_actor_is_super_admin(actor) and elevate_once):
+        execution = evaluate_action_execution(
+            tool_name,
+            public.get("role") or "user",
+            public.get("operation_mode") or "readonly",
+            blueprint=AI_AGENT_TOOL_BLUEPRINT.get(tool_name) or {},
+            write=bool(spec.get("write")),
+        )
+        elevated = bool(spec.get("write") and _actor_is_super_admin(actor) and elevate_once)
+        if spec.get("write") and not execution["allowed"] and not elevated:
             _audit_agent_event("AI_AGENT_WRITE_TOOL", actor, success=False, detail=f"tool={tool_name},error=operation_mode_not_write,mode={public.get('operation_mode')}")
             return json_resp({
                 "ok": False,
-                "msg": "寫入型工具需要 root 允許本次提權，或先將 AI Agent operation mode 切換為 write",
+                "msg": "此 action 的風險層級不允許在目前模式執行；請使用 assist-safe action，或由 root 切換為 write 模式",
                 "operation_mode": public.get("operation_mode"),
                 "requires_elevation": _actor_is_super_admin(actor),
+                "action_policy": execution,
             }), 409
         if spec.get("write") and data.get("confirm") not in {True, "EXECUTE", "execute"}:
             _audit_agent_event("AI_AGENT_WRITE_TOOL", actor, success=False, detail=f"tool={tool_name},error=missing_confirm")
@@ -5018,7 +5181,8 @@ def register_ai_agent_routes(app, deps):
             "ok": ok,
             "tool": tool_name,
             "status": status_code,
-            "elevated_once": bool(spec.get("write") and elevate_once and not write_enabled),
+            "elevated_once": elevated and not execution["allowed"],
+            "action_policy": execution,
             "result": _safe_tool_payload(payload),
         }), (200 if ok else int(status_code or 500))
 

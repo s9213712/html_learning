@@ -4702,13 +4702,23 @@ pid_matches_shutdown_port() {
 
 shutdown_candidate_pids_for_port() {
   local port="$1"
-  local pid
-  port_pid_list "$port" | tr ' ' '\n'
+  local pid listener_pids
+  local candidate_pids=()
+
+  listener_pids="$(port_pid_list "$port")"
+  for pid in $listener_pids; do
+    [[ "$pid" =~ ^[0-9]+$ ]] || continue
+    append_unique_array_value candidate_pids "$pid"
+  done
   while IFS= read -r pid; do
-    [[ -n "$pid" ]] || continue
+    [[ "$pid" =~ ^[0-9]+$ ]] || continue
     pid_matches_shutdown_port "$pid" "$port" || continue
-    printf '%s\n' "$pid"
+    append_unique_array_value candidate_pids "$pid"
   done < <({ collect_pid_file_pids; scan_dev_server_pids; } | sort -u)
+
+  if [[ "${#candidate_pids[@]}" != "0" ]]; then
+    printf '%s\n' "${candidate_pids[@]}"
+  fi
 }
 
 shutdown_dev_servers_for_port() {

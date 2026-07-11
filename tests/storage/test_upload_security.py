@@ -559,10 +559,13 @@ def test_storage_upgrade_price_catalog_backfills_missing_items():
             "SELECT * FROM economy_price_catalog WHERE item_key LIKE 'cloud_storage_%' AND enabled=1 ORDER BY item_key"
         ).fetchall()
         catalog = enrich_storage_upgrade_catalog([dict(row) for row in rows])
-        assert [item["item_key"] for item in catalog] == ["cloud_storage_1gb_30d"]
-        assert catalog[0]["storage_bytes"] == 1024 * 1024 * 1024
-        assert catalog[0]["duration_days"] == 7
-        assert catalog[0]["label"] == "雲端容量 1GB / 7 天"
+        by_key = {item["item_key"]: item for item in catalog}
+        assert set(by_key) == {"cloud_storage_1gb_7d", "cloud_storage_1gb_30d"}
+        assert by_key["cloud_storage_1gb_7d"]["storage_bytes"] == 1024 * 1024 * 1024
+        assert by_key["cloud_storage_1gb_7d"]["duration_days"] == 7
+        assert by_key["cloud_storage_1gb_7d"]["label"] == "雲端容量 1GB / 7 天"
+        assert by_key["cloud_storage_1gb_30d"]["duration_days"] == 30
+        assert by_key["cloud_storage_1gb_30d"]["label"] == "雲端容量 1GB / 30 天"
     finally:
         conn.close()
 
@@ -590,10 +593,10 @@ def test_storage_upgrade_price_catalog_updates_legacy_default_duration_and_label
             "SELECT item_name, metadata_json FROM economy_price_catalog WHERE item_key='cloud_storage_1gb_30d'"
         ).fetchone()
         product = storage_upgrade_product_from_catalog(conn, "cloud_storage_1gb_30d")
-        assert row["item_name"] == "雲端容量 1GB / 7 天"
-        assert '"duration_days":7' in row["metadata_json"]
-        assert product["duration_days"] == 7
-        assert product["label"] == "雲端容量 1GB / 7 天"
+        assert row["item_name"] == "雲端容量 1GB / 30 天"
+        assert '"duration_days":30' in row["metadata_json"]
+        assert product["duration_days"] == 30
+        assert product["label"] == "雲端容量 1GB / 30 天"
     finally:
         conn.close()
 
@@ -934,12 +937,13 @@ def test_image_reencode_uses_format_whitelist_and_explicit_pixel_limit(tmp_path,
         seen["formats"] = kwargs.get("formats")
         return real_open(*args, **kwargs)
 
+    original_max_image_pixels = Image.MAX_IMAGE_PIXELS
     monkeypatch.setattr(Image, "open", wrapped_open)
     result = reencode_image_strip_metadata(image_path, filename="avatar.jpg", max_pixels=12_345)
 
     assert result["ok"] is True
     assert seen["formats"] == ["JPEG", "PNG", "GIF", "WEBP"]
-    assert Image.MAX_IMAGE_PIXELS == 12_345
+    assert Image.MAX_IMAGE_PIXELS == original_max_image_pixels
 
 
 def test_scan_uploaded_file_records_clean_clamav_result(tmp_path, monkeypatch):

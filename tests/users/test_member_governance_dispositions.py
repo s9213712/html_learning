@@ -56,7 +56,11 @@ def _build_app(db_path, actor_box):
             "json_resp": _json_resp,
             "normalize_text": lambda value: value.strip() if isinstance(value, str) else "",
             "parse_birthdate": lambda value: value,
-            "parse_positive_int": lambda value, default=1: int(value or default),
+            "parse_positive_int": lambda value, default=1, min_value=1, max_value=None: (
+                int(value or default)
+                if int(value or default) >= min_value and (max_value is None or int(value or default) <= max_value)
+                else None
+            ),
             "revoke_user_sessions": lambda *args, **kwargs: None,
             "require_csrf": _passthrough,
             "require_csrf_safe": _passthrough,
@@ -173,3 +177,48 @@ def test_manager_member_governance_disposition_cannot_target_manager(tmp_path):
 
     assert res.status_code == 403
     assert "一般用戶" in res.get_json()["msg"]
+
+
+def test_manager_reputation_reward_is_auditable_and_role_scoped(tmp_path):
+    db_path = tmp_path / "member-reputation-reward.db"
+    _seed_db(db_path)
+    actor_box = {"actor": {"id": 2, "username": "admin", "role": "manager"}}
+    client = _build_app(db_path, actor_box).test_client()
+
+    rewarded = client.post(
+        "/api/admin/users/3/reputation-reward",
+        json={"points": 9, "reason": "high quality security report"},
+    )
+    denied = client.post(
+        "/api/admin/users/4/reputation-reward",
+        json={"points": 2, "reason": "peer reward must be root-reviewed"},
+    )
+
+    assert rewarded.status_code == 200, rewarded.get_json()
+    assert rewarded.get_json()["reward_type"] == "reputation"
+    assert rewarded.get_json()["reputation"] == 9
+    assert denied.status_code == 403
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        event = conn.execute(
+            "SELECT delta, reason, source_user_id FROM reputation_events WHERE user_id=3"
+        ).fetchone()
+        action = conn.execute(
+            "SELECT action_type, target_type, target_id, reason FROM moderation_actions WHERE target_id=3"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert dict(event) == {
+        "delta": 9,
+        "reason": "admin_member_reward:high quality security report",
+        "source_user_id": 2,
+    }
+    assert dict(action) == {
+        "action_type": "reward_member_reputation",
+        "target_type": "user",
+        "target_id": 3,
+        "reason": "high quality security report",
+    }

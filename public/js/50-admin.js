@@ -1092,7 +1092,7 @@ function switchModuleTab(tab) {
     switchSystemTab(currentSystemTab || "health");
   }
   if (normTab === "drive" && canAccessDrive) {
-    loadDriveDashboard({ lazy: true });
+    loadDriveDashboard({ lazy: true, navigationScoped: true });
   }
   if (normTab === "albums" && canAccessAlbums) {
     loadAlbumGallery();

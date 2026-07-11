@@ -15,6 +15,10 @@ tar -C "$SOURCE_ROOT" \
   --exclude='./__pycache__' \
   --exclude='./cache' \
   --exclude='./runtime' \
+  --exclude='./docs/AGENTS/reports' \
+  --exclude='./output' \
+  --exclude='./playwright-report' \
+  --exclude='./test-results' \
   --exclude='*/.pytest_cache' \
   --exclude='*/__pycache__' \
   --exclude='*/cache' \

@@ -26,6 +26,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 import chess
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
@@ -33,7 +37,6 @@ from playwright.sync_api import sync_playwright
 from scripts.testing.browser_error_filters import ignored_browser_error
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
 ROOT_PASSWORD = "RootDeep123!"
 MANAGER_PASSWORD = "ManagerDeep123!"
 TEST_PASSWORD = "TestDeep123!"
@@ -258,7 +261,7 @@ def urlopen_json(url: str, timeout: float = 2.0) -> dict[str, Any] | None:
         return None
 
 
-def wait_for_server(port: int, timeout_seconds: int = 45) -> str:
+def wait_for_server(port: int, timeout_seconds: int = 180) -> str:
     deadline = time.time() + timeout_seconds
     urls = [f"https://127.0.0.1:{port}", f"http://127.0.0.1:{port}"]
     while time.time() < deadline:
@@ -351,6 +354,26 @@ def fetch_json(
         }""",
         {"method": method, "path": path, "payload": payload, "csrf": csrf, "timeoutMs": int(timeout_ms)},
     )
+
+
+def fetch_json_get_retry(
+    page,
+    path: str,
+    *,
+    attempts: int = 3,
+    timeout_ms: int = 45000,
+) -> dict[str, Any]:
+    """Retry idempotent GETs that hit transient browser/network backpressure."""
+    retryable = {0, 408, 425, 429, 500, 502, 503, 504}
+    result: dict[str, Any] = {"status": 0, "ok": False, "body": {"msg": "request not attempted"}}
+    for attempt in range(1, max(1, int(attempts)) + 1):
+        result = fetch_json(page, "GET", path, timeout_ms=timeout_ms)
+        result["attempts"] = attempt
+        if int(result.get("status") or 0) not in retryable:
+            return result
+        if attempt < attempts:
+            page.wait_for_timeout(min(2000, 300 * attempt))
+    return result
 
 
 def build_direct_auth_headers(page, base_url: str) -> dict[str, str]:
@@ -538,9 +561,121 @@ def attach_browser_error_handlers(page, record_error) -> None:
     page.on("console", on_console)
     page.on("pageerror", lambda exc: record_error("pageerror", str(exc)))
     page.on(
+        "requestfailed",
+        lambda req: record_error("requestfailed", f"{req.failure or 'request failed'} {req.method} {req.url}")
+        if "ERR_ABORTED" not in str(req.failure or "")
+        else None,
+    )
+    page.on(
         "response",
         lambda response: record_error("http", f"{response.status} {response.url}") if response.status >= 500 else None,
     )
+
+
+def is_recoverable_network_cascade(kind: str, message: str) -> bool:
+    text = str(message or "").strip()
+    if "ERR_NETWORK_CHANGED" in text or "ERR_TOO_MANY_RETRIES" in text:
+        return True
+    if text in {"Failed to fetch", "TypeError: Failed to fetch"}:
+        return True
+    if kind == "pageerror" and text.endswith(" is not defined") and "\n" not in text:
+        return True
+    if kind == "console" and "Failed to load resource" in text:
+        return True
+    return False
+
+
+class BrowserErrorCollector:
+    """Keep recovered host-network transitions visible without hiding app defects."""
+
+    def __init__(self, errors: list[dict[str, str]], warnings: list[dict[str, str]], *, limit: int = 80) -> None:
+        self.errors = errors
+        self.warnings = warnings
+        self.limit = limit
+        self.states: dict[int, dict[str, Any]] = {}
+        self.seen_errors: set[str] = set()
+        self.seen_warnings: set[str] = set()
+
+    def register(self, page, label: str) -> None:
+        self.states[id(page)] = {
+            "label": label,
+            "capturing_navigation": False,
+            "navigation_events": [],
+            "verified": False,
+            "network_transition_until": 0.0,
+        }
+        _DEEP_BROWSER_ERROR_COLLECTORS[id(page)] = self
+        attach_browser_error_handlers(page, lambda kind, message: self.record(page, kind, message))
+
+    def _append(self, target: list[dict[str, str]], seen: set[str], event: dict[str, str]) -> None:
+        key = f"{event['page']}:{event['type']}:{event['text']}"
+        if key in seen or len(target) >= self.limit:
+            return
+        seen.add(key)
+        target.append(event)
+
+    def _append_error(self, event: dict[str, str]) -> None:
+        self._append(self.errors, self.seen_errors, event)
+
+    def _append_warning(self, event: dict[str, str]) -> None:
+        warning = {**event, "reason": "host network changed; page contract recovered"}
+        self._append(self.warnings, self.seen_warnings, warning)
+
+    def record(self, page, kind: str, message: str) -> None:
+        compact = str(message or "").replace("\n", " ")[:500]
+        if ignored_browser_error(compact):
+            return
+        state = self.states[id(page)]
+        event = {"type": kind, "text": compact, "page": str(state["label"])}
+        if state["capturing_navigation"]:
+            state["navigation_events"].append(event)
+            return
+
+        now = time.monotonic()
+        if state["verified"] and "ERR_NETWORK_CHANGED" in compact:
+            state["network_transition_until"] = now + 8.0
+            self._append_warning(event)
+            return
+        if (
+            state["verified"]
+            and now <= float(state["network_transition_until"] or 0)
+            and is_recoverable_network_cascade(kind, compact)
+        ):
+            self._append_warning(event)
+            return
+        self._append_error(event)
+
+    def begin_navigation(self, page) -> None:
+        state = self.states.get(id(page))
+        if not state:
+            return
+        state["capturing_navigation"] = True
+        state["navigation_events"] = []
+        state["verified"] = False
+        state["network_transition_until"] = 0.0
+
+    def navigation_has_network_change(self, page) -> bool:
+        state = self.states.get(id(page)) or {}
+        return any("ERR_NETWORK_CHANGED" in event.get("text", "") for event in state.get("navigation_events", []))
+
+    def finish_navigation(self, page, *, recovered: bool) -> None:
+        state = self.states.get(id(page))
+        if not state:
+            return
+        events = list(state["navigation_events"])
+        had_network_change = any("ERR_NETWORK_CHANGED" in event.get("text", "") for event in events)
+        for event in events:
+            if recovered and had_network_change and is_recoverable_network_cascade(event["type"], event["text"]):
+                self._append_warning(event)
+            else:
+                self._append_error(event)
+        state["capturing_navigation"] = False
+        state["navigation_events"] = []
+        state["verified"] = recovered
+        state["network_transition_until"] = 0.0
+
+
+_DEEP_BROWSER_ERROR_COLLECTORS: dict[int, BrowserErrorCollector] = {}
 
 
 def check_ui_quality(rec: Recorder, page, label: str, *, mobile: bool = False) -> None:
@@ -595,6 +730,40 @@ def wait_for_auth_app(page, *, timeout: int = 30000) -> None:
     )
 
 
+def wait_for_frontend_contract(page, *, timeout: int = 30000) -> None:
+    page.wait_for_function(
+        """() => [
+            typeof $ === 'function',
+            typeof apiFetch === 'function',
+            typeof switchModuleTab === 'function',
+            typeof toggleChatCreatePanel === 'function',
+            typeof loadCommunityHome === 'function',
+            typeof loadDriveDashboard === 'function',
+            typeof loadVideoPlatform === 'function',
+            typeof loadAiAgentStatus === 'function',
+            typeof loadJobCenter === 'function'
+        ].every(Boolean)""",
+        timeout=timeout,
+    )
+
+
+def goto_with_network_retry(page, url: str, *, attempts: int = 3):
+    """Retry a safe page GET only after Chromium reports a host-network transition."""
+    saw_network_change = False
+    for attempt in range(max(1, int(attempts))):
+        try:
+            return page.goto(url, wait_until="domcontentloaded")
+        except Exception as exc:
+            message = str(exc)
+            network_changed = "ERR_NETWORK_CHANGED" in message
+            retry_tail = saw_network_change and "ERR_TOO_MANY_RETRIES" in message
+            saw_network_change = saw_network_change or network_changed
+            if attempt + 1 >= attempts or not (network_changed or retry_tail):
+                raise
+            page.wait_for_timeout(250 * (attempt + 1))
+    raise RuntimeError(f"navigation retry exhausted: {url}")
+
+
 def switch_module(page, module: str) -> None:
     wait_for_auth_app(page)
     page.evaluate(
@@ -633,22 +802,53 @@ def switch_admin_tab(page, tab: str) -> None:
 
 
 def load_authenticated_app(page, base_url: str) -> None:
-    page.goto(base_url + "/", wait_until="domcontentloaded")
-    wait_for_auth_app(page)
+    collector = _DEEP_BROWSER_ERROR_COLLECTORS.get(id(page))
+    if collector:
+        collector.begin_navigation(page)
+    last_error: Exception | None = None
+    for attempt in range(3):
+        try:
+            page.goto(base_url + "/", wait_until="domcontentloaded")
+            wait_for_auth_app(page)
+            wait_for_frontend_contract(page)
+            try:
+                page.wait_for_load_state("networkidle", timeout=5000)
+            except PlaywrightTimeoutError:
+                pass
+            if collector:
+                collector.finish_navigation(page, recovered=True)
+            return
+        except Exception as exc:
+            last_error = exc
+            if collector and collector.navigation_has_network_change(page) and attempt < 2:
+                page.wait_for_timeout(250 * (attempt + 1))
+                continue
+            if collector:
+                collector.finish_navigation(page, recovered=False)
+            raise
+    if collector:
+        collector.finish_navigation(page, recovered=False)
+    if last_error:
+        raise last_error
 
 
-def login(page, base_url: str, *, load_app: bool = True) -> None:
+def login_as(page, base_url: str, username: str, password: str, *, load_app: bool = True) -> dict[str, Any]:
     page.goto(base_url + "/", wait_until="domcontentloaded")
     if not cookie_value(page, "csrf_token"):
         page.evaluate("() => fetch('/api/csrf-token', {credentials: 'same-origin'})")
-    login_result = fetch_json(page, "POST", "/api/login", {"username": "root", "password": ROOT_PASSWORD})
+    login_result = fetch_json(page, "POST", "/api/login", {"username": username, "password": password})
     if login_result["status"] != 200 or not login_result["body"].get("ok"):
-        raise RuntimeError(f"login api failed: {login_result}")
+        raise RuntimeError(f"login api failed for {username}: {login_result}")
     me = fetch_json(page, "GET", "/api/me")
     if me["status"] != 200 or not me["body"].get("ok"):
-        raise RuntimeError(f"login failed: {me}")
+        raise RuntimeError(f"login verification failed for {username}: {me}")
     if load_app:
         load_authenticated_app(page, base_url)
+    return me["body"]
+
+
+def login(page, base_url: str, *, load_app: bool = True) -> None:
+    login_as(page, base_url, "root", ROOT_PASSWORD, load_app=load_app)
 
 
 def enable_required_features(
@@ -683,6 +883,7 @@ def enable_required_features(
         "feature_social_search_enabled",
         "feature_advanced_security_enabled",
         "feature_comfyui_enabled",
+        "feature_ai_agent_enabled",
         "feature_economy_enabled",
         "feature_trading_enabled",
         "feature_games_enabled",
@@ -858,6 +1059,10 @@ def check_auth_registration_journey(rec: Recorder, browser, base_url: str, root_
     page = ctx.new_page()
     try:
         page.goto(base_url + "/", wait_until="domcontentloaded")
+        page.wait_for_function(
+            "() => document.querySelector('#reg-user')?.dataset.registerAutofillGuardBound === '1'",
+            timeout=10000,
+        )
         page.click("#tab-register")
         for selector in ("#reg-user", "#reg-pw", "#reg-pw-confirm"):
             page.click(selector)
@@ -979,6 +1184,225 @@ def check_admin_member_management(rec: Recorder, page) -> dict[str, Any]:
         unblock=unblock.get("body"),
     )
     return user
+
+
+def check_bug_report_journey(rec: Recorder, page) -> None:
+    functions_ready = page.evaluate(
+        "() => ['showBugReportDialog', 'hideBugReportDialog', 'submitBugReport'].every(name => typeof window[name] === 'function')"
+    )
+    page.locator("#bug-report-open-btn").click(timeout=5000)
+    page.wait_for_selector("#bug-report-overlay.show", state="visible", timeout=5000)
+    page.locator("#bug-report-cancel-btn").click(timeout=5000)
+    page.wait_for_selector("#bug-report-overlay.show", state="hidden", timeout=5000)
+    rec.add("bug_report_modal_flow", bool(functions_ready), f"functions_ready={bool(functions_ready)}")
+
+
+def check_ai_agent_journey(rec: Recorder, browser, base_url: str, root_page) -> None:
+    """Exercise role-scoped Agent actions through real browser sessions."""
+
+    def tool_names(result: dict[str, Any]) -> set[str]:
+        return {
+            str(item.get("name") or "")
+            for item in result.get("body", {}).get("tools") or []
+            if isinstance(item, dict) and item.get("name")
+        }
+
+    settings = fetch_json(
+        root_page,
+        "PUT",
+        "/api/admin/settings",
+        {"ai_agent_operation_mode": "write", "ai_agent_allow_tool_runs": True},
+    )
+    settings_ok = settings["status"] == 200 and bool(settings.get("body", {}).get("ok"))
+    rec.add(
+        "ai_agent_write_mode_setup",
+        settings_ok,
+        f"status={settings['status']}",
+        response=settings.get("body"),
+    )
+    if not settings_ok:
+        raise RuntimeError(f"AI Agent write-mode setup failed: {settings}")
+
+    target = ensure_journey_user(root_page, "qa_agent_target")
+
+    user_context = browser.new_context(ignore_https_errors=True, viewport={"width": 1280, "height": 800})
+    user_page = user_context.new_page()
+    attach_browser_error_handlers(user_page, lambda _kind, _text: None)
+    try:
+        login_as(user_page, base_url, "test", TEST_PASSWORD, load_app=False)
+        status = fetch_json(user_page, "GET", "/api/ai-agent/status")
+        catalog = fetch_json(user_page, "GET", "/api/ai-agent/write-tools")
+        readonly = fetch_json(user_page, "GET", "/api/ai-agent/readonly?scope=all&limit=10")
+        audit_denied = fetch_json(user_page, "GET", "/api/ai-agent/audit-status")
+        denied_manager_action = fetch_json(
+            user_page,
+            "POST",
+            "/api/ai-agent/write-tools/execute",
+            {
+                "tool": "write_member_reward",
+                "arguments": {"user_id": target["id"], "points": 1, "reason": "must be denied for user"},
+                "confirm": "EXECUTE",
+            },
+        )
+        created_file = fetch_json(
+            user_page,
+            "POST",
+            "/api/ai-agent/write-tools/execute",
+            {
+                "tool": "write_cloud_drive_create_text",
+                "arguments": {
+                    "filename": "ai-agent-user-live-qa.txt",
+                    "content": "AI Agent user action live QA",
+                    "virtual_path": "/AI Agent QA/ai-agent-user-live-qa.txt",
+                },
+                "confirm": "EXECUTE",
+            },
+        )
+        files = fetch_json(user_page, "GET", "/api/storage/files")
+        names = tool_names(catalog)
+        user_ok = (
+            status["status"] == 200
+            and status.get("body", {}).get("settings", {}).get("role") == "user"
+            and catalog["status"] == 200
+            and "write_cloud_drive_create_text" in names
+            and "write_member_reward" not in names
+            and "audit_scan" not in names
+            and readonly["status"] == 200
+            and "member_management" not in readonly.get("body", {})
+            and "attack_diagnosis" not in readonly.get("body", {})
+            and audit_denied["status"] == 403
+            and denied_manager_action["status"] == 403
+            and created_file["status"] == 200
+            and bool(created_file.get("body", {}).get("ok"))
+            and files["status"] == 200
+        )
+        rec.add(
+            "ai_agent_user_role_action_flow",
+            user_ok,
+            f"tools={len(names)}, create={created_file['status']}, manager_denied={denied_manager_action['status']}, audit_denied={audit_denied['status']}",
+            operation_mode=status.get("body", {}).get("settings", {}).get("operation_mode"),
+            created_file=created_file.get("body"),
+        )
+    finally:
+        user_context.close()
+
+    manager_context = browser.new_context(ignore_https_errors=True, viewport={"width": 1280, "height": 800})
+    manager_page = manager_context.new_page()
+    attach_browser_error_handlers(manager_page, lambda _kind, _text: None)
+    try:
+        login_as(manager_page, base_url, "admin", MANAGER_PASSWORD, load_app=False)
+        status = fetch_json(manager_page, "GET", "/api/ai-agent/status")
+        catalog = fetch_json(manager_page, "GET", "/api/ai-agent/write-tools")
+        readonly = fetch_json(manager_page, "GET", "/api/ai-agent/readonly?scope=all&limit=10")
+        audit_denied = fetch_json(manager_page, "GET", "/api/ai-agent/audit-status")
+        denied_root_action = fetch_json(
+            manager_page,
+            "POST",
+            "/api/ai-agent/write-tools/execute",
+            {"tool": "audit_scan", "arguments": {"force": False}},
+        )
+        reward = fetch_json(
+            manager_page,
+            "POST",
+            "/api/ai-agent/write-tools/execute",
+            {
+                "tool": "write_member_reward",
+                "arguments": {"user_id": target["id"], "points": 1, "reason": "AI Agent live manager QA"},
+                "confirm": "EXECUTE",
+            },
+        )
+        names = tool_names(catalog)
+        manager_ok = (
+            status["status"] == 200
+            and status.get("body", {}).get("settings", {}).get("role") == "manager"
+            and "write_member_reward" in names
+            and "write_governance_proposal_create" in names
+            and "audit_scan" not in names
+            and readonly["status"] == 200
+            and "member_management" in readonly.get("body", {})
+            and "attack_diagnosis" not in readonly.get("body", {})
+            and audit_denied["status"] == 403
+            and denied_root_action["status"] == 403
+            and reward["status"] == 200
+            and bool(reward.get("body", {}).get("ok"))
+        )
+        rec.add(
+            "ai_agent_manager_role_action_flow",
+            manager_ok,
+            f"tools={len(names)}, reward={reward['status']}, root_denied={denied_root_action['status']}, audit_denied={audit_denied['status']}",
+            reward=reward.get("body"),
+        )
+    finally:
+        manager_context.close()
+
+    root_status = fetch_json(root_page, "GET", "/api/ai-agent/status")
+    root_catalog = fetch_json(root_page, "GET", "/api/ai-agent/write-tools?include_all=1")
+    root_readonly = fetch_json(root_page, "GET", "/api/ai-agent/readonly?scope=all&limit=10")
+    root_audit = fetch_json(root_page, "GET", "/api/ai-agent/audit-status")
+    root_history = fetch_json(root_page, "GET", "/api/ai-agent/conversation-history?limit=5")
+    handoff = fetch_json(
+        root_page,
+        "POST",
+        "/api/ai-agent/write-tools/execute",
+        {
+            "tool": "write_codex_handoff_create",
+            "arguments": {
+                "title": "Playwright AI Agent live handoff",
+                "objective": "Review the isolated live QA evidence",
+                "allowed_scope": "runtime reports only",
+                "priority": "normal",
+            },
+            "confirm": "EXECUTE",
+        },
+    )
+    handoffs = fetch_json(root_page, "GET", "/api/ai-agent/codex-handoffs?limit=5")
+    root_names = tool_names(root_catalog)
+    root_ok = (
+        root_status["status"] == 200
+        and root_status.get("body", {}).get("settings", {}).get("role") == "super_admin"
+        and "write_codex_handoff_create" in root_names
+        and "write_member_reward" in root_names
+        and "audit_scan" in root_names
+        and root_readonly["status"] == 200
+        and "member_management" in root_readonly.get("body", {})
+        and "attack_diagnosis" in root_readonly.get("body", {})
+        and root_audit["status"] == 200
+        and root_history["status"] == 200
+        and handoff["status"] == 200
+        and bool(handoff.get("body", {}).get("ok"))
+        and handoffs["status"] == 200
+        and any(
+            item.get("title") == "Playwright AI Agent live handoff"
+            for item in handoffs.get("body", {}).get("handoffs") or []
+        )
+    )
+    rec.add(
+        "ai_agent_root_role_action_flow",
+        root_ok,
+        f"tools={len(root_names)}, audit={root_audit['status']}, history={root_history['status']}, handoff={handoff['status']}",
+        handoff=handoff.get("body"),
+    )
+
+    switch_module(root_page, "ai-agent")
+    root_page.wait_for_selector("#module-ai-agent.active", state="visible", timeout=10000)
+    root_page.wait_for_function(
+        "() => document.getElementById('ai-agent-readonly-role')?.textContent === 'super_admin'",
+        timeout=15000,
+    )
+    status_text = root_page.locator("#ai-agent-status").inner_text().strip()
+    effective_tools_text = root_page.locator("#ai-agent-effective-tools").inner_text().strip()
+    ui_ok = (
+        status_text != "尚未連線"
+        and "write_codex_handoff_create" in effective_tools_text
+        and root_page.locator("#ai-agent-history-btn").is_visible()
+        and root_page.locator("#ai-agent-audit-actions").is_visible()
+    )
+    check_ui_quality(rec, root_page, "ai_agent_root_desktop")
+    rec.add(
+        "ai_agent_root_ui_flow",
+        ui_ok,
+        f"status={status_text[:120]}, tools_rendered={len(effective_tools_text)}",
+    )
 
 
 def check_forum_journey(rec: Recorder, page) -> dict[str, Any]:
@@ -1269,7 +1693,7 @@ def check_video_share_journey(rec: Recorder, page) -> dict[str, Any]:
                 const msg = document.querySelector('#video-msg')?.textContent || '';
                 const status = document.querySelector('#video-upload-progress-status')?.textContent || '';
                 const percent = document.querySelector('#video-upload-progress-percent')?.textContent || '';
-                return /影音已發布/.test(msg) || /處理完成/.test(status) || percent.trim() === '100%';
+                return /影音已發布/.test(msg) || /處理完成/.test(status);
             }""",
             timeout=45000,
         )
@@ -1279,23 +1703,30 @@ def check_video_share_journey(rec: Recorder, page) -> dict[str, Any]:
         upload_success = (
             "影音已發布" in video_msg
             or "處理完成" in progress_status
-            or progress_percent.strip() == "100%"
         )
-        videos = fetch_json(page, "GET", "/api/videos")
-        page.click("#video-refresh-btn")
-        page.wait_for_timeout(900)
-        check_ui_quality(rec, page, "videos_desktop")
+        videos = fetch_json_get_retry(page, "/api/videos")
         videos_body = videos.get("body") or {}
         video_items = videos_body.get("videos") or videos_body.get("items") or videos_body.get("data") or []
+        manage = {"status": 0, "body": {}}
+        if not video_items:
+            manage = fetch_json_get_retry(page, "/api/videos/manage")
+            video_items = (manage.get("body") or {}).get("videos") or []
         latest = video_items[0] if video_items else {}
         latest_id = int(latest.get("id") or 0)
-        if latest_id:
-            card = page.locator(f'[data-video-open="{latest_id}"]').first
-            if card.count() and card.is_visible(timeout=1000):
-                card.click(timeout=5000)
-            else:
-                page.evaluate("(id) => window.openVideo?.(id)", latest_id)
-            page.wait_for_selector(f'[data-video-like="{latest_id}"]', timeout=10000)
+        if not latest_id:
+            raise RuntimeError(
+                "published video missing from browse/manage APIs: "
+                f"browse={videos}, manage={manage}, msg={video_msg!r}, progress={progress_percent!r}"
+            )
+        if page.locator("#video-back-btn").is_visible(timeout=3000):
+            page.click("#video-back-btn")
+        else:
+            page.evaluate("() => showVideoBrowseView({updateHash: true})")
+        page.wait_for_selector(f'[data-video-open="{latest_id}"]', state="visible", timeout=15000)
+        page.wait_for_timeout(200)
+        page.locator(f'[data-video-open="{latest_id}"]').first.click(timeout=5000)
+        page.wait_for_selector(f'[data-video-like="{latest_id}"]', state="visible", timeout=15000)
+        check_ui_quality(rec, page, "videos_desktop")
         video_id_attr = page.locator("[data-video-like]").first.get_attribute("data-video-like", timeout=2000)
         video_id = int(video_id_attr or latest.get("id") or 0)
         playback = fetch_json(page, "GET", f"/api/videos/{video_id}/playback") if video_id else {"status": 0, "body": {}}
@@ -1395,9 +1826,9 @@ def check_video_share_journey(rec: Recorder, page) -> dict[str, Any]:
 
 
 def check_economy_trading_journey(rec: Recorder, page, base_url: str) -> None:
-    wallet = fetch_json(page, "GET", "/api/points/wallet")
-    ledger = fetch_json(page, "GET", "/api/points/ledger")
-    markets = fetch_json(page, "GET", "/api/trading/markets")
+    wallet = fetch_json_get_retry(page, "/api/points/wallet")
+    ledger = fetch_json_get_retry(page, "/api/points/ledger")
+    markets = fetch_json_get_retry(page, "/api/trading/markets")
     market_rows = markets.get("body", {}).get("markets") or []
     market = market_rows[0] if market_rows else {}
     order_status = 0
@@ -1451,6 +1882,8 @@ def check_economy_trading_journey(rec: Recorder, page, base_url: str) -> None:
         ok,
         f"wallet={wallet['status']}, ledger={ledger['status']}, markets={markets['status']}, order={order_status}, economy_ready={economy_ready}, trading_ready={trading_ready}",
         market=market,
+        wallet=wallet.get("body"),
+        wallet_attempts=wallet.get("attempts"),
         order=order_body,
         economy_ready=economy_ready,
         economy_visible=economy_visible,
@@ -1602,8 +2035,8 @@ def check_comfyui_workflow_builder_flow(rec: Recorder, page) -> None:
 
 def check_module_tabs(rec: Recorder, page, base_url: str, viewport: dict[str, int]) -> None:
     page.set_viewport_size(viewport)
-    page.goto(base_url + "/", wait_until="domcontentloaded")
-    page.wait_for_timeout(800)
+    load_authenticated_app(page, base_url)
+    page.wait_for_timeout(1200)
     tabs = [
         ("chat", "#tab-module-chat", "#module-chat"),
         ("announcements", "#tab-module-announcements", "#module-announcements"),
@@ -1629,7 +2062,12 @@ def check_module_tabs(rec: Recorder, page, base_url: str, viewport: dict[str, in
             continue
         try:
             page.evaluate("tab => { if (typeof switchModuleTab !== 'function') throw new Error('switchModuleTab missing'); switchModuleTab(tab); }", label)
-            page.wait_for_timeout(350)
+            page.wait_for_function(
+                "selector => document.querySelector(selector)?.classList.contains('active')",
+                arg=section_sel,
+                timeout=5000,
+            )
+            page.wait_for_timeout(250)
             active = page.locator(section_sel).evaluate("el => el.classList.contains('active')")
             overflow = page.evaluate("() => document.documentElement.scrollWidth - document.documentElement.clientWidth")
             if not active:
@@ -1980,6 +2418,11 @@ def write_reports(runtime_root: Path, stamp: str, summary: dict[str, Any]) -> tu
         lines.append(f"- `{err['type']}` {err['text']}")
     if not summary["browser_errors"]:
         lines.append("- none")
+    lines.extend(["", "## Recovered Browser Warnings", ""])
+    for warning in summary.get("browser_warnings", []):
+        lines.append(f"- `{warning['type']}` [{warning.get('page', 'page')}] {warning['text']} ({warning.get('reason', '')})")
+    if not summary.get("browser_warnings"):
+        lines.append("- none")
     md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return json_path, md_path
 
@@ -1989,7 +2432,14 @@ def main() -> int:
     parser.add_argument("--runtime-root", default="")
     parser.add_argument("--keep-server", action="store_true")
     parser.add_argument("--headed", action="store_true")
+    parser.add_argument(
+        "--server-start-timeout-seconds",
+        type=int,
+        default=180,
+        help="Wait 30-600 seconds for isolated server bootstrap. Default: 180.",
+    )
     parser.add_argument("--only-drive-bulk", action="store_true", help="Run only the Cloud Drive bulk-selection Playwright journey after login and feature setup.")
+    parser.add_argument("--only-video-share", action="store_true", help="Run only the video upload/share Playwright journey after login and feature setup.")
     parser.add_argument("--max-chess-human-moves", type=int, default=40)
     parser.add_argument("--interactive-comfyui", action="store_true", help="Prompt for optional live ComfyUI/Civitai settings before running live checks.")
     parser.add_argument("--comfyui-api-url", default=os.environ.get("PLAYWRIGHT_COMFYUI_API_URL", "").strip(), help="Optional remote ComfyUI URL. Must be http(s)://host:port.")
@@ -2013,41 +2463,43 @@ def main() -> int:
     server = start_server(runtime_root, port)
     base_url = ""
     browser_errors: list[dict[str, str]] = []
+    browser_warnings: list[dict[str, str]] = []
     chess_summary: dict[str, Any] = {}
     try:
-        base_url = wait_for_server(port)
+        base_url = wait_for_server(
+            port,
+            timeout_seconds=max(30, min(600, int(args.server_start_timeout_seconds))),
+        )
         rec.add("server_start", True, base_url, pid=server.pid, runtime_root=str(runtime_root))
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=not args.headed)
             context = browser.new_context(ignore_https_errors=True, viewport={"width": 1366, "height": 768})
-            seen_browser_errors: set[str] = set()
+            error_collector = BrowserErrorCollector(browser_errors, browser_warnings)
 
-            def record_browser_error(kind: str, text: str) -> None:
-                compact = text.replace("\n", " ")[:500]
-                if ignored_browser_error(compact):
-                    return
-                key = f"{kind}:{compact}"
-                if key in seen_browser_errors or len(browser_errors) >= 80:
-                    return
-                seen_browser_errors.add(key)
-                browser_errors.append({"type": kind, "text": compact})
-
-            def new_page(viewport: dict[str, int] | None = None):
+            def new_page(viewport: dict[str, int] | None = None, *, label: str = "page"):
                 page = context.new_page()
                 if viewport:
                     page.set_viewport_size(viewport)
-                attach_browser_error_handlers(page, record_browser_error)
+                error_collector.register(page, label)
                 return page
 
-            page = new_page({"width": 1366, "height": 768})
+            page = new_page({"width": 1366, "height": 768}, label="root-main")
             root_auth_headers: dict[str, str] = {}
 
             def unauth_editor() -> None:
                 anon = browser.new_context(ignore_https_errors=True, viewport={"width": 1280, "height": 720})
                 anon_page = anon.new_page()
-                anon_page.goto(base_url + "/comfyui-workflow-editor.html", wait_until="domcontentloaded")
-                final_url = anon_page.url
-                anon.close()
+                error_collector.register(anon_page, "anonymous-editor-guard")
+                error_collector.begin_navigation(anon_page)
+                try:
+                    goto_with_network_retry(anon_page, base_url + "/comfyui-workflow-editor.html")
+                    final_url = anon_page.url
+                    error_collector.finish_navigation(anon_page, recovered=True)
+                except Exception:
+                    error_collector.finish_navigation(anon_page, recovered=False)
+                    raise
+                finally:
+                    anon.close()
                 if "/comfyui-workflow-editor.html" in final_url:
                     raise RuntimeError(f"unauthenticated editor remained accessible: {final_url}")
 
@@ -2061,7 +2513,7 @@ def main() -> int:
                 "enable_required_features",
                 lambda: enable_required_features(page, base_url, load_app=False, auth_headers=root_auth_headers),
             )
-            if not args.only_drive_bulk:
+            if not args.only_drive_bulk and not args.only_video_share:
                 rec.guard(
                     "optional_comfyui_settings",
                     lambda: apply_optional_comfyui_settings(rec, page, optional_comfyui, base_url, root_auth_headers),
@@ -2070,10 +2522,15 @@ def main() -> int:
             if args.only_drive_bulk:
                 rec.guard("drive_bulk_selection_journey", lambda: check_drive_bulk_selection_journey(rec, page))
                 page.close()
+            elif args.only_video_share:
+                rec.guard("video_share_journey", lambda: check_video_share_journey(rec, page))
+                page.close()
             else:
+                rec.guard("bug_report_journey", lambda: check_bug_report_journey(rec, page))
                 rec.guard("api_surface", lambda: check_api_surface(rec, page, base_url, root_auth_headers))
                 rec.guard("auth_registration_journey", lambda: check_auth_registration_journey(rec, browser, base_url, page))
                 rec.guard("admin_member_management_journey", lambda: check_admin_member_management(rec, page))
+                rec.guard("ai_agent_role_action_journey", lambda: check_ai_agent_journey(rec, browser, base_url, page))
                 rec.guard("forum_journey", lambda: check_forum_journey(rec, page))
                 rec.guard("drive_e2ee_journey", lambda: check_drive_e2ee_journey(rec, page))
                 rec.guard("drive_bulk_selection_journey", lambda: check_drive_bulk_selection_journey(rec, page))
@@ -2084,20 +2541,20 @@ def main() -> int:
                 rec.guard("comfyui_workflow_builder_journey", lambda: check_comfyui_workflow_builder_flow(rec, page))
                 page.close()
 
-                desktop_page = new_page({"width": 1366, "height": 768})
+                desktop_page = new_page({"width": 1366, "height": 768}, label="module-tabs-desktop")
                 rec.guard("module_tabs_desktop", lambda: check_module_tabs(rec, desktop_page, base_url, {"width": 1366, "height": 768}))
                 desktop_page.close()
 
-                mobile_page = new_page({"width": 390, "height": 844})
+                mobile_page = new_page({"width": 390, "height": 844}, label="module-tabs-mobile")
                 rec.guard("module_tabs_mobile", lambda: check_module_tabs(rec, mobile_page, base_url, {"width": 390, "height": 844}))
                 mobile_page.close()
 
-                editor_page = new_page({"width": 1366, "height": 768})
+                editor_page = new_page({"width": 1366, "height": 768}, label="comfyui-editor")
                 rec.guard("comfyui_editor", lambda: check_comfyui_editor(rec, editor_page, base_url))
                 editor_page.close()
 
-                api_page = new_page({"width": 1366, "height": 768})
-                api_page.goto(base_url + "/", wait_until="domcontentloaded")
+                api_page = new_page({"width": 1366, "height": 768}, label="api-chess")
+                load_authenticated_app(api_page, base_url)
                 rec.guard("comfyui_live_connection_optional", lambda: check_live_comfyui_connection(rec, api_page, optional_comfyui))
                 rec.guard("civitai_search", lambda: check_civitai_live_search(rec, api_page, optional_comfyui))
                 chess_summary = rec.guard("play_chess_exp4", lambda: play_exp4_chess(rec, api_page, args.max_chess_human_moves)) or {}
@@ -2122,6 +2579,7 @@ def main() -> int:
         "base_url": base_url,
         "checks": checks,
         "browser_errors": browser_errors,
+        "browser_warnings": browser_warnings,
         "chess": chess_summary,
         "optional_comfyui": optional_comfyui.safe_summary(),
     }

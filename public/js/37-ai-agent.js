@@ -1,6 +1,7 @@
 'use strict';
 
 const AI_AGENT_STATE = {
+  available: false,
   loaded: false,
   loading: false,
   sending: false,
@@ -60,7 +61,7 @@ function aiAgentConversationStorageKey(scope = AI_AGENT_STATE.accountScope || ai
 }
 
 async function aiAgentPersistConversation(scope = AI_AGENT_STATE.accountScope, options = {}) {
-  if (!scope || AI_AGENT_STATE.loadingConversation) return;
+  if (!AI_AGENT_STATE.available || !scope || AI_AGENT_STATE.loadingConversation) return;
   if (!AI_AGENT_STATE.sessionId && !AI_AGENT_STATE.messages.length) return;
   const retryCount = Math.max(0, Number(options.retryCount || 0) || 0);
   const conversationId = aiAgentEnsureSessionId();
@@ -326,7 +327,7 @@ function aiAgentResetScopeState() {
     AI_AGENT_STATE.writeToolCatalog = [];
     AI_AGENT_STATE.writeToolEnabled = new Set();
     AI_AGENT_STATE.writeToolGuard = {};
-    aiAgentLoadConversation(nextScope);
+    if (AI_AGENT_STATE.available) aiAgentLoadConversation(nextScope);
     renderAiAgentThread();
     renderAiAgentConversationHistory();
     renderAiAgentToolSelector();
@@ -2171,6 +2172,10 @@ function aiAgentPlannerToolSchemas() {
       data_scope: tool.data_scope || "",
       arg_hint: tool.arg_hint || "",
       write: !!tool.write,
+      assist_safe: !!tool.assist_safe,
+      min_role: tool.min_role || "user",
+      risk_level: tool.risk_level || "low",
+      requires_confirm: !!tool.requires_confirm,
     });
   });
   aiAgentWriteToolSpecMap().forEach((spec, name) => {
@@ -2203,6 +2208,9 @@ function aiAgentPlannerToolSchemas() {
       arg_hint: tool.arg_hint || "",
       write: !!tool.write,
       requires_confirm: !!tool.requires_confirm,
+      assist_safe: !!tool.assist_safe,
+      min_role: tool.min_role || "user",
+      risk_level: tool.risk_level || "low",
       available: aiAgentHasEffectiveTool(name),
       can_execute_now: name ? aiAgentCanRunWriteTool(name) : false,
       can_request_elevation: name ? aiAgentCanRequestWriteElevation(name) : false,
@@ -3160,7 +3168,7 @@ async function aiAgentRunGenericWriteTool(plan, userText, input) {
       elevateOnce = true;
     } else {
       AI_AGENT_STATE.messages.push({ role: "user", content: userText });
-      AI_AGENT_STATE.messages.push({ role: "assistant", content: `目前不可執行 ${toolName}。請確認 root 身分、operation mode 與 allowed_tools。` });
+      AI_AGENT_STATE.messages.push({ role: "assistant", content: `目前不可執行 ${toolName}。請確認角色權限、operation mode、action risk 與 allowed_tools。` });
       renderAiAgentThread();
       if (input) input.value = "";
       setAiAgentMessage("工具未允許", "err");
@@ -3693,15 +3701,27 @@ function aiAgentHasEffectiveTool(toolName) {
   const tools = Array.isArray(AI_AGENT_STATE.settings?.tools) ? AI_AGENT_STATE.settings.tools : [];
   if (tools.some((tool) => tool?.name === toolName)) return true;
   const configured = String(AI_AGENT_STATE.settings?.allowed_tools || "").trim();
-  if (!configured) return AI_AGENT_STATE.actor?.role === "super_admin";
+  if (!configured) return false;
   return configured.split(",").map((item) => item.trim()).filter(Boolean).includes(toolName);
 }
 
+function aiAgentEffectiveToolPolicy(toolName) {
+  const name = String(toolName || "").trim();
+  const catalog = Array.isArray(AI_AGENT_STATE.writeToolCatalog) ? AI_AGENT_STATE.writeToolCatalog : [];
+  const settingsTools = Array.isArray(AI_AGENT_STATE.settings?.tools) ? AI_AGENT_STATE.settings.tools : [];
+  return catalog.find((tool) => tool?.name === name)
+    || settingsTools.find((tool) => tool?.name === name)
+    || null;
+}
+
 function aiAgentCanRunWriteTool(toolName) {
-  return AI_AGENT_STATE.actor?.role === "super_admin"
-    && AI_AGENT_STATE.settings?.operation_mode === "write"
-    && !!AI_AGENT_STATE.settings?.operation_mode_policy?.write_enabled
-    && aiAgentHasEffectiveTool(toolName);
+  if (!aiAgentHasEffectiveTool(toolName)) return false;
+  const policy = aiAgentEffectiveToolPolicy(toolName) || {};
+  if (policy.can_execute_now === true) return true;
+  const mode = String(AI_AGENT_STATE.settings?.operation_mode || "readonly").toLowerCase();
+  if (!policy.write) return true;
+  if (mode === "write") return true;
+  return mode === "assist" && policy.assist_safe === true;
 }
 
 function aiAgentCanRequestWriteElevation(toolName) {
@@ -3772,14 +3792,11 @@ function renderAiAgentToolSelector() {
 
 async function loadAiAgentWriteToolCatalog(options = {}) {
   if (AI_AGENT_STATE.writeToolLoading && !options.force) return;
-  if (AI_AGENT_STATE.actor?.role !== "super_admin") {
-    renderAiAgentToolSelector();
-    return;
-  }
+  const isRoot = AI_AGENT_STATE.actor?.role === "super_admin";
   AI_AGENT_STATE.writeToolLoading = true;
   renderAiAgentToolSelector();
   try {
-    const res = await apiFetch(`${API}/ai-agent/write-tools?include_all=1`, {
+    const res = await apiFetch(`${API}/ai-agent/write-tools${isRoot ? "?include_all=1" : ""}`, {
       credentials: "same-origin",
     });
     const json = await res.json().catch(() => ({}));
@@ -3787,7 +3804,9 @@ async function loadAiAgentWriteToolCatalog(options = {}) {
       setAiAgentMessage(json.msg || "write tools catalog 載入失敗", "err");
       return;
     }
-    AI_AGENT_STATE.writeToolCatalog = Array.isArray(json.catalog_tools) ? json.catalog_tools : [];
+    AI_AGENT_STATE.writeToolCatalog = isRoot
+      ? (Array.isArray(json.catalog_tools) ? json.catalog_tools : [])
+      : (Array.isArray(json.tools) ? json.tools : []);
     AI_AGENT_STATE.writeToolGuard = json.guard || {};
     AI_AGENT_STATE.writeToolEnabled = aiAgentConfiguredWriteTools(json.allowed_tools ?? AI_AGENT_STATE.settings?.allowed_tools ?? "");
   } catch (err) {
@@ -3860,7 +3879,9 @@ function renderAiAgentWriteTools() {
   panel.setAttribute("aria-hidden", "true");
   if (state) {
     if (!isRoot) {
-      state.textContent = "僅 root 可使用 write-tool。";
+      state.textContent = canRunComfyui
+        ? "目前角色可在逐次確認後執行 own-scope ComfyUI action。"
+        : "目前模式或角色不允許執行 ComfyUI action。";
     } else if (canRunComfyui) {
       state.textContent = "已啟用 write_comfyui_generate；對話解析後會直接送出，並自動附帶 confirm=EXECUTE。";
     } else if (aiAgentCanRequestWriteElevation("write_comfyui_generate")) {
@@ -4129,6 +4150,7 @@ function aiAgentComfyuiResultSummary(job = {}) {
 }
 
 function aiAgentComfyuiNeedsVisionReview(job = {}) {
+  if (job?.result?.review_required === true || job?.result?.delivery_pass === false) return true;
   const jobId = String(job.job_id || "").trim();
   const submitted = jobId ? AI_AGENT_STATE.comfyuiSubmittedJobs[jobId] : null;
   const args = submitted?.args || AI_AGENT_STATE.lastComfyuiArgs || {};
@@ -4210,6 +4232,7 @@ function aiAgentComfyuiCompletionMessage(job = {}) {
   return {
     role: "assistant",
     comfyui_job_id: jobId,
+    comfyui_review_contract: job?.result?.review_contract || null,
     comfyui_staged_review: aiAgentComfyuiNeedsVisionReview(job),
     content: aiAgentComfyuiNeedsVisionReview(job)
       ? aiAgentComfyuiStagedReviewSummary(job)
@@ -4221,7 +4244,32 @@ function aiAgentComfyuiCompletionMessage(job = {}) {
 function aiAgentComfyuiReviewArgsForMessage(message = {}) {
   const jobId = String(message.comfyui_job_id || "").trim();
   const submitted = jobId ? AI_AGENT_STATE.comfyuiSubmittedJobs[jobId] : null;
-  return submitted?.args || AI_AGENT_STATE.lastComfyuiArgs || {};
+  return submitted?.args || message.comfyui_review_contract || AI_AGENT_STATE.lastComfyuiArgs || {};
+}
+
+async function aiAgentPersistComfyuiReview(jobId, review = {}, passed = false) {
+  const res = await apiFetch(`${API}/comfyui/jobs/${encodeURIComponent(jobId)}/review`, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      pass: Boolean(passed),
+      score: Number(review.score || 0),
+      hard_fail: Boolean(review.hard_fail),
+      issues: Array.isArray(review.issues) ? review.issues : [],
+      passed_gates: Array.isArray(review.passed_gates) ? review.passed_gates : [],
+      failed_gates: Array.isArray(review.failed_gates) ? review.failed_gates : [],
+      source: "ai_agent_vision_client",
+    }),
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok || !json.ok) {
+    const err = new Error(json.msg || `視覺驗收持久化失敗（HTTP ${res.status}）`);
+    err.status = res.status;
+    err.payload = json;
+    throw err;
+  }
+  return json;
 }
 
 function aiAgentStageSpecificReviewRules(stageKey = "") {
@@ -5051,7 +5099,9 @@ async function aiAgentMaybeRunStagedComfyuiReview(message = {}, options = {}) {
       renderAiAgentThread();
     }
     const review = aiAgentNormalizeVisionReview(content, args);
-    const passed = aiAgentComfyuiReviewPassed(review, args);
+    let passed = aiAgentComfyuiReviewPassed(review, args);
+    const persistedReview = await aiAgentPersistComfyuiReview(jobId, review, passed);
+    passed = Boolean(persistedReview?.review?.pass);
     const issues = review.issues?.length ? review.issues.join("；") : "-";
     const gates = review.failed_gates?.length ? review.failed_gates.join(", ") : "-";
     AI_AGENT_STATE.comfyuiStagedReviews[jobId] = { status: passed ? "passed" : "failed", review, updatedAt: Date.now() };
@@ -6305,14 +6355,16 @@ async function loadAiAgentStatus(options = {}) {
     try {
       const res = await apiFetch(API + "/ai-agent/status", { credentials: "same-origin" });
       const json = await res.json().catch(() => ({}));
-      if (!json.ok) {
+      if (!res.ok || !json.ok) {
+        AI_AGENT_STATE.available = false;
         setAiAgentMessage(json.msg || "AI Agent 狀態讀取失敗", "err");
         return;
       }
+      const firstAvailableLoad = !AI_AGENT_STATE.available;
+      AI_AGENT_STATE.available = true;
       renderAiAgentStatus(json);
-      if (json?.actor?.role === "super_admin") {
-        await loadAiAgentWriteToolCatalog({ force: true }).catch(() => undefined);
-      }
+      if (firstAvailableLoad) aiAgentLoadConversation(AI_AGENT_STATE.accountScope || aiAgentCurrentAccountScope());
+      await loadAiAgentWriteToolCatalog({ force: true }).catch(() => undefined);
       await loadAiAgentReadOnly({ scope: "all", limit: 20, silent: true }).catch(() => undefined);
       if (json?.actor?.scope?.can_manage_servers) {
         await loadAiAgentAuditStatus({ silent: true }).catch(() => undefined);
@@ -6361,12 +6413,14 @@ async function loadAiAgentReadOnly(options = {}) {
 function clearAiAgentConversation() {
   const scope = AI_AGENT_STATE.accountScope || aiAgentCurrentAccountScope();
   const conversationId = AI_AGENT_STATE.sessionId || "default";
-  apiFetch(API + "/ai-agent/conversation", {
-    method: "DELETE",
-    credentials: "same-origin",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ conversation_id: conversationId }),
-  }).catch(() => undefined);
+  if (AI_AGENT_STATE.available) {
+    apiFetch(API + "/ai-agent/conversation", {
+      method: "DELETE",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ conversation_id: conversationId }),
+    }).catch(() => undefined);
+  }
   AI_AGENT_STATE.messages = [];
   AI_AGENT_STATE.imageDataUrl = "";
   AI_AGENT_STATE.imageLoading = false;
@@ -6467,8 +6521,7 @@ async function sendAiAgentMessage() {
     if (!AI_AGENT_STATE.loaded && typeof loadAiAgentStatus === "function") {
       await loadAiAgentStatus({ force: true }).catch(() => undefined);
     }
-    if (AI_AGENT_STATE.actor?.role === "super_admin"
-      && (!Array.isArray(AI_AGENT_STATE.writeToolCatalog) || !AI_AGENT_STATE.writeToolCatalog.length)
+    if ((!Array.isArray(AI_AGENT_STATE.writeToolCatalog) || !AI_AGENT_STATE.writeToolCatalog.length)
       && typeof loadAiAgentWriteToolCatalog === "function") {
       await loadAiAgentWriteToolCatalog({ force: false }).catch(() => undefined);
     }

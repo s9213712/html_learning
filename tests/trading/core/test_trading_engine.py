@@ -6994,6 +6994,50 @@ def test_margin_collateral_add_is_idempotent_without_client_key(tmp_path):
     assert dashboard["funding"]["trial_credit"]["deployed_points"] == 300
 
 
+def test_margin_collateral_retry_across_minute_boundary_is_idempotent(tmp_path, monkeypatch):
+    points, trading = _services(tmp_path)
+    points.record_transaction(user_id=1, currency_type="points", direction="credit", amount=1000, action_type="admin_adjust_credit")
+    opened = trading.open_margin_position(
+        actor=_actor(),
+        market_symbol="ETH/POINTS",
+        position_type="margin_long",
+        quantity="0.1",
+        collateral_points=200,
+    )
+
+    class BoundaryDateTime(datetime):
+        current = datetime(2026, 7, 11, 12, 0, 59, 900000)
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls.current
+
+    monkeypatch.setattr(trading_margin_module, "datetime", BoundaryDateTime)
+    monkeypatch.setattr(trading_margin_module, "_now_text", lambda: BoundaryDateTime.current.isoformat())
+    first = trading.add_margin_collateral(
+        actor=_actor(),
+        position_uuid=opened["position"]["position_uuid"],
+        amount_points=100,
+    )
+    BoundaryDateTime.current = datetime(2026, 7, 11, 12, 1, 0, 100000)
+    second = trading.add_margin_collateral(
+        actor=_actor(),
+        position_uuid=opened["position"]["position_uuid"],
+        amount_points=100,
+    )
+
+    assert first["position"]["collateral_points"] == 300
+    assert second["position"]["collateral_points"] == 300
+    conn = trading.get_db()
+    try:
+        operation_count = conn.execute(
+            "SELECT COUNT(*) FROM trading_operation_idempotency WHERE operation='margin_collateral_add'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert operation_count == 1
+
+
 def test_expired_trial_margin_collateral_can_be_closed_without_negative_accounting(tmp_path):
     points, trading = _services(tmp_path)
     points.record_transaction(user_id=1, currency_type="points", direction="credit", amount=1000, action_type="admin_adjust_credit")

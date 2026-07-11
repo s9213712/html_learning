@@ -1000,13 +1000,21 @@ def save_preview_with_retry(
     return {"ok": False, "error": errors[-1] if errors else "preview failed", "retry_errors": errors, "attempts": attempts}
 
 
+def image_pixels(image: Image.Image):
+    """Return Pillow pixels without relying on the deprecated getdata API."""
+    flattened = getattr(image, "get_flattened_data", None)
+    if callable(flattened):
+        return flattened()
+    return image.getdata()
+
+
 def detect_visual_artifacts(image_path: str | Path) -> dict[str, Any]:
     path = Path(image_path)
     if not path.is_file():
         return {"checked": False, "error": "image not found"}
     image = Image.open(path).convert("RGB")
     width, height = image.size
-    all_pixels = list(image.getdata())
+    all_pixels = list(image_pixels(image))
     if not all_pixels:
         return {"checked": False, "error": "image has no pixels", "has_blocking_artifact": True}
     channel_extrema = image.getextrema()
@@ -1037,7 +1045,7 @@ def detect_visual_artifacts(image_path: str | Path) -> dict[str, Any]:
                 continue
             total_tiles += 1
             tile = image.crop((x1, y1, x2, y2))
-            pixels = list(tile.getdata())
+            pixels = list(image_pixels(tile))
             if not pixels:
                 continue
             gray_like = 0
@@ -1095,7 +1103,7 @@ def detect_visual_artifacts(image_path: str | Path) -> dict[str, Any]:
                 x2 = min(width, x1 + tile_w)
                 y2 = min(height, y1 + tile_h)
                 tile = image.crop((x1, y1, x2, y2))
-                pixels = list(tile.getdata())
+                pixels = list(image_pixels(tile))
                 if pixels:
                     luminance_means.append(sum((int(r) + int(g) + int(b)) / 3 for r, g, b in pixels) / len(pixels))
             if luminance_means:

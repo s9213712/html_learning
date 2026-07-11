@@ -174,7 +174,7 @@ def test_filemanager_and_albummanager_ui_are_wired():
     assert "completeDriveResumableUpload" in drive_js
     assert '"resumable_uploading"' in drive_js
     assert '"waiting_resume"' in drive_js
-    assert "function restoreDriveBackgroundTransfers()" in drive_js
+    assert "function restoreDriveBackgroundTransfers({ signal, shouldContinue } = {})" in drive_js
     assert "function applyResumableUploadSessionToTransfer" in drive_js
     assert 'data-drive-action="cancel-resumable-upload"' in drive_js
     assert 'data-drive-action="resume-resumable-upload"' in drive_js
@@ -317,7 +317,7 @@ def test_filemanager_and_albummanager_ui_are_wired():
     assert "操作失敗（HTTP ${res.status}）" in drive_js
     assert 'data-drive-action="edit-text" data-file-id="${sanitize(file.id)}">編輯文字</button>' not in drive_js
     assert 'id="storage-organize-btn"' not in index_html
-    assert "loadStorageFiles(csrf)" in drive_js
+    assert "loadStorageFiles(csrf, { signal })" in drive_js
     assert 'storageUploadBtn.addEventListener("click", openStorageUploadPicker)' in bootstrap_js
     assert 'storageFolderUploadBtn.addEventListener("click", openStorageFolderUploadPicker)' in bootstrap_js
     assert 'storageUploadFile.addEventListener("change", uploadStorageFile)' in bootstrap_js
@@ -462,8 +462,16 @@ def test_album_viewer_has_dedicated_module():
     assert 'target.closest(".drive-file-actions")' in drive_js
     assert 'openStorageFolder(folderPath).catch((err) => alert(err.message || "開啟資料夾失敗"))' in drive_js
     assert "/cloud-drive/remote-download/tasks" in drive_js
-    assert "async function restoreRemoteDownloadTasks()" in drive_js
+    assert "async function restoreRemoteDownloadTasks({ signal } = {})" in drive_js
     assert "resumeRemoteDownloadTaskPolling(task)" in drive_js
+    assert "async function loadRemoteDownloadTaskList" in drive_js
+    assert "if (driveRemoteTaskListInFlight) return driveRemoteTaskListInFlight" in drive_js
+    assert "DRIVE_REMOTE_TASK_LIST_CACHE_MS" in drive_js
+    assert "requestGeneration === driveRemoteTaskListGeneration" in drive_js
+    assert 'document.addEventListener("hackme:module-changed"' in drive_js
+    assert "cancelDriveDashboardNavigationLoad()" in drive_js
+    assert "navigationScoped" in drive_js
+    assert "new AbortController()" in drive_js
     assert "function classifyRemoteDownloadInput(rawUrl" in drive_js
     assert "torrentUrlsAsBt" in drive_js
     assert "function promptRemoteDriveDownloadUrl()" in drive_js
@@ -714,7 +722,9 @@ def test_core_api_fetch_refreshes_csrf_once():
     assert "fetchCsrfToken({ force: true })" in core_js
     assert "const retried = await apiFetch(url, { ...options, credentials: opts.credentials, headers: retryHeaders }, false);" in core_js
     assert "return retried;" in core_js
-    assert 'headers.set("X-CSRF-Token", await fetchCsrfToken());' in core_js
+    assert 'headers.set(' in core_js
+    assert '"X-CSRF-Token",' in core_js
+    assert "await abortableWait(fetchCsrfToken(), opts.signal" in core_js
     assert "BroadcastChannel" in core_js
 
 

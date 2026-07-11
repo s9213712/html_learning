@@ -180,6 +180,11 @@ def test_video_platform_uses_separate_watch_view_and_mobile_layout():
     assert 'id="video-browse-view"' in index_html
     assert 'id="video-watch-view"' in index_html
     assert "function showVideoBrowseView" in videos_js
+    assert "function cancelPendingVideoDetailRequest" in videos_js
+    assert "detailRequestGeneration" in videos_js
+    assert "navigationGeneration" in videos_js
+    assert "Math.min(95, percent * 0.95)" in videos_js
+    assert 'stage: "completed_with_warning"' in videos_js
     assert "function showVideoWatchView" in videos_js
     assert "function openVideoOverview" in videos_js
     assert 'history.pushState(null, "", `${location.pathname}${location.search}#videos`);' in videos_js

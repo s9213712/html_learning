@@ -40,6 +40,9 @@ const videoState = {
   danmakuAnimationId: 0,
   danmakuLaneUntil: [],
   subtitleShiftMs: 0,
+  navigationGeneration: 0,
+  detailRequestGeneration: 0,
+  detailAbortController: null,
 };
 let videoPublishDriveFiles = [];
 let videoPendingPublishSelection = null;
@@ -1876,7 +1879,17 @@ function makeVideoIdempotencyKey(prefix = "video-tip") {
   return `${prefix}:${Date.now()}:${Math.random().toString(16).slice(2)}`;
 }
 
+function cancelPendingVideoDetailRequest({ advanceNavigation = false } = {}) {
+  videoState.detailRequestGeneration += 1;
+  if (advanceNavigation) videoState.navigationGeneration += 1;
+  if (videoState.detailAbortController) {
+    videoState.detailAbortController.abort();
+    videoState.detailAbortController = null;
+  }
+}
+
 function showVideoBrowseView({ updateHash = false } = {}) {
+  cancelPendingVideoDetailRequest({ advanceNavigation: updateHash });
   const browse = $("video-browse-view");
   const watch = $("video-watch-view");
   const detail = $("video-detail");
@@ -2018,6 +2031,8 @@ async function publishVideoFromDrive() {
   }
   let e2eeShare = null;
   let liveUploadJobId = "";
+  let publishedVideoId = 0;
+  const publishNavigationGeneration = videoState.navigationGeneration;
   if (!directFile && selectedFile?.privacy_mode === "e2ee" && payload.visibility === "unlisted") {
     try {
       e2eeShare = await prepareVideoE2eeShareArtifacts(selectedFile.id);
@@ -2059,12 +2074,14 @@ async function publishVideoFromDrive() {
       const upload = await videoUploadFormWithProgress(API + "/videos/upload", form, (event) => {
         if (event.lengthComputable) {
           const percent = (event.loaded / event.total) * 100;
+          const uploadComplete = event.loaded >= event.total;
           setVideoUploadProgress({
             visible: true,
-            percent,
+            percent: Math.min(95, percent * 0.95),
             loaded: event.loaded,
             total: event.total,
-            status: event.loaded >= event.total ? uploadDoneStatus : "影音檔上傳中",
+            status: uploadComplete ? uploadDoneStatus : "影音檔上傳中",
+            indeterminate: uploadComplete,
           });
           updateVideoUploadLiveJob(liveUploadJobId, {
             status: "running",
@@ -2103,12 +2120,14 @@ async function publishVideoFromDrive() {
       const upload = await videoUploadFormWithProgress(API + "/videos/publish", form, (event) => {
         if (event.lengthComputable) {
           const percent = (event.loaded / event.total) * 100;
+          const uploadComplete = event.loaded >= event.total;
           setVideoUploadProgress({
             visible: true,
-            percent,
+            percent: Math.min(95, percent * 0.95),
             loaded: event.loaded,
             total: event.total,
-            status: event.loaded >= event.total ? "封面上傳完成，伺服器處理中" : "封面上傳中",
+            status: uploadComplete ? "封面上傳完成，伺服器處理中" : "封面上傳中",
+            indeterminate: uploadComplete,
           });
         } else {
           setVideoUploadProgress({ visible: true, percent: 0, loaded: event.loaded || 0, total: 0, status: "封面上傳中", indeterminate: true });
@@ -2127,18 +2146,7 @@ async function publishVideoFromDrive() {
       json = await res.json().catch(() => ({}));
     }
     if (status < 200 || status >= 300 || !json.ok) throw new Error(json.msg || `HTTP ${status}`);
-    if (directFile || coverFile) {
-      setVideoUploadProgress({ visible: true, percent: 100, loaded: directFile?.size || coverFile?.size || 0, total: directFile?.size || coverFile?.size || 0, status: "處理完成" });
-      if (liveUploadJobId) {
-        updateVideoUploadLiveJob(liveUploadJobId, {
-          status: "succeeded",
-          progress_percent: 100,
-          stage: "completed",
-          stage_detail: "影音上傳與伺服器處理完成；若需要 HLS，後續轉檔會以另一筆任務顯示。",
-          metadata: { video_id: json.video?.id, file_id: json.file?.file_id || json.video?.cloud_file_id },
-        });
-      }
-    }
+    publishedVideoId = Number(json.video?.id || 0);
     const input = $("video-upload-file");
     if (input) input.value = "";
     const coverInput = $("video-cover-file");
@@ -2172,15 +2180,6 @@ async function publishVideoFromDrive() {
         videoMsg(`影音已發布，但 E2EE Streaming v2 建立失敗：${err.message || "請稍後重試"}`, false);
       }
     }
-    if (json.stream_warning) {
-      videoMsg(`影音已發布；${json.stream_warning}`, false);
-    } else if (json.stream_asset?.status === "ready") {
-      videoMsg("影音已發布，HLS 串流已就緒", true);
-    } else if (json.stream_asset?.status === "processing") {
-      videoMsg("影音已發布，HLS 正在後台轉檔；你可以先做別的事，進度會顯示在任務中心，完成後會通知上傳者。", true);
-    } else {
-      videoMsg("影音已發布", true);
-    }
     if (json.video?.id) {
       const preferredMode = streamingModes.includes("prepared_hls")
         ? "prepared_hls"
@@ -2190,7 +2189,31 @@ async function publishVideoFromDrive() {
     setVideoPublishPanelVisible(false, { focus: false });
     await loadVideoPublishFiles();
     await loadVideos(videoState.sort);
-    openVideoDetail(json.video.id);
+    if (publishedVideoId && videoState.navigationGeneration === publishNavigationGeneration) {
+      await openVideoDetail(publishedVideoId);
+    }
+    if (directFile || coverFile) {
+      const completedBytes = directFile?.size || coverFile?.size || 0;
+      setVideoUploadProgress({ visible: true, percent: 100, loaded: completedBytes, total: completedBytes, status: "處理完成" });
+      if (liveUploadJobId) {
+        updateVideoUploadLiveJob(liveUploadJobId, {
+          status: "succeeded",
+          progress_percent: 100,
+          stage: "completed",
+          stage_detail: "影音上傳與伺服器處理完成；若需要 HLS，後續轉檔會以另一筆任務顯示。",
+          metadata: { video_id: publishedVideoId, file_id: json.file?.file_id || json.video?.cloud_file_id },
+        });
+      }
+    }
+    if (json.stream_warning) {
+      videoMsg(`影音已發布；${json.stream_warning}`, false);
+    } else if (json.stream_asset?.status === "ready") {
+      videoMsg("影音已發布，HLS 串流已就緒", true);
+    } else if (json.stream_asset?.status === "processing") {
+      videoMsg("影音已發布，HLS 正在後台轉檔；你可以先做別的事，進度會顯示在任務中心，完成後會通知上傳者。", true);
+    } else {
+      videoMsg("影音已發布", true);
+    }
   } catch (err) {
     if (e2eeShare?.local_job_id) {
       updateVideoUploadLiveJob(e2eeShare.local_job_id, {
@@ -2202,7 +2225,20 @@ async function publishVideoFromDrive() {
       });
       clearVideoE2eeLocalTask(e2eeShare.local_job_id);
     }
-    if (directFile || coverFile) {
+    if (publishedVideoId) {
+      const completedBytes = directFile?.size || coverFile?.size || 0;
+      setVideoUploadProgress({ visible: true, percent: 100, loaded: completedBytes, total: completedBytes, status: "影音已發布，畫面同步失敗" });
+      if (liveUploadJobId) {
+        updateVideoUploadLiveJob(liveUploadJobId, {
+          status: "succeeded",
+          progress_percent: 100,
+          stage: "completed_with_warning",
+          stage_detail: `影音已發布，但畫面同步失敗：${err.message || "請刷新影音頁"}`,
+          metadata: { video_id: publishedVideoId },
+        });
+      }
+      videoMsg(`影音已發布，但畫面同步失敗：${err.message || "請刷新影音頁"}`, false);
+    } else if (directFile || coverFile) {
       setVideoUploadProgress({ visible: true, percent: 100, loaded: 0, total: 0, status: err.message || "影音發布失敗" });
       if (liveUploadJobId) {
         updateVideoUploadLiveJob(liveUploadJobId, {
@@ -2214,7 +2250,7 @@ async function publishVideoFromDrive() {
         });
       }
     }
-    videoMsg(err.message || "影音發布失敗", false);
+    if (!publishedVideoId) videoMsg(err.message || "影音發布失敗", false);
   } finally {
     if (button) button.disabled = false;
   }
@@ -5218,6 +5254,10 @@ function bindVideoPlayerView(videoId) {
 
 async function openVideoDetail(videoId) {
   if (!videoId) return;
+  cancelPendingVideoDetailRequest({ advanceNavigation: true });
+  const requestGeneration = videoState.detailRequestGeneration;
+  const controller = new AbortController();
+  videoState.detailAbortController = controller;
   const hash = `#videos/${encodeURIComponent(videoId)}`;
   if (location.hash !== hash) {
     history.pushState(null, "", `${location.pathname}${location.search}${hash}`);
@@ -5228,22 +5268,34 @@ async function openVideoDetail(videoId) {
     detail.innerHTML = `<div class="drive-empty">影音載入中...</div>`;
   }
   try {
-    const res = await apiFetch(API + `/videos/${encodeURIComponent(videoId)}`, { credentials: "same-origin" });
+    const res = await apiFetch(API + `/videos/${encodeURIComponent(videoId)}`, {
+      credentials: "same-origin",
+      signal: controller.signal,
+    });
     const json = await res.json().catch(() => ({}));
+    if (requestGeneration !== videoState.detailRequestGeneration) return;
     if (!res.ok || !json.ok) throw new Error(json.msg || `HTTP ${res.status}`);
     let playback = null;
     try {
-      const playbackRes = await apiFetch(videoPlaybackUrl(json.video), { credentials: "same-origin" });
+      const playbackRes = await apiFetch(videoPlaybackUrl(json.video), {
+        credentials: "same-origin",
+        signal: controller.signal,
+      });
       const playbackJson = await playbackRes.json().catch(() => ({}));
       if (playbackRes.ok && playbackJson.ok) {
         playback = playbackJson;
       }
-    } catch (_) {
+    } catch (err) {
+      if (err?.name === "AbortError") return;
       playback = null;
     }
+    if (requestGeneration !== videoState.detailRequestGeneration) return;
     renderVideoDetail(json.video, json.comments || [], playback);
   } catch (err) {
+    if (err?.name === "AbortError") return;
     if (detail) detail.innerHTML = `<div class="drive-empty">${sanitize(err.message || "影音載入失敗")}</div>`;
+  } finally {
+    if (videoState.detailAbortController === controller) videoState.detailAbortController = null;
   }
 }
 

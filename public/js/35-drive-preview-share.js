@@ -264,54 +264,72 @@ async function loadDriveDashboard(options = {}) {
   if (!currentUser || !canAccessModule("privacy_uploads")) return;
   if (driveDashboardInFlight) return driveDashboardInFlight;
   const lazy = options && options.lazy === true;
+  const navigationScoped = options && options.navigationScoped === true;
+  const lifecycleGeneration = driveDashboardLifecycleGeneration;
+  const navigationController = navigationScoped ? new AbortController() : null;
+  const signal = navigationController?.signal;
+  const shouldContinue = () => !navigationScoped || isDriveDashboardNavigationCurrent(lifecycleGeneration);
+  if (!shouldContinue()) return;
   const lazyRefreshMs = typeof driveDashboardLazyRefreshMs === "function" ? driveDashboardLazyRefreshMs() : DRIVE_DASHBOARD_LAZY_REFRESH_MS;
   if (lazy && driveDashboardLoadedAt && Date.now() - driveDashboardLoadedAt < lazyRefreshMs) {
-    if (typeof restoreDriveBackgroundTransfers === "function") return restoreDriveBackgroundTransfers();
-    return restoreRemoteDownloadTasks();
+    return;
   }
+  if (navigationController) driveDashboardNavigationAbortController = navigationController;
   driveDashboardInFlight = (async () => {
     updateDriveE2eePassphraseVisibility();
     const msg = $("drive-msg");
     try {
-      await fetchCsrfToken({ force: true });
+      await abortableWait(fetchCsrfToken({ force: true }), signal, "Drive dashboard load aborted");
+      if (!shouldContinue()) return;
       const csrf = getCsrfToken();
       const res = await apiFetch(API + "/files/security-policy", {
         credentials: "same-origin",
-        headers: { "X-CSRF-Token": csrf || "" }
+        headers: { "X-CSRF-Token": csrf || "" },
+        signal,
       });
       const json = await res.json().catch(() => ({}));
+      if (!shouldContinue()) return;
       if (!json.ok) {
         if (msg) flash(msg, json.msg || "雲端硬碟狀態讀取失敗", false);
         return;
       }
       renderDriveDashboard(json);
-      await loadStorageUpgradeOptions();
-      await loadRemoteDownloadCapabilities();
+      await loadStorageUpgradeOptions({ signal });
+      if (!shouldContinue()) return;
+      await loadRemoteDownloadCapabilities({ signal });
+      if (!shouldContinue()) return;
       if (typeof restoreDriveBackgroundTransfers === "function") {
-        await restoreDriveBackgroundTransfers();
+        await restoreDriveBackgroundTransfers({ signal, shouldContinue });
       } else {
-        await restoreRemoteDownloadTasks();
+        await restoreRemoteDownloadTasks({ signal });
       }
-      await loadDriveFiles(csrf);
-      await loadStorageFiles(csrf);
+      if (!shouldContinue()) return;
+      await loadDriveFiles(csrf, { signal });
+      if (!shouldContinue()) return;
+      await loadStorageFiles(csrf, { signal });
+      if (!shouldContinue()) return;
       driveDashboardLoadedAt = Date.now();
       if (msg) msg.className = "msg";
     } catch (err) {
-      if (msg) flash(msg, "雲端硬碟狀態讀取失敗", false);
+      if (err?.name !== "AbortError" && msg) flash(msg, "雲端硬碟狀態讀取失敗", false);
     } finally {
+      if (driveDashboardNavigationAbortController === navigationController) {
+        driveDashboardNavigationAbortController = null;
+      }
       driveDashboardInFlight = null;
     }
   })();
   return driveDashboardInFlight;
 }
 
-async function loadStorageUpgradeOptions() {
+async function loadStorageUpgradeOptions({ signal } = {}) {
   const card = $("drive-storage-upgrade-card");
   if (!card) return;
-  const csrf = getCsrfToken() || await fetchCsrfToken({ force: true });
+  const csrf = getCsrfToken() || await abortableWait(fetchCsrfToken({ force: true }), signal, "Storage upgrade load aborted");
   const res = await apiFetch(API + "/cloud-drive/storage-upgrades", {
     credentials: "same-origin",
     headers: { "X-CSRF-Token": csrf || "" },
+    signal,
   });
   const json = await res.json().catch(() => ({}));
   if (!res.ok || !json.ok) {

@@ -1,6 +1,14 @@
 from datetime import datetime
 
 
+def ensure_user_reputation_columns(conn):
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
+    if "reputation" not in columns:
+        conn.execute("ALTER TABLE users ADD COLUMN reputation INTEGER NOT NULL DEFAULT 0")
+    if "updated_at" not in columns:
+        conn.execute("ALTER TABLE users ADD COLUMN updated_at TEXT")
+
+
 def ensure_governance_records_schema(conn):
     conn.execute(
         """
@@ -64,6 +72,7 @@ def record_moderation_action(conn, *, moderator_id, action_type, target_type, ta
 
 
 def add_reputation_event(conn, *, user_id, delta, reason, source_user_id=None, source_post_id=None):
+    ensure_user_reputation_columns(conn)
     ensure_governance_records_schema(conn)
     delta = int(delta)
     conn.execute(

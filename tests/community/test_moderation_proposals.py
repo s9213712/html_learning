@@ -315,6 +315,40 @@ def test_mute_governance_requires_duration_and_limits_speech_features(tmp_path):
     assert revoked == [4]
 
 
+def test_governance_preserves_bounded_evidence_and_rejects_bad_ttl(tmp_path):
+    db_path = tmp_path / "moderation-evidence.db"
+    _seed_users(db_path)
+    revoked = []
+    actor_box = {"actor": {"id": 2, "username": "admin1", "role": "manager"}}
+    client = _build_app(str(db_path), actor_box, revoked).test_client()
+
+    malformed = client.post(
+        "/api/admin/moderation/proposals",
+        json={"target_user_id": 4, "action_type": "warn", "reason": "probe", "ttl_hours": "forever"},
+    )
+    oversized = client.post(
+        "/api/admin/moderation/proposals",
+        json={"target_user_id": 4, "action_type": "warn", "reason": "probe", "ttl_hours": 999999},
+    )
+    created = client.post(
+        "/api/admin/moderation/proposals",
+        json={
+            "target_user_id": 4,
+            "action_type": "warn",
+            "reason": "documented abuse",
+            "evidence": {"report_ids": [11, 12], "summary": "duplicate spam"},
+        },
+    )
+
+    assert malformed.status_code == 400
+    assert oversized.status_code == 400
+    assert created.status_code == 200, created.get_json()
+    assert created.get_json()["proposal"]["action_payload"]["evidence"] == {
+        "report_ids": [11, 12],
+        "summary": "duplicate spam",
+    }
+
+
 def test_emergency_governance_applies_then_reverts_if_not_approved(tmp_path):
     db_path = tmp_path / "moderation-emergency.db"
     _seed_users(db_path)

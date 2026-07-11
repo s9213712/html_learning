@@ -1740,6 +1740,52 @@ def test_get_stream_status_marks_e2ee_media_unavailable(tmp_path):
     assert "E2EE" in status["error_message"]
 
 
+def test_non_media_file_never_gets_synthetic_stream_state(tmp_path):
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE uploaded_files (
+            id TEXT PRIMARY KEY,
+            owner_user_id INTEGER NOT NULL,
+            storage_path TEXT NOT NULL,
+            privacy_mode TEXT NOT NULL,
+            risk_level TEXT NOT NULL,
+            scan_status TEXT NOT NULL,
+            original_filename_plain_for_public TEXT,
+            mime_type_plain_for_public TEXT,
+            size_bytes INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT,
+            deleted_at TEXT
+        )
+        """
+    )
+    storage_root = tmp_path / "storage"
+    storage_root.mkdir()
+    _seed_uploaded_file(
+        conn,
+        storage_root,
+        file_id="plain-text",
+        owner_user_id=1,
+        filename="notes.txt",
+        mime="text/plain",
+        privacy_mode="server_encrypted",
+    )
+    row = conn.execute("SELECT * FROM uploaded_files WHERE id='plain-text'").fetchone()
+
+    assert media_streaming.get_stream_status(conn, file_row=row) is None
+    assert media_streaming.should_auto_prepare_stream(row, visibility="public") == {
+        "enabled": False,
+        "reason": "not_media",
+        "media_type": "",
+    }
+    with pytest.raises(ValueError, match="not an audio or video"):
+        media_streaming.mark_stream_asset_processing(conn, file_row=row)
+    with pytest.raises(ValueError, match="not an audio or video"):
+        media_streaming.prepare_stream_asset(conn, file_row=row, storage_root=storage_root)
+
+
 def test_video_playback_and_hls_routes_use_ready_stream_asset(tmp_path, monkeypatch):
     db_path = tmp_path / "video-stream.db"
     storage_root = tmp_path / "storage"
@@ -2358,7 +2404,7 @@ def test_media_prepare_and_status_require_login_without_500(tmp_path):
     assert status.get_json()["error"] == "login_required"
 
 
-def test_video_publish_auto_prepares_stream_asset_without_blocking_publish(tmp_path, monkeypatch):
+def test_video_publish_prepares_requested_hls_without_blocking_publish(tmp_path, monkeypatch):
     db_path = tmp_path / "publish-route.db"
     storage_root = tmp_path / "storage"
     storage_root.mkdir()
@@ -2399,6 +2445,7 @@ def test_video_publish_auto_prepares_stream_asset_without_blocking_publish(tmp_p
             "cloud_file_id": "video-1",
             "title": "Movie",
             "visibility": "public",
+            "streaming_modes": ["direct", "prepared_hls"],
         },
     )
     body = response.get_json()
@@ -2620,6 +2667,7 @@ def test_video_publish_keeps_success_when_background_worker_launch_fails(tmp_pat
             "cloud_file_id": "video-2",
             "title": "Movie 2",
             "visibility": "public",
+            "streaming_modes": ["direct", "prepared_hls"],
         },
     )
     body = response.get_json()
@@ -2717,6 +2765,7 @@ def test_server_encrypted_video_stream_requires_prepared_hls_not_main_process_de
             cloud_file_id="server-encrypted-video",
             title="Private HLS only",
             visibility="unlisted",
+            streaming_modes=["prepared_hls"],
         )
         conn.commit()
     finally:

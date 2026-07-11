@@ -228,6 +228,21 @@ def register_moderation_routes(app, deps):
             features = _parse_governance_features(data.get("restriction_features"), required=True)
             payload["restriction_features"] = features
             payload["restriction_feature_labels"] = [FEATURE_LABELS.get(key, key) for key in features]
+        evidence = data.get("evidence")
+        if isinstance(evidence, str):
+            evidence = normalize_text(evidence)[:2000]
+        elif isinstance(evidence, list):
+            evidence = [normalize_text(item)[:300] for item in evidence[:20] if normalize_text(item)]
+        elif isinstance(evidence, dict):
+            try:
+                encoded = json.dumps(evidence, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                evidence = json.loads(encoded) if len(encoded) <= 4000 else None
+            except Exception:
+                evidence = None
+        else:
+            evidence = None
+        if evidence:
+            payload["evidence"] = evidence
         return payload
 
     def _proposal_action_payload(proposal):
@@ -648,7 +663,12 @@ def register_moderation_routes(app, deps):
             if emergency_execute and action_type not in GOVERNANCE_EMERGENCY_ACTION_TYPES:
                 return json_resp({"ok":False,"msg":"此治理動作不支援緊急執行"}), 400
             policy = governance_policy_for_action(action_type, target["role"])
-            ttl_hours = 1 if emergency_execute else data.get("ttl_hours", 72)
+            try:
+                ttl_hours = 1 if emergency_execute else int(data.get("ttl_hours", 72) or 72)
+            except Exception:
+                return json_resp({"ok":False,"msg":"提案有效期限格式錯誤"}), 400
+            if ttl_hours < 1 or ttl_hours > GOVERNANCE_MAX_DURATION_HOURS:
+                return json_resp({"ok":False,"msg":f"提案有效期限需介於 1 到 {GOVERNANCE_MAX_DURATION_HOURS} 小時"}), 400
             proposal, err = create_moderation_proposal(
                 conn,
                 target_user_id=target["id"],

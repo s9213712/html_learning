@@ -107,6 +107,20 @@ SAFE_SAMPLER_FALLBACK = "euler"
 SAFE_SCHEDULER_FALLBACK = "normal"
 
 
+def _generation_job_db_snapshot_is_current(db_job, memory_job):
+    if not memory_job:
+        return True
+    try:
+        db_updated_at = float((db_job or {}).get("updated_at") or 0)
+    except (TypeError, ValueError):
+        db_updated_at = 0.0
+    try:
+        memory_updated_at = float((memory_job or {}).get("updated_at") or 0)
+    except (TypeError, ValueError):
+        memory_updated_at = 0.0
+    return db_updated_at >= memory_updated_at
+
+
 def _env_int(name, default, minimum, maximum):
     try:
         value = int(os.environ.get(name, str(default)))
@@ -1913,41 +1927,44 @@ def register_comfyui_routes(app, deps):
             "updated_at": float(row["updated_at"] or 0),
         }
 
-    def _persist_generation_job(job):
+    def _upsert_generation_job(conn, job):
         if not isinstance(job, dict) or not job.get("job_id"):
-            return False
+            raise ValueError("generation job_id is required")
         result_payload = _strip_comfyui_inline_data_urls(job.get("result")) if job.get("result") is not None else None
+        _ensure_generation_job_schema(conn)
+        conn.execute(
+            """
+            INSERT INTO comfyui_generation_jobs (
+                job_id, owner_user_id, owner_username, status, error,
+                progress_json, result_json, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(job_id) DO UPDATE SET
+                owner_user_id=excluded.owner_user_id,
+                owner_username=excluded.owner_username,
+                status=excluded.status,
+                error=excluded.error,
+                progress_json=excluded.progress_json,
+                result_json=excluded.result_json,
+                updated_at=excluded.updated_at
+            """,
+            (
+                str(job["job_id"]),
+                int(job.get("owner_user_id") or 0),
+                str(job.get("owner_username") or ""),
+                str(job.get("status") or "queued"),
+                str(job.get("error") or ""),
+                json.dumps(job.get("progress") or {}, ensure_ascii=False, sort_keys=True),
+                json.dumps(result_payload, ensure_ascii=False, sort_keys=True) if result_payload is not None else None,
+                float(job.get("created_at") or time.time()),
+                float(job.get("updated_at") or time.time()),
+            ),
+        )
+
+    def _persist_generation_job(job):
         conn = get_db()
         try:
-            _ensure_generation_job_schema(conn)
-            conn.execute(
-                """
-                INSERT INTO comfyui_generation_jobs (
-                    job_id, owner_user_id, owner_username, status, error,
-                    progress_json, result_json, created_at, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(job_id) DO UPDATE SET
-                    owner_user_id=excluded.owner_user_id,
-                    owner_username=excluded.owner_username,
-                    status=excluded.status,
-                    error=excluded.error,
-                    progress_json=excluded.progress_json,
-                    result_json=excluded.result_json,
-                    updated_at=excluded.updated_at
-                """,
-                (
-                    str(job["job_id"]),
-                    int(job.get("owner_user_id") or 0),
-                    str(job.get("owner_username") or ""),
-                    str(job.get("status") or "queued"),
-                    str(job.get("error") or ""),
-                    json.dumps(job.get("progress") or {}, ensure_ascii=False, sort_keys=True),
-                    json.dumps(result_payload, ensure_ascii=False, sort_keys=True) if result_payload is not None else None,
-                    float(job.get("created_at") or time.time()),
-                    float(job.get("updated_at") or time.time()),
-                ),
-            )
+            _upsert_generation_job(conn, job)
             conn.commit()
             return True
         except Exception:
@@ -2075,50 +2092,91 @@ def register_comfyui_routes(app, deps):
                     generation_jobs[job_id] = job
         if not job:
             return None
+        platform_sync_error = None
         with generation_jobs_lock:
-            job = generation_jobs.get(job_id, job)
-            if not job:
+            current = generation_jobs.get(job_id, job)
+            if not current:
                 return None
+            updated = dict(current)
             for key, value in changes.items():
                 if key == "result":
                     value = _strip_comfyui_inline_data_urls(value)
-                job[key] = value
-            job["updated_at"] = time.time()
-            updated = dict(job)
-        _persist_generation_job(updated)
-        try:
-            from services.job_center import add_job_event, get_job_by_source, update_job as update_platform_job
-
+                updated[key] = value
+            updated["updated_at"] = time.time()
             conn = get_db()
             try:
-                platform_job = get_job_by_source(conn, "comfyui", job_id)
-                if platform_job:
-                    status_map = {"completed": "succeeded", "error": "failed", "running": "running", "queued": "queued"}
-                    next_status = status_map.get(str(updated.get("status") or ""), None)
-                    payload = {}
-                    if next_status:
-                        payload["status"] = next_status
-                        payload["stage"] = next_status
-                    if next_status in {"succeeded", "failed", "cancelled", "expired"}:
-                        payload["finished_at"] = __import__("datetime").datetime.utcnow().replace(microsecond=0).isoformat()
-                    if updated.get("error"):
-                        payload["error_message"] = str(updated.get("error") or "")[:1000]
-                        payload["error_stage"] = "comfyui"
-                    defer_progress = next_status not in {"succeeded", "failed", "cancelled", "expired"}
-                    update_platform_job(conn, platform_job["job_uuid"], defer_progress=defer_progress, **payload)
-                    add_job_event(
-                        conn,
-                        platform_job["job_uuid"],
-                        event_type="updated",
-                        stage=payload.get("stage"),
-                        message=payload.get("error_message") or "ComfyUI 任務狀態更新",
-                        defer_progress=defer_progress,
+                _upsert_generation_job(conn, updated)
+                try:
+                    from services.job_center import add_job_event, get_job_by_source, update_job as update_platform_job
+
+                    platform_job = get_job_by_source(conn, "comfyui", job_id)
+                    if platform_job:
+                        status_map = {"completed": "succeeded", "error": "failed", "running": "running", "queued": "queued"}
+                        next_status = status_map.get(str(updated.get("status") or ""), None)
+                        terminal = next_status in {"succeeded", "failed", "cancelled", "expired"}
+                        progress_data = updated.get("progress") if isinstance(updated.get("progress"), dict) else {}
+                        payload = {}
+                        if next_status:
+                            payload["status"] = next_status
+                            payload["stage"] = next_status
+                        if terminal:
+                            default_stage = {
+                                "succeeded": "completed",
+                                "failed": "error",
+                            }.get(next_status, next_status)
+                            payload["stage"] = str(progress_data.get("phase") or default_stage)[:80]
+                            payload["progress_percent"] = int(float(progress_data.get("percent") or 100))
+                            payload["stage_detail"] = str(progress_data.get("detail") or "")[:1000]
+                            payload["finished_at"] = __import__("datetime").datetime.utcnow().replace(microsecond=0).isoformat()
+                        if updated.get("error"):
+                            payload["error_message"] = str(updated.get("error") or "")[:1000]
+                            payload["error_stage"] = "comfyui"
+                        defer_progress = not terminal
+                        update_platform_job(conn, platform_job["job_uuid"], defer_progress=defer_progress, **payload)
+                        add_job_event(
+                            conn,
+                            platform_job["job_uuid"],
+                            event_type="updated",
+                            stage=payload.get("stage"),
+                            message=payload.get("error_message") or "ComfyUI 任務狀態更新",
+                            progress_percent=payload.get("progress_percent"),
+                            defer_progress=defer_progress,
+                        )
+                except Exception as exc:
+                    platform_sync_error = exc
+                    conn.rollback()
+                    _upsert_generation_job(conn, updated)
+                conn.commit()
+            except Exception:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                try:
+                    audit(
+                        "COMFYUI_JOB_PERSIST_ERROR",
+                        "-",
+                        user=str(updated.get("owner_username") or "-"),
+                        success=False,
+                        detail=f"job_id={job_id},status={updated.get('status') or '-'}",
                     )
-                    conn.commit()
+                except Exception:
+                    pass
+                return {**updated, "persistence_error": True}
             finally:
                 conn.close()
-        except Exception:
-            pass
+            generation_jobs[job_id] = updated
+        if platform_sync_error is not None:
+            try:
+                audit(
+                    "COMFYUI_JOB_CENTER_SYNC_ERROR",
+                    "-",
+                    user=str(updated.get("owner_username") or "-"),
+                    success=False,
+                    detail=f"job_id={job_id},status={updated.get('status') or '-'},error={platform_sync_error}",
+                )
+            except Exception:
+                pass
         return updated
 
     def _update_generation_job_progress(job_id, progress):
@@ -2163,7 +2221,9 @@ def register_comfyui_routes(app, deps):
                 job["_last_platform_progress_at"] = now
                 job["_last_platform_progress_signature"] = progress_signature
             updated = dict(job)
-        _persist_generation_job(updated)
+        persisted = _persist_generation_job(updated)
+        if not persisted:
+            return {**updated, "persistence_error": True}
         if not should_write_platform_progress:
             return updated
         try:
@@ -2186,7 +2246,14 @@ def register_comfyui_routes(app, deps):
                         "canceled": "cancelled",
                         "expired": "expired",
                     }
-                    next_status = terminal_status_map.get(stage, "running")
+                    # Backend progress is telemetry, not the durable lifecycle
+                    # source. A terminal Job Center state is only emitted after
+                    # the domain job row has persisted that terminal status.
+                    domain_status = str(updated.get("status") or "running").strip().lower()
+                    next_status = terminal_status_map.get(domain_status, "running")
+                    if stage in terminal_status_map and next_status == "running":
+                        stage = "finalizing"
+                        detail = detail or "ComfyUI 已完成輸出，正在持久化站內結果"
                     update_payload = {
                         "status": next_status,
                         "progress_percent": percent,
@@ -2260,8 +2327,7 @@ def register_comfyui_routes(app, deps):
                 current = generation_jobs.get(job_id)
                 if (
                     not current
-                    or float(db_job.get("updated_at") or 0) >= float(current.get("updated_at") or 0)
-                    or str(current.get("status") or "") in {"queued", "running"}
+                    or _generation_job_db_snapshot_is_current(db_job, current)
                 ):
                     generation_jobs[job_id] = db_job
                     return dict(db_job)
@@ -2335,8 +2401,14 @@ def register_comfyui_routes(app, deps):
                         "prompt_runtime_presence": presence,
                         "prompt_runtime_presence_meta": presence_meta,
                     }
+                    _update_generation_job(
+                        job["job_id"],
+                        status="error",
+                        error=detail,
+                        result=job.get("result"),
+                        progress=terminal_progress,
+                    )
                     _update_generation_job_progress(job["job_id"], terminal_progress)
-                    _update_generation_job(job["job_id"], status="error", error=detail, result=job.get("result"))
                     payload["status"] = "error"
                     payload["error"] = detail
                     payload["progress"] = terminal_progress
@@ -2394,8 +2466,14 @@ def register_comfyui_routes(app, deps):
                         "completed": False,
                         "terminal_reason": "backend_unresponsive_timeout",
                     }
+                    _update_generation_job(
+                        job["job_id"],
+                        status="error",
+                        error=detail,
+                        result=job.get("result"),
+                        progress=terminal_progress,
+                    )
                     _update_generation_job_progress(job["job_id"], terminal_progress)
-                    _update_generation_job(job["job_id"], status="error", error=detail, result=job.get("result"))
                     payload["status"] = "error"
                     payload["error"] = detail
                     payload["progress"] = terminal_progress
@@ -2708,8 +2786,9 @@ def register_comfyui_routes(app, deps):
         return ""
 
     def _assert_comfyui_final_images_usable(result):
-        result_images = result.get("images") if isinstance(result.get("images"), list) else []
-        if not result_images and result.get("image_ref"):
+        has_explicit_image_outputs = isinstance(result.get("images"), list)
+        result_images = result.get("images") if has_explicit_image_outputs else []
+        if not has_explicit_image_outputs and result.get("image_ref"):
             result_images = [result]
         if not result_images:
             return
@@ -2724,6 +2803,89 @@ def register_comfyui_routes(app, deps):
                 issues.append(f"{filename}: {issue}")
         if issues:
             raise ComfyUIError("ComfyUI 輸出品質檢查失敗：" + "；".join(issues[:5]))
+
+    def _bounded_json_clone(value, *, max_chars=12000, fallback=None):
+        try:
+            encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            if len(encoded) > int(max_chars):
+                return fallback
+            return json.loads(encoded)
+        except Exception:
+            return fallback
+
+    def _generation_delivery_contract(params, *, image_count=0):
+        params = params if isinstance(params, dict) else {}
+        controlnet = params.get("controlnet") if isinstance(params.get("controlnet"), dict) else {}
+        control_image_ref = params.get("control_image_ref") or controlnet.get("image_ref")
+
+        def _review_int(name, default, lower, upper):
+            try:
+                value = int(params.get(name) if params.get(name) not in (None, "") else default)
+            except Exception:
+                value = default
+            return max(lower, min(upper, value))
+
+        def _review_float(name, default, lower, upper):
+            try:
+                value = float(params.get(name) if params.get(name) not in (None, "") else default)
+            except Exception:
+                value = default
+            return max(lower, min(upper, value))
+
+        mode = str(params.get("generation_mode") or "txt2img").strip().lower()
+        workflow_id = str(
+            params.get("workflow_system_bundle_id")
+            or params.get("official_workflow_id")
+            or params.get("workflow_id")
+            or ""
+        ).strip()
+        semantic_edit = bool(
+            int(image_count or 0) > 0
+            and (
+                mode in {"img2img", "inpaint", "outpaint"}
+                or _is_qwen_edit_workflow_family_id(workflow_id)
+                or params.get("reference_image_ref")
+                or control_image_ref
+            )
+        )
+        review_required = bool(
+            int(image_count or 0) > 0
+            and (_coerce_bool(params.get("agent_review_required")) or semantic_edit)
+        )
+        review_context = {
+            "agent_review_required": review_required,
+            "agent_review_mode": str(params.get("agent_review_mode") or "vision_iterative_gate")[:80],
+            "agent_review_strategy": str(params.get("agent_review_strategy") or "")[:80],
+            "agent_review_min_candidates": _review_int("agent_review_min_candidates", 1, 1, 4),
+            "agent_review_max_attempts": _review_int("agent_review_max_attempts", 2, 1, 6),
+            "agent_review_pass_threshold": _review_float("agent_review_pass_threshold", 0.8, 0.5, 1.0),
+            "agent_review_plan": str(params.get("agent_review_plan") or "")[:2000],
+            "agent_review_attempt_index": _review_int("agent_review_attempt_index", 1, 1, 20),
+            "agent_review_stage_index": _review_int("agent_review_stage_index", 0, 0, 20),
+            "agent_review_stage_key": str(params.get("agent_review_stage_key") or "")[:40],
+            "agent_review_stage_attempt": _review_int("agent_review_stage_attempt", 1, 1, 20),
+            "agent_review_stage_sequence": _bounded_json_clone(
+                params.get("agent_review_stage_sequence") or [],
+                max_chars=12000,
+                fallback=[],
+            ),
+            "generation_mode": mode,
+            "workflow_id": workflow_id,
+            "prompt": str(params.get("prompt") or "")[:3000],
+            "edit_instruction": str(params.get("edit_instruction") or params.get("edit_prompt") or "")[:3000],
+            "negative_prompt": str(params.get("negative_prompt") or "")[:3000],
+            "source_image_ref": _bounded_json_clone(params.get("source_image_ref"), max_chars=3000),
+            "reference_image_ref": _bounded_json_clone(params.get("reference_image_ref"), max_chars=3000),
+            "control_image_ref": _bounded_json_clone(control_image_ref, max_chars=3000),
+        }
+        return {
+            "delivery_status": "review_required" if review_required else "ready",
+            "review_required": review_required,
+            "delivery_pass": not review_required,
+            "technical_quality_pass": True,
+            "semantic_quality_pass": None if review_required else True,
+            "review_contract": review_context,
+        }
 
     def _is_qwen_edit_workflow_family_id(value):
         workflow_id = str(value or "").strip()
@@ -3394,6 +3556,7 @@ def register_comfyui_routes(app, deps):
                 "history_id": history_id,
                 "wallet": (billing or {}).get("wallet") or _comfyui_wallet_payload(actor),
             }
+            payload.update(_generation_delivery_contract(params, image_count=len(images)))
             audit(
                 "COMFYUI_GENERATE",
                 audit_ip,
@@ -3402,18 +3565,21 @@ def register_comfyui_routes(app, deps):
                 ua=audit_ua,
                 detail=f"job_id={job_id}, prompt_id={result['prompt_id']}, file={result['image_ref'].get('filename')}, batch={len(images)}",
             )
-            _update_generation_job_progress(job_id, {
+            completed_progress = {
+                **_generation_job_progress_snapshot(job_id),
                 "phase": "completed",
                 "percent": 100,
                 "completed": True,
                 "detail": f"已完成，共 {len(images)} 張",
-            })
+            }
             _update_generation_job(
                 job_id,
                 status="completed",
                 result=payload,
                 error="",
+                progress=completed_progress,
             )
+            _update_generation_job_progress(job_id, completed_progress)
         except ComfyUIError as exc:
             error_progress = {
                 "phase": "error",
@@ -3424,8 +3590,9 @@ def register_comfyui_routes(app, deps):
             }
             if getattr(active_client, "backend_kind", "") == "diffusers":
                 error_progress = _diffusers_error_progress(job_id, exc)
+            error_progress = {**_generation_job_progress_snapshot(job_id), **error_progress}
+            _update_generation_job(job_id, status="error", error=str(exc), result=None, progress=error_progress)
             _update_generation_job_progress(job_id, error_progress)
-            _update_generation_job(job_id, status="error", error=str(exc), result=None)
             audit("COMFYUI_GENERATE_ERROR", audit_ip, user=_actor_value(actor, "username"), success=False, ua=audit_ua, detail=str(exc)[:180])
         except Exception as exc:
             error_progress = {
@@ -3437,8 +3604,9 @@ def register_comfyui_routes(app, deps):
             }
             if getattr(active_client, "backend_kind", "") == "diffusers":
                 error_progress = _diffusers_error_progress(job_id, exc)
+            error_progress = {**_generation_job_progress_snapshot(job_id), **error_progress}
+            _update_generation_job(job_id, status="error", error=str(exc), result=None, progress=error_progress)
             _update_generation_job_progress(job_id, error_progress)
-            _update_generation_job(job_id, status="error", error=str(exc), result=None)
             audit("COMFYUI_GENERATE_ERROR", audit_ip, user=_actor_value(actor, "username"), success=False, ua=audit_ua, detail=str(exc)[:180])
         finally:
             if generation_token:
@@ -3605,6 +3773,9 @@ def register_comfyui_routes(app, deps):
                 "partial": True,
                 "expected_image_count": expected_count,
             }
+            payload.update(_generation_delivery_contract(default_params, image_count=len(images)))
+            payload["delivery_status"] = "partial"
+            payload["delivery_pass"] = False
             _update_generation_job(job_id, result=payload)
 
         def _workflow_progress_callback(progress):
@@ -3674,13 +3845,22 @@ def register_comfyui_routes(app, deps):
                 "workflow_run_id": run_id,
                 "preset_id": int(row["id"]),
             }
-            _update_generation_job(job_id, status="completed", result=payload, error="")
-            _update_generation_job_progress(job_id, {
+            payload.update(_generation_delivery_contract(default_params, image_count=len(images)))
+            completed_progress = {
+                **_generation_job_progress_snapshot(job_id),
                 "phase": "completed",
                 "percent": 100,
                 "completed": True,
                 "detail": f"已完成，共 {len(images)} 張圖片、{len(media)} 個媒體輸出",
-            })
+            }
+            _update_generation_job(
+                job_id,
+                status="completed",
+                result=payload,
+                error="",
+                progress=completed_progress,
+            )
+            _update_generation_job_progress(job_id, completed_progress)
             audit(
                 "COMFYUI_WORKFLOW_RUN",
                 audit_ip,
@@ -3696,8 +3876,16 @@ def register_comfyui_routes(app, deps):
                 conn.commit()
             finally:
                 conn.close()
-            _update_generation_job(job_id, status="error", error=str(exc), result=None)
-            _update_generation_job_progress(job_id, {"phase": "error", "detail": str(exc), "completed": False})
+            error_progress = {
+                **_generation_job_progress_snapshot(job_id),
+                "phase": "error",
+                "percent": 100,
+                "detail": str(exc),
+                "error_message": str(exc),
+                "completed": False,
+            }
+            _update_generation_job(job_id, status="error", error=str(exc), result=None, progress=error_progress)
+            _update_generation_job_progress(job_id, error_progress)
             audit("COMFYUI_WORKFLOW_RUN_ERROR", audit_ip, user=_actor_value(actor, "username"), success=False, ua=audit_ua, detail=str(exc)[:180])
         except Exception as exc:
             conn = get_db()
@@ -3706,8 +3894,16 @@ def register_comfyui_routes(app, deps):
                 conn.commit()
             finally:
                 conn.close()
-            _update_generation_job(job_id, status="error", error=str(exc), result=None)
-            _update_generation_job_progress(job_id, {"phase": "error", "detail": str(exc), "completed": False})
+            error_progress = {
+                **_generation_job_progress_snapshot(job_id),
+                "phase": "error",
+                "percent": 100,
+                "detail": str(exc),
+                "error_message": str(exc),
+                "completed": False,
+            }
+            _update_generation_job(job_id, status="error", error=str(exc), result=None, progress=error_progress)
+            _update_generation_job_progress(job_id, error_progress)
             audit("COMFYUI_WORKFLOW_RUN_ERROR", audit_ip, user=_actor_value(actor, "username"), success=False, ua=audit_ua, detail=str(exc)[:180])
 
     def _run_comfyui_model_download_job(job_id, actor, request_data, request_meta=None):
@@ -4033,6 +4229,29 @@ def register_comfyui_routes(app, deps):
         mode = str(value or "fixed").strip().lower()
         return mode if mode in {"random", "fixed", "increment", "decrement"} else "fixed"
 
+    def _normalize_agent_review_params(data):
+        sequence = data.get("agent_review_stage_sequence")
+        if isinstance(sequence, str):
+            sequence = _parse_json_field(sequence, [])
+        if not isinstance(sequence, list):
+            sequence = []
+        sequence = _bounded_json_clone(sequence[:8], max_chars=12000, fallback=[])
+        return {
+            "agent_review_required": _coerce_bool(data.get("agent_review_required")),
+            "agent_review_mode": str(data.get("agent_review_mode") or "")[:80],
+            "agent_review_strategy": str(data.get("agent_review_strategy") or "")[:80],
+            "agent_review_min_candidates": _int_range(data.get("agent_review_min_candidates"), 1, 1, 4),
+            "agent_review_max_attempts": _int_range(data.get("agent_review_max_attempts"), 2, 1, 6),
+            "agent_review_pass_threshold": _float_range(data.get("agent_review_pass_threshold"), 0.8, 0.5, 1.0),
+            "agent_review_plan": str(data.get("agent_review_plan") or "")[:2000],
+            "agent_review_attempt_index": _int_range(data.get("agent_review_attempt_index"), 1, 1, 20),
+            "agent_review_stage_index": _int_range(data.get("agent_review_stage_index"), 0, 0, 20),
+            "agent_review_stage_key": str(data.get("agent_review_stage_key") or "")[:40],
+            "agent_review_stage_attempt": _int_range(data.get("agent_review_stage_attempt"), 1, 1, 20),
+            "agent_review_stage_sequence": sequence,
+            "edit_instruction": _normalize_comfyui_prompt_text(data.get("edit_instruction") or data.get("edit_prompt"))[:3000],
+        }
+
     def _normalize_generation_payload(data):
         mode = _normalized_generation_mode(data.get("generation_mode"))
         if not mode:
@@ -4157,6 +4376,7 @@ def register_comfyui_routes(app, deps):
             "upscale_model": str(data.get("upscale_model") or "").strip(),
             "outpaint": _normalize_outpaint_payload(data),
         }
+        params.update(_normalize_agent_review_params(data))
         skip_asset_validation = _coerce_bool(data.get("skip_asset_validation"))
         if not skip_asset_validation and mode == "img2img" and not params["source_image_ref"]:
             return None, "圖生圖需要來源圖片"
@@ -4511,6 +4731,7 @@ def register_comfyui_routes(app, deps):
         "generation_job_payload": _generation_job_payload,
         "image_ref_payload": _image_ref_payload,
         "initial_generation_progress": _initial_generation_progress,
+        "update_generation_job": _update_generation_job,
         "update_generation_job_progress": _update_generation_job_progress,
         "run_comfyui_generation_job": _run_comfyui_generation_job,
         "ensure_comfyui_workflow_schema": _ensure_comfyui_workflow_schema,

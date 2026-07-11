@@ -126,7 +126,9 @@ def test_functional_smoke_login_helpers_require_real_session_cookie():
     assert 'fail "auth session refresh smoke user" "missing session_token cookie after smoke user login"' in script
     assert "port_is_available()" in script
     assert "pick_free_local_port()" in script
-    assert 'BASE_URL="${SMOKE_SCHEME}://${HOST}:${PORT}"' in script
+    assert 'local connect_host="${CLIENT_HOST:-$HOST}"' in script
+    assert 'BASE_URL="${SMOKE_SCHEME}://${connect_host}:${PORT}"' in script
+    assert "refresh_base_url()" in script
     assert 'if [[ -z "$PORT" ]]; then' in script
     assert 'auto-pick failed; choose --port explicitly or run outside a socket-restricted sandbox' in script
     assert 'pass "server startup port selection" "port $previous_port already in use; switched to free port $PORT"' in script

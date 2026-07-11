@@ -60,7 +60,9 @@ def test_margin_collateral_without_client_key_uses_stable_retry_key():
     trading = (ROOT / "services" / "trading" / "margin.py").read_text(encoding="utf-8")
     collateral_route = trading.split("def add_margin_collateral", 1)[1].split("def close_margin_position", 1)[0]
 
-    assert 'fallback_key = idempotency_key or f"{position_uuid}:{amount}:{int(datetime.now().timestamp() // 60)}"' in collateral_route
+    assert "_implicit_operation_keys(" in collateral_route
+    assert "boundary_operation_key=boundary_operation_key" in collateral_route
+    assert "IMPLICIT_IDEMPOTENCY_BOUNDARY_GRACE_SECONDS" in trading
     assert "uuid.uuid4()" not in collateral_route
     assert 'idempotency_key=f"trading:margin:collateral_add:{operation_key}"' in collateral_route
 

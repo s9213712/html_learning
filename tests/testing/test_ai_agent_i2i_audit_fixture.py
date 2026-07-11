@@ -27,5 +27,5 @@ def test_i2i_source_fixture_keeps_prompt_in_metadata_not_pixels(tmp_path):
 
     image = Image.open(paths["source"]).convert("RGB")
     top_label_strip = image.crop((0, 0, 760, 76))
-    dark_pixels = sum(1 for r, g, b in top_label_strip.getdata() if r < 100 and g < 100 and b < 100)
+    dark_pixels = sum(1 for r, g, b in module.image_pixels(top_label_strip) if r < 100 and g < 100 and b < 100)
     assert dark_pixels == 0

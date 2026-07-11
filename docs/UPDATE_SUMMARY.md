@@ -1,6 +1,41 @@
 # Update Summary
 
-Release ID: `05_2026.06.08-001`
+Release ID: `05_2026.07.10-001`
+
+## 05_2026.07.10-001
+
+- Rebuilt AI Agent actions around explicit role and operation-mode policy.
+  Users can confirm own-scope safe actions, managers can operate bounded member
+  and community governance tools, and root retains audited system, emergency,
+  launch, and Codex handoff controls. Tool discovery and execution now share the
+  same effective-policy contract.
+- Made AI audit write locks persistent across workers, added encrypted
+  conversation isolation and role-scoped read snapshots, and extended the live
+  Playwright journey across user, manager, and root Agent workflows.
+- Hardened ComfyUI terminal job commits and semantic i2i/edit delivery review so
+  domain status, Job Center status, progress, and review evidence cannot expose
+  partially committed success.
+- Made video tips atomic and idempotent across split databases, corrected media
+  type handling and SVG isolation, and tightened album/upload/stream contracts.
+- Removed false-green CI paths, registered the expanded QA inventory, kept all
+  test runtimes under `/tmp`, and made the deep Playwright runner directly
+  executable without an external `PYTHONPATH` workaround.
+- Made Cloud Drive dashboard reads navigation-scoped, abortable, deduplicated,
+  and cache-safe so fast module changes cannot leave stale task requests or
+  overwrite a newer remote-download view.
+- Made video upload progress represent server-side publish completion rather
+  than transport completion, and invalidated stale detail navigation so a late
+  publish callback cannot pull the user away from the video list.
+- Normalized and deduplicated dev-server shutdown PID candidates before process
+  termination, preventing adjacent listener/worker IDs from being concatenated
+  into a false non-dev PID during multi-worker shutdown.
+- Made gitleaks timeouts bounded and actionable for the large audit repository,
+  aligned the CI job budget with the quick-test timeout, and closed two
+  nondeterministic gates: stale ComfyUI progress snapshots and minute-boundary
+  margin-collateral retries.
+- Added bounded fresh-connection retry for management-plane job enqueue under
+  SQLite write contention, preventing burst root operations from surfacing a
+  lock exception; the lock regression now runs in the pre-push quick suite.
 
 ## 05_2026.06.08-001
 

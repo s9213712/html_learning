@@ -22,6 +22,11 @@ from services.job_center import (
     update_job,
     utc_now,
 )
+from services.core.sqlite_hardening import (
+    is_sqlite_lock_error,
+    sqlite_retry_attempts,
+    sqlite_retry_base_sleep_seconds,
+)
 
 
 MANAGEMENT_PLANE_SOURCE_MODULE = "management_plane"
@@ -321,42 +326,68 @@ def start_management_plane_job(
 ) -> dict[str, Any]:
     queue_class_name = _safe_lock_name(queue_class, default="management")
     resource_lock_names = _normalize_resource_locks(resource_locks)
-    conn = get_db()
-    try:
-        ensure_management_plane_schema(conn)
-        if reuse_running:
-            existing = _reusable_existing_job(
+    job = None
+    attempts = max(1, sqlite_retry_attempts())
+    retry_sleep = sqlite_retry_base_sleep_seconds()
+    for attempt in range(attempts):
+        conn = get_db()
+        retry_error = None
+        try:
+            ensure_management_plane_schema(conn)
+            if reuse_running:
+                existing = _reusable_existing_job(
+                    conn,
+                    snapshot_key=snapshot_key,
+                    reuse_recent_success_seconds=reuse_recent_success_seconds,
+                )
+                if existing:
+                    return {"created": False, "job": existing}
+            job = create_job(
                 conn,
-                snapshot_key=snapshot_key,
-                reuse_recent_success_seconds=reuse_recent_success_seconds,
+                owner_user_id=(actor or {}).get("id"),
+                created_by_user_id=(actor or {}).get("id"),
+                job_type=job_type,
+                title=title,
+                description="Management-plane async job; heavy work runs outside the request path.",
+                source_module=MANAGEMENT_PLANE_SOURCE_MODULE,
+                source_ref=snapshot_key,
+                status="queued",
+                progress_percent=0,
+                stage="queued",
+                max_retries=0,
+                cancellable=False,
+                metadata={
+                    "snapshot_key": snapshot_key,
+                    "request": request_payload or {},
+                    "starter_pid": os.getpid(),
+                    "queue_class": queue_class_name,
+                    "resource_locks": list(resource_lock_names),
+                },
             )
-            if existing:
-                return {"created": False, "job": existing}
-        job = create_job(
-            conn,
-            owner_user_id=(actor or {}).get("id"),
-            created_by_user_id=(actor or {}).get("id"),
-            job_type=job_type,
-            title=title,
-            description="Management-plane async job; heavy work runs outside the request path.",
-            source_module=MANAGEMENT_PLANE_SOURCE_MODULE,
-            source_ref=snapshot_key,
-            status="queued",
-            progress_percent=0,
-            stage="queued",
-            max_retries=0,
-            cancellable=False,
-            metadata={
-                "snapshot_key": snapshot_key,
-                "request": request_payload or {},
-                "starter_pid": os.getpid(),
-                "queue_class": queue_class_name,
-                "resource_locks": list(resource_lock_names),
-            },
+            conn.commit()
+        except Exception as exc:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            if not is_sqlite_lock_error(exc) or attempt >= attempts - 1:
+                raise
+            retry_error = exc
+        finally:
+            conn.close()
+        if retry_error is None:
+            break
+        delay = retry_sleep * (2**attempt)
+        _LOGGER.warning(
+            "management-plane enqueue locked; retrying snapshot=%s attempt=%s/%s delay=%.3fs",
+            snapshot_key,
+            attempt + 1,
+            attempts,
+            delay,
         )
-        conn.commit()
-    finally:
-        conn.close()
+        time.sleep(delay)
+    if not job:
+        raise RuntimeError("management-plane job enqueue did not produce a job")
 
     thread = threading.Thread(
         target=_run_management_plane_job,

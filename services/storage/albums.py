@@ -241,9 +241,11 @@ def revoke_album_share_links(conn, *, actor, album_id):
 def _is_album_media_storage_row(row):
     mime = str((row["mime_type_plain_for_public"] if "mime_type_plain_for_public" in row.keys() else "") or "").lower()
     name = str((row["display_name"] if "display_name" in row.keys() else "") or "").lower()
+    if mime.split(";", 1)[0].strip() == "image/svg+xml" or name.endswith(".svg"):
+        return False
     if mime.startswith("image/") or mime.startswith("video/"):
         return True
-    image_exts = (".avif", ".bmp", ".gif", ".heic", ".heif", ".jpeg", ".jpg", ".png", ".svg", ".webp")
+    image_exts = (".avif", ".bmp", ".gif", ".heic", ".heif", ".jpeg", ".jpg", ".png", ".webp")
     video_exts = (".avi", ".m4v", ".mkv", ".mov", ".mp4", ".mpeg", ".mpg", ".ogv", ".webm", ".wmv")
     return name.endswith(image_exts + video_exts)
 

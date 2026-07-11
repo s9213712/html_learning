@@ -20,6 +20,7 @@ QUICK_TESTS = [
     "tests/trading/core/test_trading_engine.py",
     "tests/storage/test_remote_downloads.py",
     "tests/video/api/test_video_publish.py",
+    "tests/services/test_management_plane.py",
     "tests/regressions/test_security_issue_regressions.py",
     "tests/users/test_user_csv_exports.py",
 ]

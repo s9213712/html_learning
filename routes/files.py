@@ -21,6 +21,7 @@ from services.security.upload_security import (
     get_user_cloud_drive_usage,
     log_file_access,
     safe_public_filename,
+    safe_public_mime_type,
     scan_uploaded_file,
 )
 from datetime import datetime
@@ -941,6 +942,7 @@ def register_file_routes(app, deps):
         )
         response.headers["X-Hackme-Transfer-Mode"] = "python_throttled_stream"
         response.headers["X-Cloud-Drive-Rate-Limit-KB-Per-Sec"] = str(kb_per_sec)
+        response.headers["X-Content-Type-Options"] = "nosniff"
         return response
 
     def _parse_http_byte_range(range_header, total_size):
@@ -991,6 +993,7 @@ def register_file_routes(app, deps):
             "attachment" if as_attachment else "inline",
             download_name,
         )
+        response.headers["X-Content-Type-Options"] = "nosniff"
         return response
 
     def _send_local_storage_file(path, *, as_attachment=False, download_name="download.bin", mimetype=None, conditional=True):
@@ -1011,12 +1014,18 @@ def register_file_routes(app, deps):
             conditional=conditional,
         )
         response.headers.setdefault("X-Hackme-Transfer-Mode", "python_send_file")
+        response.headers["X-Content-Type-Options"] = "nosniff"
         return response
 
     def _send_readable_file(row, *, as_attachment, download_name, mimetype=None, conditional=False, actor=None):
         path = resolve_file_storage_path(storage_root, row)
         if not path.exists():
             return None
+        try:
+            stored_mimetype = row["mime_type_plain_for_public"] or ""
+        except Exception:
+            stored_mimetype = ""
+        response_mimetype = mimetype or safe_public_mime_type(download_name, stored_mimetype)
         policy = _actor_transfer_policy(actor) if actor else {"download_kb_per_sec": 0}
         download_kb_per_sec = int(policy.get("download_kb_per_sec") or 0)
         if is_server_encrypted_file(row):
@@ -1045,7 +1054,7 @@ def register_file_routes(app, deps):
                 response = Response(
                     _generate_chunked_plaintext(),
                     status=206 if byte_range else 200,
-                    mimetype=mimetype or mimetypes.guess_type(download_name)[0] or "application/octet-stream",
+                    mimetype=response_mimetype,
                 )
                 response.headers["Content-Length"] = str(content_length)
                 response.headers["Accept-Ranges"] = "bytes"
@@ -1058,6 +1067,7 @@ def register_file_routes(app, deps):
                     "attachment" if as_attachment else "inline",
                     download_name,
                 )
+                response.headers["X-Content-Type-Options"] = "nosniff"
                 return response
             raw = decrypt_server_encrypted_bytes(path, server_file_fernet)
             if request.headers.get("Range") or download_kb_per_sec <= 0:
@@ -1065,7 +1075,7 @@ def register_file_routes(app, deps):
                     raw,
                     as_attachment=as_attachment,
                     download_name=download_name,
-                    mimetype=mimetype,
+                    mimetype=response_mimetype,
                     range_header=request.headers.get("Range"),
                 )
             if download_kb_per_sec > 0:
@@ -1080,7 +1090,7 @@ def register_file_routes(app, deps):
                     _chunks,
                     as_attachment=as_attachment,
                     download_name=download_name,
-                    mimetype=mimetype,
+                    mimetype=response_mimetype,
                     total_size=len(raw),
                     kb_per_sec=download_kb_per_sec,
                 )
@@ -1088,7 +1098,7 @@ def register_file_routes(app, deps):
                 raw,
                 as_attachment=as_attachment,
                 download_name=download_name,
-                mimetype=mimetype,
+                mimetype=response_mimetype,
                 range_header=None,
             )
         if download_kb_per_sec > 0:
@@ -1103,7 +1113,7 @@ def register_file_routes(app, deps):
                 _file_chunks,
                 as_attachment=as_attachment,
                 download_name=download_name,
-                mimetype=mimetype,
+                mimetype=response_mimetype,
                 total_size=path.stat().st_size,
                 kb_per_sec=download_kb_per_sec,
             )
@@ -1111,7 +1121,7 @@ def register_file_routes(app, deps):
             path,
             as_attachment=as_attachment,
             download_name=download_name,
-            mimetype=mimetype,
+            mimetype=response_mimetype,
             conditional=conditional,
         )
 

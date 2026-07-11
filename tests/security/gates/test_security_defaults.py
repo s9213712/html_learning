@@ -55,7 +55,10 @@ def test_security_defaults_include_login_autofill_and_notification_mute_settings
 def test_server_upload_request_limit_is_env_driven_and_has_413_handler():
     server_py = (ROOT / "server.py").read_text(encoding="utf-8")
     assert 'HTML_LEARNING_MAX_CONTENT_MB' in server_py
-    assert 'MAX_UPLOAD_REQUEST_MB = _env_int("HTML_LEARNING_MAX_CONTENT_MB", 1024, minimum=128)' in server_py
+    assert "def _configured_max_content_mb():" in server_py
+    assert '_env_int("HTML_LEARNING_MAX_CONTENT_MB", 8192, minimum=128)' in server_py
+    assert '_load_db_setting_value(DB_PATH, "server_max_content_mb")' in server_py
+    assert "MAX_UPLOAD_REQUEST_MB = _configured_max_content_mb()" in server_py
     assert 'app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_REQUEST_MB * 1024 * 1024' in server_py
     assert "@app.errorhandler(RequestEntityTooLarge)" in server_py
     assert '"error": "request_too_large"' in server_py

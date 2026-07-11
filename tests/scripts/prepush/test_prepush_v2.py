@@ -1,4 +1,6 @@
 import os
+import re
+import subprocess
 import time
 from pathlib import Path
 
@@ -224,6 +226,7 @@ def test_quick_pytest_targets_cover_new_feature_regressions():
         "tests/account/sessions/test_account_sessions.py",
         "tests/users/test_sanction_notices.py",
         "tests/trading/core/test_trading_engine.py",
+        "tests/services/test_management_plane.py",
         "tests/regressions/test_security_issue_regressions.py",
     }
     assert expected.issubset(set(pytest_quick_check.QUICK_TESTS))
@@ -231,6 +234,14 @@ def test_quick_pytest_targets_cover_new_feature_regressions():
 
 def test_quick_pytest_timeout_budget_matches_current_hook_scope():
     assert pytest_quick_check.QUICK_PYTEST_TIMEOUT_SECONDS >= 180
+
+
+def test_ci_job_timeout_covers_quick_pytest_and_gate_overhead():
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    match = re.search(r"^\s*timeout-minutes:\s*(\d+)\s*$", workflow, re.MULTILINE)
+
+    assert match is not None
+    assert int(match.group(1)) * 60 >= pytest_quick_check.QUICK_PYTEST_TIMEOUT_SECONDS + 600
 
 
 def test_ci_context_is_noninteractive_for_clean(tmp_path):
@@ -386,6 +397,35 @@ def test_gitleaks_missing_ci_fails(monkeypatch):
     ctx = PrepushContext.build(repo_root=ROOT, mode="quick", is_ci=True)
     result = secrets_check.run(ctx)
     assert result.status == FAIL
+
+
+def test_gitleaks_timeout_budget_is_bounded_and_configurable(monkeypatch):
+    monkeypatch.delenv("PREPUSH_GITLEAKS_TIMEOUT_SECONDS", raising=False)
+    assert secrets_check.gitleaks_timeout_seconds() == 300
+    monkeypatch.setenv("PREPUSH_GITLEAKS_TIMEOUT_SECONDS", "2")
+    assert secrets_check.gitleaks_timeout_seconds() == 30
+    monkeypatch.setenv("PREPUSH_GITLEAKS_TIMEOUT_SECONDS", "9999")
+    assert secrets_check.gitleaks_timeout_seconds() == 1800
+    monkeypatch.setenv("PREPUSH_GITLEAKS_TIMEOUT_SECONDS", "invalid")
+    assert secrets_check.gitleaks_timeout_seconds() == 300
+
+
+def test_gitleaks_timeout_returns_actionable_failure(tmp_path, monkeypatch):
+    ctx = make_ctx(tmp_path, is_ci=True)
+    monkeypatch.setattr(utils, "tool_exists", lambda name: name == "gitleaks")
+    monkeypatch.setattr(
+        utils,
+        "run_command",
+        lambda *args, **kwargs: (_ for _ in ()).throw(subprocess.TimeoutExpired(args[0], kwargs.get("timeout"))),
+    )
+    monkeypatch.setenv("PREPUSH_GITLEAKS_TIMEOUT_SECONDS", "31")
+
+    result = secrets_check.run(ctx)
+
+    assert result.status == FAIL
+    assert result.name == "gitleaks scan"
+    assert "timed out after 31 seconds" in result.message
+    assert "PREPUSH_GITLEAKS_TIMEOUT_SECONDS" in result.remediation
 
 
 def test_subprocess_timeout_is_reported():

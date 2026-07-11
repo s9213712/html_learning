@@ -14,7 +14,7 @@ AUDIO_EXTENSIONS = {
     ".mp3", ".oga", ".ogg", ".opus", ".wav", ".weba",
 }
 VIDEO_EXTENSIONS = {".avi", ".m4v", ".mkv", ".mov", ".mp4", ".mpeg", ".mpg", ".ogv", ".webm", ".wmv"}
-IMAGE_EXTENSIONS = {".avif", ".bmp", ".gif", ".jpeg", ".jpg", ".png", ".svg", ".webp"}
+IMAGE_EXTENSIONS = {".avif", ".bmp", ".gif", ".jpeg", ".jpg", ".png", ".webp"}
 PDF_EXTENSIONS = {".pdf"}
 ARCHIVE_EXTENSIONS = {
     ".zip", ".7z", ".rar", ".tar", ".gz", ".tgz", ".tar.gz", ".tar.bz2",
@@ -53,6 +53,10 @@ def preview_category(row):
     filename = _filename(row)
     ext = _extension(filename)
     mime = _mime(row, filename)
+    # SVG is active XML content. Show its source as inert text and never feed
+    # an untrusted upload to an inline image/document browsing context.
+    if ext == ".svg" or mime.split(";", 1)[0].strip().lower() == "image/svg+xml":
+        return "text", "text/plain"
     if mime.startswith("audio/") or ext in AUDIO_EXTENSIONS:
         return "audio", _display_mime(mime, filename)
     if mime.startswith("video/") or ext in VIDEO_EXTENSIONS:

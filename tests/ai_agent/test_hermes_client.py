@@ -150,7 +150,8 @@ def test_ai_agent_chat_injects_persona_and_task_scope(monkeypatch):
     assert "未啟用任務提示" in content
     assert "生圖 / 下載排錯" in content
     assert "生圖提示詞與參數" in content
-    assert "工具僅提供可執行建議" in content
+    assert "目前是協助模式" in content
+    assert "assist_safe=true" in content
 
 
 def test_ai_agent_multimodal_messages_are_openai_compatible():
@@ -696,7 +697,11 @@ def test_ai_agent_operation_mode_normalizes_and_keeps_allowed_models():
     write_policy = ai_agent_operation_mode_policy("write")
     assert write_policy["mode"] == "write"
     assert write_policy["write_enabled"] is True
-    assert write_policy["min_role"] == "super_admin"
+    assert write_policy["min_role"] == "user"
+
+    audit_policy = ai_agent_operation_mode_policy("audit")
+    assert audit_policy["audit_enabled"] is True
+    assert audit_policy["min_role"] == "super_admin"
 
 
 def test_ai_agent_effective_tools_are_role_and_allowlist_scoped():
@@ -775,7 +780,7 @@ def test_ai_agent_chat_blocks_non_root_in_audit_mode(monkeypatch):
     assert result["content"] == "root audit ok"
 
 
-def test_ai_agent_chat_write_mode_is_root_only(monkeypatch):
+def test_ai_agent_chat_write_mode_is_role_scoped(monkeypatch):
     payloads = []
 
     def fake_json_request(_settings, method, path, payload=None, session_key="", timeout=None):
@@ -784,17 +789,18 @@ def test_ai_agent_chat_write_mode_is_root_only(monkeypatch):
 
     monkeypatch.setattr(hermes_client, "_json_request", fake_json_request)
 
-    with pytest.raises(AiAgentError) as exc:
-        hermes_client.ai_agent_chat(
-            {
-                "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
-                "ai_agent_api_key": "dummy-key",
-                "ai_agent_operation_mode": "write",
-            },
-            messages=[{"role": "user", "content": "幫我調整設定"}],
-            actor={"role": "manager"},
-        )
-    assert "執行寫入模式" in str(exc.value)
+    manager_result = hermes_client.ai_agent_chat(
+        {
+            "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
+            "ai_agent_api_key": "dummy-key",
+            "ai_agent_operation_mode": "write",
+            "ai_agent_model": "test-model",
+        },
+        messages=[{"role": "user", "content": "幫我檢查會員管理工作"}],
+        actor={"username": "managerA", "role": "manager"},
+    )
+    assert manager_result["content"] == "root write ok"
+    assert "目前權限：manager" in payloads[-1]["messages"][0]["content"]
 
     result = hermes_client.ai_agent_chat(
         {
@@ -810,7 +816,7 @@ def test_ai_agent_chat_write_mode_is_root_only(monkeypatch):
     system_prompt = payloads[-1]["messages"][0]["content"]
     assert "目前登入者：root" in system_prompt
     assert "目前權限：super_admin" in system_prompt
-    assert "你不是一般使用者助手，也不是唯讀模式" in system_prompt
+    assert "角色範圍寫入模式" in system_prompt
     assert "前台直接執行" in system_prompt
     assert "不要要求複製 JSON 或手動 POST" in system_prompt
     assert "/api/ai-agent/write-tools/execute" in system_prompt
@@ -1157,6 +1163,147 @@ def test_ai_agent_write_guard_persistent_clear_event_unblocks(tmp_path):
         db.row_factory = sqlite3.Row
         return db
 
+    assert ai_agent_write_guard_status(get_db=get_db)["blocked"] is False
+
+
+def test_ai_agent_write_guard_persistent_clear_overrides_stale_process_alert(tmp_path):
+    clear_ai_agent_audit_scan_state()
+    db_path = tmp_path / "ai_agent_audit_guard_stale_worker.sqlite"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE secure_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT,
+            action TEXT,
+            ip TEXT,
+            user TEXT,
+            success INTEGER,
+            detail TEXT
+        )
+        """
+    )
+    now = datetime.now().replace(microsecond=0)
+    conn.execute(
+        "INSERT INTO secure_audit (ts, action, ip, user, success, detail) VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            now.isoformat(),
+            "SETTINGS_CHANGED",
+            "127.0.0.1",
+            "root",
+            1,
+            json.dumps({"changed_keys": ["ai_agent_allowed_tools"]}),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    def get_db():
+        db = sqlite3.connect(db_path)
+        db.row_factory = sqlite3.Row
+        return db
+
+    scan = run_ai_agent_audit_scan(
+        {
+            "ai_agent_audit_ip_event_rate_threshold": 100,
+            "ai_agent_audit_security_event_rate_threshold": 100,
+            "ai_agent_audit_cpu_percent_threshold": 100,
+            "ai_agent_audit_ram_percent_threshold": 100,
+            "ai_agent_audit_disk_percent_threshold": 100,
+            "ai_agent_audit_notify_root": False,
+        },
+        get_db=get_db,
+        actor={"id": 1, "username": "root", "role": "super_admin"},
+        force=True,
+    )
+    assert scan["status"] == "alert"
+    assert ai_agent_write_guard_status()["blocked"] is True
+
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO secure_audit (ts, action, ip, user, success, detail) VALUES (?, ?, ?, ?, ?, ?)",
+        ((now + timedelta(seconds=1)).isoformat(), "AI_AGENT_AUDIT_MAIN_AI_GUARD", "127.0.0.1", "root", 0, "blocked"),
+    )
+    conn.execute(
+        "INSERT INTO secure_audit (ts, action, ip, user, success, detail) VALUES (?, ?, ?, ?, ?, ?)",
+        ((now + timedelta(seconds=2)).isoformat(), "AI_AGENT_AUDIT_MAIN_AI_GUARD_CLEAR", "127.0.0.1", "root", 1, "clear"),
+    )
+    conn.commit()
+    conn.close()
+
+    guard = ai_agent_write_guard_status(get_db=get_db)
+    assert guard["blocked"] is False
+    assert guard["source"] == "secure_audit"
+    assert guard["guard_event"]["action"] == "AI_AGENT_AUDIT_MAIN_AI_GUARD_CLEAR"
+
+
+def test_ai_agent_root_force_scan_immediately_acknowledges_persisted_guard(tmp_path):
+    clear_ai_agent_audit_scan_state()
+    db_path = tmp_path / "ai_agent_audit_guard_ack.sqlite"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE secure_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT,
+            action TEXT,
+            ip TEXT,
+            user TEXT,
+            success INTEGER,
+            detail TEXT
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO secure_audit (ts, action, ip, user, success, detail) VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            datetime.now().replace(microsecond=0).isoformat(),
+            "SETTINGS_CHANGED",
+            "127.0.0.1",
+            "root",
+            1,
+            json.dumps({"changed_keys": ["ai_agent_allowed_tools"]}),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    def get_db():
+        db = sqlite3.connect(db_path)
+        db.row_factory = sqlite3.Row
+        return db
+
+    def record_audit(action, ip, user, **kwargs):
+        db = get_db()
+        db.execute(
+            "INSERT INTO secure_audit (ts, action, ip, user, success, detail) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                datetime.now().replace(microsecond=0).isoformat(),
+                action,
+                ip,
+                user,
+                1 if kwargs.get("success", True) else 0,
+                kwargs.get("detail") or "",
+            ),
+        )
+        db.commit()
+        db.close()
+
+    settings = {
+        "ai_agent_audit_ip_event_rate_threshold": 100,
+        "ai_agent_audit_security_event_rate_threshold": 100,
+        "ai_agent_audit_cpu_percent_threshold": 100,
+        "ai_agent_audit_ram_percent_threshold": 100,
+        "ai_agent_audit_disk_percent_threshold": 100,
+        "ai_agent_audit_notify_root": False,
+    }
+    actor = {"id": 1, "username": "root", "role": "super_admin"}
+    first = run_ai_agent_audit_scan(settings, get_db=get_db, actor=actor, force=True, audit=record_audit)
+    assert first["status"] == "alert"
+    assert ai_agent_write_guard_status(get_db=get_db)["blocked"] is True
+
+    second = run_ai_agent_audit_scan(settings, get_db=get_db, actor=actor, force=True, audit=record_audit)
+    assert not any(item["code"] == "ai_agent.sensitive_settings_changed" for item in second["anomalies"])
     assert ai_agent_write_guard_status(get_db=get_db)["blocked"] is False
 
 

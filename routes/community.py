@@ -7,7 +7,7 @@ from functools import wraps
 
 from flask import Response, request
 
-from services.governance.records import add_reputation_event, record_moderation_action
+from services.governance.records import add_reputation_event, ensure_user_reputation_columns, record_moderation_action
 from services.security.permissions import require_member_action
 
 
@@ -626,13 +626,6 @@ def register_community_routes(app, deps):
             f"ORDER BY CASE WHEN username='root' THEN 0 WHEN role='super_admin' THEN 1 WHEN role='manager' THEN 2 ELSE 3 END, id ASC "
             f"LIMIT 1"
         ).fetchone()
-
-    def ensure_user_reputation_columns(conn):
-        cols = {row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
-        if "reputation" not in cols:
-            conn.execute("ALTER TABLE users ADD COLUMN reputation INTEGER NOT NULL DEFAULT 0")
-        if "updated_at" not in cols:
-            conn.execute("ALTER TABLE users ADD COLUMN updated_at TEXT")
 
     def ensure_user_violation_columns(conn):
         cols = {row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()}

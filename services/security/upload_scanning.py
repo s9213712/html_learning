@@ -166,7 +166,6 @@ def reencode_image_strip_metadata(path, *, filename=None, max_pixels=25_000_000)
     target = Path(path)
     before_size = target.stat().st_size
     try:
-        Image.MAX_IMAGE_PIXELS = int(max_pixels or 25_000_000)
         with Image.open(target, formats=["JPEG", "PNG", "GIF", "WEBP"]) as img:
             frames = getattr(img, "n_frames", 1)
             if frames and frames > 1:

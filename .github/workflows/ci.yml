@@ -2,13 +2,13 @@ name: ci
 
 on:
   push:
-    branches: [main, 03.Points, 04.BLOCKCHAIN, 04.BLOCKCHAIN_RC1]
+    branches: [main, 03.Points, 04.BLOCKCHAIN, 04.BLOCKCHAIN_RC1, 05.AI_Agent]
   pull_request:
 
 jobs:
   smoke-and-security:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 45
     env:
       GITLEAKS_VERSION: "8.30.1"
     steps:

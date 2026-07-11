@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from scripts.testing.playwright_deep_site_check import is_recoverable_network_cascade
 from scripts.testing.playwright_platform_health_check import ignored_browser_error
 
 
@@ -102,9 +103,27 @@ def test_deep_playwright_comfyui_host_port_counts_as_live_config():
 def test_deep_playwright_video_flow_opens_detail_before_like_selector():
     script = (ROOT / "scripts" / "testing" / "playwright_deep_site_check.py").read_text(encoding="utf-8")
 
+    assert 'videos = fetch_json_get_retry(page, "/api/videos")' in script
+    assert 'manage = fetch_json_get_retry(page, "/api/videos/manage")' in script
     assert 'latest_id = int(latest.get("id") or 0)' in script
-    assert "card.count() and card.is_visible(timeout=1000)" in script
+    assert 'page.click("#video-back-btn")' in script
+    assert "page.wait_for_selector(f'[data-video-open=\"{latest_id}\"]', state=\"visible\"" in script
+    assert "page.locator(f'[data-video-open=\"{latest_id}\"]').first.click" in script
     assert "page.wait_for_selector(f'[data-video-like=\"{latest_id}\"]'" in script
+    assert 'parser.add_argument("--only-video-share"' in script
+
+
+def test_deep_playwright_only_downgrades_correlated_recovered_network_cascades():
+    script = (ROOT / "scripts" / "testing" / "playwright_deep_site_check.py").read_text(encoding="utf-8")
+
+    assert is_recoverable_network_cascade("requestfailed", "net::ERR_NETWORK_CHANGED GET https://127.0.0.1/app.js")
+    assert is_recoverable_network_cascade("pageerror", "toggleChatCreatePanel is not defined")
+    assert not is_recoverable_network_cascade("pageerror", "TypeError: cannot read properties of null")
+    assert "navigation_has_network_change" in script
+    assert 'collector.finish_navigation(page, recovered=True)' in script
+    assert '"browser_warnings": browser_warnings' in script
+    assert "def goto_with_network_retry" in script
+    assert 'goto_with_network_retry(anon_page, base_url + "/comfyui-workflow-editor.html")' in script
 
 
 def test_deep_playwright_sets_up_admin_state_before_loading_full_app():

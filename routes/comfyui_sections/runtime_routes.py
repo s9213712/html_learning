@@ -64,6 +64,7 @@ def register_comfyui_runtime_routes(app, ctx):
     _run_comfyui_workflow_preset_job = ctx.get("run_comfyui_workflow_preset_job")
     _generation_job_payload = ctx.get("generation_job_payload")
     _initial_generation_progress = ctx.get("initial_generation_progress")
+    _update_generation_job = ctx.get("update_generation_job")
     _update_generation_job_progress = ctx.get("update_generation_job_progress")
     _media_ref_payload = ctx.get("image_ref_payload")
     _start_local_comfyui = ctx["start_local_comfyui"]
@@ -894,6 +895,74 @@ def register_comfyui_runtime_routes(app, ctx):
             "result": job.get("result"),
         }
         return json_resp({"ok": True, "job": public_job})
+
+    @app.route("/api/comfyui/jobs/<job_id>/review", methods=["POST"])
+    @require_csrf
+    def comfyui_generation_job_review(job_id):
+        actor, err = _actor_or_401()
+        if err:
+            return err
+        job, err = _assert_generation_job_owner(job_id, actor)
+        if err:
+            return err
+        if str(job.get("status") or "") != "completed" or not isinstance(job.get("result"), dict):
+            return json_resp({"ok": False, "msg": "產圖結果完成後才能記錄視覺驗收"}), 409
+        try:
+            data = request.get_json(force=True)
+        except Exception:
+            return json_resp({"ok": False, "msg": "請求 JSON 格式錯誤"}), 400
+        if not isinstance(data, dict) or "pass" not in data:
+            return json_resp({"ok": False, "msg": "視覺驗收必須提供 pass"}), 400
+        try:
+            score = max(0.0, min(1.0, float(data.get("score") or 0)))
+        except Exception:
+            return json_resp({"ok": False, "msg": "視覺驗收 score 格式錯誤"}), 400
+        hard_fail = _coerce_bool(data.get("hard_fail"))
+        result = dict(job["result"])
+        contract = result.get("review_contract") if isinstance(result.get("review_contract"), dict) else {}
+        try:
+            threshold = max(0.5, min(1.0, float(contract.get("agent_review_pass_threshold") or 0.8)))
+        except Exception:
+            threshold = 0.8
+        requested_pass = data.get("pass") is True
+        passed = bool(requested_pass and not hard_fail and score >= threshold)
+
+        def _text_list(name):
+            values = data.get(name) if isinstance(data.get(name), list) else []
+            return [str(item or "").strip()[:500] for item in values[:20] if str(item or "").strip()]
+
+        review = {
+            "pass": passed,
+            "requested_pass": requested_pass,
+            "score": score,
+            "threshold": threshold,
+            "hard_fail": hard_fail,
+            "issues": _text_list("issues"),
+            "passed_gates": _text_list("passed_gates"),
+            "failed_gates": _text_list("failed_gates"),
+            "source": str(data.get("source") or "ai_agent_vision_client").strip()[:80],
+        }
+        result.update({
+            "delivery_status": "approved" if passed else "review_failed",
+            "review_required": not passed,
+            "delivery_pass": passed,
+            "semantic_quality_pass": passed,
+            "review_result": review,
+        })
+        if not callable(_update_generation_job):
+            return json_resp({"ok": False, "msg": "視覺驗收持久化服務未載入"}), 503
+        updated = _update_generation_job(job_id, result=result)
+        if not updated or updated.get("persistence_error"):
+            return json_resp({"ok": False, "msg": "視覺驗收無法持久化，結果仍視為未通過"}), 503
+        audit(
+            "COMFYUI_GENERATION_REVIEW",
+            get_client_ip(),
+            user=_actor_value(actor, "username", "-"),
+            success=passed,
+            ua=get_ua(),
+            detail=f"job_id={job_id},pass={passed},score={score:.3f},threshold={threshold:.3f},hard_fail={hard_fail}",
+        )
+        return json_resp({"ok": True, "job_id": job_id, "delivery": result, "review": review})
 
     @app.route("/api/comfyui/media-preview", methods=["POST"])
     @require_csrf

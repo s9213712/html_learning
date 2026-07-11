@@ -1056,6 +1056,8 @@ def test_comfyui_img2img_controlnet_generate_uploads_assets_and_records_history(
     assert generated.status_code == 200
     body = _await_comfyui_result(client, generated)
     assert body["history_id"] > 0
+    assert body["review_required"] is True
+    assert body["review_contract"]["control_image_ref"]["filename"] == "control.png"
     assert FakeComfyUIClient.last_params["generation_mode"] == "img2img"
     assert FakeComfyUIClient.last_params["source_image_ref"]["filename"] == "source.png"
     assert FakeComfyUIClient.last_params["controlnet"]["image_ref"]["filename"] == "control.png"
@@ -2635,7 +2637,7 @@ def test_comfyui_async_job_status_survives_worker_handoff(tmp_path):
     assert final_job["result"]["image"]["image_ref"]["filename"] == "hackme_web_00001_.png"
 
 
-def test_comfyui_async_generation_worker_survives_logout_or_session_change(tmp_path):
+def test_comfyui_async_generation_worker_survives_logout_or_session_change(tmp_path, monkeypatch):
     db_path = tmp_path / "comfyui.db"
     storage_root = tmp_path / "storage"
     storage_root.mkdir()
@@ -2643,6 +2645,36 @@ def test_comfyui_async_generation_worker_survives_logout_or_session_change(tmp_p
     actor_box = {"actor": _actor()}
     started = threading.Event()
     release = threading.Event()
+    terminal_observations = []
+
+    from services import job_center as job_center_service
+
+    real_update_job = job_center_service.update_job
+
+    def observe_terminal_update(conn, job_uuid, **kwargs):
+        observed_job_id = current_job_id["value"]
+        platform_row = conn.execute(
+            "SELECT source_ref FROM job_center_jobs WHERE job_uuid=?",
+            (job_uuid,),
+        ).fetchone()
+        if (
+            kwargs.get("status") == "succeeded"
+            and observed_job_id
+            and platform_row
+            and platform_row["source_ref"] == observed_job_id
+        ):
+            domain_row = conn.execute(
+                "SELECT status, result_json FROM comfyui_generation_jobs WHERE job_id=?",
+                (observed_job_id,),
+            ).fetchone()
+            terminal_observations.append({
+                "status": domain_row["status"] if domain_row else None,
+                "has_result": bool(domain_row and domain_row["result_json"]),
+            })
+        return real_update_job(conn, job_uuid, **kwargs)
+
+    current_job_id = {"value": ""}
+    monkeypatch.setattr(job_center_service, "update_job", observe_terminal_update)
 
     class SlowSessionIndependentClient(FakeComfyUIClient):
         def generate_image(self, params, *, timeout_seconds=180, progress_callback=None):
@@ -2686,6 +2718,7 @@ def test_comfyui_async_generation_worker_survives_logout_or_session_change(tmp_p
     )
     assert started_response.status_code == 200
     job_id = started_response.get_json()["job"]["job_id"]
+    current_job_id["value"] = job_id
     assert started.wait(timeout=10)
 
     actor_box["actor"] = None
@@ -2722,6 +2755,68 @@ def test_comfyui_async_generation_worker_survives_logout_or_session_change(tmp_p
     final_body = final_status.get_json()
     assert final_body["job"]["status"] == "completed"
     assert final_body["job"]["result"]["image"]["image_ref"]["filename"] == "hackme_web_00001_.png"
+    assert terminal_observations
+    assert all(
+        item == {"status": "completed", "has_result": True}
+        for item in terminal_observations
+    ), terminal_observations
+
+
+def test_comfyui_i2i_result_requires_persisted_semantic_review(tmp_path):
+    db_path = tmp_path / "comfyui-review.db"
+    storage_root = tmp_path / "storage"
+    storage_root.mkdir()
+    _init_db(db_path)
+    client = _build_app(db_path, storage_root).test_client()
+
+    started = client.post(
+        "/api/comfyui/generate",
+        json={
+            "model": "dream.safetensors",
+            "prompt": "preserve the person and change the outfit",
+            "generation_mode": "img2img",
+            "skip_asset_validation": True,
+            "agent_review_required": True,
+            "agent_review_mode": "vision_iterative_gate",
+            "agent_review_strategy": "pairwise_reference_merge",
+            "agent_review_max_attempts": 3,
+            "agent_review_pass_threshold": 0.8,
+            "agent_review_plan": "source -> clothes -> vision gate",
+            "confirm_billing": True,
+        },
+    )
+    job = _await_comfyui_job(client, started)
+    job_id = job["job_id"]
+
+    assert job["result"]["delivery_status"] == "review_required"
+    assert job["result"]["review_required"] is True
+    assert job["result"]["delivery_pass"] is False
+    assert job["result"]["technical_quality_pass"] is True
+    assert job["result"]["semantic_quality_pass"] is None
+    assert job["result"]["review_contract"]["agent_review_strategy"] == "pairwise_reference_merge"
+    assert job["result"]["review_contract"]["agent_review_plan"] == "source -> clothes -> vision gate"
+
+    reviewed = client.post(
+        f"/api/comfyui/jobs/{job_id}/review",
+        json={
+            "pass": True,
+            "score": 0.92,
+            "hard_fail": False,
+            "issues": [],
+            "passed_gates": ["outfit", "identity"],
+            "failed_gates": [],
+            "source": "ai_agent_vision_client",
+        },
+    )
+    assert reviewed.status_code == 200, reviewed.get_json()
+    assert reviewed.get_json()["review"]["pass"] is True
+
+    persisted = client.get(f"/api/comfyui/jobs/{job_id}").get_json()["job"]["result"]
+    assert persisted["delivery_status"] == "approved"
+    assert persisted["review_required"] is False
+    assert persisted["delivery_pass"] is True
+    assert persisted["semantic_quality_pass"] is True
+    assert persisted["review_result"]["score"] == 0.92
 
 
 def test_comfyui_batch_limit_is_root_configurable(tmp_path):
@@ -2802,7 +2897,14 @@ def test_comfyui_generation_failure_does_not_charge_points(tmp_path):
     storage_root.mkdir()
     _init_db(db_path)
     points = FakePointsService(balance=100)
-    client = _build_app(db_path, storage_root, comfyui_client=FailingComfyUIClient(), points_service=points).test_client()
+    audit_events = []
+    client = _build_app(
+        db_path,
+        storage_root,
+        comfyui_client=FailingComfyUIClient(),
+        points_service=points,
+        extra_deps={"audit": lambda *args, **kwargs: audit_events.append({"args": args, "kwargs": kwargs})},
+    ).test_client()
 
     generated = client.post(
         "/api/comfyui/generate",
@@ -2825,7 +2927,10 @@ def test_comfyui_generation_failure_does_not_charge_points(tmp_path):
     finally:
         conn.close()
     assert platform_job is not None
-    assert platform_job["status"] == "failed"
+    assert platform_job["status"] == "failed", {
+        "platform_job": dict(platform_job),
+        "audit_events": audit_events,
+    }
     assert platform_job["stage"] == "error"
     assert platform_job["progress_percent"] == 100
     assert "ComfyUI 產圖失敗" in platform_job["error_message"]
@@ -4612,6 +4717,28 @@ def test_comfyui_diffusers_failure_reports_reason_and_python_log_tail(tmp_path):
     assert progress["error_message"] == "Diffusers exploded: missing tensor"
     assert progress["step"] == "Diffusers 產圖失敗"
     assert progress["python_log_tail"] == ["diffusers pipeline loading", "diffusers inference failed"]
+
+
+def test_comfyui_generation_job_snapshot_does_not_replace_newer_running_progress():
+    memory_job = {
+        "status": "running",
+        "updated_at": 20.0,
+        "progress": {"python_log_tail": ["latest"]},
+    }
+    stale_db_job = {
+        "status": "running",
+        "updated_at": 19.0,
+        "progress": {},
+    }
+    newer_db_job = {
+        "status": "error",
+        "updated_at": 21.0,
+        "progress": {"phase": "error"},
+    }
+
+    assert comfyui_routes._generation_job_db_snapshot_is_current(stale_db_job, memory_job) is False
+    assert comfyui_routes._generation_job_db_snapshot_is_current(newer_db_job, memory_job) is True
+    assert comfyui_routes._generation_job_db_snapshot_is_current(newer_db_job, None) is True
 
 
 def test_comfyui_diffusers_mode_allows_generation_page_repo_override(tmp_path):

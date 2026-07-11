@@ -2183,6 +2183,7 @@ def register_video_routes(app, deps):
         if sensitive:
             return sensitive
         conn = get_db()
+        points_conn = None
         try:
             restricted = _video_publish_restriction_response(conn, actor)
             if restricted:
@@ -3922,7 +3923,7 @@ def register_video_routes(app, deps):
             conn.close()
 
     @app.route("/api/videos/<int:video_id>/stream", methods=["GET"])
-    @require_csrf
+    @require_csrf_safe
     def video_stream(video_id):
         actor = get_current_user_ctx()
         conn = get_db()
@@ -3960,7 +3961,7 @@ def register_video_routes(app, deps):
             conn.close()
 
     @app.route("/api/videos/<int:video_id>/realtime-proxy", methods=["GET"])
-    @require_csrf
+    @require_csrf_safe
     def video_realtime_proxy(video_id):
         actor = get_current_user_ctx()
         conn = get_db()
@@ -4369,7 +4370,13 @@ def register_video_routes(app, deps):
                 return json_resp({"ok": False, "msg": f"投幣至少需要 {min_points} 點", "error": "tip_amount_too_small"}), 400
             ensure_video_schema(conn)
             conn.commit()
-            conn.execute("BEGIN IMMEDIATE")
+            if not points_service or not callable(getattr(points_service, "get_db", None)):
+                raise RuntimeError("PointsChain service is unavailable")
+            points_conn = points_service.get_db()
+            if hasattr(points_service, "ensure_schema"):
+                points_service.ensure_schema(points_conn)
+            points_conn.commit()
+            points_conn.execute("BEGIN")
             result = tip_video(
                 conn,
                 points_service=points_service,
@@ -4378,6 +4385,8 @@ def register_video_routes(app, deps):
                 amount=amount,
                 fee_percent=_settings_float("video_tip_fee_percent", 5),
                 idempotency_key=request.headers.get("Idempotency-Key") or data.get("idempotency_key"),
+                points_conn=points_conn,
+                commit_points_before_record=True,
             )
             conn.commit()
             audit(
@@ -4391,6 +4400,10 @@ def register_video_routes(app, deps):
             return json_resp(result)
         except Exception as exc:
             conn.rollback()
+            if points_conn is not None:
+                points_conn.rollback()
             return _error_response(exc)
         finally:
+            if points_conn is not None:
+                points_conn.close()
             conn.close()

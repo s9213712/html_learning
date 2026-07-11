@@ -38,6 +38,9 @@ def test_root_bug_report_admin_is_wired_under_system_management():
     assert 'API + "/community/announcements"' in admin_js
     assert 'tabSystemBugReports.addEventListener("click", () => switchSystemTab("bug-reports"))' in bootstrap_js
     assert 'rootBugReportRefresh.addEventListener("click", loadRootBugReports)' in bootstrap_js
+    assert 'if (typeof showBugReportDialog === "function") showBugReportDialog();' in bootstrap_js
+    assert 'if (typeof submitBugReport === "function") submitBugReport();' in bootstrap_js
+    assert 'if (typeof hideBugReportDialog === "function") hideBugReportDialog();' in bootstrap_js
     assert '"description": item.get("description")' in route_py
     assert '"steps": item.get("steps")' in route_py
     assert '"suggested_reward_points": item.get("suggested_reward_points") or item.get("reward_points")' in route_py

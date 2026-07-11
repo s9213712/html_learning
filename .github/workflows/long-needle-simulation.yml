@@ -11,7 +11,7 @@ on:
       - "scripts/testing/long-needle-simulation.workflow.yml"
       - ".github/workflows/long-needle-simulation.yml"
   push:
-    branches: [main, 04.BLOCKCHAIN, 04.BLOCKCHAIN_RC1]
+    branches: [main, 04.BLOCKCHAIN, 04.BLOCKCHAIN_RC1, 05.AI_Agent]
     paths:
       - "routes/economy.py"
       - "services/points_chain/**"

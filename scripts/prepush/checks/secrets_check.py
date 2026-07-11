@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import re
+import subprocess
 
 from scripts.prepush import utils
 from scripts.prepush.context import PrepushContext
@@ -31,6 +33,15 @@ SCAN_EXTRA = (
     "docs/For_developer.md",
     "docs/UPDATE_SUMMARY.md",
 )
+DEFAULT_GITLEAKS_TIMEOUT_SECONDS = 300
+
+
+def gitleaks_timeout_seconds() -> int:
+    try:
+        requested = int(os.environ.get("PREPUSH_GITLEAKS_TIMEOUT_SECONDS", str(DEFAULT_GITLEAKS_TIMEOUT_SECONDS)).strip())
+    except (TypeError, ValueError):
+        requested = DEFAULT_GITLEAKS_TIMEOUT_SECONDS
+    return max(30, min(1800, requested))
 
 
 def line_allowed(line: str) -> bool:
@@ -97,25 +108,37 @@ def run(ctx: PrepushContext) -> CheckResult:
 
     # Run from the repo root with a relative source so `.gitleaks.toml` path
     # allowlists such as `^runtime/` match generated local runtime trees.
-    proc = utils.run_command(
-        [
-            "gitleaks",
-            "detect",
-            "--source",
-            ".",
-            "--no-git",
-            "--redact",
-            "--max-target-megabytes",
-            "2",
-            "--no-banner",
-            "--log-level",
-            "error",
-            "--config",
-            str(ctx.repo_root / ".gitleaks.toml"),
-        ],
-        cwd=ctx.repo_root,
-        timeout=90,
-    )
+    timeout_seconds = gitleaks_timeout_seconds()
+    try:
+        proc = utils.run_command(
+            [
+                "gitleaks",
+                "detect",
+                "--source",
+                ".",
+                "--no-git",
+                "--redact",
+                "--max-target-megabytes",
+                "2",
+                "--no-banner",
+                "--log-level",
+                "error",
+                "--config",
+                str(ctx.repo_root / ".gitleaks.toml"),
+            ],
+            cwd=ctx.repo_root,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired:
+        return CheckResult.fail(
+            "gitleaks scan",
+            f"gitleaks timed out after {timeout_seconds} seconds",
+            severity="high",
+            remediation=(
+                "Inspect repository size and gitleaks exclusions, or set "
+                "PREPUSH_GITLEAKS_TIMEOUT_SECONDS to a bounded value between 30 and 1800."
+            ),
+        )
     if proc.returncode != 0:
         return CheckResult.fail(
             "gitleaks scan",

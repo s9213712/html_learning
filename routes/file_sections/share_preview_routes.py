@@ -87,6 +87,7 @@ def register_file_share_preview_routes(app, ctx):
             conditional=conditional,
         )
         response.headers.setdefault("X-Hackme-Transfer-Mode", "python_send_file")
+        response.headers["X-Content-Type-Options"] = "nosniff"
         return response
 
     @app.route("/api/storage/share-links", methods=["GET", "POST"])

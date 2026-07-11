@@ -80,6 +80,12 @@ let driveRemoteDownloadCapabilitiesRetryCount = 0;
 let driveLatestQuota = null;
 let driveDashboardInFlight = null;
 let driveDashboardLoadedAt = 0;
+let driveDashboardNavigationAbortController = null;
+let driveDashboardLifecycleGeneration = 0;
+let driveRemoteTaskListInFlight = null;
+let driveRemoteTaskListCache = [];
+let driveRemoteTaskListLoadedAt = 0;
+let driveRemoteTaskListGeneration = 0;
 let chatAttachmentUploadInFlight = false;
 let chatAttachmentUploadFingerprint = "";
 const driveRemotePollingTaskIds = new Set();
@@ -88,6 +94,7 @@ const DRIVE_TRANSFER_FAILED_VISIBLE_MS = 15000;
 const DRIVE_TASK_CENTER_LOCAL_MAX = 80;
 const DRIVE_REMOTE_STATUS_RETRY_LIMIT = 12;
 const DRIVE_REMOTE_CAPABILITY_RETRY_LIMIT = 4;
+const DRIVE_REMOTE_TASK_LIST_CACHE_MS = 750;
 const DRIVE_DASHBOARD_LAZY_REFRESH_MS = 10000;
 const DRIVE_RESUMABLE_UPLOAD_THRESHOLD_BYTES = 8 * 1024 * 1024;
 const DRIVE_RESUMABLE_UPLOAD_CHUNK_BYTES = 4 * 1024 * 1024;
@@ -99,6 +106,32 @@ function driveDashboardLazyRefreshMs() {
   }
   return DRIVE_DASHBOARD_LAZY_REFRESH_MS;
 }
+
+function cancelDriveDashboardNavigationLoad() {
+  driveDashboardLifecycleGeneration += 1;
+  if (driveDashboardNavigationAbortController) {
+    driveDashboardNavigationAbortController.abort();
+    driveDashboardNavigationAbortController = null;
+  }
+  if (driveRemoteDownloadCapabilitiesRetryTimer) {
+    clearTimeout(driveRemoteDownloadCapabilitiesRetryTimer);
+    driveRemoteDownloadCapabilitiesRetryTimer = null;
+  }
+}
+
+function isDriveDashboardNavigationCurrent(generation) {
+  return generation === driveDashboardLifecycleGeneration
+    && currentModuleTab === "drive"
+    && !document.hidden;
+}
+
+document.addEventListener("hackme:module-changed", (event) => {
+  if (event.detail?.current !== "drive") cancelDriveDashboardNavigationLoad();
+});
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) cancelDriveDashboardNavigationLoad();
+});
 
 function isDriveTransferActive(item = {}) {
   return !["completed", "failed", "paused", "cancelled", "waiting_resume"].includes(String(item.status || ""));
@@ -1407,14 +1440,8 @@ async function loadDriveTaskCenterJobs({ csrf = "" } = {}) {
   const jobs = getDriveTaskCenterLocalJobs();
   const token = csrf || getCsrfToken() || await fetchCsrfToken();
   try {
-    const res = await apiFetch(API + "/cloud-drive/remote-download/tasks", {
-      credentials: "same-origin",
-      headers: { "X-CSRF-Token": token || "" },
-    });
-    const json = await res.json().catch(() => ({}));
-    if (res.ok && json.ok && Array.isArray(json.tasks)) {
-      jobs.push(...json.tasks.map(driveRemoteTaskToJobCenterJob));
-    }
+    const tasks = await loadRemoteDownloadTaskList({ csrf: token });
+    jobs.push(...tasks.map(driveRemoteTaskToJobCenterJob));
   } catch (_) {
     // Job Center must still render platform jobs if drive remote tasks cannot be read.
   }
@@ -1425,6 +1452,43 @@ async function loadDriveTaskCenterJobs({ csrf = "" } = {}) {
     // Job Center must still render platform jobs if resumable sessions cannot be read.
   }
   return mergeDriveTaskCenterJobs(jobs);
+}
+
+function invalidateRemoteDownloadTaskList() {
+  driveRemoteTaskListGeneration += 1;
+  driveRemoteTaskListLoadedAt = 0;
+  driveRemoteTaskListCache = [];
+}
+
+async function loadRemoteDownloadTaskList({ csrf = "", force = false, signal } = {}) {
+  const cacheFresh = driveRemoteTaskListLoadedAt
+    && Date.now() - driveRemoteTaskListLoadedAt < DRIVE_REMOTE_TASK_LIST_CACHE_MS;
+  if (!force && cacheFresh) return driveRemoteTaskListCache.slice();
+  if (driveRemoteTaskListInFlight) return driveRemoteTaskListInFlight;
+
+  const requestGeneration = driveRemoteTaskListGeneration;
+  const request = (async () => {
+    const token = csrf || getCsrfToken() || await abortableWait(fetchCsrfToken(), signal, "Drive task list aborted");
+    const res = await apiFetch(API + "/cloud-drive/remote-download/tasks", {
+      credentials: "same-origin",
+      headers: { "X-CSRF-Token": token || "" },
+      signal,
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok || !json.ok) throw new Error(json.msg || `遠端下載任務讀取失敗（HTTP ${res.status}）`);
+    const tasks = Array.isArray(json.tasks) ? json.tasks : [];
+    if (requestGeneration === driveRemoteTaskListGeneration) {
+      driveRemoteTaskListCache = tasks;
+      driveRemoteTaskListLoadedAt = Date.now();
+    }
+    return tasks.slice();
+  })();
+  driveRemoteTaskListInFlight = request;
+  try {
+    return await request;
+  } finally {
+    if (driveRemoteTaskListInFlight === request) driveRemoteTaskListInFlight = null;
+  }
 }
 
 function addDriveTransferRow(item) {
@@ -1495,6 +1559,7 @@ async function dismissRemoteDownloadTask(taskId, transferId) {
       credentials: "same-origin",
       headers: { "X-CSRF-Token": getCsrfToken() || "" },
     }).catch(() => {});
+    invalidateRemoteDownloadTaskList();
   }
   removeDriveTransferRow(transferId);
 }
@@ -1509,6 +1574,7 @@ async function controlRemoteDownloadTask(taskId, transferId, action) {
   });
   const json = await res.json().catch(() => ({}));
   if (!res.ok || !json.ok) throw new Error(json.msg || "下載任務更新失敗");
+  invalidateRemoteDownloadTaskList();
   const task = json.task || {};
   if (task.id) applyRemoteDownloadTaskToTransfer(task);
   if (transferId && task.id) {
@@ -1560,6 +1626,7 @@ async function recoverRemoteDownloadTask(taskId, transferId) {
   });
   const json = await res.json().catch(() => ({}));
   if (!res.ok || !json.ok) throw new Error(json.msg || `恢復保存失敗（HTTP ${res.status}）`);
+  invalidateRemoteDownloadTaskList();
   const task = json.task || {};
   if (transferId) updateDriveTransferRow(transferId, {
     status: task.status || "completed",
@@ -2058,12 +2125,13 @@ function askDriveE2eePassphrase(promptText = "請輸入此檔案的 E2EE 加密�
   });
 }
 
-async function loadDriveFiles(csrf) {
+async function loadDriveFiles(csrf, { signal } = {}) {
   const list = $("drive-file-list");
   if (!list) return;
   const res = await apiFetch(API + "/cloud-drive/files", {
     credentials: "same-origin",
-    headers: { "X-CSRF-Token": csrf || "" }
+    headers: { "X-CSRF-Token": csrf || "" },
+    signal,
   });
   const json = await res.json().catch(() => ({}));
   if (!json.ok) {
@@ -2526,15 +2594,16 @@ async function uploadDriveBlobResumable({
   return completed;
 }
 
-async function loadRemoteDownloadCapabilities() {
+async function loadRemoteDownloadCapabilities({ signal } = {}) {
   const status = $("drive-remote-download-status");
   const torrentButtons = [$("drive-remote-torrent-inline-btn"), $("drive-remote-torrent-btn")].filter(Boolean);
   if (!currentUser || !canAccessModule("privacy_uploads")) return;
-  await fetchCsrfToken();
+  await abortableWait(fetchCsrfToken(), signal, "Drive capability load aborted");
   try {
     const res = await apiFetch(API + "/cloud-drive/remote-download/capabilities", {
       credentials: "same-origin",
-      headers: { "X-CSRF-Token": getCsrfToken() || "" }
+      headers: { "X-CSRF-Token": getCsrfToken() || "" },
+      signal,
     });
     const json = await res.json().catch(() => ({}));
     if (!json.ok) {
@@ -2573,6 +2642,7 @@ async function loadRemoteDownloadCapabilities() {
         : "Direct link 可用；BT/magnet 不可用，請設定 Transmission RPC 或安裝 aria2c";
     }
   } catch (err) {
+    if (err?.name === "AbortError") return;
     driveRemoteDownloadCapabilities = { direct: true, bt_magnet: false, bt_file: false };
     if (status) status.textContent = "BT 能力檢查失敗；Direct link 仍可用";
     torrentButtons.forEach((button) => {
@@ -2734,6 +2804,7 @@ async function startRemoteDriveDownload({ source = "auto", downloadMode = "direc
     if (!res.ok || !json.ok) throw new Error(json.msg || `遠端下載失敗（HTTP ${res.status}）`);
     const task = json.task || {};
     if (!task.id) throw new Error("遠端下載任務建立失敗");
+    invalidateRemoteDownloadTaskList();
     updateDriveTransferRow(transferId, {
       id: transferId,
       task_id: task.id,
@@ -2934,19 +3005,20 @@ function resumeRemoteDownloadTaskPolling(task) {
     });
 }
 
-async function loadDriveResumableUploadSessions({ csrf = "" } = {}) {
-  const token = csrf || getCsrfToken() || await fetchCsrfToken();
+async function loadDriveResumableUploadSessions({ csrf = "", signal } = {}) {
+  const token = csrf || getCsrfToken() || await abortableWait(fetchCsrfToken(), signal, "Resumable upload session load aborted");
   const res = await apiFetch(API + "/cloud-drive/resumable-upload/sessions?limit=20", {
     credentials: "same-origin",
     headers: { "X-CSRF-Token": token || "" },
+    signal,
   });
   const json = await res.json().catch(() => ({}));
   if (!res.ok || !json.ok) return [];
   return Array.isArray(json.sessions) ? json.sessions : [];
 }
 
-async function restoreResumableUploadSessions() {
-  const sessions = await loadDriveResumableUploadSessions({ csrf: getCsrfToken() || "" });
+async function restoreResumableUploadSessions({ signal } = {}) {
+  const sessions = await loadDriveResumableUploadSessions({ csrf: getCsrfToken() || "", signal });
   let waitingResumeCount = 0;
   sessions.forEach((session) => {
     applyResumableUploadSessionToTransfer(session);
@@ -2957,15 +3029,8 @@ async function restoreResumableUploadSessions() {
   }
 }
 
-async function restoreRemoteDownloadTasks() {
-  await fetchCsrfToken();
-  const res = await apiFetch(API + "/cloud-drive/remote-download/tasks", {
-    credentials: "same-origin",
-    headers: { "X-CSRF-Token": getCsrfToken() || "" },
-  });
-  const json = await res.json().catch(() => ({}));
-  if (!res.ok || !json.ok) return;
-  const tasks = Array.isArray(json.tasks) ? json.tasks : [];
+async function restoreRemoteDownloadTasks({ signal } = {}) {
+  const tasks = await loadRemoteDownloadTaskList({ csrf: getCsrfToken() || "", signal });
   tasks.forEach((task) => {
     const transferId = applyRemoteDownloadTaskToTransfer(task);
     if (!transferId) return;
@@ -2976,13 +3041,20 @@ async function restoreRemoteDownloadTasks() {
   });
 }
 
-async function restoreDriveBackgroundTransfers() {
+async function restoreDriveBackgroundTransfers({ signal, shouldContinue } = {}) {
+  const canContinue = () => typeof shouldContinue !== "function" || shouldContinue();
+  if (!canContinue()) return;
   try {
-    await restoreRemoteDownloadTasks();
-  } catch (_) {}
+    await restoreRemoteDownloadTasks({ signal });
+  } catch (err) {
+    if (err?.name === "AbortError") return;
+  }
+  if (!canContinue()) return;
   try {
-    await restoreResumableUploadSessions();
-  } catch (_) {}
+    await restoreResumableUploadSessions({ signal });
+  } catch (err) {
+    if (err?.name === "AbortError") return;
+  }
 }
 
 function triggerBrowserDownload(url, filename = "") {
@@ -5133,17 +5205,17 @@ function renderStorageFeatureDisabled() {
   closeAlbumDetail();
 }
 
-async function loadStorageFiles(csrf) {
+async function loadStorageFiles(csrf, { signal } = {}) {
   if (!storageAlbumsFeatureEnabled()) {
     renderStorageFeatureDisabled();
     return;
   }
   const headers = { "X-CSRF-Token": csrf || "" };
   const [filesRes, trashRes, foldersRes, albumsRes] = await Promise.all([
-    apiFetch(API + "/storage/files", { credentials: "same-origin", headers }),
-    apiFetch(API + "/storage/trash", { credentials: "same-origin", headers }),
-    apiFetch(API + "/storage/folders", { credentials: "same-origin", headers }),
-    apiFetch(API + "/storage/albums", { credentials: "same-origin", headers })
+    apiFetch(API + "/storage/files", { credentials: "same-origin", headers, signal }),
+    apiFetch(API + "/storage/trash", { credentials: "same-origin", headers, signal }),
+    apiFetch(API + "/storage/folders", { credentials: "same-origin", headers, signal }),
+    apiFetch(API + "/storage/albums", { credentials: "same-origin", headers, signal })
   ]);
   const filesJson = await filesRes.json().catch(() => ({}));
   const trashJson = await trashRes.json().catch(() => ({}));

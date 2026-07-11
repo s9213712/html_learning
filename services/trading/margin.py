@@ -35,6 +35,8 @@ from services.trading.mode_gate import (
 POSITION_MARGIN_LONG = "margin_long"
 POSITION_MARGIN_SHORT = "short"
 POSITION_MARGIN_SHORT_LEGACY = "margin_short"
+IMPLICIT_IDEMPOTENCY_BUCKET_SECONDS = 60
+IMPLICIT_IDEMPOTENCY_BOUNDARY_GRACE_SECONDS = 10
 
 
 def _json_dumps(value):
@@ -56,6 +58,54 @@ def _client_idempotency_key(value, *, prefix):
         return ""
     digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
     return f"{prefix}:{digest}"
+
+
+def _implicit_operation_keys(*, value_prefix, key_prefix, request_time=None):
+    request_time = request_time or datetime.now()
+    bucket = int(request_time.timestamp() // IMPLICIT_IDEMPOTENCY_BUCKET_SECONDS)
+    current = _client_idempotency_key(f"{value_prefix}:{bucket}", prefix=key_prefix)
+    previous = _client_idempotency_key(f"{value_prefix}:{bucket - 1}", prefix=key_prefix)
+    return current, previous, request_time
+
+
+def _operation_replay_response(
+    conn,
+    *,
+    operation,
+    operation_key,
+    boundary_operation_key="",
+    request_time=None,
+):
+    current = conn.execute(
+        """
+        SELECT response_json, created_at, updated_at
+        FROM trading_operation_idempotency
+        WHERE idempotency_key=? AND operation=?
+        """,
+        (operation_key, operation),
+    ).fetchone()
+    if current and current["response_json"]:
+        return _json_loads(current["response_json"], {"ok": True})
+    if not boundary_operation_key or request_time is None:
+        return None
+    boundary = conn.execute(
+        """
+        SELECT response_json, created_at, updated_at
+        FROM trading_operation_idempotency
+        WHERE idempotency_key=? AND operation=?
+        """,
+        (boundary_operation_key, operation),
+    ).fetchone()
+    if not boundary or not boundary["response_json"]:
+        return None
+    try:
+        recorded_at = datetime.fromisoformat(str(boundary["updated_at"] or boundary["created_at"] or ""))
+        age_seconds = (request_time - recorded_at).total_seconds()
+    except (TypeError, ValueError):
+        return None
+    if 0 <= age_seconds <= IMPLICIT_IDEMPOTENCY_BOUNDARY_GRACE_SECONDS:
+        return _json_loads(boundary["response_json"], {"ok": True})
+    return None
 
 
 def _normalize_optional_risk_percent(value, *, name):
@@ -1002,11 +1052,17 @@ def add_margin_collateral(
     if not actor_user_id:
         raise ValueError("login required")
     amount = _to_int(amount_points, name="collateral_points", minimum=1, maximum=10**12)
-    fallback_key = idempotency_key or f"{position_uuid}:{amount}:{int(datetime.now().timestamp() // 60)}"
-    operation_key = _client_idempotency_key(
-        fallback_key,
-        prefix=f"margin_collateral_add:{actor_user_id}:{position_uuid}",
-    )
+    request_time = datetime.now()
+    boundary_operation_key = ""
+    key_prefix = f"margin_collateral_add:{actor_user_id}:{position_uuid}"
+    if idempotency_key:
+        operation_key = _client_idempotency_key(idempotency_key, prefix=key_prefix)
+    else:
+        operation_key, boundary_operation_key, request_time = _implicit_operation_keys(
+            value_prefix=f"{position_uuid}:{amount}",
+            key_prefix=key_prefix,
+            request_time=request_time,
+        )
     conn = service.get_db()
     try:
         service.ensure_schema(conn)
@@ -1014,17 +1070,16 @@ def add_margin_collateral(
         conn.execute("BEGIN IMMEDIATE")
         service._assert_writable(conn)
         if operation_key:
-            existing_operation = conn.execute(
-                """
-                SELECT response_json FROM trading_operation_idempotency
-                WHERE idempotency_key=? AND operation='margin_collateral_add'
-                """,
-                (operation_key,),
-            ).fetchone()
-            if existing_operation and existing_operation["response_json"]:
-                result = _json_loads(existing_operation["response_json"], {"ok": True})
+            replay = _operation_replay_response(
+                conn,
+                operation="margin_collateral_add",
+                operation_key=operation_key,
+                boundary_operation_key=boundary_operation_key,
+                request_time=request_time,
+            )
+            if replay is not None:
                 conn.rollback()
-                return result
+                return replay
             now_text = _now_text()
             insert_cur = conn.execute(
                 """
@@ -1158,11 +1213,17 @@ def withdraw_margin_collateral(
     if not actor_user_id:
         raise ValueError("login required")
     amount = _to_int(amount_points, name="collateral_points", minimum=1, maximum=10**12)
-    fallback_key = idempotency_key or f"{position_uuid}:{amount}:{int(datetime.now().timestamp() // 60)}"
-    operation_key = _client_idempotency_key(
-        fallback_key,
-        prefix=f"margin_collateral_withdraw:{actor_user_id}:{position_uuid}",
-    )
+    request_time = datetime.now()
+    boundary_operation_key = ""
+    key_prefix = f"margin_collateral_withdraw:{actor_user_id}:{position_uuid}"
+    if idempotency_key:
+        operation_key = _client_idempotency_key(idempotency_key, prefix=key_prefix)
+    else:
+        operation_key, boundary_operation_key, request_time = _implicit_operation_keys(
+            value_prefix=f"{position_uuid}:{amount}",
+            key_prefix=key_prefix,
+            request_time=request_time,
+        )
     conn = service.get_db()
     try:
         service.ensure_schema(conn)
@@ -1170,17 +1231,16 @@ def withdraw_margin_collateral(
         conn.execute("BEGIN IMMEDIATE")
         service._assert_writable(conn)
         if operation_key:
-            existing_operation = conn.execute(
-                """
-                SELECT response_json FROM trading_operation_idempotency
-                WHERE idempotency_key=? AND operation='margin_collateral_withdraw'
-                """,
-                (operation_key,),
-            ).fetchone()
-            if existing_operation and existing_operation["response_json"]:
-                result = _json_loads(existing_operation["response_json"], {"ok": True})
+            replay = _operation_replay_response(
+                conn,
+                operation="margin_collateral_withdraw",
+                operation_key=operation_key,
+                boundary_operation_key=boundary_operation_key,
+                request_time=request_time,
+            )
+            if replay is not None:
                 conn.rollback()
-                return result
+                return replay
             now_text = _now_text()
             insert_cur = conn.execute(
                 """

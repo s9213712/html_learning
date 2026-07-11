@@ -1334,6 +1334,28 @@ def register_comfyui_workflow_routes(app, ctx):
                 if isinstance(value, str) and not value.strip():
                     continue
                 workflow_run_params[key] = value
+            for key in (
+                "agent_review_required",
+                "agent_review_mode",
+                "agent_review_strategy",
+                "agent_review_min_candidates",
+                "agent_review_max_attempts",
+                "agent_review_pass_threshold",
+                "agent_review_plan",
+                "agent_review_attempt_index",
+                "agent_review_stage_index",
+                "agent_review_stage_key",
+                "agent_review_stage_attempt",
+            ):
+                value = body.get(key)
+                if value in (None, ""):
+                    continue
+                workflow_run_params[key] = safe_text(value, 2000) if isinstance(value, str) else value
+            review_sequence = body.get("agent_review_stage_sequence")
+            if isinstance(review_sequence, list):
+                encoded_review_sequence = json.dumps(review_sequence[:8], ensure_ascii=False, sort_keys=True)
+                if len(encoded_review_sequence) <= 12000:
+                    workflow_run_params["agent_review_stage_sequence"] = json.loads(encoded_review_sequence)
             if workflow_run_params.get("edit_instruction") and not workflow_run_params.get("effective_edit_instruction"):
                 workflow_run_params["effective_edit_instruction"] = workflow_run_params.get("edit_instruction")
             requested_width = _workflow_request_int(

@@ -21,5 +21,6 @@ def test_register_form_surfaces_field_level_errors_without_full_reset():
     assert 'if (field === "password" || field === "password_confirm") return true;' in auth
     assert 'el.addEventListener("input", clearHandler);' in auth
     assert 'if (typeof bindRegisterFieldHelpers === "function") bindRegisterFieldHelpers();' in bootstrap
+    assert bootstrap.index('if (typeof bindRegisterFieldHelpers === "function") bindRegisterFieldHelpers();') < bootstrap.index("await loadSiteConfig();")
     assert ".field-error {" in styles
     assert "box-shadow: 0 0 0 1px rgba(255,79,109,.24);" in styles
