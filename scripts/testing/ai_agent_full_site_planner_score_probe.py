@@ -3,13 +3,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import time
 from pathlib import Path
 from typing import Any
 
 from playwright.sync_api import sync_playwright
 
-from ai_agent_real_i2i_edit_audit import api_fetch, login, open_ai_agent
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.testing.ai_agent_real_i2i_edit_audit import api_fetch, login, open_ai_agent  # noqa: E402
+from scripts.testing.probe_credentials import add_root_password_argument  # noqa: E402
 
 
 CASES: list[dict[str, Any]] = [
@@ -19,6 +26,13 @@ CASES: list[dict[str, Any]] = [
         "expect_action": "write_tool",
         "expect_tools": ["write_trading_place_order"],
         "required_args": ["market_symbol", "side", "order_type", "quantity", "limit_price_points"],
+        "expected_args": {
+            "market_symbol": "BTC-PC0",
+            "side": "buy",
+            "order_type": "limit",
+            "quantity": 2,
+            "limit_price_points": 123.45,
+        },
     },
     {
         "case_id": "trade_grid_preview",
@@ -29,10 +43,16 @@ CASES: list[dict[str, Any]] = [
     },
     {
         "case_id": "trade_bot_backtest",
-        "text": "幫我用 SOL-PC0 做均線策略機器人回測，lookback 30 天，初始資金 10000，參數 fast=5 slow=20。",
+        "text": "幫我用 SOL-PC0 做 moving_average 均線機器人回測，lookback 30 天，初始資金 10000，參數 fast=5 slow=20。",
         "expect_action": "write_tool",
         "expect_tools": ["write_trading_bot_backtest"],
         "required_args": ["market_symbol", "strategy", "lookback_days", "initial_cash"],
+        "expected_args": {
+            "market_symbol": "SOL-PC0",
+            "strategy": "moving_average",
+            "lookback_days": 30,
+            "initial_cash": 10000,
+        },
     },
     {
         "case_id": "trade_liquidation_scan",
@@ -126,11 +146,30 @@ CASES: list[dict[str, Any]] = [
         "required_args": ["name"],
     },
     {
-        "case_id": "launch_preflight",
-        "text": "幫我執行上線前檢查，找失敗原因並直到成功轉成 production 上線模式。",
+        "case_id": "launch_preflight_dry_run",
+        "text": "幫我執行上線前檢查並找出失敗原因；這次只做 dry-run，不要切換 production。",
+        "expect_action": "write_tool",
+        "expect_tools": ["write_launch_preflight_execute"],
+        "required_args": ["target_mode", "auto_switch", "force_audit"],
+        "expected_args": {
+            "target_mode": "production",
+            "auto_switch": False,
+            "force_audit": True,
+        },
+        "forbidden_args": ["confirm"],
+    },
+    {
+        "case_id": "launch_preflight_go_live",
+        "text": "幫我執行上線前檢查；若檢查通過，明確授權 GO_LIVE 切換到 production。",
         "expect_action": "write_tool",
         "expect_tools": ["write_launch_preflight_execute"],
         "required_args": ["target_mode", "auto_switch", "force_audit", "confirm"],
+        "expected_args": {
+            "target_mode": "production",
+            "auto_switch": True,
+            "force_audit": True,
+            "confirm": "GO_LIVE",
+        },
     },
     {
         "case_id": "codex_handoff",
@@ -207,6 +246,44 @@ def _missing_any_args(args: dict[str, Any], groups: list[list[str]]) -> list[str
     return missing
 
 
+def _arg_values_match(actual: Any, expected: Any) -> bool:
+    if isinstance(expected, bool):
+        return isinstance(actual, bool) and actual is expected
+    if isinstance(expected, (int, float)) and not isinstance(expected, bool):
+        return isinstance(actual, (int, float)) and not isinstance(actual, bool) and actual == expected
+    return actual == expected
+
+
+def _arg_value_mismatches(args: dict[str, Any], expected_args: dict[str, Any]) -> list[dict[str, Any]]:
+    mismatches = []
+    for key, expected in expected_args.items():
+        if key not in args:
+            continue
+        actual = args.get(key)
+        if not _arg_values_match(actual, expected):
+            mismatches.append({"arg": key, "expected": expected, "actual": actual})
+    return mismatches
+
+
+def _planner_settings_update(
+    *,
+    model: str,
+    api_base_url: str,
+    comfyui_api_url: str,
+) -> dict[str, Any]:
+    return {
+        "ai_agent_provider": "openai_compatible",
+        "ai_agent_api_base_url": api_base_url.rstrip("/"),
+        "ai_agent_model": model,
+        "ai_agent_allowed_models": model,
+        "ai_agent_operation_mode": "write",
+        "ai_agent_allowed_tools": "",
+        "ai_agent_allow_image_input": True,
+        "comfyui_connection_mode": "remote",
+        "comfyui_remote_api_url": comfyui_api_url.rstrip("/"),
+    }
+
+
 def _score_case(case: dict[str, Any], plan: dict[str, Any], error: str = "") -> dict[str, Any]:
     action = str(plan.get("action") or "")
     tool = str(plan.get("tool") or "")
@@ -254,14 +331,27 @@ def _score_case(case: dict[str, Any], plan: dict[str, Any], error: str = "") -> 
             "reason": "ok" if passed else (error or "action mismatch"),
         }
     expected_tools = set(case.get("expect_tools") or [])
-    missing = _missing_args(args, list(case.get("required_args") or []))
+    expected_args = dict(case.get("expected_args") or {})
+    required_args = list(dict.fromkeys([*(case.get("required_args") or []), *expected_args]))
+    missing = _missing_args(args, required_args)
     missing.extend(_missing_any_args(args, list(case.get("required_any_args") or [])))
-    passed = (not error) and action == expect_action and tool in expected_tools and not missing
+    arg_value_mismatches = _arg_value_mismatches(args, expected_args)
+    forbidden_args_present = [key for key in case.get("forbidden_args") or [] if key in args]
+    passed = (
+        (not error)
+        and action == expect_action
+        and tool in expected_tools
+        and not missing
+        and not arg_value_mismatches
+        and not forbidden_args_present
+    )
     return {
         "passed": passed,
         "action": action,
         "tool": tool,
         "missing_args": missing,
+        "arg_value_mismatches": arg_value_mismatches,
+        "forbidden_args_present": forbidden_args_present,
         "reason": error or ("ok" if passed else "tool/action/args mismatch"),
     }
 
@@ -270,7 +360,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", default="https://127.0.0.1:5000")
     parser.add_argument("--username", default="root")
-    parser.add_argument("--root-password", default="root")
+    add_root_password_argument(parser)
     parser.add_argument("--model", default="qwen3.5:cloud")
     parser.add_argument("--api-base-url", default="http://127.0.0.1:11434/v1")
     parser.add_argument("--comfyui-api-url", default="http://127.0.0.1:8189")
@@ -333,26 +423,33 @@ def main() -> int:
         before = api_fetch(page, "GET", "/api/admin/settings")
         original_settings = (before.get("body") or {}).get("settings") or {}
         report["original_allowed_tools"] = original_settings.get("ai_agent_allowed_tools")
+        report["original_allowed_models"] = original_settings.get("ai_agent_allowed_models")
         update = api_fetch(
             page,
             "PUT",
             "/api/admin/settings",
-            {
-                "ai_agent_provider": "openai_compatible",
-                "ai_agent_api_base_url": args.api_base_url.rstrip("/"),
-                "ai_agent_model": args.model,
-                "ai_agent_operation_mode": "write",
-                "ai_agent_allowed_tools": "",
-                "ai_agent_allow_image_input": True,
-                "comfyui_connection_mode": "remote",
-                "comfyui_remote_api_url": args.comfyui_api_url.rstrip("/"),
-            },
+            _planner_settings_update(
+                model=args.model,
+                api_base_url=args.api_base_url,
+                comfyui_api_url=args.comfyui_api_url,
+            ),
         )
         report["settings_update"] = update
         open_ai_agent(page, report["base_url"])
+        # Opening the panel starts an asynchronous status load.  Calling the
+        # loader again while that request is in flight returns immediately, so
+        # wait for the authenticated actor/settings to land before planning.
+        # Otherwise the model sees an anonymous actor with no effective tools
+        # and may correctly refuse an otherwise valid root-only test case.
+        page.wait_for_function(
+            """() => Boolean(
+              AI_AGENT_STATE?.actor?.username
+              && AI_AGENT_STATE?.settings?.operation_mode
+            )""",
+            timeout=30_000,
+        )
         page.evaluate(
             """async () => {
-              await loadAiAgentStatus({force: true});
               await loadAiAgentWriteToolCatalog({force: true});
             }"""
         )
@@ -404,6 +501,7 @@ def main() -> int:
         if original_settings:
             restore_payload = {
                 "ai_agent_allowed_tools": original_settings.get("ai_agent_allowed_tools", ""),
+                "ai_agent_allowed_models": original_settings.get("ai_agent_allowed_models", ""),
                 "ai_agent_operation_mode": original_settings.get("ai_agent_operation_mode", "assist"),
                 "ai_agent_model": original_settings.get("ai_agent_model", args.model),
                 "ai_agent_api_base_url": original_settings.get("ai_agent_api_base_url", args.api_base_url),

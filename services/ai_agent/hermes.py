@@ -1,9 +1,11 @@
 import json
+import ipaddress
 import os
 import re
 import sqlite3
 import threading
 from collections import Counter
+from collections.abc import Mapping
 from datetime import datetime, timedelta
 import shutil
 from time import monotonic, sleep, time
@@ -441,8 +443,8 @@ AI_AGENT_TOOL_BLUEPRINT = {
         "data_scope": "write_tool:launch_check",
     },
     "write_launch_preflight_execute": {
-        "label": "執行上線前檢查與切換",
-        "description": "root 專用白名單工具：執行上線前 requirements、log chain、AI audit scan，整理阻塞原因，gate 通過時切換 production。",
+        "label": "執行上線前檢查",
+        "description": "root 專用白名單工具：執行 requirements、log chain、AI audit scan，整理阻塞原因與後續指令；預設只 dry-run，明確 GO_LIVE 時才切換 production。",
         "min_role": "super_admin",
         "data_scope": "write_tool:launch_check",
     },
@@ -836,13 +838,38 @@ def normalize_ai_agent_role(value):
     return normalize_action_role(value)
 
 
+_AI_AGENT_ACTOR_MISSING = object()
+
+
+def _ai_agent_actor_value(actor, key, default=None):
+    if actor is None:
+        return default
+    if isinstance(actor, Mapping):
+        return actor.get(key, default)
+    row_mapping = getattr(actor, "_mapping", None)
+    if isinstance(row_mapping, Mapping):
+        return row_mapping.get(key, default)
+    getter = getattr(actor, "get", None)
+    if callable(getter):
+        try:
+            return getter(key, default)
+        except TypeError:
+            try:
+                return getter(key)
+            except (LookupError, TypeError, AttributeError):
+                pass
+    try:
+        return actor[key]
+    except (LookupError, TypeError, AttributeError):
+        return getattr(actor, key, default)
+
+
 def normalize_ai_agent_actor_role(actor):
-    if isinstance(actor, dict):
-        username = str(actor.get("username") or "").strip()
-        if username == "root":
-            return "super_admin"
-        return normalize_ai_agent_role(actor.get("role"))
-    return normalize_ai_agent_role(actor)
+    username = str(_ai_agent_actor_value(actor, "username", "") or "").strip()
+    if username.lower() == "root":
+        return "super_admin"
+    role = _ai_agent_actor_value(actor, "role", _AI_AGENT_ACTOR_MISSING)
+    return normalize_ai_agent_role(actor if role is _AI_AGENT_ACTOR_MISSING else role)
 
 
 def _agent_role_scope(role):
@@ -850,12 +877,18 @@ def _agent_role_scope(role):
 
 
 def _ai_agent_actor_context(actor, actor_role):
-    username = ""
-    if isinstance(actor, dict):
-        username = str(actor.get("username") or "").strip()
-    elif actor:
-        username = str(actor or "").strip()
-    normalized_role = normalize_ai_agent_role(actor_role)
+    username_value = _ai_agent_actor_value(actor, "username", _AI_AGENT_ACTOR_MISSING)
+    role_value = _ai_agent_actor_value(actor, "role", _AI_AGENT_ACTOR_MISSING)
+    if username_value is _AI_AGENT_ACTOR_MISSING:
+        username = str(actor or "").strip() if isinstance(actor, (str, int)) else ""
+    else:
+        username = str(username_value or "").strip()
+    if username.lower() == "root":
+        normalized_role = "super_admin"
+    elif role_value is not _AI_AGENT_ACTOR_MISSING:
+        normalized_role = normalize_ai_agent_role(role_value)
+    else:
+        normalized_role = normalize_ai_agent_role(actor_role)
     scope = _agent_role_scope(normalized_role)
     if not username:
         username = "unknown"
@@ -1600,6 +1633,7 @@ def run_ai_agent_audit_scan(settings, *, get_db, get_audit_db=None, actor=None, 
     security_type_counts = Counter()
     security_ip_counts = Counter()
     request_ip_counts = Counter()
+    request_security_signal_counts = Counter()
     request_action_counts = Counter()
 
     for row in security_rows:
@@ -1614,6 +1648,19 @@ def run_ai_agent_audit_scan(settings, *, get_db, get_audit_db=None, actor=None, 
         action = str(_row_get(row, "action") or "request").strip()
         request_ip_counts[ip] += 1 if ip and ip != "-" else 0
         request_action_counts[action] += 1
+        normalized_action = action.upper()
+        if ip and ip != "-" and any(marker in normalized_action for marker in (
+            "LOGIN_FAIL",
+            "AUTH_FAIL",
+            "INVALID_TOKEN",
+            "UNAUTHORIZED",
+            "PERMISSION_DENIED",
+            "CSRF_FAIL",
+            "BOUNDARY_BLOCK",
+            "IDOR",
+            "SECURITY_BLOCK",
+        )):
+            request_security_signal_counts[ip] += 1
 
     top_request_ips = [{"ip": ip, "count": count} for ip, count in request_ip_counts.most_common(5)]
     top_security_ips = [{"ip": ip, "count": count} for ip, count in security_ip_counts.most_common(5)]
@@ -1670,14 +1717,45 @@ def run_ai_agent_audit_scan(settings, *, get_db, get_audit_db=None, actor=None, 
     for item in top_request_ips:
         if item["count"] >= ip_threshold_count:
             rate = item["count"] / max(1, ip_rate_window)
+            corroborating_security_events = int(security_ip_counts.get(item["ip"], 0))
+            explicit_security_signals = int(request_security_signal_counts.get(item["ip"], 0))
+            suspicious = corroborating_security_events > 0 or explicit_security_signals > 0
+            try:
+                parsed_ip = ipaddress.ip_address(item["ip"])
+                auto_block_eligible = not (parsed_ip.is_loopback or parsed_ip.is_unspecified)
+            except ValueError:
+                auto_block_eligible = False
+            if not suspicious:
+                add_anomaly(
+                    "capacity.request_rate_per_ip",
+                    "warn",
+                    f"IP {item['ip']} 在 {ip_rate_window} 分鐘請求量偏高（{item['count']}）；目前沒有攻擊佐證，視為容量/壓測事件。",
+                    {
+                        "ip": item["ip"],
+                        "count": item["count"],
+                        "rate_per_minute": rate,
+                        "window_minutes": ip_rate_window,
+                        "security_evidence": False,
+                    },
+                )
+                recommendations.append(f"請確認 IP {item['ip']} 是否為 QA、批次作業或合法高流量；只調整容量/限流，不自動封鎖。")
+                continue
             sev = "alert" if item["count"] >= ip_threshold_count * 2 else "warn"
             add_anomaly(
-                "security.request_rate_per_ip",
+                "security.suspicious_request_rate_per_ip",
                 sev,
-                f"IP {item['ip']} 在 {ip_rate_window} 分鐘請求筆數偏高（{item['count']}）",
-                {"ip": item["ip"], "count": item["count"], "window_minutes": ip_rate_window},
+                f"IP {item['ip']} 請求量偏高，且有獨立安全事件佐證。",
+                {
+                    "ip": item["ip"],
+                    "count": item["count"],
+                    "rate_per_minute": rate,
+                    "window_minutes": ip_rate_window,
+                    "security_events": corroborating_security_events,
+                    "explicit_security_signals": explicit_security_signals,
+                    "security_evidence": True,
+                },
             )
-            if audit_settings["audit_auto_block_suspect_ip"]:
+            if audit_settings["audit_auto_block_suspect_ip"] and auto_block_eligible:
                 try:
                     from services.security.events import block_ip
 
@@ -1763,6 +1841,21 @@ def run_ai_agent_audit_scan(settings, *, get_db, get_audit_db=None, actor=None, 
             continue
         event_user = str(_row_get(row, "user") or "-").strip()
         event_ts = str(_row_get(row, "ts") or "").strip()
+        if event_user.lower() == "root":
+            add_anomaly(
+                "ai_agent.authorized_sensitive_settings_changed",
+                "warn",
+                "root 已變更 AI Agent 敏感設定；此為授權管理操作，不視為網路攻擊，也不鎖定 write-tools。",
+                {
+                    "keys": lockdown_keys,
+                    "sensitive_keys": sensitive_keys,
+                    "user": event_user,
+                    "ts": event_ts,
+                    "authorized": True,
+                },
+            )
+            recommendations.append("請在變更紀錄中確認 root 操作內容；若非本人操作，再進入 incident mode 並撤銷 session。")
+            continue
         add_anomaly(
             "ai_agent.sensitive_settings_changed",
             "alert",
@@ -2192,7 +2285,15 @@ def _normalize_chat_messages(messages, *, prompt="", image_data_url="", allow_im
             content = [{"type": "text", "text": content}]
         elif not isinstance(content, list):
             content = []
-        content.append({"type": "image_url", "image_url": {"url": image_data_url}})
+        last_message_image_urls = {
+            str((part.get("image_url") or {}).get("url") or "")
+            for part in content
+            if isinstance(part, dict)
+            and part.get("type") == "image_url"
+            and isinstance(part.get("image_url"), dict)
+        }
+        if image_data_url not in last_message_image_urls:
+            content.append({"type": "image_url", "image_url": {"url": image_data_url}})
         last["content"] = content
     return normalized
 

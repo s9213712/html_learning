@@ -119,6 +119,32 @@ def test_ai_agent_admin_role_maps_to_manager_scope_only():
     assert normalize_ai_agent_role("super_admin") == "super_admin"
 
 
+@pytest.mark.parametrize(
+    ("username", "role", "expected_role"),
+    [
+        ("root", "user", "super_admin"),
+        ("managerA", "admin", "manager"),
+        ("memberA", "user", "user"),
+        ("operatorA", "super_admin", "super_admin"),
+    ],
+)
+def test_ai_agent_actor_role_and_context_support_sqlite_rows(username, role, expected_role):
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    try:
+        actor = connection.execute(
+            "SELECT ? AS username, ? AS role",
+            (username, role),
+        ).fetchone()
+    finally:
+        connection.close()
+
+    assert hermes_client.normalize_ai_agent_actor_role(actor) == expected_role
+    context = hermes_client._ai_agent_actor_context(actor, "user")
+    assert f"目前登入者：{username}" in context
+    assert f"目前權限：{expected_role}" in context
+
+
 def test_ai_agent_chat_injects_persona_and_task_scope(monkeypatch):
     payloads = []
 
@@ -179,6 +205,30 @@ def test_ai_agent_multimodal_accepts_1920_png_sized_data_url():
     )
 
     assert messages[0]["content"][1]["image_url"]["url"] == data_url
+
+
+def test_ai_agent_multimodal_deduplicates_exact_image_and_keeps_distinct_images():
+    attached = "data:image/png;base64,attached"
+    different = "data:image/png;base64,different"
+    messages = _normalize_chat_messages(
+        [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "compare these"},
+                {"type": "image_url", "image_url": {"url": attached}},
+                {"type": "image_url", "image_url": {"url": different}},
+            ],
+        }],
+        image_data_url=attached,
+        allow_image_input=True,
+    )
+
+    image_urls = [
+        part["image_url"]["url"]
+        for part in messages[0]["content"]
+        if part["type"] == "image_url"
+    ]
+    assert image_urls == [attached, different]
 
 
 def test_ai_agent_rejects_image_when_disabled():
@@ -954,7 +1004,23 @@ def test_ai_agent_audit_scan_auto_block_suspect_ip(monkeypatch, tmp_path):
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE security_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_type TEXT,
+            ip_address TEXT,
+            target_user TEXT,
+            detail TEXT,
+            created_at TEXT
+        )
+        """
+    )
     now = datetime.now().replace(microsecond=0)
+    conn.execute(
+        "INSERT INTO security_events (event_type, ip_address, target_user, detail, created_at) VALUES (?, ?, ?, ?, ?)",
+        ("auth_failure", "198.51.100.20", "userA", "invalid token", now.isoformat()),
+    )
     for idx in range(12):
         ts = (now - timedelta(seconds=idx)).isoformat()
         conn.execute(
@@ -1003,7 +1069,62 @@ def test_ai_agent_audit_scan_auto_block_suspect_ip(monkeypatch, tmp_path):
     assert blocked_ips[0]["minutes"] == 8
 
 
-def test_ai_agent_audit_scan_locks_down_write_tools_on_sensitive_setting_change(tmp_path):
+def test_ai_agent_audit_scan_classifies_high_rate_without_security_evidence_as_capacity(monkeypatch, tmp_path):
+    db_path = tmp_path / "ai_agent_audit_legitimate_load.sqlite"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE secure_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT,
+            action TEXT,
+            ip TEXT,
+            user TEXT,
+            success INTEGER,
+            detail TEXT
+        )
+        """
+    )
+    now = datetime.now().replace(microsecond=0)
+    for idx in range(12):
+        conn.execute(
+            "INSERT INTO secure_audit (ts, action, ip, user, success, detail) VALUES (?, ?, ?, ?, ?, ?)",
+            ((now - timedelta(seconds=idx)).isoformat(), "AI_AGENT_STATUS", "127.0.0.1", "root", 1, f"qa-{idx}"),
+        )
+    conn.commit()
+    conn.close()
+    blocked_ips = []
+    monkeypatch.setattr("services.security.events.block_ip", lambda ip, **kwargs: blocked_ips.append(ip))
+
+    def get_db():
+        db = sqlite3.connect(db_path)
+        db.row_factory = sqlite3.Row
+        return db
+
+    scan = run_ai_agent_audit_scan(
+        {
+            "ai_agent_audit_interval_minutes": 1,
+            "ai_agent_audit_ip_event_rate_threshold": 1,
+            "ai_agent_audit_ip_event_rate_window_minutes": 1,
+            "ai_agent_audit_security_event_rate_threshold": 100,
+            "ai_agent_audit_security_event_rate_window_minutes": 1,
+            "ai_agent_audit_cpu_percent_threshold": 100,
+            "ai_agent_audit_ram_percent_threshold": 100,
+            "ai_agent_audit_disk_percent_threshold": 100,
+            "ai_agent_audit_auto_block_suspect_ip": True,
+            "ai_agent_audit_notify_root": False,
+        },
+        get_db=get_db,
+        actor={"id": 1, "username": "root", "role": "super_admin"},
+        force=True,
+    )
+
+    assert any(item["code"] == "capacity.request_rate_per_ip" for item in scan["anomalies"])
+    assert not any(item["code"] == "security.suspicious_request_rate_per_ip" for item in scan["anomalies"])
+    assert blocked_ips == []
+
+
+def test_ai_agent_audit_scan_locks_down_write_tools_on_untrusted_sensitive_setting_change(tmp_path):
     clear_ai_agent_audit_scan_state()
     db_path = tmp_path / "ai_agent_audit_guard.sqlite"
     conn = sqlite3.connect(db_path)
@@ -1027,7 +1148,7 @@ def test_ai_agent_audit_scan_locks_down_write_tools_on_sensitive_setting_change(
             now.isoformat(),
             "SETTINGS_CHANGED",
             "127.0.0.1",
-            "root",
+            "intruder",
             1,
             json.dumps({"changed_keys": ["ai_agent_allowed_tools"], "scope": "system_settings"}),
         ),
@@ -1067,6 +1188,62 @@ def test_ai_agent_audit_scan_locks_down_write_tools_on_sensitive_setting_change(
     assert any(item["type"] == "ai_agent_write_tools_lockdown" for item in scan["interventions"])
     assert ai_agent_write_guard_status()["blocked"] is True
     assert any(event["args"][0] == "AI_AGENT_AUDIT_MAIN_AI_GUARD" for event in audit_events)
+
+
+def test_ai_agent_audit_scan_treats_root_setting_change_as_authorized_operation(tmp_path):
+    clear_ai_agent_audit_scan_state()
+    db_path = tmp_path / "ai_agent_audit_authorized_settings.sqlite"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE secure_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT,
+            action TEXT,
+            ip TEXT,
+            user TEXT,
+            success INTEGER,
+            detail TEXT
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO secure_audit (ts, action, ip, user, success, detail) VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            datetime.now().replace(microsecond=0).isoformat(),
+            "SETTINGS_CHANGED",
+            "127.0.0.1",
+            "root",
+            1,
+            json.dumps({"changed_keys": ["ai_agent_allowed_tools"], "scope": "system_settings"}),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    def get_db():
+        db = sqlite3.connect(db_path)
+        db.row_factory = sqlite3.Row
+        return db
+
+    scan = run_ai_agent_audit_scan(
+        {
+            "ai_agent_audit_ip_event_rate_threshold": 100,
+            "ai_agent_audit_security_event_rate_threshold": 100,
+            "ai_agent_audit_cpu_percent_threshold": 100,
+            "ai_agent_audit_ram_percent_threshold": 100,
+            "ai_agent_audit_disk_percent_threshold": 100,
+            "ai_agent_audit_notify_root": False,
+        },
+        get_db=get_db,
+        actor={"id": 1, "username": "root", "role": "super_admin"},
+        force=True,
+    )
+
+    assert scan["status"] == "warn"
+    assert any(item["code"] == "ai_agent.authorized_sensitive_settings_changed" for item in scan["anomalies"])
+    assert not any(item["type"] == "ai_agent_write_tools_lockdown" for item in scan["interventions"])
+    assert ai_agent_write_guard_status(get_db=get_db)["blocked"] is False
 
 
 def test_ai_agent_audit_scan_does_not_lock_down_on_operation_mode_only(tmp_path):
@@ -1190,7 +1367,7 @@ def test_ai_agent_write_guard_persistent_clear_overrides_stale_process_alert(tmp
             now.isoformat(),
             "SETTINGS_CHANGED",
             "127.0.0.1",
-            "root",
+            "intruder",
             1,
             json.dumps({"changed_keys": ["ai_agent_allowed_tools"]}),
         ),
@@ -1260,7 +1437,7 @@ def test_ai_agent_root_force_scan_immediately_acknowledges_persisted_guard(tmp_p
             datetime.now().replace(microsecond=0).isoformat(),
             "SETTINGS_CHANGED",
             "127.0.0.1",
-            "root",
+            "intruder",
             1,
             json.dumps({"changed_keys": ["ai_agent_allowed_tools"]}),
         ),
@@ -1382,8 +1559,8 @@ def test_ai_agent_audit_scan_reads_secure_audit_from_split_audit_db(tmp_path):
     )
 
     assert scan["aggregates"]["secure_audit_total"] == 1
-    assert scan["status"] == "alert"
-    assert any(item["code"] == "ai_agent.sensitive_settings_changed" for item in scan["anomalies"])
+    assert scan["status"] == "warn"
+    assert any(item["code"] == "ai_agent.authorized_sensitive_settings_changed" for item in scan["anomalies"])
 
 
 def test_public_ai_agent_audit_status_uses_last_scan_cache(tmp_path):

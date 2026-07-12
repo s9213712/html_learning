@@ -1,5 +1,3 @@
-import re
-import warnings
 from pathlib import Path
 
 
@@ -10,15 +8,58 @@ def _read(path):
     return (ROOT / path).read_text(encoding="utf-8")
 
 
-def _warn_if_asset_cache_version_changed(html, asset_path, expected_version):
-    match = re.search(rf'{re.escape(asset_path)}\?v=([^"]+)', html)
-    assert match, f"{asset_path}?v= is not referenced"
-    actual_version = match.group(1)
-    if actual_version != expected_version:
-        warnings.warn(
-            f"{asset_path} cache-bust version changed: expected {expected_version!r}, got {actual_version!r}",
-            stacklevel=2,
-        )
+def test_ai_agent_launch_preflight_is_dry_run_unless_root_explicitly_confirms_go_live():
+    ai_agent_js = _read("public/js/37-ai-agent.js")
+
+    assert "function aiAgentLaunchAutoSwitchRequested" in ai_agent_js
+    assert "args.auto_switch = aiAgentLaunchAutoSwitchRequested(raw);" in ai_agent_js
+    assert "if (args.auto_switch) args.confirm = \"GO_LIVE\";" in ai_agent_js
+    assert "return /\\bGO_LIVE\\b/i.test(raw);" in ai_agent_js
+    assert "中文的立即、確認、正式上線或一般『上線前檢查』都不能替代 GO_LIVE" in ai_agent_js
+    assert "args={target_mode:'production', auto_switch:false, force_audit:true}" in ai_agent_js
+    assert "function aiAgentEnforceLaunchPlanConfirmation" in ai_agent_js
+    assert "auto_switch: explicitGoLive" in ai_agent_js
+    assert "else delete repaired.args.confirm;" in ai_agent_js
+
+
+def test_ai_agent_write_plans_require_affirmative_user_intent_and_treat_quoted_commands_as_data():
+    ai_agent_js = _read("public/js/37-ai-agent.js")
+
+    assert "function aiAgentUserTextIsNonExecutingContext" in ai_agent_js
+    assert "function aiAgentUserTextExplicitlyRequestsWrite" in ai_agent_js
+    assert "model output is never user consent" in ai_agent_js
+    assert "Model confidence is untrusted metadata" in ai_agent_js
+    assert "localPlan.tool !== plannedTool && localSchema" in ai_agent_js
+    assert "localPlan.confidence >= Number(repaired.confidence" not in ai_agent_js
+    assert "return aiAgentUserTextExplicitlyRequestsWrite(raw);" in ai_agent_js
+    assert "文件|範例|例子|示例|客服|訊息|內容|文字|引用" in ai_agent_js
+    assert "translate this|explain how|show me how" in ai_agent_js
+    confirmed_write = ai_agent_js.split("function aiAgentPlanConfirmedWrite", 1)[1].split("function ", 1)[0]
+    assert "plan?.execute_write === true" not in confirmed_write
+    assert "args.confirm_billing === true" not in confirmed_write
+
+
+def test_ai_agent_local_financial_parser_does_not_confuse_field_names_with_market_orders():
+    ai_agent_js = _read("public/js/37-ai-agent.js")
+
+    assert 'args.order_type = /市價|\\bmarket(?:\\s+order)?\\b/i.test(raw) ? "market" : "limit";' in ai_agent_js
+    assert 'args.order_type = /市價|market/i.test(raw)' not in ai_agent_js
+    assert 'explicitStrategy || (/均線|moving\\s*average|\\bma\\b/i.test(raw) ? "moving_average" : "default")' in ai_agent_js
+    fast_path = ai_agent_js.split("function aiAgentLocalFastPathAllowed", 1)[1].split("function aiAgentEnforceLaunchPlanConfirmation", 1)[0]
+    assert '"write_trading_place_order"' not in fast_path
+    assert '"write_points_wallet_transfer"' not in fast_path
+    assert '"write_points_governance_execute"' not in fast_path
+
+
+def test_ai_agent_mutations_are_not_blindly_retried_and_preflight_errors_are_visible_in_thread():
+    ai_agent_js = _read("public/js/37-ai-agent.js")
+
+    assert "function aiAgentWriteToolAutoRetryAllowed" in ai_agent_js
+    assert "const attemptLimit = aiAgentWriteToolAutoRetryAllowed(resolvedToolName)" in ai_agent_js
+    assert '"write_trading_place_order"' not in ai_agent_js.split("function aiAgentWriteToolAutoRetryAllowed", 1)[1].split("async function", 1)[0]
+    assert "function aiAgentRecordChatPreflightFailure" in ai_agent_js
+    assert "AI_AGENT_STATE.messages.push({ role: \"assistant\", content: message });" in ai_agent_js
+    assert 'policy.risk_level !== "high"' in ai_agent_js
 
 
 def test_ai_agent_module_frontend_is_wired_as_independent_feature():
@@ -59,11 +100,11 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert 'id="ai-agent-comfyui-vae"' in html
     assert 'id="ai-agent-comfyui-generate-btn"' in html
     assert 'id="s-module-ai-agent-min-role"' in html
-    _warn_if_asset_cache_version_changed(html, "/js/37-ai-agent.js", "20260703-ai-agent-pose-control-v35")
-    _warn_if_asset_cache_version_changed(html, "/js/90-bootstrap.js", "20260611-ai-agent-comfyui-write-tool")
+    assert '/js/37-ai-agent.js?v=__ASSET_VERSION__' in html
+    assert '/js/90-bootstrap.js?v=__ASSET_VERSION__' in html
 
     assert '"ai-agent": "feature_ai_agent_enabled"' in core_js
-    assert '/js/00-core.js?v=20260623-site-config-retry' in html
+    assert '/js/00-core.js?v=__ASSET_VERSION__' in html
     assert "site config load skipped after retry" in core_js
     assert "site config load failed" not in core_js
     assert "normalizeModuleSettingKey(moduleKey)" in core_js
@@ -409,15 +450,24 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert "儲存或加入收藏" in ai_agent_js
     assert "發文分享" in ai_agent_js
     assert "await aiAgentAnalyzeImageForComfyui(userText)" in ai_agent_js
-    assert "await runAiAgentComfyuiGenerate(args)" in ai_agent_js
-    assert "if (!plan) {" in ai_agent_js
+    assert "await runAiAgentComfyuiGenerate(args, { operation })" in ai_agent_js
+    assert "if (!plan && aiAgentOperationIsCurrent(operation)) {" in ai_agent_js
+    assert "if (plan) {" in ai_agent_js
     assert "await aiAgentExecuteToolPlan(plan, plannerText, input" in ai_agent_js
     assert "aiAgentConversationStorageKey" in ai_agent_js
     assert 'API + "/ai-agent/conversation"' in ai_agent_js
     assert "conversationPersistError" in ai_agent_js
     assert "persistRetryCount" in ai_agent_js
     assert "AI Agent conversation persist failed after retries" in ai_agent_js
-    assert "aiAgentPersistConversation(scope, { retryCount: AI_AGENT_STATE.persistRetryCount })" in ai_agent_js
+    assert "void aiAgentPersistConversation(scope, { retryCount: nextRetryCount, snapshot });" in ai_agent_js
+    assert "conversationLoadToken" in ai_agent_js
+    assert "scope !== AI_AGENT_STATE.accountScope" in ai_agent_js
+    assert "persistRetryTimers" in ai_agent_js
+    assert "persistInFlight[scope] instanceof Set" in ai_agent_js
+    assert "persistControllers" in ai_agent_js
+    assert "await Promise.allSettled(pendingPersists);" in ai_agent_js
+    assert "aiAgentCancelConversationPersistence(scope, { invalidate: true });" in ai_agent_js
+    assert "flushAiAgentConversationBeforeLogout" in ai_agent_js
     assert "localStorage.setItem" not in ai_agent_js
     assert "ALLOW_WRITE_ONCE" in ai_agent_js
     assert "elevate_once" in ai_agent_js
@@ -428,7 +478,7 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert 'ai-agent-tool-selector' in html
     assert 'ai-agent-tool-selector-list' in html
     assert 'include_all=1' in ai_agent_js
-    assert 'await loadAiAgentWriteToolCatalog({ force: false }).catch(() => undefined);' in ai_agent_js
+    assert 'await loadAiAgentWriteToolCatalog({ force: false });' in ai_agent_js
     assert 'ai_agent_allowed_tools: allowedTools' in ai_agent_js
     assert '"__none__"' in ai_agent_js
     assert 'setAiAgentToolSelection("comfyui")' in ai_agent_js
@@ -458,7 +508,7 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert ".ai-agent-tool-panel" in css
     assert ".ai-agent-message-meta" in css
     assert "@media (max-width: 640px)" in css
-    assert "37-ai-agent.js?v=20260703-ai-agent-pose-control-v35" in html
+    assert "37-ai-agent.js?v=__ASSET_VERSION__" in html
 
 
 def test_ai_agent_root_quick_settings_use_reserved_pricing_key():

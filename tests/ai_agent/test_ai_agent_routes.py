@@ -886,6 +886,89 @@ def test_ai_agent_write_tool_execute_allows_root_elevate_once(tmp_path):
     assert captured["board_id"] == 1
 
 
+@pytest.mark.parametrize("operation_mode", ["assist", "readonly"])
+@pytest.mark.parametrize(
+    ("tool_name", "arguments", "internal_path", "internal_method"),
+    [
+        (
+            "write_cloud_drive_delete",
+            {"file_id": "file-danger"},
+            "/api/cloud-drive/files/file-danger",
+            "DELETE",
+        ),
+        (
+            "write_trading_place_order",
+            {
+                "market_symbol": "BTC-PC0",
+                "side": "buy",
+                "order_type": "market",
+                "quantity": 1,
+            },
+            "/api/trading/orders",
+            "POST",
+        ),
+        (
+            "write_governance_execute",
+            {"proposal_id": 9},
+            "/api/admin/moderation/proposals/9/execute",
+            "POST",
+        ),
+    ],
+)
+def test_ai_agent_root_elevate_once_cannot_bypass_write_mode_for_high_risk_tools(
+    tmp_path,
+    operation_mode,
+    tool_name,
+    arguments,
+    internal_path,
+    internal_method,
+):
+    clear_ai_agent_audit_scan_state()
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": operation_mode,
+            "ai_agent_allowed_tools": tool_name,
+        },
+    )
+    internal_dispatches = []
+
+    def fake_internal_dispatch():
+        internal_dispatches.append({
+            "method": request.method,
+            "path": request.path,
+            "body": request.get_json(silent=True),
+        })
+        return _json_resp({"ok": True})
+
+    app.add_url_rule(
+        internal_path,
+        endpoint=f"fake_high_risk_dispatch_{tool_name}_{operation_mode}",
+        view_func=fake_internal_dispatch,
+        methods=[internal_method],
+    )
+
+    response = app.test_client().post("/api/ai-agent/write-tools/execute", json={
+        "tool": tool_name,
+        "confirm": "EXECUTE",
+        "elevate_once": "ALLOW_WRITE_ONCE",
+        "arguments": arguments,
+    })
+    payload = response.get_json()
+
+    assert response.status_code == 409
+    assert payload["ok"] is False
+    assert payload["operation_mode"] == operation_mode
+    assert payload["requires_elevation"] is False
+    assert payload["requires_write_mode"] is True
+    assert payload["action_policy"]["risk_level"] == "high"
+    assert payload["action_policy"]["reason"] == "operation_mode_denied"
+    assert internal_dispatches == []
+
+
 def test_ai_agent_conversation_memory_is_encrypted_and_user_isolated(tmp_path):
     db_path = tmp_path / "ai_agent_routes.db"
     _build_db(db_path)
@@ -1077,7 +1160,7 @@ def test_ai_agent_launch_preflight_executes_checks_audit_and_switch(monkeypatch,
     @app.route("/api/root/server-mode", methods=["GET"])
     def fake_server_mode():
         calls.append("server_mode")
-        return _json_resp({"ok": True, "mode": "production"})
+        return _json_resp({"ok": True, "mode": {"current_mode": "production"}})
 
     def fake_audit_scan(*args, **kwargs):
         calls.append("audit_scan")
@@ -1103,7 +1186,248 @@ def test_ai_agent_launch_preflight_executes_checks_audit_and_switch(monkeypatch,
     assert payload["result"]["completed"] is True
     assert payload["result"]["final_mode"] == "production"
     assert payload["result"]["blockers"] == []
+    assert payload["result"]["preflight_passed"] is True
+    assert payload["result"]["dry_run"] is False
+    assert payload["result"]["operator_boundary"]["production_switch_requires_explicit_go_live"] is True
     assert calls == ["requirements", "logs_verify", "audit_scan", "switch", "server_mode"]
+
+
+def test_ai_agent_launch_preflight_defaults_to_dry_run_without_switch(monkeypatch, tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "write",
+            "ai_agent_allowed_tools": "write_launch_preflight_execute",
+        },
+    )
+    calls = []
+
+    @app.route("/api/root/server-mode/requirements", methods=["GET"])
+    def fake_requirements_dry_run():
+        calls.append("requirements")
+        return _json_resp({
+            "ok": True,
+            "missing": [],
+            "failed": [],
+            "reports": {"large_evidence": {"pass": True, "raw": "x" * 20_000}},
+        })
+
+    @app.route("/api/root/server-mode/logs/verify", methods=["GET"])
+    def fake_logs_dry_run():
+        calls.append("logs_verify")
+        return _json_resp({"ok": True, "chain": {"ok": True}})
+
+    @app.route("/api/root/server-mode/switch", methods=["POST"])
+    def forbidden_implicit_switch():
+        raise AssertionError("dry-run must not switch production")
+
+    @app.route("/api/root/server-mode", methods=["GET"])
+    def fake_mode_dry_run():
+        calls.append("server_mode")
+        return _json_resp({"ok": True, "mode": "dev_ready"})
+
+    monkeypatch.setattr(
+        "routes.ai_agent.run_ai_agent_audit_scan",
+        lambda *args, **kwargs: {"summary": {"status": "ok", "anomaly_count": 0}},
+    )
+
+    response = app.test_client().post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_launch_preflight_execute",
+        "confirm": "EXECUTE",
+        "arguments": {"target_mode": "production", "force_audit": True},
+    })
+    result = response.get_json()["result"]
+
+    assert response.status_code == 200
+    assert result["preflight_passed"] is True
+    assert result["ready_to_switch"] is True
+    assert result["completed"] is False
+    assert result["dry_run"] is True
+    assert result.get("truncated") is not True
+    requirements_step = next(item for item in result["steps"] if item["name"] == "requirements_gate")
+    assert requirements_step["result"]["report_status"]["large_evidence"] == {"pass": True}
+    assert "reports" not in requirements_step["result"]
+    assert result["msg"] == "上線前檢查通過；本次為 dry-run，未切換 production"
+    assert result["next_actions"][0]["kind"] == "explicit_go_live_confirmation"
+    assert result["next_actions"][0]["required_arguments"]["confirm"] == "GO_LIVE"
+    assert any(item["kind"] == "twenty_four_hour_operational_campaign" for item in result["operator_runbook"])
+    assert any("pytest_in_tmp.sh -q tests" in item.get("command", "") for item in result["operator_runbook"])
+    campaign_step = next(item for item in result["operator_runbook"] if item["kind"] == "twenty_four_hour_operational_campaign")
+    assert campaign_step["required_active_test_seconds"] == 86_400
+    assert campaign_step["authorization_wait_included"] is False
+    assert "operational_campaign_24h.py" in campaign_step["command"]
+    assert "--duration-seconds 86400" in campaign_step["command"]
+    assert "long_video_upload_stream_hls_share" in campaign_step["coverage"]
+    assert "operational_soak_probe.py" not in campaign_step["command"]
+    assert "--root-password" not in campaign_step["command"]
+    whole_site_step = next(item for item in result["operator_runbook"] if item["kind"] == "whole_site_production_gate")
+    assert whole_site_step["required_env"] == ["WHOLE_SITE_ROOT_PASSWORD", "HACKME_RUNTIME_DIR"]
+    assert calls == ["requirements", "logs_verify", "server_mode"]
+
+
+def test_ai_agent_launch_preflight_treats_failed_http_status_as_blocker(monkeypatch, tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "write",
+            "ai_agent_allowed_tools": "write_launch_preflight_execute",
+        },
+    )
+
+    @app.route("/api/root/server-mode/requirements", methods=["GET"])
+    def failed_requirements_without_ok_flag():
+        return _json_resp({"raw": "upstream unavailable"}, 503)
+
+    @app.route("/api/root/server-mode/logs/verify", methods=["GET"])
+    def healthy_logs_for_failed_requirements():
+        return _json_resp({"ok": True})
+
+    @app.route("/api/root/server-mode", methods=["GET"])
+    def current_mode_after_failed_requirements():
+        return _json_resp({"ok": True, "mode": {"current_mode": "dev_ready"}})
+
+    monkeypatch.setattr(
+        "routes.ai_agent.run_ai_agent_audit_scan",
+        lambda *args, **kwargs: {"summary": {"status": "ok", "anomaly_count": 0}},
+    )
+
+    response = app.test_client().post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_launch_preflight_execute",
+        "confirm": "EXECUTE",
+        "arguments": {"target_mode": "production"},
+    })
+    result = response.get_json()["result"]
+
+    assert response.status_code == 200
+    assert result["preflight_passed"] is False
+    assert "requirements gate 呼叫失敗：HTTP 503" in result["blockers"]
+    assert result["completed"] is False
+
+
+def test_ai_agent_launch_preflight_reports_failed_final_mode_readback(monkeypatch, tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "write",
+            "ai_agent_allowed_tools": "write_launch_preflight_execute",
+        },
+    )
+
+    @app.route("/api/root/server-mode/requirements", methods=["GET"])
+    def healthy_requirements_before_readback_failure():
+        return _json_resp({"ok": True, "missing": [], "failed": []})
+
+    @app.route("/api/root/server-mode/logs/verify", methods=["GET"])
+    def healthy_logs_before_readback_failure():
+        return _json_resp({"ok": True})
+
+    @app.route("/api/root/server-mode", methods=["GET"])
+    def failed_final_mode_readback():
+        return _json_resp({"raw": "mode service unavailable"}, 503)
+
+    monkeypatch.setattr(
+        "routes.ai_agent.run_ai_agent_audit_scan",
+        lambda *args, **kwargs: {"summary": {"status": "ok", "anomaly_count": 0}},
+    )
+
+    response = app.test_client().post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_launch_preflight_execute",
+        "confirm": "EXECUTE",
+        "arguments": {"target_mode": "production"},
+    })
+    result = response.get_json()["result"]
+
+    assert result["preflight_passed"] is False
+    assert "最終 server mode 回讀失敗：HTTP 503" in result["blockers"]
+    assert result["steps"][-1]["name"] == "final_mode_status"
+    assert result["steps"][-1]["ok"] is False
+
+
+def test_ai_agent_launch_preflight_maps_missing_reports_to_operator_commands(monkeypatch, tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "write",
+            "ai_agent_allowed_tools": "write_launch_preflight_execute",
+        },
+    )
+
+    @app.route("/api/root/server-mode/requirements", methods=["GET"])
+    def fake_missing_requirements():
+        return _json_resp({
+            "ok": False,
+            "missing": ["ai_agent_boundary", "operational_campaign_24h"],
+            "failed": ["pytest"],
+            "reports": {},
+        })
+
+    @app.route("/api/root/server-mode/logs/verify", methods=["GET"])
+    def fake_missing_logs():
+        return _json_resp({"ok": True})
+
+    @app.route("/api/root/server-mode", methods=["GET"])
+    def fake_missing_mode():
+        return _json_resp({"ok": True, "mode": "dev_ready"})
+
+    monkeypatch.setattr(
+        "routes.ai_agent.run_ai_agent_audit_scan",
+        lambda *args, **kwargs: {"summary": {"status": "ok", "anomaly_count": 0}},
+    )
+
+    response = app.test_client().post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_launch_preflight_execute",
+        "confirm": "EXECUTE",
+        "arguments": {"target_mode": "production"},
+    })
+    result = response.get_json()["result"]
+    commands = {item.get("report_type"): item.get("command") for item in result["next_actions"]}
+
+    assert response.status_code == 200
+    assert result["preflight_passed"] is False
+    assert commands == {
+        "ai_agent_boundary": "python3 scripts/on_live_reports/ai_agent_boundary.py",
+        "operational_campaign_24h": (
+            "python3 scripts/testing/operational_campaign_24h.py --campaign-root "
+            "/tmp/hackme_web_campaign_24h_<RUN_ID> --duration-seconds 86400 "
+            "--account-count 10 --round-ops 1000 --concurrency 32 --session-pool 20 --resource-interval 5"
+        ),
+        "pytest": "python3 scripts/on_live_reports/pytest.py",
+    }
+    assert all(item["agent_can_execute"] is False for item in result["next_actions"])
+
+
+def test_ai_agent_launch_switch_requires_explicit_go_live_confirmation(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "write",
+            "ai_agent_allowed_tools": "write_launch_preflight_execute",
+        },
+    )
+
+    response = app.test_client().post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_launch_preflight_execute",
+        "confirm": "EXECUTE",
+        "arguments": {"target_mode": "production", "auto_switch": True},
+    })
+
+    assert response.status_code == 400
+    assert response.get_json()["result"]["required_confirm"] == "GO_LIVE"
 
 
 def test_ai_agent_expanded_write_tool_dispatches_json_route(tmp_path):
