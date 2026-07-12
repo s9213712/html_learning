@@ -35,9 +35,10 @@ from services.trading.trading_engine import (  # noqa: E402
     notional_points,
     units_to_quantity,
 )
+from scripts.test_artifacts import test_artifact_path  # noqa: E402
 
 
-REPORT_DIR = ROOT / "security" / "reports"
+REPORT_DIR = test_artifact_path("reports", "trading", "workflow_template_validation")
 WORKFLOW_DIR = ROOT / "workflows" / "trading_bot"
 TRIGGER_CASES = {
     "auto_search_winner_claude_rev3_return": (

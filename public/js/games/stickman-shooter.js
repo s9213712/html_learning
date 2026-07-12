@@ -2510,7 +2510,10 @@
     drawStickmanShooter(state);
     setStickmanStatus(api, state);
     if (wantsCoop) {
-      api.multiplayer?.()?.start?.(multiplayerRoom.id).catch(() => {});
+      api.multiplayer?.()?.start?.(multiplayerRoom.id).catch((err) => {
+        window.reportFrontendFailure?.("stickman-multiplayer-start", err);
+        api.status(err?.message || "多人連線啟動失敗。");
+      });
       syncStickmanMultiplayer(api, state, { force: true });
     }
     state.timer = setInterval(() => updateStickmanShooter(api), 16);

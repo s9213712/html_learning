@@ -133,6 +133,7 @@ def test_health_readiness_and_db_integrity_endpoints(tmp_path):
     body = readiness.get_json()
     assert body["readiness"]["status"] == "ok"
     assert body["readiness"]["database"]["schema_version"] == CURRENT_SCHEMA_VERSION
+    assert body["readiness"]["database"]["quick_check"] == ["skipped_fast_health"]
 
     db = client.get("/api/admin/health/db-integrity")
     assert db.status_code == 200

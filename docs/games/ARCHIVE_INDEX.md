@@ -36,7 +36,7 @@ Exp5 adapter / retrain 判斷；部署時應讀上方報告與 `references/`，�
 | current baseline v14 context | [SUMMARY.md](experiments/exp5/2026-05-13_exp5_current_baseline_v14_context/SUMMARY.md) |
 | normal retrain smoke v11 | [SUMMARY.md](experiments/exp5/2026-05-13_exp5_normal_retrain_smoke_v11/SUMMARY.md) |
 | normal retrain repeatability gate | [chess_exp5_repeatability_20260513_132003.128888.md](experiments/exp5/2026-05-13_exp5_normal_retrain_smoke_v11/repeatability_gate/chess_exp5_repeatability_20260513_132003.128888.md) |
-| normal retrain strength gate | [chess_exp5_strength_gate_20260513_132003.106759.md](experiments/exp5/2026-05-13_exp5_normal_retrain_smoke_v11/repeatability_gate/runtime/chess_exp5_strength_gate_20260513_132003.106759.md) |
+| normal retrain repeatability gate | [chess_exp5_repeatability_20260513_132003.128888.md](experiments/exp5/2026-05-13_exp5_normal_retrain_smoke_v11/repeatability_gate/chess_exp5_repeatability_20260513_132003.128888.md) |
 
 ## 報告索引
 

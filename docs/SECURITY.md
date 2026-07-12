@@ -38,8 +38,8 @@
 ## 審計與完整性
 - 審計日誌以 `secure_audit` 寫入 hash-chain。
 - 違規計次也維持 hash-chain，支援 integrity 驗證。
-- 兼容 legacy repo-root `logs/audit.log` fallback（舊資料可視）；目前正式 runtime 路徑是 `runtime/logs/`
-- Integrity Guard 會以簽章 `runtime/integrity_manifest.json` 監控受保護程式檔。
+- 兼容 legacy repo-root `logs/audit.log` fallback（舊資料可視）；目前正式路徑是 `$HACKME_RUNTIME_DIR/logs/`。
+- Integrity Guard 會以簽章 `$HACKME_RUNTIME_DIR/integrity_manifest.json` 監控受保護程式檔。
   啟動與 root rescan 會比對 modified / added / deleted，建立
   `integrity_findings`，不會自動更新 manifest。
 - root approve 必須輸入 `APPROVE INTEGRITY UPDATE`；approve / reject /

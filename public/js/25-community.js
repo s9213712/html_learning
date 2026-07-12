@@ -28,6 +28,31 @@ let communityBoardModerators = [];
 let communityModeratorManagerOpen = false;
 let communityModeratorCandidates = [];
 let communityModeratorCandidatesLoadedAt = 0;
+let communityAccountGeneration = 0;
+
+function communityOperationContext() {
+  return {
+    generation: communityAccountGeneration,
+    scope: typeof getCurrentAccountStorageScope === "function"
+      ? getCurrentAccountStorageScope()
+      : String(currentUserId || currentUser || "anonymous"),
+  };
+}
+
+function communityOperationIsCurrent(operation) {
+  if (!operation || Number(operation.generation) !== communityAccountGeneration) return false;
+  const scope = typeof getCurrentAccountStorageScope === "function"
+    ? getCurrentAccountStorageScope()
+    : String(currentUserId || currentUser || "anonymous");
+  return operation.scope === scope;
+}
+
+function communityAssertOperationCurrent(operation) {
+  if (communityOperationIsCurrent(operation)) return;
+  const err = new Error("Account context changed");
+  err.name = "AbortError";
+  throw err;
+}
 
 const COMMUNITY_MODERATOR_PERMISSIONS = [
   ["can_review_threads", "審核主題"],
@@ -321,7 +346,11 @@ function renderCommunityModerators() {
   }
   if (panel) panel.style.display = canShow && communityModeratorManagerOpen ? "block" : "none";
   if (canShow && communityModeratorManagerOpen) {
-    loadCommunityModeratorCandidates().catch(() => {});
+    loadCommunityModeratorCandidates().catch((err) => {
+      reportFrontendFailure("community-moderator-candidates", err);
+      const select = $("community-moderator-user-id");
+      if (select) select.innerHTML = `<option value="">會員清單讀取失敗</option>`;
+    });
   }
   if (!list || !canManageCommunity()) return;
   if (!selectedCommunityBoardId) {
@@ -540,11 +569,13 @@ function openCommunityInlineMediaPicker(button) {
   input.click();
 }
 
-async function uploadCommunityInlineMediaFile(file, textarea, csrf) {
+async function uploadCommunityInlineMediaFile(file, textarea, csrf, operation = communityOperationContext()) {
+  communityAssertOperationCurrent(operation);
   const kind = communityInlineMediaKind(file);
   if (!kind) throw new Error(`「${file?.name || "檔案"}」不是可內嵌的圖片、影片或音訊格式`);
   if (typeof preflightDriveUploadSize === "function") {
     const ok = await preflightDriveUploadSize(file.size, `討論區媒體「${file.name || "media"}」`);
+    communityAssertOperationCurrent(operation);
     if (!ok) throw new Error("檔案大小超出目前可上傳限制");
   }
   const filename = communityInlineMediaSafeName(file);
@@ -577,12 +608,14 @@ async function uploadCommunityInlineMediaFile(file, textarea, csrf) {
       csrf,
       label: filename,
     });
+    communityAssertOperationCurrent(operation);
   } else if (typeof xhrUploadWithProgress === "function") {
     const form = new FormData();
     form.append("file", file, filename);
     form.append("privacy_mode", "standard_plain");
     form.append("virtual_path", virtualPath);
     const upload = await xhrUploadWithProgress(`${API}/cloud-drive/upload`, form, csrf, null);
+    communityAssertOperationCurrent(operation);
     uploadJson = upload.json || {};
     if (upload.status < 200 || upload.status >= 300 || !uploadJson.ok) {
       throw new Error(uploadJson.msg || `討論區媒體上傳失敗（HTTP ${upload.status}）`);
@@ -599,6 +632,7 @@ async function uploadCommunityInlineMediaFile(file, textarea, csrf) {
       body: form,
     });
     uploadJson = await upload.json().catch(() => ({}));
+    communityAssertOperationCurrent(operation);
     if (!upload.ok || !uploadJson.ok) throw new Error(uploadJson.msg || "討論區媒體上傳失敗");
   }
   const fileId = uploadJson?.file?.file_id || uploadJson?.file?.id || "";
@@ -618,6 +652,7 @@ async function uploadCommunityInlineMediaFile(file, textarea, csrf) {
     }),
   });
   const shareJson = await shareRes.json().catch(() => ({}));
+  communityAssertOperationCurrent(operation);
   if (!shareRes.ok || !shareJson.ok) throw new Error(shareJson.msg || "討論區媒體分享連結建立失敗");
   const token = shareJson?.share_link?.token || "";
   if (!token) throw new Error("討論區媒體分享連結缺少 token");
@@ -626,6 +661,7 @@ async function uploadCommunityInlineMediaFile(file, textarea, csrf) {
 }
 
 async function uploadCommunityInlineMedia(input) {
+  const operation = communityOperationContext();
   const textarea = $(input?.dataset?.communityMediaTarget || "");
   const files = Array.from(input?.files || []);
   if (!textarea || !files.length) return;
@@ -633,22 +669,32 @@ async function uploadCommunityInlineMedia(input) {
   let inserted = 0;
   try {
     await fetchCsrfToken({ force: true });
+    communityAssertOperationCurrent(operation);
     const csrf = getCsrfToken() || "";
     for (const file of files) {
+      communityAssertOperationCurrent(operation);
       try {
-        await uploadCommunityInlineMediaFile(file, textarea, csrf);
+        await uploadCommunityInlineMediaFile(file, textarea, csrf, operation);
+        communityAssertOperationCurrent(operation);
         inserted += 1;
       } catch (err) {
+        if (!communityOperationIsCurrent(operation) || err?.name === "AbortError") throw err;
         flash($("community-msg"), err.message || "討論區媒體插入失敗", false);
       }
     }
     if (inserted > 0) {
       flash($("community-msg"), `已插入 ${inserted} 個討論區媒體`, true);
-      if (typeof loadDriveDashboard === "function") loadDriveDashboard().catch(() => {});
+      if (typeof loadDriveDashboard === "function") {
+        loadDriveDashboard().catch((err) => reportFrontendFailure("community-inline-media-drive-refresh", err));
+      }
+    }
+  } catch (err) {
+    if (communityOperationIsCurrent(operation) && err?.name !== "AbortError") {
+      flash($("community-msg"), err?.message || "討論區媒體插入失敗", false);
     }
   } finally {
     input.value = "";
-    setCommunityMediaButtonsBusy(textarea.id, false);
+    if (communityOperationIsCurrent(operation)) setCommunityMediaButtonsBusy(textarea.id, false);
   }
 }
 
@@ -1572,3 +1618,54 @@ function toggleCommunityThreadCreator(forceOpen = null) {
   communityThreadCreatorOpen = forceOpen === null ? !communityThreadCreatorOpen : !!forceOpen;
   renderCommunityThreads(selectedCommunityBoard);
 }
+
+function resetCommunityAccountState() {
+  communityAccountGeneration += 1;
+  communityBoards = [];
+  communityCategories = [];
+  communityAnnouncements = [];
+  communityAnnouncementsEtag = "";
+  selectedCommunityBoardId = null;
+  selectedCommunityThreadId = null;
+  communityThreads = [];
+  selectedCommunityBoard = null;
+  selectedCommunityThread = null;
+  selectedCommunityPosts = [];
+  selectedCommunityPostPageInfo = {};
+  communityBoardModerators = [];
+  communityModeratorCandidates = [];
+  communityModeratorCandidatesLoadedAt = 0;
+  communityThreadPage = 0;
+  communityThreadTotal = 0;
+  communityBoardQuery = "";
+  communityThreadQuery = "";
+  communityAnnouncementEditorOpen = false;
+  communityBoardRequestOpen = false;
+  communityCategoryManagerOpen = false;
+  communityThreadCreatorOpen = false;
+  communityModeratorManagerOpen = false;
+  resetCommunityAnnouncementEditor();
+  resetCommunityReviewState();
+  toggleCommunityTools(false);
+  showCommunityBoardStage();
+  renderCommunityAnnouncements();
+  renderCommunityCategories();
+  [
+    "community-thread-title",
+    "community-thread-content",
+    "community-reply-content",
+    "community-thread-media-input",
+    "community-reply-media-input",
+    "community-board-title",
+    "community-board-description",
+    "community-board-rules",
+    "community-category-name",
+    "community-category-description",
+    "community-moderator-user-id",
+  ].forEach((id) => {
+    const input = $(id);
+    if (input && "value" in input) input.value = "";
+  });
+}
+
+document.addEventListener("hackme:account-context-changed", resetCommunityAccountState);

@@ -18,8 +18,8 @@ def test_restart_button_waits_for_offline_then_online():
     assert 'async function restartServer(event)' in admin_js
     assert 'event.preventDefault' in admin_js
     assert "安全驗證狀態失效" in admin_js
-    assert "waitForRestartOffline(25000)" in admin_js
-    assert "waitForRestartOnline(previousStartedAt, 180000)" in admin_js
+    assert "waitForRestartOffline(25000, operation)" in admin_js
+    assert "waitForRestartOnline(previousStartedAt, 180000, operation)" in admin_js
     assert "25 秒內沒有偵測到伺服器離線" in admin_js
     assert "3 分鐘內未重新連線" in admin_js
     assert "location.reload()" in admin_js

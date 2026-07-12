@@ -220,40 +220,43 @@ PYTHONPATH="$PROJECT_ROOT" python3 -m py_compile \
 
 git -C "$PROJECT_ROOT" diff --check
 
+ARTIFACT_ROOT=/tmp/hackme_web_test_artifacts/reports/security/server_mode_v2
+mkdir -p "$ARTIFACT_ROOT"
+
 PYTHONPATH="$PROJECT_ROOT" python3 \
   "$PROJECT_ROOT/scripts/security/server_mode/server_mode_v2_clean_smoke.py" \
-  --out "$PROJECT_ROOT/runtime/reports/security"
+  --out "$ARTIFACT_ROOT"
 
 PYTHONPATH="$PROJECT_ROOT" python3 \
   "$PROJECT_ROOT/scripts/security/server_mode/server_mode_v2_adversarial.py" \
-  --out "$PROJECT_ROOT/runtime/reports/security"
+  --out "$ARTIFACT_ROOT"
 
 PYTHONPATH="$PROJECT_ROOT" python3 \
   "$PROJECT_ROOT/scripts/security/server_mode/server_mode_v2_redteam_l2.py" \
-  --out "$PROJECT_ROOT/runtime/reports/security"
+  --out "$ARTIFACT_ROOT"
 
 PYTHONPATH="$PROJECT_ROOT" python3 \
   "$PROJECT_ROOT/scripts/security/server_mode/server_mode_v2_live_http_smoke.py" \
-  --out "$PROJECT_ROOT/runtime/reports/security"
+  --out "$ARTIFACT_ROOT"
 
 cd "$PROJECT_ROOT"
 scripts/security/pentest/run_pentest.sh --only server-mode-v2 \
   --target http://127.0.0.1:5000 \
-  --out runtime/reports/security
+  --out "$ARTIFACT_ROOT"
 
 scripts/security/pentest/run_pentest.sh --only server-mode-v2-adversarial \
   --target http://127.0.0.1:5000 \
-  --out runtime/reports/security
+  --out "$ARTIFACT_ROOT"
 
 scripts/security/pentest/run_pentest.sh --only server-mode-v2-live-http \
   --target http://127.0.0.1:5000 \
-  --out runtime/reports/security
+  --out "$ARTIFACT_ROOT"
 
 scripts/security/pentest/run_pentest.sh --only server-mode-v2-enterprise \
   --target http://127.0.0.1:5000 \
-  --out runtime/reports/security
+  --out "$ARTIFACT_ROOT"
 
 scripts/security/pentest/run_pentest.sh --only server-mode-v2-redteam-l2 \
   --target http://127.0.0.1:5000 \
-  --out runtime/reports/security
+  --out "$ARTIFACT_ROOT"
 ```

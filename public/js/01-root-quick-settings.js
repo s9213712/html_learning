@@ -600,6 +600,21 @@ function closeRootModuleSettings() {
   document.body.classList.remove("modal-open");
 }
 
+function resetRootModuleQuickSettingsAccountState() {
+  rootModuleEconomyCatalogCache = [];
+  closeRootModuleSettings();
+  const overlay = $("root-module-settings-overlay");
+  if (overlay) delete overlay.dataset.moduleTab;
+  ["root-module-settings-fields", "root-module-pricing-list"].forEach((id) => {
+    const el = $(id);
+    if (el) el.replaceChildren();
+  });
+  ["root-module-settings-title", "root-module-settings-subtitle", "root-module-settings-note", "root-module-settings-msg"].forEach((id) => {
+    const el = $(id);
+    if (el) el.textContent = "";
+  });
+}
+
 function syncRootModuleProxyValues() {
   const overlay = $("root-module-settings-overlay");
   if (!overlay) return;
@@ -636,7 +651,7 @@ async function saveRootModulePricing(config) {
   if (typeof loadRootEconomyCatalog === "function") loadRootEconomyCatalog();
   if (typeof loadEconomy === "function") loadEconomy();
   if (typeof refreshComfyuiStatus === "function" && rootModulePricingPresets(config).some((item) => item.category === "comfyui")) {
-    refreshComfyuiStatus({ switchAway: false }).catch(() => {});
+    refreshComfyuiStatus({ switchAway: false }).catch((err) => reportFrontendFailure("root-settings-comfyui-refresh", err));
   }
   return saved;
 }
@@ -663,10 +678,14 @@ async function saveRootModuleSettings() {
     if (moduleTab === "ai-agent" && typeof loadAiAgentStatus === "function") {
       await loadAiAgentStatus({ force: true });
       if (typeof loadAiAgentReadOnly === "function") {
-        await loadAiAgentReadOnly({ scope: "all", limit: 20, silent: true, force: true }).catch(() => undefined);
+        await loadAiAgentReadOnly({ scope: "all", limit: 20, silent: true, force: true }).catch((err) => {
+          reportFrontendFailure("root-settings-ai-agent-readonly-refresh", err);
+        });
       }
       if (typeof loadAiAgentAuditStatus === "function") {
-        await loadAiAgentAuditStatus({ silent: true }).catch(() => undefined);
+        await loadAiAgentAuditStatus({ silent: true }).catch((err) => {
+          reportFrontendFailure("root-settings-ai-agent-audit-refresh", err);
+        });
       }
     }
     if (msg) {
@@ -691,5 +710,7 @@ if (document.readyState === "loading") {
   syncRootModuleSettingsButtons();
 }
 document.addEventListener("hackme:module-changed", syncRootModuleSettingsButtons);
+document.addEventListener("hackme:account-context-changed", resetRootModuleQuickSettingsAccountState);
 window.syncRootModuleSettingsButtons = syncRootModuleSettingsButtons;
 window.openRootModuleSettings = openRootModuleSettings;
+window.resetRootModuleQuickSettingsAccountState = resetRootModuleQuickSettingsAccountState;

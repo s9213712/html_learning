@@ -883,8 +883,10 @@ function setBotChartOverlay(type, botUuid, marketSymbol) {
       renderTradingSummary();
     }
   }
-  loadTradingReferencePrices().catch(() => {
+  loadTradingReferencePrices().catch((err) => {
+    reportFrontendFailure("trading-reference-prices-overlay", err);
     if (tradingState.referencePrices) renderTradingReferenceChart(tradingState.referencePrices);
+    tradingSetMsg(`圖表已切換到 ${tradingDisplaySymbol(marketSymbol || "")}，但參考價格更新失敗`, false);
   });
   tradingSetMsg(`圖表已切換到 ${tradingDisplaySymbol(marketSymbol || "")}，標記 ${type === "grid" ? "網格層級" : "交易點位"}`);
 }
@@ -947,6 +949,16 @@ let tradingGridBots = [];
 let tradingGridPreviewState = null;
 let tradingGridPreviewTimer = null;
 let tradingGridPreviewRequestSeq = 0;
+
+window.resetTradingBotsAccountState = function resetTradingBotsAccountState() {
+  if (tradingGridPreviewTimer) clearTimeout(tradingGridPreviewTimer);
+  tradingGridPreviewTimer = null;
+  tradingGridPreviewRequestSeq += 1;
+  tradingGridBots = [];
+  tradingGridPreviewState = null;
+  tradingWorkflowBenchmarkCache = null;
+  tradingWorkflowBenchmarkLoading = false;
+};
 
 function gridComputeLevels(lower, upper, count, mode) {
   if (count < 2 || lower <= 0 || upper <= lower) return [];
@@ -1075,12 +1087,19 @@ function collectGridBotPreviewPayload() {
 
 function scheduleGridBotPreview() {
   if (tradingGridPreviewTimer) clearTimeout(tradingGridPreviewTimer);
+  const operation = tradingOperationContext();
   tradingGridPreviewTimer = setTimeout(() => {
-    renderGridBotPreview({ quiet: true }).catch((err) => tradingSetMsg(tradingFriendlyErrorText(err?.message || "網格試算失敗"), false));
+    tradingGridPreviewTimer = null;
+    if (!tradingOperationIsCurrent(operation)) return;
+    renderGridBotPreview({ quiet: true, operation }).catch((err) => {
+      if (tradingOperationIsCurrent(operation) && !tradingIsAbortError(err)) tradingSetMsg(tradingFriendlyErrorText(err?.message || "網格試算失敗"), false);
+    });
   }, 150);
 }
 
-async function renderGridBotPreview({ quiet = true } = {}) {
+async function renderGridBotPreview({ quiet = true, operation = null } = {}) {
+  const operationContext = operation || tradingOperationContext();
+  tradingAssertOperationCurrent(operationContext);
   const preview = $("trading-grid-preview");
   if (!preview) return null;
   const payload = collectGridBotPreviewPayload();
@@ -1109,6 +1128,7 @@ async function renderGridBotPreview({ quiet = true } = {}) {
       body: JSON.stringify(payload),
     });
     const json = await res.json().catch(() => ({}));
+    tradingAssertOperationCurrent(operationContext);
     if (requestSeq !== tradingGridPreviewRequestSeq) return tradingGridPreviewState;
     if (!res.ok || !json.ok) {
       tradingGridPreviewState = null;
@@ -1119,6 +1139,7 @@ async function renderGridBotPreview({ quiet = true } = {}) {
     feePreview = json;
     tradingGridPreviewState = json;
   } catch (e) {
+    if (!tradingOperationIsCurrent(operationContext) || tradingIsAbortError(e)) return null;
     if (requestSeq !== tradingGridPreviewRequestSeq) return tradingGridPreviewState;
     tradingGridPreviewState = null;
     preview.innerHTML = `<div class="negative">網格試算失敗：${sanitize(e.message || "請稍後再試")}</div>`;
@@ -1438,7 +1459,9 @@ async function awardTradingBotCompetition() {
   const awarded = Array.isArray(json.awarded) ? json.awarded : [];
   tradingSetMsg(awarded.length ? `已發放 ${awarded.length} 筆機器人週賽獎勵` : "沒有新的週賽獎勵需要發放");
   await loadTradingBotCompetition();
-  if (typeof loadEconomyDashboard === "function") loadEconomyDashboard().catch(() => {});
+  if (typeof loadEconomyDashboard === "function") {
+    loadEconomyDashboard().catch((err) => reportFrontendFailure("trading-award-economy-refresh", err));
+  }
 }
 
 function computeGridSpotSituation(marketSymbol, lower, upper, count, amount, mode) {

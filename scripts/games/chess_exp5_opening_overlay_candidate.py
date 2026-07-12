@@ -12,7 +12,6 @@ import argparse
 from datetime import datetime
 import hashlib
 import json
-import os
 from pathlib import Path
 import random
 import shutil
@@ -41,10 +40,13 @@ from services.games.chess_nnue import (  # noqa: E402
 )
 
 
-DEFAULT_RESULTS_ROOT = Path(os.environ.get("HACKME_CHESS_RESULTS_DIR", str(ROOT / "runtime" / "reports" / "games" / "chess_results")))
+from scripts.games.common_paths import chess_results_root, runtime_model_path  # noqa: E402
+
+
+DEFAULT_RESULTS_ROOT = chess_results_root()
 DEFAULT_OPENING_CURRICULUM = DEFAULT_RESULTS_ROOT / "exp5_14b_clean_opening_heldout" / "clean_opening_curriculum.jsonl"
 DEFAULT_EXP5_13_SUMMARY = DEFAULT_RESULTS_ROOT / "exp5_13_rule_smoke_stalemate_fix_check" / "summary.json"
-DEFAULT_RUNTIME_PRODUCTION = ROOT / "runtime" / "games" / "models" / "chess_experiment_5_nnue_experience.json"
+DEFAULT_RUNTIME_PRODUCTION = runtime_model_path("chess_experiment_5_nnue_experience.json")
 DEFAULT_PROMOTED_STAGE = DEFAULT_RESULTS_ROOT / "exp5_08_stage_candidate" / "chess_experiment_5_nnue_stage_candidate.json"
 DEFAULT_OUTPUT_DIR = DEFAULT_RESULTS_ROOT / "exp5_16_opening_overlay_candidate"
 DEFAULT_SEARCH_PROFILE = "fixed_depth_strong"

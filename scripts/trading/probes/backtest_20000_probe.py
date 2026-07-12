@@ -2,11 +2,17 @@
 import argparse
 import json
 import math
+import os
+import secrets
 import sqlite3
 import sys
 import tempfile
 import time
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[3]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from flask import Flask, jsonify
 
@@ -43,7 +49,8 @@ def build_temp_services():
     conn.commit()
     conn.close()
 
-    points = PointsLedgerService(get_db=get_db, chain_secret="probe-secret", backup_dir=temp_dir / "points_chain_backups")
+    chain_secret = os.environ.get("HACKME_BACKTEST_CHAIN_SECRET") or secrets.token_urlsafe(48)
+    points = PointsLedgerService(get_db=get_db, chain_secret=chain_secret, backup_dir=temp_dir / "points_chain_backups")
     trading = TradingEngineService(get_db=get_db, points_service=points)
     return temp_dir, points, trading
 

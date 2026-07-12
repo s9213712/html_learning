@@ -19,6 +19,7 @@ from routes.files import register_file_routes
 from services.storage.cloud_drive import (
     decrypt_server_encrypted_bytes,
     ensure_cloud_drive_attachment_schema,
+    share_e2ee_file,
 )
 from services.media.streaming import ensure_media_stream_schema
 from services.users.member_levels import ensure_member_level_rules_schema
@@ -1691,6 +1692,50 @@ def test_storage_album_crud_and_file_membership(tmp_path):
     assert client.get(f"/api/storage/albums/{album['id']}").status_code == 404
 
 
+def test_storage_album_batch_share_is_atomic_and_complete(tmp_path):
+    db_path = tmp_path / "drive.db"
+    storage_root = tmp_path / "storage"
+    storage_root.mkdir()
+    _init_db(db_path)
+    actor_box = {"actor": _actor(1, "alice")}
+    client = _build_app(db_path, storage_root, actor_box).test_client()
+
+    storage_file_ids = []
+    for name in ("batch-a.txt", "batch-b.txt"):
+        uploaded = client.post(
+            "/api/storage/files",
+            data={"file": (io.BytesIO(name.encode("utf-8")), name), "virtual_path": f"batch/{name}"},
+            content_type="multipart/form-data",
+        )
+        assert uploaded.status_code == 200
+        storage_file_ids.append(uploaded.get_json()["storage_file"]["id"])
+
+    rolled_back = client.post(
+        "/api/storage/albums/batch-share",
+        json={
+            "title": "Must Roll Back",
+            "storage_file_ids": [storage_file_ids[0], "missing-storage-file"],
+        },
+    )
+    assert rolled_back.status_code == 400
+    conn = sqlite3.connect(db_path)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM albums WHERE title='Must Roll Back'").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+    created = client.post(
+        "/api/storage/albums/batch-share",
+        json={"title": "Atomic Batch", "storage_file_ids": storage_file_ids},
+    )
+    assert created.status_code == 200
+    album = created.get_json()["album"]
+    assert album["visibility"] == "unlisted"
+    assert album["share_link"]["url"] == album["share_url"]
+    assert len(album["files"]) == 2
+    assert {item["storage_file_id"] for item in album["files"]} == set(storage_file_ids)
+
+
 def test_storage_album_smart_organize_groups_media_by_folder_without_duplicates(tmp_path):
     db_path = tmp_path / "drive.db"
     storage_root = tmp_path / "storage"
@@ -3034,6 +3079,29 @@ def test_e2ee_share_and_revoke_controls_download_grant(tmp_path):
     )
     assert uploaded.status_code == 200
     file_id = uploaded.get_json()["file"]["file_id"]
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        result, msg = share_e2ee_file(
+            conn,
+            actor=_actor(1, "alice"),
+            file_id=file_id,
+            recipient_user_id=3,
+            encrypted_file_key="sealed:mallory-key",
+        )
+        assert result is None
+        assert "好友" in msg
+    finally:
+        conn.rollback()
+        conn.close()
+
+    nonfriend = client.post(
+        f"/api/files/{file_id}/share",
+        json={"recipient_user_id": 3, "encrypted_file_key": "sealed:mallory-key"},
+    )
+    assert nonfriend.status_code == 403
+    assert nonfriend.get_json()["error"] == "friend_required"
 
     shared = client.post(
         f"/api/files/{file_id}/share",

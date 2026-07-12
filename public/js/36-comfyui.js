@@ -8,6 +8,7 @@ let comfyuiImageLightboxSwipeState = null;
 let comfyuiSavedResult = null;
 let comfyuiModelsLoaded = false;
 let comfyuiModelsLoadPromise = null;
+let comfyuiModelsLoadGeneration = 0;
 let comfyuiModelsLastLoadedAt = 0;
 let comfyuiModelsLastStatusText = "";
 let comfyuiServerAvailable = null;
@@ -18,7 +19,9 @@ let comfyuiProgressPythonLogTail = [];
 let comfyuiProgressBackendKind = "";
 let comfyuiResourceDashboardTimer = null;
 let comfyuiResourceDashboardInFlight = false;
+let comfyuiModelDownloadPollToken = null;
 let comfyuiGenerateAbortController = null;
+let comfyuiGenerationRunToken = null;
 let comfyuiActiveJobId = null;
 let comfyuiMaxBatchSize = 1;
 let comfyuiBillingQuote = null;
@@ -41,6 +44,8 @@ let comfyuiLocalRuntimeActive = false;
 let comfyuiLocalStartPollTimer = null;
 let comfyuiCivitaiInspection = null;
 let comfyuiCivitaiSearchResults = [];
+let comfyuiCivitaiSearchGeneration = 0;
+let comfyuiCivitaiInspectGeneration = 0;
 let comfyuiControlnetTypes = {};
 let comfyuiUpscaleModels = [];
 let comfyuiGenerationModes = [];
@@ -49,6 +54,7 @@ let comfyuiDiffusersInspection = null;
 let comfyuiGgufProfiles = [];
 let comfyuiInstalledGgufModels = [];
 let comfyuiGgufProfilesLoadPromise = null;
+let comfyuiGgufProfilesLoadGeneration = 0;
 const comfyuiDiffusersInspectCache = new Map();
 const comfyuiDiffusersInspectInflight = new Map();
 let comfyuiHistoryItems = [];
@@ -59,11 +65,15 @@ let comfyuiWorkflowEditorDefaults = null;
 let comfyuiSelectedTemplatePresetId = null;
 let comfyuiSelectedTemplateDetail = null;
 let comfyuiLastFocusedPromptType = "prompt";
+let comfyuiAccountGeneration = 0;
+let comfyuiMaskEditorLoadGeneration = 0;
+let comfyuiImagePickerLoadGeneration = 0;
 let comfyuiInputAssets = {
   source: { file: null, imageRef: null, previewUrl: "", filename: "", cloudFileId: "" },
   mask: { file: null, imageRef: null, previewUrl: "", filename: "", cloudFileId: "" },
   control: { file: null, imageRef: null, previewUrl: "", filename: "", cloudFileId: "" },
 };
+const comfyuiInputAssetHydrationTokens = new Map();
 let comfyuiMaskEditorState = {
   open: false,
   mode: "paint",
@@ -136,6 +146,47 @@ function comfyuiUserStorageKey(key) {
     ? `user:${id}`
     : (currentUser ? `name:${String(currentUser).trim().toLowerCase()}` : "anonymous");
   return `hackme_web:${scope}:${String(key || "state")}`;
+}
+
+function comfyuiOperationContext() {
+  return {
+    generation: comfyuiAccountGeneration,
+    scope: typeof getCurrentAccountStorageScope === "function"
+      ? getCurrentAccountStorageScope()
+      : String(currentUserId || currentUser || "anonymous"),
+  };
+}
+
+function comfyuiOperationIsCurrent(operation) {
+  if (!operation || Number(operation.generation) !== comfyuiAccountGeneration) return false;
+  const scope = typeof getCurrentAccountStorageScope === "function"
+    ? getCurrentAccountStorageScope()
+    : String(currentUserId || currentUser || "anonymous");
+  return operation.scope === scope;
+}
+
+function comfyuiAccountAbortError() {
+  if (typeof accountRequestAbortError === "function") return accountRequestAbortError();
+  return new DOMException("Account context changed", "AbortError");
+}
+
+function comfyuiAssertOperationCurrent(operation) {
+  if (comfyuiOperationIsCurrent(operation)) return;
+  throw comfyuiAccountAbortError();
+}
+
+function comfyuiAssertLoadCurrent(operation, expectedGeneration, currentGeneration) {
+  comfyuiAssertOperationCurrent(operation);
+  if (expectedGeneration !== currentGeneration) throw comfyuiAccountAbortError();
+}
+
+function comfyuiAssertGenerationCurrent(operation, runToken) {
+  comfyuiAssertOperationCurrent(operation);
+  if (runToken && comfyuiGenerationRunToken !== runToken) throw comfyuiAccountAbortError();
+}
+
+function clearComfyuiGenerationRunToken(runToken) {
+  if (comfyuiGenerationRunToken === runToken) comfyuiGenerationRunToken = null;
 }
 const COMFYUI_DRAFT_FIELD_IDS = [
   "comfyui-generation-mode",
@@ -371,6 +422,18 @@ function setComfyuiMessage(text, ok = true) {
   flash(msg, text, ok);
 }
 
+function handleComfyuiActionError(error, fallback, { history = false, report = "" } = {}) {
+  if (error?.name === "AbortError" || (typeof isAccountContextAbortError === "function" && isAccountContextAbortError(error))) return false;
+  if (report) {
+    reportFrontendFailure(report, error);
+    return true;
+  }
+  const message = error?.message || fallback;
+  if (history && typeof setComfyuiHistoryActionMessage === "function") setComfyuiHistoryActionMessage(message, false);
+  else setComfyuiMessage(message, false);
+  return true;
+}
+
 function setComfyuiIdleSuspend(reason, active, label) {
   if (typeof setInactivitySuspendState === "function") {
     const backendLabel = isComfyuiDiffusersMode() ? "Diffusers" : "ComfyUI";
@@ -424,19 +487,23 @@ function stopComfyuiLocalStartPolling() {
   setComfyuiIdleSuspend("comfyui_start_local", false, "ComfyUI 啟動中");
 }
 
-function scheduleComfyuiLocalStartPolling({ attemptsLeft = 120, delayMs = 5000 } = {}) {
+function scheduleComfyuiLocalStartPolling({ attemptsLeft = 120, delayMs = 5000, operation = null } = {}) {
+  const operationContext = operation || comfyuiOperationContext();
+  if (!comfyuiOperationIsCurrent(operationContext)) return;
   stopComfyuiLocalStartPolling();
   if (comfyuiEffectiveConnectionMode() !== "local" || attemptsLeft <= 0) return;
   setComfyuiIdleSuspend("comfyui_start_local", true, "ComfyUI 啟動中");
   comfyuiLocalStartPollTimer = setTimeout(async () => {
     comfyuiLocalStartPollTimer = null;
-    const ok = await refreshComfyuiStatus({ switchAway: false });
+    if (!comfyuiOperationIsCurrent(operationContext)) return;
+    const ok = await refreshComfyuiStatus({ switchAway: false, operation: operationContext });
+    if (!comfyuiOperationIsCurrent(operationContext)) return;
     if (ok) {
       setComfyuiMessage("本地 ComfyUI 已啟動完成。", true);
-      await loadComfyuiModels({ forceRefresh: true });
+      await loadComfyuiModels({ forceRefresh: true, operation: operationContext });
       return;
     }
-    scheduleComfyuiLocalStartPolling({ attemptsLeft: attemptsLeft - 1, delayMs });
+    scheduleComfyuiLocalStartPolling({ attemptsLeft: attemptsLeft - 1, delayMs, operation: operationContext });
   }, delayMs);
 }
 
@@ -738,6 +805,7 @@ function comfyuiDiffusersTextOnlyMode() {
 }
 
 function resetComfyuiInputAssetState(key) {
+  comfyuiInputAssetHydrationTokens.delete(key);
   const asset = comfyuiAssetState(key);
   revokeComfyuiAssetPreview(asset);
   comfyuiInputAssets[key] = { file: null, imageRef: null, previewUrl: "", filename: "", cloudFileId: "" };
@@ -883,17 +951,22 @@ function fillComfyuiGgufVariants(profileId = "") {
   renderComfyuiGgufProfileHint();
 }
 
-async function ensureComfyuiGgufProfilesLoaded({ force = false } = {}) {
+async function ensureComfyuiGgufProfilesLoaded({ force = false, operation = null } = {}) {
+  const operationContext = operation || comfyuiOperationContext();
+  comfyuiAssertOperationCurrent(operationContext);
   if (!force && Array.isArray(comfyuiGgufProfiles) && comfyuiGgufProfiles.length) return true;
   if (!currentUser || !canAccessModule("comfyui")) return false;
   if (!force && comfyuiGgufProfilesLoadPromise) return comfyuiGgufProfilesLoadPromise;
-  comfyuiGgufProfilesLoadPromise = (async () => {
+  const loadGeneration = ++comfyuiGgufProfilesLoadGeneration;
+  const loadPromise = (async () => {
     await fetchCsrfToken();
+    comfyuiAssertLoadCurrent(operationContext, loadGeneration, comfyuiGgufProfilesLoadGeneration);
     const res = await apiFetch(API + "/comfyui/installed-gguf" + comfyuiRequestQuery(), {
       credentials: "same-origin",
       headers: { "X-CSRF-Token": getCsrfToken() || "" }
     });
     const json = await res.json().catch(() => ({}));
+    comfyuiAssertLoadCurrent(operationContext, loadGeneration, comfyuiGgufProfilesLoadGeneration);
     syncComfyuiPrimaryConnectionModeFromResponse(json);
     if (!res.ok || !json.ok) throw new Error(json.msg || `GGUF profile 讀取失敗（HTTP ${res.status}）`);
     fillComfyuiGgufProfiles(json.gguf_profiles || []);
@@ -901,10 +974,11 @@ async function ensureComfyuiGgufProfilesLoaded({ force = false } = {}) {
     renderComfyuiInstalledGgufModels(comfyuiInstalledGgufModels);
     return comfyuiGgufProfiles.length > 0;
   })();
+  comfyuiGgufProfilesLoadPromise = loadPromise;
   try {
-    return await comfyuiGgufProfilesLoadPromise;
+    return await loadPromise;
   } finally {
-    comfyuiGgufProfilesLoadPromise = null;
+    if (comfyuiGgufProfilesLoadPromise === loadPromise) comfyuiGgufProfilesLoadPromise = null;
   }
 }
 
@@ -1196,7 +1270,9 @@ function cacheComfyuiDiffusersInspection(cacheKey, data) {
   }
 }
 
-async function inspectComfyuiDiffusersRepo({ quiet = false } = {}) {
+async function inspectComfyuiDiffusersRepo({ quiet = false, operation = null } = {}) {
+  const operationContext = operation || comfyuiOperationContext();
+  comfyuiAssertOperationCurrent(operationContext);
   const repo = sanitizeComfyuiDiffusersRepoField({ strict: true, quiet });
   const mode = comfyuiGenerationMode();
   if (!repo) {
@@ -1232,6 +1308,7 @@ async function inspectComfyuiDiffusersRepo({ quiet = false } = {}) {
       credentials: "same-origin"
     });
     const json = await res.json().catch(() => ({}));
+    comfyuiAssertOperationCurrent(operationContext);
     if (!res.ok || !json.ok) throw new Error(json.msg || `Hugging Face repo 檢查失敗（HTTP ${res.status}）`);
     cacheComfyuiDiffusersInspection(cacheKey, json);
     comfyuiDiffusersInspection = { repo: json.repo_id || repo, mode, data: json };
@@ -1245,12 +1322,17 @@ async function inspectComfyuiDiffusersRepo({ quiet = false } = {}) {
   try {
     return await requestPromise;
   } catch (err) {
+    if (!comfyuiOperationIsCurrent(operationContext) || err?.name === "AbortError") {
+      throw err?.name === "AbortError" ? err : comfyuiAccountAbortError();
+    }
     comfyuiDiffusersInspection = { repo, mode, error: err.message || "Hugging Face repo 檢查失敗，尚未開始下載。" };
     renderComfyuiDiffusersInspection();
     if (!quiet) setComfyuiMessage(comfyuiDiffusersInspection.error, false);
     return null;
   } finally {
-    comfyuiDiffusersInspectInflight.delete(cacheKey);
+    if (comfyuiDiffusersInspectInflight.get(cacheKey) === requestPromise) {
+      comfyuiDiffusersInspectInflight.delete(cacheKey);
+    }
   }
 }
 
@@ -1455,10 +1537,10 @@ function setComfyuiView(view, { persist = true } = {}) {
     try { localStorage.setItem(comfyuiUserStorageKey(COMFYUI_VIEW_STORAGE_KEY), activeView); } catch (_) {}
   }
   if (activeView === "history") {
-    loadComfyuiHistory().catch((err) => setComfyuiHistoryActionMessage(err?.message || "ComfyUI 歷史讀取失敗", false));
+    loadComfyuiHistory().catch((err) => handleComfyuiActionError(err, "ComfyUI 歷史讀取失敗", { history: true }));
   }
   if (activeView === "favorites") {
-    loadComfyuiImageFavorites().catch((err) => setComfyuiMessage(err?.message || "圖片收藏讀取失敗", false));
+    loadComfyuiImageFavorites().catch((err) => handleComfyuiActionError(err, "圖片收藏讀取失敗"));
   }
   if (activeView === "workflow") {
     loadComfyuiWorkflowPresets().catch((err) => {
@@ -1689,6 +1771,7 @@ function renderComfyuiInputAsset(key) {
 }
 
 function setComfyuiInputAssetFromFile(key, file) {
+  comfyuiInputAssetHydrationTokens.delete(key);
   if (!comfyuiCanUseInputAssetForCurrentMode(key)) {
     const meta = COMFYUI_INPUT_ASSET_META[key];
     const fileInput = meta?.fileInputId ? $(meta.fileInputId) : null;
@@ -1712,6 +1795,7 @@ function setComfyuiInputAssetFromFile(key, file) {
 }
 
 function setComfyuiInputAssetFromRef(key, imageRef, previewUrl = "", filename = "", options = {}) {
+  comfyuiInputAssetHydrationTokens.delete(key);
   if (!comfyuiCanUseInputAssetForCurrentMode(key)) {
     setComfyuiMessage("這個 HF repo 已判斷為文字生圖，不需要來源圖片或遮罩。", false);
     return;
@@ -1732,6 +1816,7 @@ function setComfyuiInputAssetFromRef(key, imageRef, previewUrl = "", filename = 
 }
 
 function clearComfyuiInputAsset(key) {
+  comfyuiInputAssetHydrationTokens.delete(key);
   const asset = comfyuiAssetState(key);
   revokeComfyuiAssetPreview(asset);
   comfyuiInputAssets[key] = { file: null, imageRef: null, previewUrl: "", filename: "", cloudFileId: "" };
@@ -1761,11 +1846,36 @@ function comfyuiMaskEditorElements() {
   };
 }
 
-function loadComfyuiMaskEditorImage(src) {
+function comfyuiMaskEditorOperationIsCurrent(operation) {
+  return comfyuiOperationIsCurrent(operation)
+    && operation.loadGeneration === comfyuiMaskEditorLoadGeneration;
+}
+
+function assertComfyuiMaskEditorOperation(operation) {
+  if (comfyuiMaskEditorOperationIsCurrent(operation)) return;
+  if (typeof accountRequestAbortError === "function") throw accountRequestAbortError();
+  throw new DOMException("Account context changed", "AbortError");
+}
+
+function loadComfyuiMaskEditorImage(src, operation) {
   return new Promise((resolve, reject) => {
     const image = new Image();
-    image.onload = () => resolve(image);
-    image.onerror = () => reject(new Error("來源圖片無法載入遮罩編輯器。"));
+    image.onload = () => {
+      try {
+        assertComfyuiMaskEditorOperation(operation);
+        resolve(image);
+      } catch (err) {
+        reject(err);
+      }
+    };
+    image.onerror = () => {
+      try {
+        assertComfyuiMaskEditorOperation(operation);
+        reject(new Error("來源圖片無法載入遮罩編輯器。"));
+      } catch (err) {
+        reject(err);
+      }
+    };
     image.src = src;
   });
 }
@@ -1861,7 +1971,12 @@ function drawComfyuiExistingMaskIntoEditor(maskImage) {
 }
 
 async function openComfyuiMaskEditor() {
+  const operation = {
+    ...comfyuiOperationContext(),
+    loadGeneration: ++comfyuiMaskEditorLoadGeneration,
+  };
   const sourceAsset = comfyuiAssetState("source");
+  const sourcePreviewUrl = String(sourceAsset.previewUrl || "");
   const { modal, sourceCanvas, maskCanvas, meta } = comfyuiMaskEditorElements();
   if (!modal || !sourceCanvas || !maskCanvas) {
     setComfyuiMessage("遮罩編輯器尚未載入，請重新整理頁面。", false);
@@ -1871,11 +1986,14 @@ async function openComfyuiMaskEditor() {
     let width = comfyuiMaskEditorDimension($("comfyui-width")?.value || comfyuiDefaultWidth, comfyuiDefaultWidth);
     let height = comfyuiMaskEditorDimension($("comfyui-height")?.value || comfyuiDefaultHeight, comfyuiDefaultHeight);
     let sourceImage = null;
-    if (sourceAsset.previewUrl) {
-      sourceImage = await loadComfyuiMaskEditorImage(sourceAsset.previewUrl);
+    if (sourcePreviewUrl) {
+      sourceImage = await loadComfyuiMaskEditorImage(sourcePreviewUrl, operation);
+      assertComfyuiMaskEditorOperation(operation);
+      if (comfyuiAssetState("source").previewUrl !== sourcePreviewUrl) return;
       width = comfyuiMaskEditorDimension(sourceImage.naturalWidth || sourceImage.width || width, width);
       height = comfyuiMaskEditorDimension(sourceImage.naturalHeight || sourceImage.height || height, height);
     }
+    assertComfyuiMaskEditorOperation(operation);
     resizeComfyuiMaskEditorCanvases(width, height, { lockInputs: !!sourceImage });
     if (sourceImage) {
       sourceCanvas.getContext("2d").drawImage(sourceImage, 0, 0, width, height);
@@ -1884,12 +2002,18 @@ async function openComfyuiMaskEditor() {
     }
     maskCanvas.getContext("2d").clearRect(0, 0, width, height);
     const maskAsset = comfyuiAssetState("mask");
-    if (maskAsset.previewUrl) {
+    const maskPreviewUrl = String(maskAsset.previewUrl || "");
+    if (maskPreviewUrl) {
       try {
-        const maskImage = await loadComfyuiMaskEditorImage(maskAsset.previewUrl);
+        const maskImage = await loadComfyuiMaskEditorImage(maskPreviewUrl, operation);
+        assertComfyuiMaskEditorOperation(operation);
+        if (comfyuiAssetState("mask").previewUrl !== maskPreviewUrl) return;
         drawComfyuiExistingMaskIntoEditor(maskImage);
-      } catch (_) {}
+      } catch (err) {
+        if (!comfyuiMaskEditorOperationIsCurrent(operation)) return;
+      }
     }
+    assertComfyuiMaskEditorOperation(operation);
     if (meta) {
       meta.textContent = sourceImage
         ? `${width} x ${height}；白色區域會交給 inpaint 重繪。`
@@ -1904,11 +2028,13 @@ async function openComfyuiMaskEditor() {
     modal.hidden = false;
     updateComfyuiMaskEditorToolbar();
   } catch (err) {
+    if (!comfyuiMaskEditorOperationIsCurrent(operation)) return;
     setComfyuiMessage(err.message || "遮罩編輯器開啟失敗。", false);
   }
 }
 
 function closeComfyuiMaskEditor() {
+  comfyuiMaskEditorLoadGeneration += 1;
   const { modal } = comfyuiMaskEditorElements();
   comfyuiMaskEditorState.open = false;
   comfyuiMaskEditorState.drawing = false;
@@ -2045,8 +2171,13 @@ function comfyuiMaskEditorBlob() {
 }
 
 async function applyComfyuiMaskEditor() {
+  const operation = {
+    ...comfyuiOperationContext(),
+    loadGeneration: comfyuiMaskEditorLoadGeneration,
+  };
   try {
     const blob = await comfyuiMaskEditorBlob();
+    assertComfyuiMaskEditorOperation(operation);
     const sourceName = String(comfyuiAssetState("source").filename || "source").replace(/\.[^.]+$/, "");
     const filename = `${sourceName || "source"}-mask.png`;
     let file;
@@ -2060,11 +2191,14 @@ async function applyComfyuiMaskEditor() {
     closeComfyuiMaskEditor();
     setComfyuiMessage("已套用遮罩；送出時會以 mask_image 傳給 ComfyUI。", true);
   } catch (err) {
+    if (!comfyuiMaskEditorOperationIsCurrent(operation)) return;
     setComfyuiMessage(err.message || "遮罩套用失敗。", false);
   }
 }
 
-async function loadComfyuiImageRefPreview(imageRef) {
+async function loadComfyuiImageRefPreview(imageRef, operation = null) {
+  const operationContext = operation || comfyuiOperationContext();
+  comfyuiAssertOperationCurrent(operationContext);
   const res = await apiFetch(API + "/comfyui/image-preview", {
     method: "POST",
     credentials: "same-origin",
@@ -2075,6 +2209,7 @@ async function loadComfyuiImageRefPreview(imageRef) {
     body: JSON.stringify({ image_ref: imageRef })
   });
   const json = await res.json().catch(() => ({}));
+  comfyuiAssertOperationCurrent(operationContext);
   if (!res.ok || !json.ok) throw new Error(json.msg || `ComfyUI 圖片預覽讀取失敗（HTTP ${res.status}）`);
   return json.image || {};
 }
@@ -2124,14 +2259,18 @@ function comfyuiDataUrlToBlobUrl(dataUrl, cacheKey = "") {
   }
 }
 
-async function hydrateComfyuiOutputImage(image) {
+async function hydrateComfyuiOutputImage(image, operation = null) {
+  const operationContext = operation || comfyuiOperationContext();
+  comfyuiAssertOperationCurrent(operationContext);
   if (!image || image.data_url || !image.image_ref?.filename) return image;
   const cacheKey = comfyuiImageRefCacheKey(image.image_ref);
   if (cacheKey && comfyuiOutputPreviewCache.has(cacheKey)) {
     return { ...image, ...comfyuiOutputPreviewCache.get(cacheKey) };
   }
   await fetchCsrfToken();
-  const preview = await loadComfyuiImageRefPreview(image.image_ref);
+  comfyuiAssertOperationCurrent(operationContext);
+  const preview = await loadComfyuiImageRefPreview(image.image_ref, operationContext);
+  comfyuiAssertOperationCurrent(operationContext);
   const hydrated = {
     data_url: preview.data_url || "",
     mime_type: preview.mime_type || image.mime_type || "image/png",
@@ -2141,16 +2280,20 @@ async function hydrateComfyuiOutputImage(image) {
   return { ...image, ...hydrated };
 }
 
-async function hydrateComfyuiGeneratedImages(images = []) {
+async function hydrateComfyuiGeneratedImages(images = [], operation = null) {
+  const operationContext = operation || comfyuiOperationContext();
+  comfyuiAssertOperationCurrent(operationContext);
   const items = Array.isArray(images) ? images.filter(Boolean) : [];
   const hydrated = [];
   for (const image of items) {
-    hydrated.push(await hydrateComfyuiOutputImage(image));
+    hydrated.push(await hydrateComfyuiOutputImage(image, operationContext));
   }
   return hydrated;
 }
 
-async function loadComfyuiMediaPreview(fileRef, jobId) {
+async function loadComfyuiMediaPreview(fileRef, jobId, operation = null) {
+  const operationContext = operation || comfyuiOperationContext();
+  comfyuiAssertOperationCurrent(operationContext);
   const res = await apiFetch(API + "/comfyui/media-preview", {
     method: "POST",
     credentials: "same-origin",
@@ -2161,11 +2304,14 @@ async function loadComfyuiMediaPreview(fileRef, jobId) {
     body: JSON.stringify({ file_ref: fileRef, job_id: jobId })
   });
   const json = await res.json().catch(() => ({}));
+  comfyuiAssertOperationCurrent(operationContext);
   if (!res.ok || !json.ok) throw new Error(json.msg || `ComfyUI 媒體預覽讀取失敗（HTTP ${res.status}）`);
   return json.media || {};
 }
 
-async function hydrateComfyuiOutputMedia(item, jobId) {
+async function hydrateComfyuiOutputMedia(item, jobId, operation = null) {
+  const operationContext = operation || comfyuiOperationContext();
+  comfyuiAssertOperationCurrent(operationContext);
   if (!item) return item;
   if (item.data_url) {
     const existingKey = item.file_ref?.filename
@@ -2184,7 +2330,8 @@ async function hydrateComfyuiOutputMedia(item, jobId) {
   }
   try {
     await fetchCsrfToken({ force: true });
-    const preview = await loadComfyuiMediaPreview(item.file_ref, jobId);
+    const preview = await loadComfyuiMediaPreview(item.file_ref, jobId, operationContext);
+    comfyuiAssertOperationCurrent(operationContext);
     const dataUrl = preview.data_url || "";
     const hydrated = {
       data_url: dataUrl,
@@ -2197,29 +2344,43 @@ async function hydrateComfyuiOutputMedia(item, jobId) {
     if (cacheKey) comfyuiMediaPreviewCache.set(cacheKey, hydrated);
     return { ...item, ...hydrated };
   } catch (err) {
+    if (!comfyuiOperationIsCurrent(operationContext) || err?.name === "AbortError") throw err;
     return { ...item, preview_error: err.message || "媒體預覽讀取失敗" };
   }
 }
 
-async function hydrateComfyuiGeneratedMedia(mediaItems = [], jobId = "") {
+async function hydrateComfyuiGeneratedMedia(mediaItems = [], jobId = "", operation = null) {
+  const operationContext = operation || comfyuiOperationContext();
+  comfyuiAssertOperationCurrent(operationContext);
   const items = Array.isArray(mediaItems) ? mediaItems.filter(Boolean) : [];
   const hydrated = [];
   for (const item of items) {
-    hydrated.push(await hydrateComfyuiOutputMedia(item, jobId));
+    hydrated.push(await hydrateComfyuiOutputMedia(item, jobId, operationContext));
   }
   return hydrated;
 }
 
-async function hydrateComfyuiInputAssetFromRef(key, imageRef) {
+async function hydrateComfyuiInputAssetFromRef(key, imageRef, operation = null) {
+  const operationContext = operation || comfyuiOperationContext();
+  const hydrationToken = {};
+  comfyuiAssertOperationCurrent(operationContext);
+  comfyuiInputAssetHydrationTokens.set(key, hydrationToken);
   if (!imageRef?.filename) {
-    clearComfyuiInputAsset(key);
+    if (comfyuiInputAssetHydrationTokens.get(key) === hydrationToken) clearComfyuiInputAsset(key);
     return;
   }
   try {
     await fetchCsrfToken({ force: true });
-    const preview = await loadComfyuiImageRefPreview(imageRef);
+    const preview = await loadComfyuiImageRefPreview(imageRef, operationContext);
+    comfyuiAssertOperationCurrent(operationContext);
+    if (comfyuiInputAssetHydrationTokens.get(key) !== hydrationToken) return;
     setComfyuiInputAssetFromRef(key, imageRef, preview.data_url || "", imageRef.filename || "");
   } catch (err) {
+    if (
+      !comfyuiOperationIsCurrent(operationContext)
+      || comfyuiInputAssetHydrationTokens.get(key) !== hydrationToken
+      || err?.name === "AbortError"
+    ) return;
     setComfyuiInputAssetFromRef(key, imageRef, "", imageRef.filename || "");
     setComfyuiMessage(err.message || "圖片預覽讀取失敗", false);
   }
@@ -2235,6 +2396,7 @@ function comfyuiImagePickerElements() {
 }
 
 function closeComfyuiImagePicker() {
+  comfyuiImagePickerLoadGeneration += 1;
   const { modal } = comfyuiImagePickerElements();
   comfyuiImagePickerState.open = false;
   if (modal) modal.hidden = true;
@@ -2279,25 +2441,47 @@ function renderComfyuiImagePickerList() {
     button.addEventListener("click", () => {
       const source = button.getAttribute("data-comfyui-picker-source");
       const index = Number(button.getAttribute("data-comfyui-picker-index") || 0);
-      applyComfyuiImagePickerSelection(source, index).catch((err) => setComfyuiMessage(err.message || "圖片選擇失敗", false));
+      applyComfyuiImagePickerSelection(source, index).catch((err) => {
+        if (err?.name !== "AbortError") setComfyuiMessage(err.message || "圖片選擇失敗", false);
+      });
     });
   });
 }
 
-async function loadComfyuiImagePickerCandidates() {
+function comfyuiImagePickerOperationIsCurrent(operation) {
+  return comfyuiOperationIsCurrent(operation)
+    && operation.pickerGeneration === comfyuiImagePickerLoadGeneration;
+}
+
+function comfyuiAssertImagePickerOperationCurrent(operation) {
+  if (comfyuiImagePickerOperationIsCurrent(operation)) return;
+  throw comfyuiAccountAbortError();
+}
+
+async function loadComfyuiImagePickerCandidates(operation = null) {
+  const operationContext = operation || {
+    ...comfyuiOperationContext(),
+    pickerGeneration: comfyuiImagePickerLoadGeneration,
+  };
+  comfyuiAssertImagePickerOperationCurrent(operationContext);
   await fetchCsrfToken();
+  comfyuiAssertImagePickerOperationCurrent(operationContext);
   const res = await apiFetch(API + "/comfyui/input-image-candidates", {
     credentials: "same-origin",
     headers: { "X-CSRF-Token": getCsrfToken() || "" }
   });
   const json = await res.json().catch(() => ({}));
+  comfyuiAssertImagePickerOperationCurrent(operationContext);
   if (!res.ok || !json.ok) throw new Error(json.msg || `既有圖片清單讀取失敗（HTTP ${res.status}）`);
   comfyuiImagePickerState.history = Array.isArray(json.history) ? json.history : [];
   comfyuiImagePickerState.cloudDrive = Array.isArray(json.cloud_drive) ? json.cloud_drive : [];
 }
 
-async function importComfyuiDriveImage(fileId) {
+async function importComfyuiDriveImage(fileId, operation = null) {
+  const operationContext = operation || comfyuiOperationContext();
+  comfyuiAssertOperationCurrent(operationContext);
   await fetchCsrfToken({ force: true });
+  comfyuiAssertOperationCurrent(operationContext);
   const res = await apiFetch(API + "/comfyui/import-drive-image", {
     method: "POST",
     credentials: "same-origin",
@@ -2308,11 +2492,14 @@ async function importComfyuiDriveImage(fileId) {
     body: JSON.stringify({ file_id: fileId })
   });
   const json = await res.json().catch(() => ({}));
+  comfyuiAssertOperationCurrent(operationContext);
   if (!res.ok || !json.ok) throw new Error(json.msg || `雲端硬碟圖片匯入失敗（HTTP ${res.status}）`);
   return json.image || {};
 }
 
-async function importComfyuiUploadedImage(assetKey = "source") {
+async function importComfyuiUploadedImage(assetKey = "source", operation = null) {
+  const operationContext = operation || comfyuiOperationContext();
+  comfyuiAssertOperationCurrent(operationContext);
   const asset = comfyuiAssetState(assetKey);
   if (!asset?.file) throw new Error("尚未選擇要匯入的本機圖片。");
   await fetchCsrfToken({ force: true });
@@ -2328,6 +2515,8 @@ async function importComfyuiUploadedImage(assetKey = "source") {
     body: form
   });
   const json = await res.json().catch(() => ({}));
+  comfyuiAssertOperationCurrent(operationContext);
+  if (comfyuiAssetState(assetKey)?.file !== asset.file) throw comfyuiAccountAbortError();
   if (!res.ok || !json.ok) throw new Error(json.msg || `本機圖片匯入失敗（HTTP ${res.status}）`);
   const image = json.image || {};
   setComfyuiInputAssetFromRef(assetKey, image.image_ref, image.data_url || asset.previewUrl || "", image.filename || asset.filename || "", {
@@ -2336,7 +2525,9 @@ async function importComfyuiUploadedImage(assetKey = "source") {
   return image;
 }
 
-async function importComfyuiUploadedVideo(assetKey = "video") {
+async function importComfyuiUploadedVideo(assetKey = "video", operation = null) {
+  const operationContext = operation || comfyuiOperationContext();
+  comfyuiAssertOperationCurrent(operationContext);
   const asset = comfyuiAssetState(assetKey);
   if (!asset?.file) throw new Error("尚未選擇要匯入的本機影片。");
   await fetchCsrfToken({ force: true });
@@ -2352,6 +2543,8 @@ async function importComfyuiUploadedVideo(assetKey = "video") {
     body: form
   });
   const json = await res.json().catch(() => ({}));
+  comfyuiAssertOperationCurrent(operationContext);
+  if (comfyuiAssetState(assetKey)?.file !== asset.file) throw comfyuiAccountAbortError();
   if (!res.ok || !json.ok) throw new Error(json.msg || `本機影片匯入失敗（HTTP ${res.status}）`);
   const media = json.media || {};
   setComfyuiInputAssetFromRef(assetKey, media.media_ref || { filename: media.filename || asset.filename || "" }, asset.previewUrl || "", media.filename || asset.filename || "", {
@@ -2360,16 +2553,19 @@ async function importComfyuiUploadedVideo(assetKey = "video") {
   return media;
 }
 
-async function importComfyuiUploadedMedia(assetKey = "source") {
+async function importComfyuiUploadedMedia(assetKey = "source", operation = null) {
+  const operationContext = operation || comfyuiOperationContext();
   const asset = comfyuiAssetState(assetKey);
   const meta = COMFYUI_INPUT_ASSET_META[assetKey] || {};
   if (meta.mediaType === "video" || /^video\//i.test(asset?.file?.type || "")) {
-    return importComfyuiUploadedVideo(assetKey);
+    return importComfyuiUploadedVideo(assetKey, operationContext);
   }
-  return importComfyuiUploadedImage(assetKey);
+  return importComfyuiUploadedImage(assetKey, operationContext);
 }
 
-async function importComfyuiHistoryImage(imageRef) {
+async function importComfyuiHistoryImage(imageRef, operation = null) {
+  const operationContext = operation || comfyuiOperationContext();
+  comfyuiAssertOperationCurrent(operationContext);
   await fetchCsrfToken({ force: true });
   const res = await apiFetch(API + "/comfyui/import-history-image", {
     method: "POST",
@@ -2381,16 +2577,22 @@ async function importComfyuiHistoryImage(imageRef) {
     body: JSON.stringify({ image_ref: imageRef })
   });
   const json = await res.json().catch(() => ({}));
+  comfyuiAssertOperationCurrent(operationContext);
   if (!res.ok || !json.ok) throw new Error(json.msg || `歷史圖片匯入失敗（HTTP ${res.status}）`);
   return json.image || {};
 }
 
 async function applyComfyuiImagePickerSelection(source, index) {
+  const operation = {
+    ...comfyuiOperationContext(),
+    pickerGeneration: comfyuiImagePickerLoadGeneration,
+  };
   const targetKey = comfyuiImagePickerState.targetKey || "source";
   if (source === "history") {
     const item = (comfyuiImagePickerState.history || [])[index];
     if (!item?.image_ref) throw new Error("歷史圖片引用不存在。");
-    const image = await importComfyuiHistoryImage(item.image_ref);
+    const image = await importComfyuiHistoryImage(item.image_ref, operation);
+    comfyuiAssertImagePickerOperationCurrent(operation);
     setComfyuiInputAssetFromRef(targetKey, image.image_ref, image.data_url || "", image.filename || item.filename || "", {
       cloudFileId: image.cloud_file_id || "",
     });
@@ -2401,7 +2603,8 @@ async function applyComfyuiImagePickerSelection(source, index) {
   if (source === "cloud_drive") {
     const item = (comfyuiImagePickerState.cloudDrive || [])[index];
     if (!item?.file_id) throw new Error("雲端硬碟圖片不存在。");
-    const image = await importComfyuiDriveImage(item.file_id);
+    const image = await importComfyuiDriveImage(item.file_id, operation);
+    comfyuiAssertImagePickerOperationCurrent(operation);
     setComfyuiInputAssetFromRef(targetKey, image.image_ref, image.data_url || "", image.filename || item.filename || "", {
       cloudFileId: image.cloud_file_id || item.file_id || "",
     });
@@ -2414,15 +2617,21 @@ async function openComfyuiImagePicker(targetKey = "source") {
   if (!COMFYUI_INPUT_ASSET_META[targetKey]) targetKey = "source";
   const { modal, list, status } = comfyuiImagePickerElements();
   if (!modal) return;
+  const operation = {
+    ...comfyuiOperationContext(),
+    pickerGeneration: ++comfyuiImagePickerLoadGeneration,
+  };
   comfyuiImagePickerState.open = true;
   comfyuiImagePickerState.targetKey = targetKey;
   modal.hidden = false;
   if (list) list.innerHTML = '<div class="drive-empty">正在讀取歷史產圖與雲端硬碟圖片...</div>';
   if (status) status.textContent = "正在讀取圖片清單...";
   try {
-    await loadComfyuiImagePickerCandidates();
+    await loadComfyuiImagePickerCandidates(operation);
+    comfyuiAssertImagePickerOperationCurrent(operation);
     renderComfyuiImagePickerList();
   } catch (err) {
+    if (!comfyuiImagePickerOperationIsCurrent(operation) || err?.name === "AbortError") return;
     if (status) status.textContent = err.message || "圖片清單讀取失敗";
     if (list) list.innerHTML = `<div class="drive-empty">${sanitize(err.message || "圖片清單讀取失敗")}</div>`;
   }
@@ -2558,20 +2767,25 @@ async function refreshComfyuiResourceDashboard() {
     renderComfyuiResourceDashboard({}, { error: "尚未登入" });
     return;
   }
-  comfyuiResourceDashboardInFlight = true;
+  const operation = comfyuiOperationContext();
+  const requestToken = {};
+  comfyuiResourceDashboardInFlight = requestToken;
   try {
     const csrf = await fetchCsrfToken();
+    comfyuiAssertOperationCurrent(operation);
     const res = await apiFetch(API + "/comfyui/resources", {
       credentials: "same-origin",
       headers: { "X-CSRF-Token": csrf || "" },
     });
     const json = await res.json().catch(() => ({}));
+    comfyuiAssertOperationCurrent(operation);
     if (!res.ok || !json.ok) throw new Error(json.msg || "資源 dashboard 讀取失敗");
     renderComfyuiResourceDashboard(json.resource_usage || {});
   } catch (err) {
+    if (!comfyuiOperationIsCurrent(operation) || err?.name === "AbortError") return;
     renderComfyuiResourceDashboard({}, { error: err?.message || "資源 dashboard 讀取失敗" });
   } finally {
-    comfyuiResourceDashboardInFlight = false;
+    if (comfyuiResourceDashboardInFlight === requestToken) comfyuiResourceDashboardInFlight = false;
   }
 }
 
@@ -2817,12 +3031,16 @@ function comfyuiForegroundTimeoutMessage(err) {
 }
 
 async function pollComfyuiJobUntilDone(jobId, controller, timeoutSeconds, options = {}) {
+  const operation = options.operation || null;
+  const runToken = options.runToken || null;
+  if (operation) comfyuiAssertGenerationCurrent(operation, runToken);
   comfyuiActiveJobId = jobId;
   const startedAt = Date.now();
   const unlimited = Number(timeoutSeconds) <= 0;
   let deadline = unlimited ? Number.POSITIVE_INFINITY : startedAt + timeoutSeconds * 1000 + 15000;
   let displayTimeoutSeconds = unlimited ? 0 : timeoutSeconds;
   while (unlimited || Date.now() < deadline) {
+    if (operation) comfyuiAssertGenerationCurrent(operation, runToken);
     if (controller.signal.aborted) throw new DOMException("Aborted", "AbortError");
     const res = await apiFetch(API + `/comfyui/jobs/${encodeURIComponent(jobId)}`, {
       credentials: "same-origin",
@@ -2830,6 +3048,7 @@ async function pollComfyuiJobUntilDone(jobId, controller, timeoutSeconds, option
       headers: { "X-CSRF-Token": getCsrfToken() || "" }
     });
     const json = await res.json().catch(() => ({}));
+    if (operation) comfyuiAssertGenerationCurrent(operation, runToken);
     if (!res.ok || !json.ok) throw new Error(json.msg || `ComfyUI 工作狀態讀取失敗（HTTP ${res.status}）`);
     const job = json.job || {};
     if (!unlimited && isComfyuiJobQueued(job)) {
@@ -2856,6 +3075,7 @@ async function pollComfyuiJobUntilDone(jobId, controller, timeoutSeconds, option
     if (job.status === "completed" && job.result) return job.result;
     if (job.status === "error") throw new Error(comfyuiBuildJobFailureMessage(job));
     await new Promise((resolve) => setTimeout(resolve, comfyuiJobPollMs()));
+    if (operation) comfyuiAssertGenerationCurrent(operation, runToken);
   }
   throw createComfyuiForegroundTimeoutError(jobId);
 }
@@ -3824,21 +4044,21 @@ function bindComfyuiAdvancedUi() {
   if (uploadBtn && uploadBtn.dataset.comfyuiBound !== "1") {
     uploadBtn.dataset.comfyuiBound = "1";
     uploadBtn.addEventListener("click", () => {
-      uploadComfyuiModelFile().catch((err) => setComfyuiMessage(err.message || "模型上傳失敗", false));
+      uploadComfyuiModelFile().catch((err) => handleComfyuiActionError(err, "模型上傳失敗"));
     });
   }
   const favoriteBtn = $("comfyui-favorite-btn");
   if (favoriteBtn && favoriteBtn.dataset.comfyuiBound !== "1") {
     favoriteBtn.dataset.comfyuiBound = "1";
     favoriteBtn.addEventListener("click", () => {
-      favoriteComfyuiGeneratedImage().catch((err) => setComfyuiMessage(err.message || "圖片收藏失敗", false));
+      favoriteComfyuiGeneratedImage().catch((err) => handleComfyuiActionError(err, "圖片收藏失敗"));
     });
   }
   const favoritesRefreshBtn = $("comfyui-favorites-refresh-btn");
   if (favoritesRefreshBtn && favoritesRefreshBtn.dataset.comfyuiBound !== "1") {
     favoritesRefreshBtn.dataset.comfyuiBound = "1";
     favoritesRefreshBtn.addEventListener("click", () => {
-      loadComfyuiImageFavorites().catch((err) => setComfyuiMessage(err.message || "圖片收藏讀取失敗", false));
+      loadComfyuiImageFavorites().catch((err) => handleComfyuiActionError(err, "圖片收藏讀取失敗"));
     });
   }
   const favoriteCivitaiOpenBtn = $("comfyui-favorite-civitai-open-btn");
@@ -3881,21 +4101,21 @@ function bindComfyuiAdvancedUi() {
   if (favoriteCivitaiImportBtn && favoriteCivitaiImportBtn.dataset.comfyuiBound !== "1") {
     favoriteCivitaiImportBtn.dataset.comfyuiBound = "1";
     favoriteCivitaiImportBtn.addEventListener("click", () => {
-      importComfyuiFavoriteFromCivitai().catch((err) => setComfyuiMessage(err.message || "Civitai 圖片匯入失敗", false));
+      importComfyuiFavoriteFromCivitai().catch((err) => handleComfyuiActionError(err, "Civitai 圖片匯入失敗"));
     });
   }
   const favoriteUploadSaveBtn = $("comfyui-favorite-upload-save-btn");
   if (favoriteUploadSaveBtn && favoriteUploadSaveBtn.dataset.comfyuiBound !== "1") {
     favoriteUploadSaveBtn.dataset.comfyuiBound = "1";
     favoriteUploadSaveBtn.addEventListener("click", () => {
-      saveUploadedComfyuiFavorite().catch((err) => setComfyuiMessage(err.message || "上傳收藏失敗", false));
+      saveUploadedComfyuiFavorite().catch((err) => handleComfyuiActionError(err, "上傳收藏失敗"));
     });
   }
   const civitaiSearchBtn = $("comfyui-civitai-search-btn");
   if (civitaiSearchBtn && civitaiSearchBtn.dataset.comfyuiBound !== "1") {
     civitaiSearchBtn.dataset.comfyuiBound = "1";
     civitaiSearchBtn.addEventListener("click", () => {
-      searchComfyuiCivitaiModels().catch((err) => setComfyuiMessage(err.message || "Civitai 搜尋失敗", false));
+      searchComfyuiCivitaiModels().catch((err) => handleComfyuiActionError(err, "Civitai 搜尋失敗"));
     });
   }
   ["model", "preprocessor"].forEach((name) => {
@@ -3940,7 +4160,7 @@ function bindComfyuiAdvancedUi() {
           setComfyuiMessage("這個 HF repo 已判斷為文字生圖，不需要來源圖片或遮罩。", false);
           return;
         }
-        openComfyuiImagePicker(key).catch((err) => setComfyuiMessage(err.message || "圖片選擇器開啟失敗", false));
+        openComfyuiImagePicker(key).catch((err) => handleComfyuiActionError(err, "圖片選擇器開啟失敗"));
       });
     }
   });
@@ -4016,28 +4236,28 @@ function bindComfyuiAdvancedUi() {
   if (refreshBtn && refreshBtn.dataset.comfyuiBound !== "1") {
     refreshBtn.dataset.comfyuiBound = "1";
     refreshBtn.addEventListener("click", () => {
-      loadComfyuiHistory().catch((err) => setComfyuiMessage(err.message || "ComfyUI 歷史紀錄讀取失敗", false));
+      loadComfyuiHistory().catch((err) => handleComfyuiActionError(err, "ComfyUI 歷史紀錄讀取失敗", { history: true }));
     });
   }
   const workflowRefreshBtn = $("comfyui-workflows-refresh-btn");
   if (workflowRefreshBtn && workflowRefreshBtn.dataset.comfyuiBound !== "1") {
     workflowRefreshBtn.dataset.comfyuiBound = "1";
     workflowRefreshBtn.addEventListener("click", () => {
-      loadComfyuiWorkflowPresets().catch((err) => setComfyuiMessage(err.message || "workflow preset 讀取失敗", false));
+      loadComfyuiWorkflowPresets().catch((err) => handleComfyuiActionError(err, "workflow preset 讀取失敗"));
     });
   }
   const workflowFile = $("comfyui-workflow-file");
   if (workflowFile && workflowFile.dataset.comfyuiBound !== "1") {
     workflowFile.dataset.comfyuiBound = "1";
     workflowFile.addEventListener("change", () => {
-      loadComfyuiWorkflowFile().catch((err) => setComfyuiMessage(err.message || "workflow 檔案讀取失敗", false));
+      loadComfyuiWorkflowFile().catch((err) => handleComfyuiActionError(err, "workflow 檔案讀取失敗"));
     });
   }
   const workflowExportCurrentBtn = $("comfyui-workflow-export-current-btn");
   if (workflowExportCurrentBtn && workflowExportCurrentBtn.dataset.comfyuiBound !== "1") {
     workflowExportCurrentBtn.dataset.comfyuiBound = "1";
     workflowExportCurrentBtn.addEventListener("click", () => {
-      exportCurrentComfyuiWorkflow().catch((err) => setComfyuiMessage(err.message || "workflow 匯出失敗", false));
+      exportCurrentComfyuiWorkflow().catch((err) => handleComfyuiActionError(err, "workflow 匯出失敗"));
     });
   }
   const workflowLoadVisualBtn = $("comfyui-workflow-load-visual-btn");
@@ -4054,14 +4274,14 @@ function bindComfyuiAdvancedUi() {
   if (workflowImportBtn && workflowImportBtn.dataset.comfyuiBound !== "1") {
     workflowImportBtn.dataset.comfyuiBound = "1";
     workflowImportBtn.addEventListener("click", () => {
-      importComfyuiWorkflowPreset().catch((err) => setComfyuiMessage(err.message || "workflow 匯入失敗", false));
+      importComfyuiWorkflowPreset().catch((err) => handleComfyuiActionError(err, "workflow 匯入失敗"));
     });
   }
   const workflowUpdateBtn = $("comfyui-workflow-update-btn");
   if (workflowUpdateBtn && workflowUpdateBtn.dataset.comfyuiBound !== "1") {
     workflowUpdateBtn.dataset.comfyuiBound = "1";
     workflowUpdateBtn.addEventListener("click", () => {
-      updateComfyuiWorkflowPreset().catch((err) => setComfyuiMessage(err.message || "workflow 更新失敗", false));
+      updateComfyuiWorkflowPreset().catch((err) => handleComfyuiActionError(err, "workflow 更新失敗"));
     });
   }
   const workflowResetBtn = $("comfyui-workflow-reset-btn");
@@ -4125,6 +4345,7 @@ function bindComfyuiAdvancedUi() {
   if (!document.body.dataset.comfyuiAccountScopeBound) {
     document.body.dataset.comfyuiAccountScopeBound = "1";
     document.addEventListener("hackme:account-context-changed", () => {
+      resetComfyuiAccountState();
       updateComfyuiRootPanelVisibility();
     });
   }
@@ -4133,7 +4354,153 @@ function bindComfyuiAdvancedUi() {
   Object.keys(COMFYUI_INPUT_ASSET_META).forEach((key) => renderComfyuiInputAsset(key));
 }
 
+function resetComfyuiAccountState() {
+  comfyuiAccountGeneration += 1;
+  comfyuiModelsLoadGeneration += 1;
+  comfyuiGgufProfilesLoadGeneration += 1;
+  comfyuiModelsLoadPromise = null;
+  comfyuiGgufProfilesLoadPromise = null;
+  comfyuiResourceDashboardInFlight = false;
+  comfyuiModelDownloadPollToken = null;
+  comfyuiGenerationRunToken = null;
+  if (comfyuiGenerateAbortController) comfyuiGenerateAbortController.abort();
+  comfyuiGenerateAbortController = null;
+  stopComfyuiProgress();
+  stopComfyuiResourceDashboardPolling();
+  stopComfyuiLocalStartPolling();
+  setComfyuiIdleSuspend("comfyui_model_download", false, "ComfyUI 模型下載中");
+  closeComfyuiMaskEditor();
+  closeComfyuiImagePicker();
+  closeComfyuiGeneratedImageLightbox();
+  closeComfyuiFavoriteModal();
+  closeComfyuiFavoritePreviewModal();
+  comfyuiCurrentImage = null;
+  comfyuiGeneratedImages = [];
+  comfyuiGeneratedMedia = [];
+  comfyuiSelectedImageIndex = 0;
+  comfyuiSavedResult = null;
+  comfyuiAlbumsLoaded = false;
+  comfyuiActiveJobId = null;
+  comfyuiBillingQuote = null;
+  comfyuiProgressPythonLogTail = [];
+  comfyuiHistoryItems = [];
+  comfyuiImageFavorites = [];
+  comfyuiWorkflowPresets = [];
+  comfyuiWorkflowCurrentPresetId = null;
+  comfyuiWorkflowEditorDefaults = null;
+  comfyuiSelectedTemplatePresetId = null;
+  comfyuiSelectedTemplateDetail = null;
+  comfyuiSelectedLoras = [];
+  comfyuiModelsLoaded = false;
+  comfyuiServerAvailable = null;
+  comfyuiLocalRuntimeActive = false;
+  comfyuiAvailableCheckpoints = [];
+  comfyuiAvailableLoras = [];
+  comfyuiLoraDetails = {};
+  comfyuiAvailableEmbeddings = [];
+  comfyuiAvailableVaes = [];
+  comfyuiAvailableDiffusionModels = [];
+  comfyuiAvailableClipModels = [];
+  comfyuiAvailableClipVisionModels = [];
+  comfyuiAvailableLatentUpscaleModels = [];
+  comfyuiAvailableControlnetModels = [];
+  comfyuiControlnetTypes = {};
+  comfyuiUpscaleModels = [];
+  comfyuiGenerationModes = [];
+  comfyuiModelFamilies = [];
+  comfyuiGgufProfiles = [];
+  comfyuiInstalledGgufModels = [];
+  comfyuiDiffusersInspection = null;
+  comfyuiCivitaiInspection = null;
+  comfyuiCivitaiSearchResults = [];
+  comfyuiCivitaiSearchGeneration += 1;
+  comfyuiCivitaiInspectGeneration += 1;
+  clearComfyuiModelsCache();
+  comfyuiDiffusersInspectCache.clear();
+  comfyuiDiffusersInspectInflight.clear();
+  if (typeof window.resetComfyuiWorkflowAccountState === "function") {
+    window.resetComfyuiWorkflowAccountState();
+  }
+  if (typeof window.resetComfyUITemplateImporterAccountState === "function") {
+    window.resetComfyUITemplateImporterAccountState();
+  }
+  COMFYUI_DRAFT_FIELD_IDS.forEach((id) => {
+    const field = $(id);
+    if (!field) return;
+    if (field.type === "checkbox" || field.type === "radio") {
+      field.checked = field.defaultChecked;
+    } else if (field.tagName === "SELECT") {
+      const defaultIndex = Array.from(field.options || []).findIndex((option) => option.defaultSelected);
+      field.selectedIndex = defaultIndex >= 0 ? defaultIndex : 0;
+    } else {
+      field.value = field.defaultValue || "";
+    }
+  });
+  [
+    "comfyui-model-upload-file",
+    "comfyui-civitai-url",
+    "comfyui-civitai-search-query",
+    "comfyui-model-base-dir",
+    "comfyui-model-relative-path",
+    "comfyui-favorite-civitai-url",
+  ].forEach((id) => {
+    const field = $(id);
+    if (field && "value" in field) field.value = "";
+  });
+  [
+    "comfyui-model-select",
+    "comfyui-lora-select",
+    "comfyui-vae-select",
+    "comfyui-controlnet-model",
+    "comfyui-upscale-model",
+    "comfyui-diffusers-gguf-profile",
+    "comfyui-diffusers-gguf-variant",
+  ].forEach((id) => {
+    const select = $(id);
+    if (select) select.innerHTML = '<option value="">尚未載入</option>';
+  });
+  [
+    "comfyui-selected-loras",
+    "comfyui-embedding-shortcuts",
+    "comfyui-installed-gguf-list",
+    "comfyui-civitai-search-results",
+    "comfyui-civitai-trained-words",
+  ].forEach((id) => {
+    const container = $(id);
+    if (container) container.replaceChildren();
+  });
+  [
+    ["comfyui-model-download-btn", "下載選定版本"],
+    ["comfyui-model-upload-btn", "上傳模型檔"],
+  ].forEach(([id, label]) => {
+    const button = $(id);
+    if (!button) return;
+    button.disabled = currentUser !== "root";
+    button.textContent = label;
+  });
+  setComfyuiModelDownloadProgress({ visible: false, running: false, percent: 0, label: "", detail: "" });
+  const modelDownloadStatus = $("comfyui-model-download-status");
+  if (modelDownloadStatus) modelDownloadStatus.textContent = "";
+  Object.keys(COMFYUI_INPUT_ASSET_META).forEach((key) => resetComfyuiInputAssetState(key));
+  comfyuiOutputPreviewCache.clear();
+  comfyuiMediaPreviewCache.clear();
+  comfyuiMediaObjectUrlCache.forEach((url) => {
+    try { URL.revokeObjectURL(url); } catch (_) {}
+  });
+  comfyuiMediaObjectUrlCache.clear();
+  renderComfyuiGeneratedImages([]);
+  renderComfyuiHistory();
+  renderComfyuiImageFavorites([]);
+  const resultMeta = $("comfyui-result-meta");
+  const historyStatus = $("comfyui-history-status");
+  const favoritesStatus = $("comfyui-favorites-status");
+  if (resultMeta) resultMeta.textContent = "";
+  if (historyStatus) historyStatus.textContent = "尚未讀取歷史紀錄";
+  if (favoritesStatus) favoritesStatus.textContent = "尚未讀取圖片收藏。";
+}
+
 async function loadComfyuiLastSettings() {
+  const operation = comfyuiOperationContext();
   const draft = readComfyuiDraft();
   if (!Object.keys(draft).length) {
     setComfyuiMessage("目前沒有保存過的 ComfyUI 設定", false);
@@ -4141,12 +4508,16 @@ async function loadComfyuiLastSettings() {
   }
   if (!comfyuiModelsLoaded && comfyuiServerAvailable !== false) {
     await loadComfyuiModels();
+    comfyuiAssertOperationCurrent(operation);
   }
   await restoreComfyuiDraftForManualLoad();
+  comfyuiAssertOperationCurrent(operation);
   setComfyuiMessage("已載入上次 ComfyUI 設定", true);
 }
 
-async function loadComfyuiAlbums({ force = false } = {}) {
+async function loadComfyuiAlbums({ force = false, operation = null } = {}) {
+  const operationContext = operation || comfyuiOperationContext();
+  comfyuiAssertOperationCurrent(operationContext);
   const select = $("comfyui-album-select");
   if (!select) return [];
   if (comfyuiAlbumsLoaded && !force) {
@@ -4156,7 +4527,7 @@ async function loadComfyuiAlbums({ force = false } = {}) {
   select.innerHTML = '<option value="">不加入相簿</option><option value="" disabled>讀取相簿中...</option>';
   try {
     const json = typeof storageAction === "function"
-      ? await storageAction("/storage/albums", "GET")
+      ? await storageAction("/storage/albums", "GET", null, operationContext)
       : await (async () => {
           await fetchCsrfToken();
           const res = await apiFetch(API + "/storage/albums", {
@@ -4167,6 +4538,7 @@ async function loadComfyuiAlbums({ force = false } = {}) {
           if (!res.ok || !body.ok) throw new Error(body.msg || `相簿讀取失敗（HTTP ${res.status}）`);
           return body;
         })();
+    comfyuiAssertOperationCurrent(operationContext);
     const albums = Array.isArray(json.albums) ? json.albums : [];
     select.innerHTML = '<option value="">不加入相簿</option>' + albums.map((album) => (
       `<option value="${sanitize(String(album.id))}">${sanitize(album.title || `相簿 ${album.id}`)}</option>`
@@ -4175,6 +4547,7 @@ async function loadComfyuiAlbums({ force = false } = {}) {
     restoreComfyuiDraft();
     return albums;
   } catch (err) {
+    if (!comfyuiOperationIsCurrent(operationContext) || err?.name === "AbortError") return [];
     select.innerHTML = '<option value="">相簿讀取失敗</option>';
     comfyuiAlbumsLoaded = false;
     setComfyuiMessage(err.message || "相簿讀取失敗", false);
@@ -4231,10 +4604,14 @@ function comfyuiHistoryPreviewMarkup(item = {}) {
 }
 
 async function hydrateComfyuiHistoryPreviews() {
+  const operation = comfyuiOperationContext();
   const targets = Array.from(document.querySelectorAll("[data-comfyui-history-preview]"));
   if (!targets.length) return;
-  await fetchCsrfToken().catch(() => {});
+  await fetchCsrfToken();
+  comfyuiAssertOperationCurrent(operation);
   for (const target of targets) {
+    comfyuiAssertOperationCurrent(operation);
+    if (!target.isConnected) continue;
     const historyId = target.getAttribute("data-comfyui-history-preview") || "";
     const item = comfyuiHistoryItemById(historyId);
     const image = comfyuiHistoryFirstImage(item);
@@ -4245,12 +4622,15 @@ async function hydrateComfyuiHistoryPreviews() {
       continue;
     }
     try {
-      const hydrated = await hydrateComfyuiOutputImage(image);
+      const hydrated = await hydrateComfyuiOutputImage(image, operation);
+      comfyuiAssertOperationCurrent(operation);
+      if (!target.isConnected) continue;
       const src = hydrated.preview_url || hydrated.data_url || "";
       if (!src) throw new Error("預覽資料為空");
       target.classList.remove("is-loading", "is-empty");
       target.innerHTML = `<img src="${sanitize(src)}" alt="${sanitize(item?.preset_title || item?.payload?.model || "ComfyUI 歷史預覽")}" loading="lazy" />`;
     } catch (err) {
+      if (!comfyuiOperationIsCurrent(operation) || err?.name === "AbortError") throw err;
       target.textContent = err?.message || "預覽讀取失敗";
       target.classList.remove("is-loading");
       target.classList.add("is-empty");
@@ -4313,12 +4693,12 @@ function renderComfyuiHistory() {
       </div>
     `;
   }).join("");
-  hydrateComfyuiHistoryPreviews().catch(() => {});
+  hydrateComfyuiHistoryPreviews().catch((err) => handleComfyuiActionError(err, "ComfyUI 歷史預覽讀取失敗", { report: "comfyui-history-previews" }));
   list.querySelectorAll("[data-comfyui-history-apply]").forEach((button) => {
     button.addEventListener("click", () => {
       const historyId = button.getAttribute("data-comfyui-history-apply") || "";
       applyComfyuiHistoryToForm(historyId).catch((err) => {
-        setComfyuiHistoryActionMessage(err.message || "ComfyUI 歷史套回表單失敗", false);
+        if (err?.name !== "AbortError") setComfyuiHistoryActionMessage(err.message || "ComfyUI 歷史套回表單失敗", false);
       });
     });
   });
@@ -4326,7 +4706,7 @@ function renderComfyuiHistory() {
     button.addEventListener("click", () => {
       const historyId = button.getAttribute("data-comfyui-history-rerun") || "";
       rerunComfyuiHistory(historyId).catch((err) => {
-        setComfyuiHistoryActionMessage(err.message || "ComfyUI 歷史重跑失敗", false);
+        if (err?.name !== "AbortError") setComfyuiHistoryActionMessage(err.message || "ComfyUI 歷史重跑失敗", false);
       });
     });
   });
@@ -4334,7 +4714,7 @@ function renderComfyuiHistory() {
     button.addEventListener("click", () => {
       const historyId = button.getAttribute("data-comfyui-history-favorite") || "";
       favoriteComfyuiHistoryImage(historyId).catch((err) => {
-        setComfyuiHistoryActionMessage(err.message || "ComfyUI 歷史收藏失敗", false);
+        if (err?.name !== "AbortError") setComfyuiHistoryActionMessage(err.message || "ComfyUI 歷史收藏失敗", false);
       });
     });
   });
@@ -4342,13 +4722,15 @@ function renderComfyuiHistory() {
     button.addEventListener("click", () => {
       const historyId = button.getAttribute("data-comfyui-history-delete") || "";
       deleteComfyuiHistory(historyId).catch((err) => {
-        setComfyuiHistoryActionMessage(err.message || "ComfyUI 歷史刪除失敗", false);
+        if (err?.name !== "AbortError") setComfyuiHistoryActionMessage(err.message || "ComfyUI 歷史刪除失敗", false);
       });
     });
   });
 }
 
-async function loadComfyuiHistory() {
+async function loadComfyuiHistory(operation = null) {
+  const operationContext = operation?.generation !== undefined ? operation : comfyuiOperationContext();
+  comfyuiAssertOperationCurrent(operationContext);
   if (!currentUser || !canAccessModule("comfyui")) return [];
   const status = $("comfyui-history-status");
   if (status) status.textContent = "正在讀取 ComfyUI 歷史紀錄...";
@@ -4358,6 +4740,7 @@ async function loadComfyuiHistory() {
     headers: { "X-CSRF-Token": getCsrfToken() || "" }
   });
   const json = await res.json().catch(() => ({}));
+  comfyuiAssertOperationCurrent(operationContext);
   if (!res.ok || !json.ok) {
     const message = json.msg || `ComfyUI 歷史紀錄讀取失敗（HTTP ${res.status}）`;
     if (status) status.textContent = message;
@@ -4368,18 +4751,21 @@ async function loadComfyuiHistory() {
   return comfyuiHistoryItems;
 }
 
-async function applyComfyuiHistoryAssets(inputAssets = {}) {
+async function applyComfyuiHistoryAssets(inputAssets = {}, operation = null) {
+  const operationContext = operation || comfyuiOperationContext();
+  comfyuiAssertOperationCurrent(operationContext);
   await Promise.all([
     inputAssets?.source_image_ref
-      ? hydrateComfyuiInputAssetFromRef("source", inputAssets.source_image_ref)
+      ? hydrateComfyuiInputAssetFromRef("source", inputAssets.source_image_ref, operationContext)
       : Promise.resolve(clearComfyuiInputAsset("source")),
     inputAssets?.mask_image_ref
-      ? hydrateComfyuiInputAssetFromRef("mask", inputAssets.mask_image_ref)
+      ? hydrateComfyuiInputAssetFromRef("mask", inputAssets.mask_image_ref, operationContext)
       : Promise.resolve(clearComfyuiInputAsset("mask")),
     inputAssets?.control_image_ref
-      ? hydrateComfyuiInputAssetFromRef("control", inputAssets.control_image_ref)
+      ? hydrateComfyuiInputAssetFromRef("control", inputAssets.control_image_ref, operationContext)
       : Promise.resolve(clearComfyuiInputAsset("control")),
   ]);
+  comfyuiAssertOperationCurrent(operationContext);
 }
 
 function comfyuiHistoryPayload(item = {}) {
@@ -4454,6 +4840,7 @@ function comfyuiHistoryInputAssets(item = {}, payload = null) {
 }
 
 async function applyComfyuiHistoryToForm(historyId) {
+  const operation = comfyuiOperationContext();
   const item = comfyuiHistoryItemById(historyId);
   if (!item) {
     setComfyuiHistoryActionMessage("找不到這筆 ComfyUI 歷史紀錄，請重新整理歷史。", false);
@@ -4479,21 +4866,26 @@ async function applyComfyuiHistoryToForm(historyId) {
       const needsGgufProfiles = payload.gguf_profile || payload.gguf_variant || payload.diffusion_model || payload.diffusers_gguf_file
         || (item.workflow_json && typeof item.workflow_json === "object" && item.workflow_json["4"]);
       if (needsGgufProfiles && typeof ensureComfyuiGgufProfilesLoaded === "function") {
-        await ensureComfyuiGgufProfilesLoaded();
+        await ensureComfyuiGgufProfilesLoaded({ operation });
+        comfyuiAssertOperationCurrent(operation);
       }
       if (typeof loadComfyuiWorkflowPresets === "function" && Array.isArray(comfyuiWorkflowPresets) && !comfyuiWorkflowPresets.length) {
-        await loadComfyuiWorkflowPresets({ silentTemplateReload: true });
+        await loadComfyuiWorkflowPresets({ silentTemplateReload: true, operation });
+        comfyuiAssertOperationCurrent(operation);
       }
       ensureComfyuiHistoryWorkflowSelectOption(workflowPresetId, item.preset_title || payload.workflow_preset_title || "");
       if (typeof loadComfyuiSelectedTemplateDetail === "function") {
         await loadComfyuiSelectedTemplateDetail(workflowPresetId, { silent: true, applyDefaults: false });
+        comfyuiAssertOperationCurrent(operation);
       }
       ensureComfyuiHistoryWorkflowSelectOption(workflowPresetId, item.preset_title || payload.workflow_preset_title || "");
     } catch (err) {
+      if (!comfyuiOperationIsCurrent(operation) || err?.name === "AbortError") throw err;
       setComfyuiHistoryActionMessage(err.message || "Workflow 模板讀取失敗，無法完整套回歷史。", false);
       throw err;
     }
   }
+  comfyuiAssertOperationCurrent(operation);
   comfyuiSelectedLoras = loras
     .filter((entry) => entry && typeof entry === "object" && normalizeComfyuiLoraName(entry.name))
     .slice(0, COMFYUI_MAX_LORAS)
@@ -4560,13 +4952,15 @@ async function applyComfyuiHistoryToForm(historyId) {
       applyComfyuiTemplateHistorySnapshotToForm(historyWorkflowJson, payload);
     }
   }
-  await applyComfyuiHistoryAssets(comfyuiHistoryInputAssets(item, payload));
+  await applyComfyuiHistoryAssets(comfyuiHistoryInputAssets(item, payload), operation);
+  comfyuiAssertOperationCurrent(operation);
   updateComfyuiModeVisibility();
   writeComfyuiDraft();
   setComfyuiMessage(`已套回第 ${displayId} 筆 ComfyUI 歷史，可直接再調整後重跑。`, true);
 }
 
 async function deleteComfyuiHistory(historyId) {
+  const operation = comfyuiOperationContext();
   const targetId = String(historyId || "").trim();
   if (!targetId) {
     setComfyuiHistoryActionMessage("這筆 ComfyUI 歷史缺少可刪除 ID，請重新整理歷史。", false);
@@ -4584,6 +4978,7 @@ async function deleteComfyuiHistory(historyId) {
   const label = workflowRunId > 0 ? `workflow run #${workflowRunId}` : `第 ${legacyId} 筆 ComfyUI 歷史`;
   if (!window.confirm(`刪除${label}？只會移除本站歷史列表，不會刪除 ComfyUI 輸出檔。`)) return;
   await fetchCsrfToken({ force: true });
+  comfyuiAssertOperationCurrent(operation);
   setComfyuiHistoryActionMessage("正在刪除 ComfyUI 歷史紀錄...", true);
   const res = await apiFetch(workflowRunId > 0
     ? API + `/comfyui/workflow-runs/${encodeURIComponent(workflowRunId)}`
@@ -4593,14 +4988,18 @@ async function deleteComfyuiHistory(historyId) {
     headers: { "X-CSRF-Token": getCsrfToken() || "" }
   });
   const json = await res.json().catch(() => ({}));
+  comfyuiAssertOperationCurrent(operation);
   if (!res.ok || !json.ok) throw new Error(json.msg || `ComfyUI 歷史刪除失敗（HTTP ${res.status}）`);
   comfyuiHistoryItems = comfyuiHistoryItems.filter((item) => comfyuiHistoryItemId(item) !== targetId);
   renderComfyuiHistory();
-  loadComfyuiHistory().catch((err) => setComfyuiHistoryActionMessage(err?.message || "ComfyUI 歷史重新整理失敗", false));
+  loadComfyuiHistory(operation).catch((err) => {
+    if (comfyuiOperationIsCurrent(operation) && err?.name !== "AbortError") setComfyuiHistoryActionMessage(err?.message || "ComfyUI 歷史重新整理失敗", false);
+  });
   setComfyuiHistoryActionMessage(`已刪除${label}。`, true);
 }
 
 async function favoriteComfyuiHistoryImage(historyId) {
+  const operation = comfyuiOperationContext();
   const targetId = String(historyId || "").trim();
   if (!targetId) {
     setComfyuiHistoryActionMessage("這筆 ComfyUI 歷史缺少可收藏 ID，請重新整理歷史。", false);
@@ -4645,13 +5044,15 @@ async function favoriteComfyuiHistoryImage(historyId) {
       }),
     });
     const json = await res.json().catch(() => ({}));
+    comfyuiAssertOperationCurrent(operation);
     if (!res.ok || !json.ok) throw new Error(json.msg || `ComfyUI 歷史收藏失敗（HTTP ${res.status}）`);
     setComfyuiHistoryActionMessage(json.msg || "已收藏這張歷史產圖", true);
     if ($("comfyui-view-favorites")?.classList.contains("active")) {
-      await loadComfyuiImageFavorites();
+      await loadComfyuiImageFavorites(operation);
+      comfyuiAssertOperationCurrent(operation);
     }
   } finally {
-    if (button) {
+    if (comfyuiOperationIsCurrent(operation) && button) {
       button.disabled = !comfyuiHistoryCanFavorite(item);
       button.textContent = "收藏";
     }
@@ -4664,9 +5065,13 @@ async function rerunComfyuiHistory(historyId) {
     setComfyuiHistoryActionMessage("這筆 ComfyUI 歷史缺少可重跑 ID，請重新整理歷史。", false);
     return;
   }
+  const operation = comfyuiOperationContext();
+  const runToken = {};
+  comfyuiGenerationRunToken = runToken;
   const historyItem = comfyuiHistoryItemById(targetId);
   setComfyuiView("generate");
   await fetchCsrfToken({ force: true });
+  comfyuiAssertGenerationCurrent(operation, runToken);
   setComfyuiBusy(true);
   setComfyuiMessage("正在建立 ComfyUI 重跑工作...", true);
   startComfyuiProgress(COMFYUI_GENERATION_TIMEOUT_SECONDS);
@@ -4687,13 +5092,17 @@ async function rerunComfyuiHistory(historyId) {
       body: JSON.stringify({})
     });
     const json = await res.json().catch(() => ({}));
+    comfyuiAssertGenerationCurrent(operation, runToken);
     if (!res.ok || !json.ok) throw new Error(json.msg || `ComfyUI 歷史重跑失敗（HTTP ${res.status}）`);
     const jobId = json.job?.job_id;
-    const result = await pollComfyuiJobUntilDone(jobId, controller, COMFYUI_GENERATION_TIMEOUT_SECONDS);
+    const result = await pollComfyuiJobUntilDone(jobId, controller, COMFYUI_GENERATION_TIMEOUT_SECONDS, { operation, runToken });
+    comfyuiAssertGenerationCurrent(operation, runToken);
     const rawImages = Array.isArray(result.images) && result.images.length ? result.images : [result.image].filter(Boolean);
-    const images = await hydrateComfyuiGeneratedImages(rawImages);
+    const images = await hydrateComfyuiGeneratedImages(rawImages, operation);
+    comfyuiAssertGenerationCurrent(operation, runToken);
     comfyuiGeneratedImages = images;
-    comfyuiGeneratedMedia = await hydrateComfyuiGeneratedMedia(Array.isArray(result.media) ? result.media : [], jobId);
+    comfyuiGeneratedMedia = await hydrateComfyuiGeneratedMedia(Array.isArray(result.media) ? result.media : [], jobId, operation);
+    comfyuiAssertGenerationCurrent(operation, runToken);
     comfyuiCurrentImage = images[0] || null;
     if (images.length) {
       renderComfyuiGeneratedImages(comfyuiGeneratedImages);
@@ -4705,16 +5114,24 @@ async function rerunComfyuiHistory(historyId) {
     }
     stopComfyuiProgress({ complete: true });
     updateComfyuiResultButtons(!!images.length);
-    loadComfyuiHistory().catch((err) => setComfyuiHistoryActionMessage(err?.message || "ComfyUI 歷史重新整理失敗", false));
+    loadComfyuiHistory(operation).catch((err) => {
+      if (comfyuiOperationIsCurrent(operation) && comfyuiGenerationRunToken === runToken && err?.name !== "AbortError") {
+        setComfyuiHistoryActionMessage(err?.message || "ComfyUI 歷史重新整理失敗", false);
+      }
+    });
     setComfyuiMessage(historyItem?.history_source === "workflow"
       ? `已重跑 workflow run #${historyItem.workflow_run_id || targetId}。`
       : `已重跑第 ${targetId} 筆 ComfyUI 歷史。`, true);
   } catch (err) {
+    if (!comfyuiOperationIsCurrent(operation) || comfyuiGenerationRunToken !== runToken) return;
     stopComfyuiProgress({ error: err.message || "ComfyUI 歷史重跑失敗" });
     setComfyuiMessage(err.message || "ComfyUI 歷史重跑失敗", false);
   } finally {
-    if (comfyuiGenerateAbortController === controller) comfyuiGenerateAbortController = null;
-    setComfyuiBusy(false);
+    if (comfyuiOperationIsCurrent(operation) && comfyuiGenerationRunToken === runToken) {
+      comfyuiGenerationRunToken = null;
+      if (comfyuiGenerateAbortController === controller) comfyuiGenerateAbortController = null;
+      setComfyuiBusy(false);
+    }
   }
 }
 
@@ -5011,6 +5428,10 @@ function clearComfyuiModelsCache() {
 
 async function loadComfyuiModels(options = {}) {
   const forceRefresh = options === true || !!(options && options.forceRefresh);
+  const operation = options && typeof options === "object" && options.operation
+    ? options.operation
+    : comfyuiOperationContext();
+  comfyuiAssertOperationCurrent(operation);
   if (!currentUser || !canAccessModule("comfyui")) return;
   const status = $("comfyui-status");
   if (!forceRefresh && comfyuiModelsLoaded && Date.now() - comfyuiModelsLastLoadedAt < COMFYUI_MODELS_CACHE_MS) {
@@ -5020,8 +5441,10 @@ async function loadComfyuiModels(options = {}) {
   if (!forceRefresh && comfyuiModelsLoadPromise) return comfyuiModelsLoadPromise;
   if (status) status.textContent = isComfyuiDiffusersMode() ? "檢查 HF / Diffusers 設定中..." : "連線 ComfyUI 中...";
   setComfyuiMessage("");
-  comfyuiModelsLoadPromise = (async () => {
+  const loadGeneration = ++comfyuiModelsLoadGeneration;
+  const loadPromise = (async () => {
     await fetchCsrfToken();
+    comfyuiAssertLoadCurrent(operation, loadGeneration, comfyuiModelsLoadGeneration);
     const requestPath = "/comfyui/models" + (forceRefresh
       ? (comfyuiRequestQuery() ? `${comfyuiRequestQuery()}&refresh=1` : "?refresh=1")
       : comfyuiRequestQuery());
@@ -5030,6 +5453,7 @@ async function loadComfyuiModels(options = {}) {
       headers: { "X-CSRF-Token": getCsrfToken() || "" }
     });
     const json = await res.json().catch(() => ({}));
+    comfyuiAssertLoadCurrent(operation, loadGeneration, comfyuiModelsLoadGeneration);
     syncComfyuiPrimaryConnectionModeFromResponse(json);
     if (!res.ok || !json.ok) throw new Error(json.msg || `ComfyUI 連線失敗（HTTP ${res.status}）`);
     syncComfyuiPrimaryConnectionModeFromResponse(json);
@@ -5061,9 +5485,18 @@ async function loadComfyuiModels(options = {}) {
     updateComfyuiDiffusersUi();
     applyComfyuiRuntimeLimits(json);
     comfyuiModelsLoaded = true;
-    loadComfyuiAlbums({ force: true }).catch((err) => setComfyuiMessage(err?.message || "相簿讀取失敗", false));
-    loadComfyuiHistory().catch((err) => setComfyuiHistoryActionMessage(err?.message || "ComfyUI 歷史讀取失敗", false));
+    loadComfyuiAlbums({ force: true }).catch((err) => {
+      if (comfyuiOperationIsCurrent(operation) && loadGeneration === comfyuiModelsLoadGeneration && err?.name !== "AbortError") {
+        setComfyuiMessage(err?.message || "相簿讀取失敗", false);
+      }
+    });
+    loadComfyuiHistory().catch((err) => {
+      if (comfyuiOperationIsCurrent(operation) && loadGeneration === comfyuiModelsLoadGeneration && err?.name !== "AbortError") {
+        setComfyuiHistoryActionMessage(err?.message || "ComfyUI 歷史讀取失敗", false);
+      }
+    });
     loadComfyuiWorkflowPresets().catch((err) => {
+      if (!comfyuiOperationIsCurrent(operation) || loadGeneration !== comfyuiModelsLoadGeneration || err?.name === "AbortError") return;
       if (typeof setComfyuiWorkflowStatus === "function") {
         setComfyuiWorkflowStatus(err?.message || "Workflow preset 讀取失敗");
       } else {
@@ -5077,9 +5510,17 @@ async function loadComfyuiModels(options = {}) {
     if (status) status.textContent = activeStatusText;
     return true;
   })();
+  comfyuiModelsLoadPromise = loadPromise;
   try {
-    return await comfyuiModelsLoadPromise;
+    return await loadPromise;
   } catch (err) {
+    if (
+      !comfyuiOperationIsCurrent(operation)
+      || loadGeneration !== comfyuiModelsLoadGeneration
+      || err?.name === "AbortError"
+    ) {
+      throw err?.name === "AbortError" ? err : comfyuiAccountAbortError();
+    }
     comfyuiModelsLoaded = false;
     clearComfyuiModelsCache();
     comfyuiLoraDetails = {};
@@ -5092,11 +5533,13 @@ async function loadComfyuiModels(options = {}) {
     setComfyuiMessage((err.message || "ComfyUI 模型讀取失敗") + startHint, false);
     return false;
   } finally {
-    comfyuiModelsLoadPromise = null;
+    if (comfyuiModelsLoadPromise === loadPromise) comfyuiModelsLoadPromise = null;
   }
 }
 
-async function refreshComfyuiStatus({ switchAway = true } = {}) {
+async function refreshComfyuiStatus({ switchAway = true, operation = null } = {}) {
+  const operationContext = operation || comfyuiOperationContext();
+  if (!comfyuiOperationIsCurrent(operationContext)) return false;
   if (!currentUser || !canAccessModule("comfyui")) {
     setComfyuiTabAvailability(null);
     return false;
@@ -5110,6 +5553,7 @@ async function refreshComfyuiStatus({ switchAway = true } = {}) {
       headers: { "X-CSRF-Token": getCsrfToken() || "" }
     });
     const json = await res.json().catch(() => ({}));
+    comfyuiAssertOperationCurrent(operationContext);
     syncComfyuiPrimaryConnectionModeFromResponse(json);
     if (!res.ok || !json.ok) throw new Error(json.msg || `ComfyUI 狀態檢測失敗（HTTP ${res.status}）`);
     syncComfyuiPrimaryConnectionModeFromResponse(json);
@@ -5122,7 +5566,7 @@ async function refreshComfyuiStatus({ switchAway = true } = {}) {
       : (json.msg || `找不到 ${json.comfyui_url || "ComfyUI"} 伺服器`);
     setComfyuiTabAvailability(available, detail);
     if (available) stopComfyuiLocalStartPolling();
-    else if (starting && comfyuiEffectiveConnectionMode() === "local") scheduleComfyuiLocalStartPolling();
+    else if (starting && comfyuiEffectiveConnectionMode() === "local") scheduleComfyuiLocalStartPolling({ operation: operationContext });
     else stopComfyuiLocalStartPolling();
     if (status) status.textContent = detail;
     if (!available) {
@@ -5131,6 +5575,7 @@ async function refreshComfyuiStatus({ switchAway = true } = {}) {
     }
     return available;
   } catch (err) {
+    if (!comfyuiOperationIsCurrent(operationContext) || err?.name === "AbortError") return false;
     const message = err.message || "ComfyUI 伺服器未連線";
     comfyuiLocalRuntimeActive = false;
     setComfyuiTabAvailability(false, message);
@@ -5141,6 +5586,7 @@ async function refreshComfyuiStatus({ switchAway = true } = {}) {
 }
 
 async function startLocalComfyui() {
+  const operation = comfyuiOperationContext();
   const start = $("comfyui-start-btn");
   const status = $("comfyui-status");
   let keepIdleSuspend = false;
@@ -5174,15 +5620,18 @@ async function startLocalComfyui() {
       setComfyuiTabAvailability(false, info.message || "ComfyUI 正在背景啟動中");
       if (status) status.textContent = info.message || "ComfyUI 正在背景啟動中，稍後請按重新整理模型";
       keepIdleSuspend = true;
-      scheduleComfyuiLocalStartPolling();
+      scheduleComfyuiLocalStartPolling({ operation });
       return;
     }
     await new Promise((resolve) => setTimeout(resolve, 1500));
-    await loadComfyuiModels({ forceRefresh: true });
+    comfyuiAssertOperationCurrent(operation);
+    await loadComfyuiModels({ forceRefresh: true, operation });
   } catch (err) {
+    if (!comfyuiOperationIsCurrent(operation) || err?.name === "AbortError") return;
     setComfyuiMessage(err.message || "ComfyUI 啟動失敗", false);
     if (status) status.textContent = "ComfyUI 啟動失敗";
   } finally {
+    if (!comfyuiOperationIsCurrent(operation)) return;
     if (!keepIdleSuspend) setComfyuiIdleSuspend("comfyui_start_local", false, "ComfyUI 啟動中");
     if (start) {
       start.disabled = false;
@@ -5549,9 +5998,13 @@ async function preflightComfyuiBilling(payload, runCount, billingConfirmation) {
 }
 
 async function generateComfyuiImage() {
+  const operation = comfyuiOperationContext();
+  const runToken = {};
+  comfyuiGenerationRunToken = runToken;
   if (comfyuiServerAvailable === false) {
     setComfyuiMessage("正在重新檢查 ComfyUI 連線...", true);
-    const available = await refreshComfyuiStatus({ switchAway: false });
+    const available = await refreshComfyuiStatus({ switchAway: false, operation });
+    comfyuiAssertGenerationCurrent(operation, runToken);
     if (!available) {
       const effectiveMode = comfyuiEffectiveConnectionMode();
       const hint = effectiveMode === "local"
@@ -5561,24 +6014,31 @@ async function generateComfyuiImage() {
           : "ComfyUI 伺服器未連線，無法產圖。");
       setComfyuiMessage(hint, false);
       resetComfyuiIdleUi();
+      clearComfyuiGenerationRunToken(runToken);
       return;
     }
   }
   if (!comfyuiModelsLoaded) {
     setComfyuiMessage("正在載入 ComfyUI 模型清單...", true);
-    await loadComfyuiModels({ forceRefresh: true });
+    await loadComfyuiModels({ forceRefresh: true, operation });
+    comfyuiAssertGenerationCurrent(operation, runToken);
   }
   if (!comfyuiModelsLoaded) {
     setComfyuiMessage("ComfyUI 模型尚未載入，請按「重新整理模型」查看詳細錯誤。", false);
     resetComfyuiIdleUi();
+    clearComfyuiGenerationRunToken(runToken);
     return;
   }
   let payload = comfyuiPayload();
   if (isComfyuiDiffusersMode()) {
     const repo = normalizeComfyuiHuggingFaceRepoInput(payload.diffusers_model_repo || payload.model || "");
     if (repo && !comfyuiDiffusersInspectionMatches(repo, payload.generation_mode)) {
-      const inspection = await inspectComfyuiDiffusersRepo({ quiet: false });
-      if (!inspection) return;
+      const inspection = await inspectComfyuiDiffusersRepo({ quiet: false, operation });
+      comfyuiAssertGenerationCurrent(operation, runToken);
+      if (!inspection) {
+        clearComfyuiGenerationRunToken(runToken);
+        return;
+      }
       payload = comfyuiPayload();
     }
   }
@@ -5586,36 +6046,54 @@ async function generateComfyuiImage() {
   if (!isComfyuiDiffusersMode() && selectedTemplateId) {
     if (typeof runSelectedComfyuiWorkflowTemplateFromGenerate !== "function") {
       setComfyuiMessage("已選擇 Workflow 模板，但模板執行模組尚未載入。請重新整理頁面後再試。", false);
+      clearComfyuiGenerationRunToken(runToken);
       return;
     }
     try {
-      await runSelectedComfyuiWorkflowTemplateFromGenerate(payload.generation_mode);
+      await runSelectedComfyuiWorkflowTemplateFromGenerate(payload.generation_mode, { operation, runToken });
+      comfyuiAssertGenerationCurrent(operation, runToken);
     } catch (err) {
+      if (!comfyuiOperationIsCurrent(operation) || comfyuiGenerationRunToken !== runToken) return;
+      if (err?.name === "AbortError") {
+        clearComfyuiGenerationRunToken(runToken);
+        return;
+      }
       setComfyuiMessage(err.message || "Workflow 模板執行失敗", false);
     }
+    clearComfyuiGenerationRunToken(runToken);
     return;
   }
   const validationMessage = comfyuiValidatePayloadForUi(payload);
   if (comfyuiModeRequiresWorkflowTemplate(payload.generation_mode)) {
     if (typeof runSelectedComfyuiWorkflowTemplateFromGenerate !== "function") {
       setComfyuiMessage(`「${comfyuiReadableModeLabel(payload.generation_mode)}」需要使用 Workflow 模板執行，但模板模組尚未載入。請重新整理頁面後再試。`, false);
+      clearComfyuiGenerationRunToken(runToken);
       return;
     }
     try {
-      await runSelectedComfyuiWorkflowTemplateFromGenerate(payload.generation_mode);
+      await runSelectedComfyuiWorkflowTemplateFromGenerate(payload.generation_mode, { operation, runToken });
+      comfyuiAssertGenerationCurrent(operation, runToken);
     } catch (err) {
+      if (!comfyuiOperationIsCurrent(operation) || comfyuiGenerationRunToken !== runToken) return;
+      if (err?.name === "AbortError") {
+        clearComfyuiGenerationRunToken(runToken);
+        return;
+      }
       setComfyuiMessage(err.message || "Workflow 模板執行失敗", false);
     }
+    clearComfyuiGenerationRunToken(runToken);
     return;
   }
   if (validationMessage) {
     setComfyuiMessage(validationMessage, false);
+    clearComfyuiGenerationRunToken(runToken);
     return;
   }
   const runCount = comfyuiRunCount();
   const billingConfirmation = confirmComfyuiBilling(payload);
   if (!billingConfirmation.confirmed) {
     setComfyuiMessage("已取消產圖扣點確認", false);
+    clearComfyuiGenerationRunToken(runToken);
     return;
   }
   updateComfyuiPreviewCardForOutputKinds(["image"]);
@@ -5635,7 +6113,9 @@ async function generateComfyuiImage() {
   comfyuiGenerateAbortController = controller;
   try {
     await fetchCsrfToken({ force: true });
+    comfyuiAssertGenerationCurrent(operation, runToken);
     const preflightBilling = await preflightComfyuiBilling(payload, runCount, billingConfirmation);
+    comfyuiAssertGenerationCurrent(operation, runToken);
     if (preflightBilling) {
       comfyuiBillingQuote = { ...(comfyuiBillingQuote || {}), ...preflightBilling };
     }
@@ -5647,6 +6127,7 @@ async function generateComfyuiImage() {
     const totalRequests = runCount * requestedBatchSize;
     startComfyuiProgress(COMFYUI_GENERATION_TIMEOUT_SECONDS * totalRequests);
     for (let requestIndex = 0; requestIndex < totalRequests; requestIndex += 1) {
+      comfyuiAssertGenerationCurrent(operation, runToken);
       if (controller.signal.aborted) throw new DOMException("Aborted", "AbortError");
       const runIndex = Math.floor(requestIndex / requestedBatchSize);
       const batchIndex = requestIndex % requestedBatchSize;
@@ -5683,15 +6164,21 @@ async function generateComfyuiImage() {
         })()
       });
       const startJson = await startRes.json().catch(() => ({}));
+      comfyuiAssertGenerationCurrent(operation, runToken);
       if (!startRes.ok || !startJson.ok) throw new Error(startJson.msg || `第 ${requestIndex + 1} 張產圖失敗（HTTP ${startRes.status}）`);
       const jobId = startJson.job?.job_id;
       if (!jobId) throw new Error("ComfyUI 未回傳工作編號");
       const json = await pollComfyuiJobUntilDone(jobId, controller, COMFYUI_GENERATION_TIMEOUT_SECONDS, {
         progressTransform: (progress) => aggregateComfyuiJobProgress(progress, { requestIndex, totalRequests }),
+        operation,
+        runToken,
       });
+      comfyuiAssertGenerationCurrent(operation, runToken);
       const rawRunImages = Array.isArray(json.images) && json.images.length ? json.images : [json.image].filter(Boolean);
-      const runImages = await hydrateComfyuiGeneratedImages(rawRunImages);
-      const runMedia = await hydrateComfyuiGeneratedMedia(Array.isArray(json.media) ? json.media : [], jobId);
+      const runImages = await hydrateComfyuiGeneratedImages(rawRunImages, operation);
+      comfyuiAssertGenerationCurrent(operation, runToken);
+      const runMedia = await hydrateComfyuiGeneratedMedia(Array.isArray(json.media) ? json.media : [], jobId, operation);
+      comfyuiAssertGenerationCurrent(operation, runToken);
       runMedia.forEach((item) => {
         generatedMedia.push({ ...item, run_index: runIndex, batch_index: batchIndex, run_count: runCount });
       });
@@ -5730,21 +6217,29 @@ async function generateComfyuiImage() {
     stopComfyuiProgress({ complete: true });
     updateComfyuiResultButtons(true);
     applyComfyuiSeedAfterGenerate(generated[generated.length - 1]?.seed);
-    loadComfyuiHistory().catch((err) => setComfyuiHistoryActionMessage(err?.message || "ComfyUI 歷史重新整理失敗", false));
+    loadComfyuiHistory(operation).catch((err) => {
+      if (comfyuiOperationIsCurrent(operation) && comfyuiGenerationRunToken === runToken && err?.name !== "AbortError") {
+        setComfyuiHistoryActionMessage(err?.message || "ComfyUI 歷史重新整理失敗", false);
+      }
+    });
     const billingText = totalCharged > 0
       ? `已扣 ${totalCharged} 點。`
       : "";
     setComfyuiMessage(`已執行 ${runCount} 次，共產生 ${comfyuiGeneratedImages.length} 張圖片；${billingText}請選擇要儲存或分享的圖片。`, true);
   } catch (err) {
+    if (!comfyuiOperationIsCurrent(operation) || comfyuiGenerationRunToken !== runToken) return;
     const interrupted = err?.name === "AbortError";
     const message = interrupted ? "已中斷產圖" : (err.message || "產圖失敗");
     if (preview) preview.innerHTML = `<div class="drive-empty">${sanitize(message)}</div>`;
     stopComfyuiProgress({ error: message });
     setComfyuiMessage(message, interrupted);
   } finally {
-    comfyuiActiveJobId = null;
-    if (comfyuiGenerateAbortController === controller) comfyuiGenerateAbortController = null;
-    setComfyuiBusy(false);
+    if (comfyuiOperationIsCurrent(operation) && comfyuiGenerationRunToken === runToken) {
+      comfyuiGenerationRunToken = null;
+      comfyuiActiveJobId = null;
+      if (comfyuiGenerateAbortController === controller) comfyuiGenerateAbortController = null;
+      setComfyuiBusy(false);
+    }
   }
 }
 
@@ -5797,7 +6292,9 @@ async function interruptComfyuiGeneration() {
     const json = await res.json().catch(() => ({}));
     return { res, json };
   })();
-  interruptRequest.catch(() => {});
+  interruptRequest.catch((err) => reportFrontendFailure("comfyui-interrupt-late-result", err, {
+    expected: err?.name === "AbortError",
+  }));
   try {
     const { res, json } = await Promise.race([interruptRequest, interruptTimeout]);
     if (!res.ok || !json.ok) throw new Error(json.msg || `中斷產圖失敗（HTTP ${res.status}）`);
@@ -5957,7 +6454,9 @@ async function shareComfyuiToCommunity() {
     };
     setComfyuiMessage(`${json.msg || "已分享到 ComfyUI 專區"}：${json.thread?.title || ""}`, true);
     if (json.thread?.board_id && typeof switchModuleTab === "function") {
-      if (typeof loadCommunityBoards === "function") loadCommunityBoards().catch(() => {});
+      if (typeof loadCommunityBoards === "function") {
+        loadCommunityBoards().catch((err) => reportFrontendFailure("comfyui-share-community-refresh", err));
+      }
     }
     if (typeof loadDriveDashboard === "function") await loadDriveDashboard();
     await loadComfyuiAlbums({ force: true });
@@ -6343,7 +6842,9 @@ function openComfyuiFavoritePreview(favoriteId) {
       </div>
     `;
     detail.querySelector("[data-comfyui-favorite-preview-apply]")?.addEventListener("click", () => {
-      applyComfyuiFavoriteToForm(item.id).catch((err) => setComfyuiMessage(err.message || "圖片收藏套回表單失敗", false));
+      applyComfyuiFavoriteToForm(item.id).catch((err) => {
+        if (err?.name !== "AbortError") setComfyuiMessage(err.message || "圖片收藏套回表單失敗", false);
+      });
       closeComfyuiFavoritePreviewModal();
     });
     detail.querySelectorAll("[data-comfyui-favorite-copy]").forEach((button) => {
@@ -6353,7 +6854,7 @@ function openComfyuiFavoritePreview(favoriteId) {
       });
     });
     detail.querySelector("[data-comfyui-favorite-preview-delete]")?.addEventListener("click", () => {
-      deleteComfyuiImageFavorite(item.id).catch((err) => setComfyuiMessage(err.message || "圖片收藏刪除失敗", false));
+      deleteComfyuiImageFavorite(item.id).catch((err) => handleComfyuiActionError(err, "圖片收藏刪除失敗"));
     });
   }
   modal.hidden = false;
@@ -6410,7 +6911,9 @@ function renderComfyuiImageFavorites(favorites = []) {
   setComfyuiFavoritesStatus(`已讀取 ${comfyuiImageFavorites.length} 筆圖片收藏。`);
 }
 
-async function loadComfyuiImageFavorites() {
+async function loadComfyuiImageFavorites(operation = null) {
+  const operationContext = operation?.generation !== undefined ? operation : comfyuiOperationContext();
+  comfyuiAssertOperationCurrent(operationContext);
   const refreshBtn = $("comfyui-favorites-refresh-btn");
   if (refreshBtn) {
     refreshBtn.disabled = true;
@@ -6424,10 +6927,11 @@ async function loadComfyuiImageFavorites() {
       headers: { "X-CSRF-Token": getCsrfToken() || "" },
     });
     const json = await res.json().catch(() => ({}));
+    comfyuiAssertOperationCurrent(operationContext);
     if (!res.ok || !json.ok) throw new Error(json.msg || `圖片收藏讀取失敗（HTTP ${res.status}）`);
     renderComfyuiImageFavorites(json.favorites || []);
   } finally {
-    if (refreshBtn) {
+    if (comfyuiOperationIsCurrent(operationContext) && refreshBtn) {
       refreshBtn.disabled = false;
       refreshBtn.textContent = "重新整理收藏";
     }
@@ -6466,7 +6970,9 @@ function comfyuiFavoriteWorkflowBundleHint(params = {}) {
   return "";
 }
 
-async function resolveComfyuiFavoriteWorkflow(params = {}) {
+async function resolveComfyuiFavoriteWorkflow(params = {}, operation = null) {
+  const operationContext = operation || comfyuiOperationContext();
+  comfyuiAssertOperationCurrent(operationContext);
   const directId = Number(params.workflow_preset_id || params.preset_id || 0);
   if (Number.isFinite(directId) && directId > 0) {
     return {
@@ -6479,10 +6985,12 @@ async function resolveComfyuiFavoriteWorkflow(params = {}) {
   if (!bundleId) return { id: 0, title: "", bundleId: "" };
   if (typeof loadComfyuiWorkflowPresets === "function") {
     try {
-      await loadComfyuiWorkflowPresets({ silentTemplateReload: true });
+      await loadComfyuiWorkflowPresets({ silentTemplateReload: true, operation: operationContext });
     } catch (err) {
+      if (!comfyuiOperationIsCurrent(operationContext) || err?.name === "AbortError") throw err;
       console.warn("Failed to load workflow presets for favorite restore", err);
     }
+    comfyuiAssertOperationCurrent(operationContext);
   }
   const presets = Array.isArray(comfyuiWorkflowPresets) ? comfyuiWorkflowPresets : [];
   const preset = presets.find((item) => String(item?.system_bundle_id || "") === bundleId)
@@ -6493,6 +7001,7 @@ async function resolveComfyuiFavoriteWorkflow(params = {}) {
 }
 
 async function applyComfyuiFavoriteToForm(favoriteId) {
+  const operation = comfyuiOperationContext();
   const item = comfyuiImageFavorites.find((favorite) => String(favorite?.id || "") === String(favoriteId || ""));
   if (!item) {
     setComfyuiMessage("找不到這筆圖片收藏。", false);
@@ -6501,7 +7010,8 @@ async function applyComfyuiFavoriteToForm(favoriteId) {
   const params = item.params && typeof item.params === "object" ? item.params : {};
   const normalized = comfyuiNormalizeFavoriteParamsForRestore(params);
   const diffusersRepo = params.diffusers_model_repo || "";
-  const workflow = diffusersRepo ? { id: 0, title: "", bundleId: "" } : await resolveComfyuiFavoriteWorkflow(params);
+  const workflow = diffusersRepo ? { id: 0, title: "", bundleId: "" } : await resolveComfyuiFavoriteWorkflow(params, operation);
+  comfyuiAssertOperationCurrent(operation);
   const workflowPresetId = Number(workflow.id || 0);
   const favoriteWorkflowJson = item?.params?.workflow_json && typeof item.params.workflow_json === "object" && !Array.isArray(item.params.workflow_json)
     ? item.params.workflow_json
@@ -6519,6 +7029,7 @@ async function applyComfyuiFavoriteToForm(favoriteId) {
     }
     if (typeof loadComfyuiSelectedTemplateDetail === "function") {
       await loadComfyuiSelectedTemplateDetail(workflowPresetId, { silent: true, applyDefaults: false });
+      comfyuiAssertOperationCurrent(operation);
     }
     if (typeof ensureComfyuiHistoryWorkflowSelectOption === "function") {
       ensureComfyuiHistoryWorkflowSelectOption(workflowPresetId, workflow.title || params.workflow_preset_title || "");
@@ -6579,6 +7090,7 @@ async function applyComfyuiFavoriteToForm(favoriteId) {
 
 async function deleteComfyuiImageFavorite(favoriteId) {
   if (!favoriteId) return;
+  const operation = comfyuiOperationContext();
   const confirmed = window.confirm("刪除這筆圖片收藏？");
   if (!confirmed) return;
   try {
@@ -6589,10 +7101,13 @@ async function deleteComfyuiImageFavorite(favoriteId) {
       headers: { "X-CSRF-Token": getCsrfToken() || "" },
     });
     const json = await res.json().catch(() => ({}));
+    comfyuiAssertOperationCurrent(operation);
     if (!res.ok || !json.ok) throw new Error(json.msg || `圖片收藏刪除失敗（HTTP ${res.status}）`);
-    await loadComfyuiImageFavorites();
+    await loadComfyuiImageFavorites(operation);
+    comfyuiAssertOperationCurrent(operation);
     setComfyuiMessage(json.msg || "已刪除圖片收藏", true);
   } catch (err) {
+    if (!comfyuiOperationIsCurrent(operation) || err?.name === "AbortError") return;
     setComfyuiMessage(err.message || "圖片收藏刪除失敗", false);
   }
 }
@@ -6616,6 +7131,8 @@ async function favoriteComfyuiGeneratedImage() {
     setComfyuiMessage("目前沒有可收藏的產圖結果", false);
     return;
   }
+  const operation = comfyuiOperationContext();
+  const payload = comfyuiFavoriteCurrentPayload();
   const favoriteBtn = $("comfyui-favorite-btn");
   if (favoriteBtn) {
     favoriteBtn.disabled = true;
@@ -6630,18 +7147,21 @@ async function favoriteComfyuiGeneratedImage() {
         "Content-Type": "application/json",
         "X-CSRF-Token": getCsrfToken() || "",
       },
-      body: JSON.stringify(comfyuiFavoriteCurrentPayload()),
+      body: JSON.stringify(payload),
     });
     const json = await res.json().catch(() => ({}));
+    comfyuiAssertOperationCurrent(operation);
     if (!res.ok || !json.ok) throw new Error(json.msg || `圖片收藏失敗（HTTP ${res.status}）`);
     setComfyuiMessage(json.msg || "已收藏這張產圖", true);
     if ($("comfyui-view-favorites")?.classList.contains("active")) {
-      await loadComfyuiImageFavorites();
+      await loadComfyuiImageFavorites(operation);
+      comfyuiAssertOperationCurrent(operation);
     }
   } catch (err) {
+    if (!comfyuiOperationIsCurrent(operation) || err?.name === "AbortError") return;
     setComfyuiMessage(err.message || "圖片收藏失敗", false);
   } finally {
-    if (favoriteBtn) {
+    if (comfyuiOperationIsCurrent(operation) && favoriteBtn) {
       favoriteBtn.disabled = !comfyuiCurrentImage?.image_ref;
       favoriteBtn.textContent = "收藏";
     }
@@ -6649,6 +7169,7 @@ async function favoriteComfyuiGeneratedImage() {
 }
 
 async function importComfyuiFavoriteFromCivitai() {
+  const operation = comfyuiOperationContext();
   const input = $("comfyui-favorite-civitai-url");
   const button = $("comfyui-favorite-civitai-import-btn");
   const status = $("comfyui-favorite-civitai-status");
@@ -6674,17 +7195,20 @@ async function importComfyuiFavoriteFromCivitai() {
       body: JSON.stringify({ url }),
     });
     const json = await res.json().catch(() => ({}));
+    comfyuiAssertOperationCurrent(operation);
     if (!res.ok || !json.ok) throw new Error(json.msg || `Civitai 圖片匯入失敗（HTTP ${res.status}）`);
     if (status) status.textContent = json.msg || "已匯入 Civitai 圖片收藏。";
     input.value = "";
-    await loadComfyuiImageFavorites();
+    await loadComfyuiImageFavorites(operation);
+    comfyuiAssertOperationCurrent(operation);
     closeComfyuiFavoriteModal();
     setComfyuiMessage(json.msg || "已匯入 Civitai 圖片收藏", true);
   } catch (err) {
+    if (!comfyuiOperationIsCurrent(operation) || err?.name === "AbortError") return;
     if (status) status.textContent = err.message || "Civitai 圖片匯入失敗";
     setComfyuiMessage(err.message || "Civitai 圖片匯入失敗", false);
   } finally {
-    if (button) {
+    if (comfyuiOperationIsCurrent(operation) && button) {
       button.disabled = false;
       button.textContent = "從 Civitai 匯入";
     }
@@ -6709,6 +7233,7 @@ function comfyuiFavoriteUploadParams() {
 }
 
 async function saveUploadedComfyuiFavorite() {
+  const operation = comfyuiOperationContext();
   const fileInput = $("comfyui-favorite-upload-file");
   const button = $("comfyui-favorite-upload-save-btn");
   const status = $("comfyui-favorite-upload-status");
@@ -6740,17 +7265,21 @@ async function saveUploadedComfyuiFavorite() {
       body: form,
     });
     const json = await res.json().catch(() => ({}));
+    comfyuiAssertOperationCurrent(operation);
+    if (fileInput?.files?.[0] !== file) throw comfyuiAccountAbortError();
     if (!res.ok || !json.ok) throw new Error(json.msg || `上傳收藏失敗（HTTP ${res.status}）`);
     if (status) status.textContent = json.msg || "已儲存上傳收藏。";
     if (fileInput) fileInput.value = "";
-    await loadComfyuiImageFavorites();
+    await loadComfyuiImageFavorites(operation);
+    comfyuiAssertOperationCurrent(operation);
     closeComfyuiFavoriteModal();
     setComfyuiMessage(json.msg || "已儲存上傳收藏", true);
   } catch (err) {
+    if (!comfyuiOperationIsCurrent(operation) || err?.name === "AbortError") return;
     if (status) status.textContent = err.message || "上傳收藏失敗";
     setComfyuiMessage(err.message || "上傳收藏失敗", false);
   } finally {
-    if (button) {
+    if (comfyuiOperationIsCurrent(operation) && button) {
       button.disabled = false;
       button.textContent = "儲存上傳收藏";
     }
@@ -6843,7 +7372,7 @@ function renderComfyuiCivitaiSearchResults(results) {
   box.querySelectorAll("[data-comfyui-civitai-select]").forEach((button) => {
     button.addEventListener("click", () => {
       const modelId = button.getAttribute("data-comfyui-civitai-select") || "";
-      useComfyuiCivitaiSearchResult(modelId).catch((err) => setComfyuiMessage(err.message || "帶入 Civitai 模型失敗", false));
+      useComfyuiCivitaiSearchResult(modelId).catch((err) => handleComfyuiActionError(err, "帶入 Civitai 模型失敗"));
     });
   });
 }
@@ -6869,6 +7398,8 @@ async function useComfyuiCivitaiSearchResult(modelId) {
 }
 
 async function searchComfyuiCivitaiModels() {
+  const operation = comfyuiOperationContext();
+  const searchGeneration = ++comfyuiCivitaiSearchGeneration;
   if (currentUser !== "root") {
     setComfyuiMessage("只有 root 可以搜尋 Civitai 模型。", false);
     return;
@@ -6902,16 +7433,25 @@ async function searchComfyuiCivitaiModels() {
       }),
     });
     const json = await res.json().catch(() => ({}));
+    comfyuiAssertOperationCurrent(operation);
+    if (searchGeneration !== comfyuiCivitaiSearchGeneration) return;
+    if (
+      ($("comfyui-civitai-search-query")?.value || "").trim() !== query
+      || ($("comfyui-civitai-search-base-model")?.value || "").trim() !== baseModel
+      || ($("comfyui-civitai-search-type")?.value || "").trim() !== modelType
+      || (($("comfyui-civitai-search-nsfw")?.value || "safe").trim() || "safe") !== nsfwMode
+    ) return;
     if (!res.ok || !json.ok) throw new Error(json.msg || `Civitai 搜尋失敗（HTTP ${res.status}）`);
     renderComfyuiCivitaiSearchResults(json.results || []);
     if (status) status.textContent = json.msg || "已取得 Civitai 搜尋結果。";
     setComfyuiMessage(json.msg || "已取得 Civitai 搜尋結果。", true);
   } catch (err) {
+    if (!comfyuiOperationIsCurrent(operation) || searchGeneration !== comfyuiCivitaiSearchGeneration || err?.name === "AbortError") return;
     renderComfyuiCivitaiSearchResults([]);
     if (status) status.textContent = err.message || "Civitai 搜尋失敗";
     setComfyuiMessage(err.message || "Civitai 搜尋失敗", false);
   } finally {
-    if (button) {
+    if (comfyuiOperationIsCurrent(operation) && searchGeneration === comfyuiCivitaiSearchGeneration && button) {
       button.disabled = false;
       button.textContent = "搜尋 Civitai";
     }
@@ -7051,15 +7591,24 @@ function setComfyuiModelDownloadProgress({ visible = true, running = false, perc
   if (detailEl) detailEl.textContent = detail || "";
 }
 
-async function pollComfyuiModelDownloadJob(jobId) {
+async function pollComfyuiModelDownloadJob(jobId, operation = null, existingPollToken = null) {
+  const operationContext = operation || comfyuiOperationContext();
+  const pollToken = existingPollToken || {};
+  const ownsPollToken = !existingPollToken;
+  comfyuiAssertOperationCurrent(operationContext);
+  comfyuiModelDownloadPollToken = pollToken;
   setComfyuiIdleSuspend("comfyui_model_download", true, "ComfyUI 模型下載中");
   try {
     while (true) {
+      comfyuiAssertOperationCurrent(operationContext);
+      if (comfyuiModelDownloadPollToken !== pollToken) throw comfyuiAccountAbortError();
       const res = await apiFetch(API + `/root/comfyui/download-jobs/${encodeURIComponent(jobId)}`, {
         credentials: "same-origin",
         headers: { "X-CSRF-Token": getCsrfToken() || "" }
       });
       const json = await res.json().catch(() => ({}));
+      comfyuiAssertOperationCurrent(operationContext);
+      if (comfyuiModelDownloadPollToken !== pollToken) throw comfyuiAccountAbortError();
       if (!res.ok || !json.ok) throw new Error(json.msg || `模型下載進度讀取失敗（HTTP ${res.status}）`);
       const job = json.job || {};
       const progress = job.progress || {};
@@ -7079,13 +7628,20 @@ async function pollComfyuiModelDownloadJob(jobId) {
       if (job.status === "completed") return job.result || {};
       if (job.status === "error") throw new Error(job.error || progress.detail || "模型下載失敗");
       await new Promise((resolve) => setTimeout(resolve, 500));
+      comfyuiAssertOperationCurrent(operationContext);
+      if (comfyuiModelDownloadPollToken !== pollToken) throw comfyuiAccountAbortError();
     }
   } finally {
-    setComfyuiIdleSuspend("comfyui_model_download", false, "ComfyUI 模型下載中");
+    if (ownsPollToken && comfyuiModelDownloadPollToken === pollToken) {
+      comfyuiModelDownloadPollToken = null;
+      setComfyuiIdleSuspend("comfyui_model_download", false, "ComfyUI 模型下載中");
+    }
   }
 }
 
 async function inspectComfyuiCivitaiModel() {
+  const operation = comfyuiOperationContext();
+  const inspectGeneration = ++comfyuiCivitaiInspectGeneration;
   if (currentUser !== "root") {
     setComfyuiMessage("只有 root 可以下載 ComfyUI 模型。", false);
     return;
@@ -7115,16 +7671,20 @@ async function inspectComfyuiCivitaiModel() {
       body: JSON.stringify({ page_url: pageUrl })
     });
     const json = await res.json().catch(() => ({}));
+    comfyuiAssertOperationCurrent(operation);
+    if (inspectGeneration !== comfyuiCivitaiInspectGeneration) return;
+    if (($("comfyui-civitai-url")?.value || "").trim() !== pageUrl) return;
     if (!res.ok || !json.ok) throw new Error(json.msg || `模型資訊讀取失敗（HTTP ${res.status}）`);
     renderComfyuiCivitaiInspection(json.model || null);
     setComfyuiMessage(json.msg || "已讀取 Civitai 模型資訊。", true);
   } catch (err) {
+    if (!comfyuiOperationIsCurrent(operation) || inspectGeneration !== comfyuiCivitaiInspectGeneration || err?.name === "AbortError") return;
     comfyuiCivitaiInspection = null;
     renderComfyuiCivitaiInspection(null);
     if (status) status.textContent = err.message || "模型資訊讀取失敗";
     setComfyuiMessage(err.message || "模型資訊讀取失敗", false);
   } finally {
-    if (inspectBtn) {
+    if (comfyuiOperationIsCurrent(operation) && inspectGeneration === comfyuiCivitaiInspectGeneration && inspectBtn) {
       inspectBtn.disabled = false;
       inspectBtn.textContent = "讀取模型資訊";
     }
@@ -7132,6 +7692,7 @@ async function inspectComfyuiCivitaiModel() {
 }
 
 async function downloadComfyuiCivitaiModel() {
+  const operation = comfyuiOperationContext();
   if (currentUser !== "root") {
     setComfyuiMessage("只有 root 可以下載 ComfyUI 模型。", false);
     return;
@@ -7183,6 +7744,8 @@ async function downloadComfyuiCivitaiModel() {
     button.disabled = true;
     button.textContent = "下載中...";
   }
+  const downloadToken = {};
+  comfyuiModelDownloadPollToken = downloadToken;
   if (status) status.textContent = "正在建立模型下載工作...";
   setComfyuiModelDownloadProgress({
     visible: true,
@@ -7214,7 +7777,9 @@ async function downloadComfyuiCivitaiModel() {
     if (!res.ok || !json.ok) throw new Error(json.msg || `模型下載失敗（HTTP ${res.status}）`);
     const jobId = json.job?.job_id;
     if (!jobId) throw new Error("ComfyUI 未回傳模型下載工作編號");
-    const info = await pollComfyuiModelDownloadJob(jobId);
+    const info = await pollComfyuiModelDownloadJob(jobId, operation, downloadToken);
+    comfyuiAssertOperationCurrent(operation);
+    if (comfyuiModelDownloadPollToken !== downloadToken) throw comfyuiAccountAbortError();
     if (status) {
       const versionLabel = info?.civitai?.version_name ? ` · ${info.civitai.version_name}` : "";
       const trainedWords = Array.isArray(info?.civitai?.trained_words) ? info.civitai.trained_words.filter(Boolean) : [];
@@ -7229,8 +7794,9 @@ async function downloadComfyuiCivitaiModel() {
       detail: `${info.filename || ""} · ${formatDriveBytes(info.size_bytes || 0)}`
     });
     setComfyuiMessage(json.msg || "模型已下載。請重新整理模型清單。", true);
-    await loadComfyuiModels({ forceRefresh: true });
+    await loadComfyuiModels({ forceRefresh: true, operation });
   } catch (err) {
+    if (!comfyuiOperationIsCurrent(operation) || comfyuiModelDownloadPollToken !== downloadToken || err?.name === "AbortError") return;
     if (status) status.textContent = err.message || "模型下載失敗";
     setComfyuiModelDownloadProgress({
       visible: true,
@@ -7241,6 +7807,9 @@ async function downloadComfyuiCivitaiModel() {
     });
     setComfyuiMessage(err.message || "模型下載失敗", false);
   } finally {
+    if (!comfyuiOperationIsCurrent(operation) || comfyuiModelDownloadPollToken !== downloadToken) return;
+    comfyuiModelDownloadPollToken = null;
+    setComfyuiIdleSuspend("comfyui_model_download", false, "ComfyUI 模型下載中");
     if (button) {
       button.disabled = false;
       button.textContent = "下載選定版本";
@@ -7253,6 +7822,7 @@ async function downloadComfyuiModelFromUrl() {
 }
 
 async function uploadComfyuiModelFile() {
+  const operation = comfyuiOperationContext();
   if (currentUser !== "root") {
     setComfyuiMessage("只有 root 可以匯入 ComfyUI 模型。", false);
     return;
@@ -7295,6 +7865,7 @@ async function uploadComfyuiModelFile() {
       body: form,
     });
     const json = await res.json().catch(() => ({}));
+    comfyuiAssertOperationCurrent(operation);
     if (!res.ok || !json.ok) throw new Error(json.msg || `模型上傳失敗（HTTP ${res.status}）`);
     const info = json.upload || {};
     if (status) status.textContent = `${json.msg || "模型已匯入"}（${formatDriveBytes(info.size_bytes || 0)}）`;
@@ -7307,8 +7878,9 @@ async function uploadComfyuiModelFile() {
     });
     setComfyuiMessage(json.msg || "模型已匯入。請重新整理模型清單。", true);
     if (fileInput) fileInput.value = "";
-    await loadComfyuiModels({ forceRefresh: true });
+    await loadComfyuiModels({ forceRefresh: true, operation });
   } catch (err) {
+    if (!comfyuiOperationIsCurrent(operation) || err?.name === "AbortError") return;
     if (status) status.textContent = err.message || "模型上傳失敗";
     setComfyuiModelDownloadProgress({
       visible: true,
@@ -7319,6 +7891,7 @@ async function uploadComfyuiModelFile() {
     });
     setComfyuiMessage(err.message || "模型上傳失敗", false);
   } finally {
+    if (!comfyuiOperationIsCurrent(operation)) return;
     if (button) {
       button.disabled = false;
       button.textContent = "上傳模型檔";
@@ -7342,6 +7915,7 @@ const ComfyUITemplateImporter = (() => {
   let currentToken = null;
   let currentCapability = null;
   let lastFocusedImporterTextInput = null;
+  let closeTimer = null;
 
   function ensureModal() {
     if (modalEl && document.body.contains(modalEl)) return modalEl;
@@ -7386,6 +7960,8 @@ const ComfyUITemplateImporter = (() => {
 
   function openImportModal() {
     ensureModal();
+    if (closeTimer) clearTimeout(closeTimer);
+    closeTimer = null;
     currentToken = null;
     currentCapability = null;
     modalEl.style.display = "block";
@@ -7407,6 +7983,27 @@ const ComfyUITemplateImporter = (() => {
     modalEl.classList.add("hidden");
   }
 
+  function resetAccountState() {
+    if (closeTimer) clearTimeout(closeTimer);
+    closeTimer = null;
+    currentToken = null;
+    currentCapability = null;
+    lastFocusedImporterTextInput = null;
+    if (!modalEl) return;
+    closeImportModal();
+    const fileInput = modalEl.querySelector("#comfyui-template-importer-file");
+    const titleInput = modalEl.querySelector("#comfyui-template-importer-title");
+    const panels = modalEl.querySelector("#comfyui-template-importer-panels");
+    const panelContainer = modalEl.querySelector("#comfyui-template-importer-panel-container");
+    const footer = modalEl.querySelector("#comfyui-template-importer-footer");
+    if (fileInput) fileInput.value = "";
+    if (titleInput) titleInput.value = "";
+    if (panels) panels.style.display = "none";
+    if (panelContainer) panelContainer.replaceChildren();
+    if (footer) footer.style.display = "none";
+    setStatus("");
+  }
+
   function setStatus(text, isError = false) {
     if (!modalEl) return;
     const el = modalEl.querySelector("#comfyui-template-importer-status");
@@ -7418,6 +8015,7 @@ const ComfyUITemplateImporter = (() => {
 
   async function submitTemplatePreview() {
     if (!modalEl) return;
+    const operation = comfyuiOperationContext();
     const fileInput = modalEl.querySelector("#comfyui-template-importer-file");
     const file = fileInput && fileInput.files && fileInput.files[0];
     if (!file) {
@@ -7435,6 +8033,8 @@ const ComfyUITemplateImporter = (() => {
         body: formData,
       });
       const json = await res.json().catch(() => ({}));
+      comfyuiAssertOperationCurrent(operation);
+      if (fileInput.files?.[0] !== file) return;
       if (!res.ok || !json.ok) {
         throw new Error(json.msg || `分析失敗（HTTP ${res.status}）`);
       }
@@ -7443,6 +8043,7 @@ const ComfyUITemplateImporter = (() => {
       renderTemplatePanels(json.ui_schema || {}, json.capability || {});
       setStatus("分析完成；填好欄位後可匯入");
     } catch (err) {
+      if (!comfyuiOperationIsCurrent(operation) || err?.name === "AbortError") return;
       setStatus(err.message || "分析失敗", true);
     }
   }
@@ -7587,6 +8188,10 @@ const ComfyUITemplateImporter = (() => {
       setStatus("title 不可為空", true);
       return;
     }
+    const operation = comfyuiOperationContext();
+    const previewToken = currentToken;
+    const importBtn = modalEl.querySelector("#comfyui-template-importer-import-btn");
+    if (importBtn) importBtn.disabled = true;
     setStatus("匯入中...");
     try {
       await fetchCsrfToken({ force: true });
@@ -7596,22 +8201,39 @@ const ComfyUITemplateImporter = (() => {
           "Content-Type": "application/json",
           "X-CSRF-Token": getCsrfToken() || "",
         },
-        body: JSON.stringify({ preview_token: currentToken, title }),
+        body: JSON.stringify({ preview_token: previewToken, title }),
       });
       const json = await res.json().catch(() => ({}));
+      comfyuiAssertOperationCurrent(operation);
+      if (currentToken !== previewToken) return;
       if (!res.ok || !json.ok) {
         throw new Error(json.msg || `匯入失敗（HTTP ${res.status}）`);
       }
       const bundleId = json.bundle && json.bundle.id ? `，bundle ${json.bundle.id}` : "";
       setStatus(`已建立 preset #${json.preset_id}${bundleId}`);
       currentToken = null;
-      // Refresh the existing preset list if the helper exists.
       if (typeof loadComfyuiWorkflowPresets === "function") {
-        try { loadComfyuiWorkflowPresets(); } catch (_) {}
+        try {
+          await loadComfyuiWorkflowPresets();
+          comfyuiAssertOperationCurrent(operation);
+        } catch (refreshErr) {
+          if (!comfyuiOperationIsCurrent(operation) || refreshErr?.name === "AbortError") return;
+          reportFrontendFailure("comfyui-template-import-preset-refresh", refreshErr);
+          setStatus("preset 已建立，但清單刷新失敗；請重新整理頁面後確認", true);
+          return;
+        }
       }
-      setTimeout(closeImportModal, 1200);
+      closeTimer = setTimeout(() => {
+        closeTimer = null;
+        if (comfyuiOperationIsCurrent(operation)) closeImportModal();
+      }, 1200);
     } catch (err) {
+      if (!comfyuiOperationIsCurrent(operation) || err?.name === "AbortError") return;
       setStatus(err.message || "匯入失敗", true);
+    } finally {
+      if (comfyuiOperationIsCurrent(operation) && importBtn && currentToken === previewToken) {
+        importBtn.disabled = currentCapability?.overall === "UNSUPPORTED";
+      }
     }
   }
 
@@ -7637,5 +8259,7 @@ const ComfyUITemplateImporter = (() => {
     bindButton();
   }
 
-  return { openImportModal, closeImportModal, submitTemplatePreview, submitTemplateImport };
+  return { openImportModal, closeImportModal, resetAccountState, submitTemplatePreview, submitTemplateImport };
 })();
+
+window.resetComfyUITemplateImporterAccountState = () => ComfyUITemplateImporter.resetAccountState();

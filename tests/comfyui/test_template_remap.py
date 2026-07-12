@@ -452,7 +452,7 @@ def test_default_workflow_upload_callback_falls_back_to_runtime_storage(tmp_path
     source = tmp_path / "runtime" / "storage" / "users" / "1" / "abc" / "source.png"
     source.parent.mkdir(parents=True)
     source.write_bytes(b"png-bytes")
-    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HACKME_RUNTIME_DIR", str(tmp_path / "runtime"))
 
     class _CapturingClient:
         def __init__(self):

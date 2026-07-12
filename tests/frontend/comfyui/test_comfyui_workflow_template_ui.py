@@ -324,8 +324,8 @@ def test_template_local_images_are_imported_before_safe_remap_gate():
     assert "cloudFileId: image.cloud_file_id" in comfyui_js
     assert "async function ensureComfyuiTemplateImageAssignments" in workflow_js
     assert ".filter((item) => item.hasLocalFile && item.assetKey)" in workflow_js
-    assert "await importer(assetKey);" in workflow_js
-    assert "await ensureComfyuiTemplateImageAssignments(templateDetail)" in workflow_js
+    assert "await importer(assetKey, operationContext);" in workflow_js
+    assert "await ensureComfyuiTemplateImageAssignments(templateDetail, operation)" in workflow_js
 
 
 def test_official_workflow_template_media_defaults_are_auto_assigned():
@@ -372,16 +372,16 @@ def test_workflow_only_modes_delegate_generate_button_to_selected_template():
 
     assert 'return "圖生影片：先選來源圖片，再在上方 Workflow 模板選擇支援 I2V 的工作流後執行。";' in comfyui_js
     assert "runSelectedComfyuiWorkflowTemplateFromGenerate" in comfyui_js
-    assert "await runSelectedComfyuiWorkflowTemplateFromGenerate(payload.generation_mode);" in comfyui_js
-    assert "function runSelectedComfyuiWorkflowTemplateFromGenerate(mode)" in workflow_js
+    assert "await runSelectedComfyuiWorkflowTemplateFromGenerate(payload.generation_mode, { operation, runToken });" in comfyui_js
+    assert "function runSelectedComfyuiWorkflowTemplateFromGenerate(mode, options = {})" in workflow_js
     assert "function comfyuiWorkflowPresetSupportsMode" in workflow_js
     assert 't2a: "t2s"' in comfyui_js
     assert '["audio", "audios", "music", "song", "songs", "sound", "sounds"]' in workflow_js
     assert "const matches = comfyuiWorkflowPresetsForMode(normalized);" in workflow_js
-    assert "await runComfyuiWorkflowPreset(presetId);" in workflow_js
+    assert "await runComfyuiWorkflowPreset(presetId, { operation, runToken });" in workflow_js
     assert "select.focus();" in workflow_js
     assert "const selectedTemplateId = Number(comfyuiSelectedTemplatePresetId || $(\"comfyui-template-select\")?.value || 0);" in comfyui_js
-    assert "await runSelectedComfyuiWorkflowTemplateFromGenerate(payload.generation_mode);" in comfyui_js
+    assert "await runSelectedComfyuiWorkflowTemplateFromGenerate(payload.generation_mode, { operation, runToken });" in comfyui_js
 
 
 def test_generation_mode_dropdown_is_hidden_and_system_inferred():

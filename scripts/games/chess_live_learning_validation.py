@@ -18743,8 +18743,18 @@ def main() -> int:
     skip_autorun_promote = bool(args.fast_retrain or args.skip_autorun_promote or skip_autorun_benchmark)
     skip_retrain_benchmark_snapshots = bool(args.fast_retrain or args.skip_retrain_benchmark_snapshots)
     stamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
-    output_root = Path(args.output_root).expanduser().resolve() if args.output_root else (Path("/tmp") / f"chess_live_learning_validation_{stamp}")
-    output_root.mkdir(parents=True, exist_ok=True)
+    output_root = (
+        Path(args.output_root).expanduser().resolve()
+        if args.output_root
+        else Path("/tmp") / f"chess_live_learning_validation_{stamp}_{os.getpid()}"
+    )
+    if not output_root.is_relative_to(Path("/tmp")):
+        _progress("FAIL: --output-root must resolve below /tmp")
+        return 2
+    if output_root.exists() or output_root.is_symlink():
+        _progress(f"FAIL: --output-root must be a new path: {output_root}")
+        return 2
+    output_root.mkdir(parents=True, exist_ok=False)
     runtime_root = output_root / "_runtime"
     runtime_root.mkdir(parents=True, exist_ok=True)
     _progress(f"output root: {output_root}")

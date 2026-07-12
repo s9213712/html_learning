@@ -157,7 +157,7 @@ def test_training_session_updates_runtime_db_and_nn_model(tmp_path, monkeypatch)
     assert Path(reports["md_report"]).exists()
 
 
-def test_games_runtime_defaults_use_repo_runtime(monkeypatch):
+def test_games_runtime_defaults_share_external_runtime(monkeypatch):
     monkeypatch.delenv("HACKME_RUNTIME_DIR", raising=False)
     monkeypatch.delenv("HTML_LEARNING_DB_DIR", raising=False)
     monkeypatch.delenv("HTML_LEARNING_CHESS_ENGINE_DB_PATH", raising=False)

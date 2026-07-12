@@ -49,6 +49,8 @@ def test_global_ui_polish_feedback_is_wired():
     assert ".btn.loading" in styles_css
     assert ".field:focus-within label" in styles_css
     assert "prefers-reduced-motion: reduce" in styles_css
+    assert "#module-drive .drive-breadcrumb button" in styles_css
+    assert "overflow-wrap: anywhere;" in styles_css
 
 
 def test_status_messages_do_not_create_duplicate_button_feedback():
@@ -72,6 +74,60 @@ def test_status_messages_do_not_create_duplicate_button_feedback():
 
     assert "function showCopyLinkFeedback" in core_js
     assert 'showCopyLinkFeedback(button, "已完成複製", true)' in all_js
+
+
+def test_api_fetch_retries_only_explicit_pre_handler_backpressure():
+    core_js = (ROOT / "public" / "js" / "00-core.js").read_text(encoding="utf-8")
+    drive_js = (ROOT / "public" / "js" / "35-drive.js").read_text(encoding="utf-8")
+
+    assert 'response.headers?.get?.("X-Hackme-Backpressure-Rejected") === "1"' in core_js
+    assert 'payload?.error === "server_busy"' in core_js
+    assert "const maxAttempts = isReplayableFetchBody(opts.body) ? 3 : 1;" in core_js
+    assert "serverBusyRetryDelayMs(response, responsePayload)" in core_js
+    assert 'response.headers?.get?.("X-Hackme-Backpressure") || body?.error' not in core_js
+    assert 'result?.backpressure_rejected === "1" && result?.json?.error === "server_busy"' in drive_js
+
+
+def test_background_frontend_failures_are_bounded_redacted_and_observable():
+    core_js = (ROOT / "public" / "js" / "00-core.js").read_text(encoding="utf-8")
+    critical_files = {
+        "comfyui": (ROOT / "public" / "js" / "36-comfyui.js").read_text(encoding="utf-8"),
+        "workflows": (ROOT / "public" / "js" / "36-comfyui-workflows.js").read_text(encoding="utf-8"),
+        "trading": (ROOT / "public" / "js" / "56-trading-bots.js").read_text(encoding="utf-8"),
+        "root": (ROOT / "public" / "js" / "01-root-quick-settings.js").read_text(encoding="utf-8"),
+        "fps": (ROOT / "public" / "js" / "38-fps-arena.js").read_text(encoding="utf-8"),
+        "stickman": (ROOT / "public" / "js" / "games" / "stickman-shooter.js").read_text(encoding="utf-8"),
+        "drive": (ROOT / "public" / "js" / "35-drive.js").read_text(encoding="utf-8"),
+        "games": (ROOT / "public" / "js" / "38-games.js").read_text(encoding="utf-8"),
+        "agent": (ROOT / "public" / "js" / "37-ai-agent.js").read_text(encoding="utf-8"),
+        "admin": (ROOT / "public" / "js" / "50-admin.js").read_text(encoding="utf-8"),
+    }
+
+    assert "const FRONTEND_FAILURE_BUFFER_LIMIT = 100;" in core_js
+    assert "function reportFrontendFailure" in core_js
+    assert "redactFrontendFailureText" in core_js
+    assert "hackme:frontend-failure" in core_js
+    assert "window.__hackmeFrontendFailures" in core_js
+    assert "token|key|password|secret|signature" in core_js
+    assert "interruptRequest.catch(() => {})" not in critical_files["comfyui"]
+    assert "}).catch(() => {});" not in critical_files["workflows"]
+    assert "loadEconomyDashboard().catch(() => {})" not in critical_files["trading"]
+    assert "refreshComfyuiStatus({ switchAway: false }).catch(() => {})" not in critical_files["root"]
+    assert "start?.(multiplayerRoom.id).catch(() => {})" not in critical_files["fps"]
+    assert "start?.(multiplayerRoom.id).catch(() => {})" not in critical_files["stickman"]
+    assert "try { await restoreResumableUploadSessions(); } catch (_) {}" not in critical_files["drive"]
+    assert "await loadChessRootDashboard().catch(() => {});" not in critical_files["games"]
+    assert 'reportFrontendFailure("game-multiplayer-invite-poll", err)' in critical_files["games"]
+    assert 'reportFrontendFailure("game-multiplayer-invite-refresh", refreshErr)' in critical_files["games"]
+    assert '}).catch(() => undefined);' not in critical_files["agent"].split("function clearAiAgentConversation", 1)[1].split("function handleAiAgentAccountContextChanged", 1)[0]
+    assert "async function clearAiAgentConversation()" in critical_files["agent"]
+    assert 'reportFrontendFailure("ai-agent-conversation-load", err)' in critical_files["agent"]
+    assert 'reportFrontendFailure("ai-agent-conversation-persist", new Error(message))' in critical_files["agent"]
+    assert 'reportFrontendFailure("ai-agent-write-tools-load", err)' in critical_files["agent"]
+    assert 'reportFrontendFailure("ai-agent-readonly-load", err)' in critical_files["agent"]
+    assert 'reportFrontendFailure("ai-agent-models-load", err)' in critical_files["agent"]
+    assert 'reportFrontendFailure("root-backpressure-traffic-poll", err)' in critical_files["admin"]
+    assert 'reportFrontendFailure("admin-settings-auth-ui-refresh", err)' in critical_files["admin"]
 
 
 def test_privileged_surfaces_are_hidden_in_initial_markup_and_revealed_by_role():

@@ -79,12 +79,13 @@ the main sidebar "Profile" panel instead of creating a second relationship
 store. Friend-only interactions must be checked server-side:
 
 - non-friends cannot send PMs or create private group chats
-- game invites and direct strict-E2EE file-key sharing still need the same
-  backend friend-gate before they are considered complete
+- game invites and direct strict-E2EE file-key sharing enforce accepted
+  friendship on the backend; direct API calls by non-friends are rejected
 - friend-code joins create an accepted relationship without a second approval
 - root and manager can view all profiles and may PM non-friends for management
   purposes, but they still appear in friend lists and must be sorted to the top
-  with a clear official/admin marker
+  with a clear official/admin marker; that PM exception does not extend to game
+  invites or private cloud-drive key sharing
 
 The formal requirement is tracked in
 [USER_PROFILES_AND_FRIENDS.md](social/USER_PROFILES_AND_FRIENDS.md).

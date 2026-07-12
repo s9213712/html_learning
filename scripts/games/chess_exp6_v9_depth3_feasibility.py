@@ -27,8 +27,9 @@ if str(ROOT) not in sys.path:
 from services.games.chess_neural import NeuralEvaluator, load_weights  # noqa: E402
 from services.games.chess_search import ZobristHasher, search_best_move  # noqa: E402
 from services.games.chess_exp6 import _move_order_score, _SEARCH_PROFILES  # noqa: E402
+from scripts.games.common_paths import exp6_artifacts_root, runtime_model_path  # noqa: E402
 
-CHAMPION_PATH = ROOT / "runtime/games/models/chess_experiment_6_neural.npz"
+CHAMPION_PATH = runtime_model_path("chess_experiment_6_neural.npz")
 
 
 def benchmark_one_position(weights, board: chess.Board, profile_name: str) -> float:
@@ -161,7 +162,7 @@ def main() -> int:
         print(f"    d3 median: {mg_d3:.0f} ms")
         print(f"    d3 ratio:  {mg_d3/mg_d2:.1f}x")
 
-    out_path = Path.home() / "exp6_output/v9_5_depth3_feasibility.json"
+    out_path = exp6_artifacts_root() / "v9_5_depth3_feasibility.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps({
         "per_position": results,

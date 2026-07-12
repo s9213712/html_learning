@@ -51,6 +51,7 @@ from services.games.chess_neural import (  # noqa: E402
     load_weights, make_initial_weights, save_weights,
     static_baseline_cp_white,
 )
+from scripts.games.common_paths import exp6_artifacts_root, exp6_private_dir  # noqa: E402
 
 sys.path.insert(0, str(ROOT / "scripts/games"))
 import chess_exp6_curriculum as cc  # noqa: E402
@@ -73,11 +74,11 @@ SEED = 20260518
 K_NEGATIVES = 3                  # alternative legal moves sampled per position
 RANK_TEMPERATURE = 0.5           # logistic ranking softness in value space
 
-PLAYED_MOVES_PATH = ROOT / "runtime/private/games/exp6/played_moves.jsonl"
+PLAYED_MOVES_PATH = exp6_private_dir() / "played_moves.jsonl"
 # v9.3 override targets — pass via --labels / --played-moves at runtime.
-PERSISTENT_DIR = Path.home() / "exp6_output"
-SNAPSHOTS_DIR = PERSISTENT_DIR / "v7_3_snapshots"
-REPORT_JSON = PERSISTENT_DIR / "v7_3_report.json"
+PERSISTENT_DIR = exp6_artifacts_root() / "v7_3"
+SNAPSHOTS_DIR = PERSISTENT_DIR / "snapshots"
+REPORT_JSON = PERSISTENT_DIR / "report.json"
 
 
 def _value_target_from_cp_white(cp_white: float, stm_is_white: bool) -> float:
@@ -549,7 +550,7 @@ def train_loop(weights: NeuralWeights, train_data: dict, dev_data: dict, *,
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--seed-weights", type=Path,
-                    default=Path.home() / "exp6_output/v6_2_snapshots/chess_experiment_6_neural_stage02.npz")
+                    default=exp6_artifacts_root() / "curriculum" / "snapshots" / "chess_experiment_6_neural_stage02.npz")
     ap.add_argument("--epochs", type=int, default=EPOCHS)
     ap.add_argument("--lr", type=float, default=LR)
     ap.add_argument("--batch-size", type=int, default=BATCH_SIZE)

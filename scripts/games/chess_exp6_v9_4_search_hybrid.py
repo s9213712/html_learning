@@ -8,7 +8,7 @@ depth-3 hybrid (triggered when piece_count <= EXP6_HYBRID_PIECE_THRESHOLD).
 For each (weights, hybrid) combo: run staged-10 vs Stockfish 1-5
 (2 games per depth, alternating colors).
 
-Output: ~/exp6_output/v9_4_search_hybrid.json + console table.
+Output: external test artifact directory plus console table.
 
 Important: env var EXP6_HYBRID_ENDGAME_D3 is set BEFORE importing
 the curriculum module so chess_exp6._resolve_search_profile picks
@@ -23,10 +23,16 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.games.common_paths import exp6_artifacts_root  # noqa: E402
+
+EXP6_ARTIFACTS = exp6_artifacts_root()
 
 WEIGHT_SETS = {
-    "v6_2_S2": ROOT / "../exp6_output/v6_2_snapshots/chess_experiment_6_neural_stage02.npz",
-    "v9_3": Path.home() / "exp6_output/v7_3_snapshots/v9_3_best.npz",
+    "v6_2_S2": EXP6_ARTIFACTS / "curriculum" / "snapshots" / "chess_experiment_6_neural_stage02.npz",
+    "v9_3": EXP6_ARTIFACTS / "v7_3" / "snapshots" / "v9_3_best.npz",
 }
 # We treat hybrid-on as a SEPARATE Python subprocess so its env var
 # is clean. The subprocess just loads weights and runs staged-10.
@@ -98,7 +104,7 @@ def main() -> int:
                 for d, bd in sorted(r['by_depth'].items()):
                     print(f"    SF d{d}: {bd['W']}W/{bd['D']}D/{bd['L']}L  score={bd['score']:+d}")
 
-    out_path = Path.home() / "exp6_output/v9_4_search_hybrid.json"
+    out_path = EXP6_ARTIFACTS / "v9_4_search_hybrid.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(results, indent=2))
 

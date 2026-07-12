@@ -20,7 +20,7 @@ Related technical references:
 
 ## Release and Schema
 
-- Release ID: `05_2026.07.10-001`
+- Release ID: `05_2026.07.12-002`
 - Schema version: `30`
 - Release ID source: `services/platform/release_info.py`
 - Runtime version endpoint: `GET /api/version`
@@ -150,9 +150,9 @@ Social / friends note:
 - PM and private-group chat targeting now enforce accepted friendship or an
   explicit root / manager exception on the backend. Hiding buttons in the UI is
   not a security boundary.
-- Game invites and direct strict-E2EE file-key sharing are still documented
-  follow-up gaps: they must be patched to call the same target-context service
-  before being treated as fully friend-gated.
+- Game invites and direct strict-E2EE file-key sharing call the same backend
+  target-context service. Non-friend API calls are rejected; the PM management
+  exception does not extend to these private interactions.
 
 Trading registry note:
 
@@ -223,16 +223,16 @@ Server Mode v2 note:
 
 ```bash
 python3 -m pip install -r requirements-minimal.txt -r requirements-dev.txt
-python3 server.py --doctor
+HACKME_RUNTIME_DIR=/tmp/hackme_web_doctor_runtime python3 server.py --doctor
 ./test_for_develop.sh --port 50785
 ```
 
 Canonical local workflow:
 
 ```text
-repo root:
-  python3 server.py --doctor
-  python3 server.py
+direct source launch with external runtime:
+  HACKME_RUNTIME_DIR=/absolute/external/runtime python3 server.py --doctor
+  HACKME_RUNTIME_DIR=/absolute/external/runtime python3 server.py
 
 daily development:
   ./test_for_develop.sh --port <free_port>
@@ -287,9 +287,10 @@ UX degradation、application limit、server instability 或 hard failure 停止�
 風控級價格用途開關整體封死。
 
 If `runtime/cert.pem` and `runtime/key.pem` are missing, startup generates a
-local self-signed certificate/key pair for local development. Runtime DB, logs,
-storage, secrets, and integrity files default to `runtime/` under the current
-runtime root. These deployment-local runtime files must not be committed.
+Direct local launch creates a self-signed certificate/key pair in the selected
+external runtime. If `HACKME_RUNTIME_DIR` is omitted, the fallback is
+`$XDG_STATE_HOME/hackme_web` or `~/.local/state/hackme_web`, never the checkout.
+Deployment-local runtime files must not be committed.
 
 ## Runtime State
 
@@ -298,16 +299,16 @@ generated at boot and must not be committed.
 
 Ignored runtime state includes:
 
-- `runtime/database/database.db`
-- `runtime/logs/`
-- `runtime/storage/`
-- `runtime/chats/*.jsonl`
-- `runtime/anchors/*.json` and `runtime/anchors/*.jsonl`
-- `runtime/.fkey`, `runtime/.filekey`, `runtime/.csrfkey`, `runtime/.integrity_key`, `runtime/.chain_seed`
-- `runtime/cert.pem`, `runtime/key.pem`
-- `runtime/integrity_manifest.json`
-- `runtime/reports/bugs/`
-- `runtime/reports/security/`
+- `$HACKME_RUNTIME_DIR/database/database.db`
+- `$HACKME_RUNTIME_DIR/logs/`
+- `$HACKME_RUNTIME_DIR/storage/`
+- `$HACKME_RUNTIME_DIR/chats/*.jsonl`
+- `$HACKME_RUNTIME_DIR/anchors/*.json` and `$HACKME_RUNTIME_DIR/anchors/*.jsonl`
+- `$HACKME_RUNTIME_DIR/.fkey`, `.filekey`, `.csrfkey`, `.integrity_key`, `.chain_seed`
+- `$HACKME_RUNTIME_DIR/cert.pem`, `key.pem`
+- `$HACKME_RUNTIME_DIR/integrity_manifest.json`
+- `$HACKME_RUNTIME_DIR/reports/bugs/`
+- Production-gate evidence under `$HACKME_RUNTIME_DIR/reports/security/`; standalone QA evidence under `/tmp/hackme_web_test_artifacts/`.
 
 Override paths with:
 
@@ -639,6 +640,7 @@ Server-encrypted preview/download note:
 - `GET /api/storage/trash`
 - `GET /api/storage/albums`
 - `POST /api/storage/albums`
+- `POST /api/storage/albums/batch-share` (atomic create + membership + share link)
 - `GET /api/storage/albums/{id}`
 - `PUT /api/storage/albums/{id}`
 - `DELETE /api/storage/albums/{id}`

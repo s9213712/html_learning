@@ -26,6 +26,7 @@ if str(ROOT) not in sys.path:
 
 from scripts.security.common_paths import REPO_ROOT as ROOT, security_reports_root
 DEFAULT_TIMEOUT = 240
+DEFAULT_FULL_PYTEST_TIMEOUT = 7200
 HARD_FAIL_SEVERITIES = {"CRITICAL", "HIGH"}
 
 
@@ -64,6 +65,14 @@ def tail(text: str, limit: int = 3000) -> str:
     return (text or "")[-limit:]
 
 
+def redacted_command(command: list[str]) -> list[str]:
+    redacted = list(command)
+    for index, value in enumerate(redacted[:-1]):
+        if value in {"--password", "--root-password", "--manager-password"}:
+            redacted[index + 1] = "<REDACTED>"
+    return redacted
+
+
 def run_command(command: list[str], *, timeout: int, env: dict | None = None) -> Subcheck:
     started = time.perf_counter()
     merged_env = os.environ.copy()
@@ -81,11 +90,12 @@ def run_command(command: list[str], *, timeout: int, env: dict | None = None) ->
             timeout=timeout,
         )
         duration_ms = int((time.perf_counter() - started) * 1000)
+        safe_command = redacted_command(command)
         return Subcheck(
-            name=" ".join(command),
+            name=" ".join(safe_command),
             status="PASS" if proc.returncode == 0 else "FAIL",
             severity="CRITICAL" if proc.returncode != 0 else "LOW",
-            command=command,
+            command=safe_command,
             duration_ms=duration_ms,
             exit_code=proc.returncode,
             stdout_tail=tail(proc.stdout),
@@ -93,11 +103,12 @@ def run_command(command: list[str], *, timeout: int, env: dict | None = None) ->
         )
     except subprocess.TimeoutExpired as exc:
         duration_ms = int((time.perf_counter() - started) * 1000)
+        safe_command = redacted_command(command)
         return Subcheck(
-            name=" ".join(command),
+            name=" ".join(safe_command),
             status="FAIL",
             severity="HIGH",
-            command=command,
+            command=safe_command,
             duration_ms=duration_ms,
             exit_code=None,
             stdout_tail=tail(exc.stdout if isinstance(exc.stdout, str) else ""),
@@ -335,36 +346,59 @@ def build_modules(args) -> list[ModuleResult]:
     trading.add(grid_ui_check())
     trading.add(workflow_bot_ui_check())
     if args.base_url:
-        trading.add(run_command([
-            sys.executable, str(ROOT / "scripts" / "security" / "pentest" / "trading_stress_pentest.py"),
-            "--base-url", args.base_url,
-            "--mode", "functional_correctness",
-            "--users", "2",
-            "--orders-per-user", "5",
-            "--concurrency", "2",
-            "--rate", "10",
-            "--out", str(out_dir),
-        ], timeout=max(args.timeout, 360)))
+        if not args.root_password:
+            trading.add(static_check(
+                "live trading gate credentials configured",
+                False,
+                severity="HIGH",
+                followup="Set WHOLE_SITE_ROOT_PASSWORD before running live production checks.",
+            ))
+        else:
+            trading.add(run_command(
+                [
+                    sys.executable, str(ROOT / "scripts" / "security" / "pentest" / "trading_stress_pentest.py"),
+                    "--base-url", args.base_url,
+                    "--mode", "functional_correctness",
+                    "--users", "2",
+                    "--orders-per-user", "5",
+                    "--concurrency", "2",
+                    "--rate", "10",
+                    "--out", str(out_dir),
+                ],
+                timeout=max(args.timeout, 360),
+                env={"PENTEST_ROOT_PASSWORD": args.root_password},
+            ))
     modules.append(trading)
 
     comfyui = ModuleResult("J. ComfyUI Local Connection")
     comfyui_args_present = bool(args.comfyui_local_base_dir and args.comfyui_local_script)
     if args.base_url and comfyui_args_present:
-        command = [
-            sys.executable, str(ROOT / "scripts" / "comfyui" / "local_connection_smoke.py"),
-            "--base-url", args.base_url,
-            "--username", args.root_username,
-            "--password", args.root_password,
-            "--comfyui-base-dir", args.comfyui_local_base_dir,
-            "--comfyui-local-script", args.comfyui_local_script,
-            "--comfyui-api-host", args.comfyui_api_host,
-            "--comfyui-api-port", str(args.comfyui_api_port),
-            "--out-json", str(out_dir / "whole_site_comfyui_local_connection_smoke.json"),
-            "--out-md", str(out_dir / "whole_site_comfyui_local_connection_smoke.md"),
-        ]
-        if str(args.base_url).startswith("https://"):
-            command.append("--insecure")
-        comfyui.add(run_command(command, timeout=max(args.timeout, 240)))
+        if not args.root_password:
+            comfyui.add(static_check(
+                "ComfyUI local connection credentials configured",
+                False,
+                severity="HIGH",
+                followup="Set WHOLE_SITE_ROOT_PASSWORD before running the ComfyUI production check.",
+            ))
+        else:
+            command = [
+                sys.executable, str(ROOT / "scripts" / "comfyui" / "local_connection_smoke.py"),
+                "--base-url", args.base_url,
+                "--username", args.root_username,
+                "--comfyui-base-dir", args.comfyui_local_base_dir,
+                "--comfyui-local-script", args.comfyui_local_script,
+                "--comfyui-api-host", args.comfyui_api_host,
+                "--comfyui-api-port", str(args.comfyui_api_port),
+                "--out-json", str(out_dir / "whole_site_comfyui_local_connection_smoke.json"),
+                "--out-md", str(out_dir / "whole_site_comfyui_local_connection_smoke.md"),
+            ]
+            if str(args.base_url).startswith("https://"):
+                command.append("--insecure")
+            comfyui.add(run_command(
+                command,
+                timeout=max(args.timeout, 240),
+                env={"HACKME_ROOT_PASSWORD": args.root_password},
+            ))
     else:
         comfyui.add(static_check(
             "optional ComfyUI local connection smoke not configured",
@@ -429,7 +463,10 @@ def build_modules(args) -> list[ModuleResult]:
     full_suite.add(git_diff_check())
     full_suite.add(reports_output_policy_check())
     if not args.skip_full_pytest:
-        full_suite.add(run_command([str(ROOT / "scripts" / "testing" / "pytest_in_tmp.sh"), "-q", "tests"], timeout=max(args.timeout, 900)))
+        full_suite.add(run_command(
+            [str(ROOT / "scripts" / "testing" / "pytest_in_tmp.sh"), "-q", "tests"],
+            timeout=max(args.timeout, args.full_pytest_timeout),
+        ))
     else:
         full_suite.add(static_check(
             "pytest full suite explicitly skipped",
@@ -561,8 +598,18 @@ def parse_args():
     parser.add_argument("--base-url", default=os.environ.get("WHOLE_SITE_GATE_BASE_URL", "http://127.0.0.1:5000"))
     parser.add_argument("--out", default=str(security_reports_root()))
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
+    parser.add_argument(
+        "--full-pytest-timeout",
+        type=int,
+        default=int(os.environ.get("WHOLE_SITE_FULL_PYTEST_TIMEOUT", DEFAULT_FULL_PYTEST_TIMEOUT)),
+        help="Timeout for the complete pytest suite; kept separate from individual module checks.",
+    )
     parser.add_argument("--root-username", default=os.environ.get("WHOLE_SITE_ROOT_USERNAME", "root"))
-    parser.add_argument("--root-password", default=os.environ.get("WHOLE_SITE_ROOT_PASSWORD") or os.environ.get("ROOT_PASSWORD", "root"))
+    parser.add_argument(
+        "--root-password",
+        default=os.environ.get("WHOLE_SITE_ROOT_PASSWORD") or os.environ.get("HACKME_ROOT_PASSWORD", ""),
+        help="Root password for live probes. Prefer WHOLE_SITE_ROOT_PASSWORD over a command-line value.",
+    )
     parser.add_argument("--functional-smoke-port", type=int, default=50741)
     parser.add_argument("--stress-requests", type=int, default=60)
     parser.add_argument("--stress-concurrency", type=int, default=10)

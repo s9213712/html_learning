@@ -28,6 +28,40 @@ scripts/testing/pytest_in_tmp.sh
 
 用途：標準 pytest 入口。
 
+### `testing/operational_soak_probe.py`
+
+```text
+scripts/testing/operational_soak_probe.py
+  -> 建立並驗證多個真實 member accounts
+  -> system_stress_probe.py (deterministic full-operation rotation)
+  -> points_chain_destructive_stress.py (concurrent economy pressure)
+  -> root / manager HTTP sentinels
+  -> playwright_deep_site_check.py (desktop + mobile browser rotation)
+  -> atomic checkpoint + harness SHA-256 drift guard + server PID RSS evidence
+  -> /tmp/<runtime>/reports/operational_soak/*
+```
+
+用途：至少八小時的多帳號同步營運模擬；短版 smoke 不具上線簽核資格。密碼由
+`HACKME_SOAK_*` 環境變數提供，不應放在命令列或程序列表。
+
+### `testing/operational_campaign_24h.py`
+
+```text
+scripts/testing/operational_campaign_24h.py
+  -> test_for_develop.sh (primary + recovery, isolated /tmp runtimes)
+  -> operational_soak_probe.py (continuous primary pressure)
+  -> long-video upload + prepared HLS + share/revoke + desktop/mobile seek
+  -> AI Agent / trading / PointsChain attack and governance scenarios
+  -> recovery target snapshot + CLI archive + restore + restart drills
+  -> realtime proxy + cross-browser media probes
+  -> resource JSONL + server log/DB-lock + secret + source-drift checks
+  -> /tmp/<campaign>/reports/operational_campaign_24h.{json,md}
+```
+
+用途：上線前至少 86,400 秒「實際活動時間」的雙目標全功能高壓驗收。授權等待不計時，
+`--allow-short-duration` 只驗 harness，永遠不具 production sign-off 資格。完整矩陣見
+[../docs/AGENTS/24H_OPERATIONAL_CAMPAIGN.md](../docs/AGENTS/24H_OPERATIONAL_CAMPAIGN.md)。
+
 ### `prepush/pre_push_checks.py`
 
 ```text

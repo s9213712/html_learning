@@ -1,10 +1,44 @@
+import argparse
 from pathlib import Path
 
-from scripts.testing.playwright_deep_site_check import is_recoverable_network_cascade
+import pytest
+
+from scripts.testing.playwright_deep_site_check import (
+    env_int,
+    is_recoverable_network_cascade,
+    require_external_server_credentials,
+)
 from scripts.testing.playwright_platform_health_check import ignored_browser_error
 
 
 ROOT = Path(__file__).resolve().parents[3]
+
+
+def test_deep_playwright_external_server_requires_environment_credentials(monkeypatch):
+    names = (
+        "PLAYWRIGHT_ROOT_PASSWORD",
+        "PLAYWRIGHT_MANAGER_PASSWORD",
+        "PLAYWRIGHT_TEST_PASSWORD",
+    )
+    for name in names:
+        monkeypatch.delenv(name, raising=False)
+    parser = argparse.ArgumentParser()
+
+    with pytest.raises(SystemExit) as exc:
+        require_external_server_credentials(parser, "https://127.0.0.1:5000")  # ci-safety: fixture-only
+
+    assert exc.value.code == 2
+
+    for name in names:
+        monkeypatch.setenv(name, f"{name}-secret")
+    require_external_server_credentials(parser, "https://127.0.0.1:5000")  # ci-safety: fixture-only
+
+
+def test_deep_playwright_env_int_keeps_invalid_values_optional(monkeypatch):
+    monkeypatch.setenv("PLAYWRIGHT_TEST_INTEGER", "31")
+    assert env_int("PLAYWRIGHT_TEST_INTEGER") == 31
+    monkeypatch.setenv("PLAYWRIGHT_TEST_INTEGER", "invalid")
+    assert env_int("PLAYWRIGHT_TEST_INTEGER") is None
 
 
 def test_playwright_acceptance_runner_uses_isolated_runtime_and_expected_checks():
@@ -19,6 +53,10 @@ def test_playwright_acceptance_runner_uses_isolated_runtime_and_expected_checks(
     assert "--runtime-root \"${RUNTIME_BASE}/deep_attempt_${attempt}\"" in text
     assert "RUN_DEEP_PLAYWRIGHT" in text
     assert "HTML_LEARNING_PORT=5000" not in text
+    assert "AUTO_RUNTIME_BASE=1" in text
+    assert '"${AUTO_RUNTIME_BASE}" == "1"' in text
+    assert "caller-selected runtime base must not already exist" in text
+    assert "PLAYWRIGHT_RUNTIME_BASE must resolve below /tmp" in text
 
 
 def test_playwright_qa_workflow_template_installs_browser_and_runs_runner():
@@ -124,6 +162,10 @@ def test_deep_playwright_only_downgrades_correlated_recovered_network_cascades()
     assert '"browser_warnings": browser_warnings' in script
     assert "def goto_with_network_retry" in script
     assert 'goto_with_network_retry(anon_page, base_url + "/comfyui-workflow-editor.html")' in script
+    assert "controlled server backpressure" in script
+    assert 'headers.get("x-hackme-backpressure-rejected") == "1"' in script
+    assert "click_wait_recovered" in script
+    assert 'health = fetch_json_get_retry(page, "/api/admin/health")' in script
 
 
 def test_deep_playwright_sets_up_admin_state_before_loading_full_app():
@@ -137,6 +179,33 @@ def test_deep_playwright_sets_up_admin_state_before_loading_full_app():
     assert 'rec.guard("load_authenticated_app", lambda: load_authenticated_app(page, base_url))' in script
 
 
+def test_deep_playwright_reuses_isolated_server_and_checks_all_mobile_module_tabs():
+    script = (ROOT / "scripts" / "testing" / "playwright_deep_site_check.py").read_text(encoding="utf-8")
+
+    assert 'parser.add_argument("--base-url"' in script
+    assert "urlopen_json(base_url + \"/api/version\"" in script
+    assert "server = start_server(runtime_root, port) if not args.base_url else None" in script
+    assert '{"width": 360, "height": 800}' in script
+    assert '{"width": 390, "height": 844}' in script
+    assert '{"width": 768, "height": 1024}' in script
+    assert "control outside viewport" in script
+    assert "drain_frontend_failures(page)" in script
+    assert "main_frontend_failure_buffer" in script
+    assert '"#module-main-tabs > .tab[id^=\'tab-module-\']"' in script
+    assert 'role_label="member"' in script
+    assert '"module_tabs_member_mobile_390x844"' in script
+    assert "def check_account_context_isolation_journey(" in script
+    assert '"account_context_isolation_journey"' in script
+    assert '"account_context_cross_user_isolation"' in script
+    assert 'error_collector.register(member_mobile_page, "module-tabs-member-mobile-390x844")' in script
+    assert "record_browser_error" not in script
+    assert "record_browser_warning" not in script
+    assert '"ai_agent_root_launch_preflight_dry_run"' in script
+    assert 'bulk_dir = f"/QA/bulk-{stamp}"' in script
+    assert 'plain_name = f"plain-note-{stamp}.txt"' in script
+    assert 'f"ai-agent-user-live-qa-{user_file_stamp}.txt"' in script
+
+
 def test_deep_playwright_browser_fetches_are_bounded_and_traceable():
     script = (ROOT / "scripts" / "testing" / "playwright_deep_site_check.py").read_text(encoding="utf-8")
 
@@ -144,6 +213,9 @@ def test_deep_playwright_browser_fetches_are_bounded_and_traceable():
     assert "new AbortController()" in script
     assert 'print(f"[INFO] api_surface: {endpoint}", flush=True)' in script
     assert "fetch_error" in script
+    assert "result.status === 503 && result.backpressureRejected" in script
+    assert "x-hackme-backpressure-rejected" in script
+    assert "backpressure_attempts" in script
 
 
 def test_deep_playwright_api_surface_uses_direct_session_http():

@@ -85,7 +85,9 @@ governance recovery 與 bridge invariant；產品 flow 未完成 walletize 的�
 - 前端餘額顯示與後端不一致：
   先跑 chain verify，再看是否需要 recovery。
 - 想用 server snapshot restore 修好 PointsChain：
-  不一定對；若只有經濟鏈壞掉，先評估 safe mode、forensic bundle、分支與緊急治理。
+  不可行；snapshot 可封存 `finance/points_chain/trading` 供 forensic，但 restore 會以
+  `append_only_financial_restore_disabled` 明確略過 live 金融 DB。若只有經濟鏈壞掉，
+  走 safe mode、forensic bundle、分支、緊急治理與 append-only correction。
 - chain verify fail：
   應建立 forensic / branch / governance plan，而不是硬覆蓋 live ledger。
 - root 以為自己交易也會寫 PointsChain：
@@ -102,6 +104,7 @@ governance recovery 與 bridge invariant；產品 flow 未完成 walletize 的�
 
 ## 相關文件連結
 
+- [BLOCKCHAIN/README.md](BLOCKCHAIN/README.md)
 - [08_TRADING_ENGINE.md](08_TRADING_ENGINE.md)
 - [09_SNAPSHOT_RESET_RESTORE.md](09_SNAPSHOT_RESET_RESTORE.md)
 - [10_BLOCKCHAIN_WALLETIZATION_PREWORK_PLAN.md](10_BLOCKCHAIN_WALLETIZATION_PREWORK_PLAN.md)

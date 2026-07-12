@@ -49,6 +49,12 @@ Audit export:
 Snapshot and restore:
 
 - [ ] Restore rolls back database state.
+- [ ] Snapshot/archive contains forensic copies of `finance`, `points_chain`,
+  and `trading`, but restore reports them as
+  `append_only_financial_restore_disabled` and does not overwrite live state.
+- [ ] CLI runtime restore preserves the current live financial DBs, chain seed,
+  and storage payloads; a target with no live ledger refuses financial archive
+  replay and uses governed recovery instead.
 - [ ] Restore does not roll back protected mode switch logs.
 - [ ] Restore failure enters `incident_lockdown`.
 - [ ] Post-restore validation checks DB, PointsChain, Cloud Drive metadata, and
@@ -108,6 +114,7 @@ Incident lockdown:
   - snapshot_restore
   - points_chain_consistency
   - cloud_drive_quota_permission
+  - ai_agent_boundary
 - [ ] Report hash uses `sha256:<64 hex>`.
 - [ ] Report includes target commit, target branch, server mode, test result,
   tester, and signature.
@@ -117,16 +124,16 @@ Incident lockdown:
 
 ## Required Test Evidence
 
-- [ ] `security/server_mode_v2_clean_smoke.py` passes.
-- [ ] `security/server_mode_v2_adversarial.py` passes.
+- [ ] `scripts/security/server_mode/server_mode_v2_clean_smoke.py` passes.
+- [ ] `scripts/security/server_mode/server_mode_v2_adversarial.py` passes.
 - [ ] Adversarial report includes payloads, state snapshots, expected/actual,
   hash-chain evidence, restore evidence, and lockdown evidence.
 - [ ] Relevant pytest suite passes.
 - [ ] `git diff --check` passes.
 - [ ] Secret scan passes.
-- [ ] `security/server_mode_v2_redteam_l2.py` passes with
+- [ ] `scripts/security/server_mode/server_mode_v2_redteam_l2.py` passes with
   `production_readiness: YES`.
-- [ ] `security/server_mode_v2_live_http_smoke.py` passes with
+- [ ] `scripts/security/server_mode/server_mode_v2_live_http_smoke.py` passes with
   `production_readiness: YES`.
 - [ ] Live HTTP smoke evidence includes real HTTP CSRF/session login, tester
   token traversal requests against live routes, true SIGKILL superweak
@@ -135,6 +142,33 @@ Incident lockdown:
 - [ ] Off-host append-only log replication / filesystem-level immutable storage
   is either verified in the deployment environment or explicitly accepted as a
   deployment residual risk.
+- [ ] `scripts/testing/operational_campaign_24h.py` completed at least 86,400
+  active seconds; authorization/dependency wait time is excluded.
+- [ ] Primary stayed under synchronized multi-account operation rotation while
+  the recovery target ran destructive snapshot, archive, restore, restart,
+  wallet-incident, and governed-branch drills.
+- [ ] Long-video evidence includes a one-hour-or-longer source, two audio tracks,
+  subtitle, concurrent uploads, HLS jobs/playlists/segments, random seek,
+  password sharing, desktop/mobile playback, and revoke-after-use rejection.
+- [ ] AI Agent evidence covers root/member UI, Drive/share, server operations,
+  governance, trading, media tasks, confirmation/role boundaries, and launch
+  preflight; configured external ComfyUI also completes real generation.
+- [ ] Trading and PointsChain evidence covers background matching, bots,
+  margin/lending, high-frequency transfer/trading, replay/idempotency,
+  overspend, branch/governance, theft/freeze/recovery, and financial invariants.
+- [ ] Campaign evidence reports no missing account/operation success, hard
+  failure, source drift, secret leak, DB lock, unhandled server traceback,
+  silent frontend failure, or unplanned sentinel outage.
+- [ ] Campaign checkpoint ended in `complete`; primary/recovery PID evidence has
+  non-zero RSS; DB/WAL, memory, load, latency and final control-plane checks are
+  within configured SLO. A short `--allow-short-duration` run is not evidence.
+- [ ] The formal JSON was imported with `HACKME_OPERATIONAL_CAMPAIGN_REPORT`
+  through `scripts/security/gate/on_live_reports_make.py`; the signed
+  `operational_campaign_24h` required report passes and its source manifest
+  matches the exact code being promoted.
+- [ ] Root AI Agent launch preflight was verified as dry-run by default; an
+  explicit production switch requires `auto_switch=true` and exact
+  `confirm=GO_LIVE`.
 
 ## Scope Note
 
@@ -151,6 +185,8 @@ Whole-site production still requires separate passing evidence for:
 - snapshot_restore
 - points_chain_consistency
 - cloud_drive_quota_permission
+- ai_agent_boundary
+- 24-hour dual-target synchronized operational campaign
 - off-host append-only audit backup / immutable log replication
 
 The aggregate check is:
@@ -171,39 +207,10 @@ WHOLE_SITE_PRODUCTION_GATE_SUMMARY:
 - high_findings: 0
 ```
 
-Latest local release evidence before the Video Platform module for `2026.05.02-046`:
-
-```text
-runtime/reports/security/20260502T150309Z/raw/whole_site_production_gate_20260502_230524.md
-runtime/reports/security/20260502T150309Z/raw/whole_site_production_gate_20260502_230524.json
-```
-
-Result:
-
-```text
-modules_total: 12
-modules_passed: 12
-modules_failed: 0
-critical_findings: 0
-high_findings: 0
-medium_findings: 0
-production_readiness: YES
-```
-
-The current gate also includes Video Platform checks. Re-run the whole-site
-gate after video-module changes before treating a deployment as signed off.
-
-Implementation notes from this sign-off:
-
-- Password history lookups use monotonic `user_passwords.id DESC` rather than
-  textual `created_at` ordering, so mixed timestamp formats cannot select an
-  older password as the active one.
-- Disabled feature gates authenticate first for anonymous API requests, so
-  unauthenticated callers receive `401` instead of a misleading
-  feature-disabled `503`.
-- Whole-site gate targets must use initialized test credentials. The trading
-  stress runner does not rotate root's password unless `--root-new-password`
-  is passed explicitly.
+Do not copy an old release's module count or artifact path into a new sign-off.
+Attach the current run's JSON/Markdown reports from the selected runtime,
+confirm the target commit and branch match the deployed build, and record any
+explicitly accepted residual risk beside that release.
 
 ## Final Decision
 

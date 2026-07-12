@@ -1,9 +1,10 @@
 # scripts/on_live_reports/
 
 Shortcut directory for the production-gate reports described in
-[docs/11_QA_TESTING.md](../../docs/11_QA_TESTING.md). Each report type maps to
-one Python entry point here so an operator can run any single report from a
-predictable path:
+[docs/11_QA_TESTING.md](../../docs/11_QA_TESTING.md). Each report type maps to a
+predictable Python entry point where the report can be generated independently.
+The 24-hour campaign is the exception: it is generated under `/tmp` and imported
+by the one-shot orchestrator after its source manifest is revalidated.
 
 ```
 python3 scripts/on_live_reports/<report_type>.py [args...]
@@ -29,19 +30,24 @@ relevant API, or compose multiple sub-drivers.
 | `points_chain_consistency` | `points_chain_consistency.py` (wrapper) | `tests/points/test_points_chain.py` |
 | `cloud_drive_quota_permission` | `cloud_drive_quota_permission.py` (wrapper) | `tests/storage/test_cloud_drive_attachments.py` + `tests/storage/test_storage_albums_schema.py` |
 | `ai_agent_boundary` | `ai_agent_boundary.py` (wrapper) | deterministic `tests/ai_agent/test_ai_agent_routes.py` boundary regressions; no LLM call |
+| `operational_campaign_24h` | imported by `on_live_reports_make.py` | formal `/tmp/.../operational_campaign_24h.json`; requires at least 86,400 active seconds and matching source manifest |
 
 ## One-shot orchestrator
 
 To produce all reports in one run (recommended for a full production gate):
 
 ```bash
+HACKME_RUNTIME_DIR=/absolute/external/runtime \
+HACKME_OPERATIONAL_CAMPAIGN_REPORT=/tmp/<campaign>/reports/operational_campaign_24h.json \
+ROOT_PASSWORD='<root-password>' \
+MANAGER_PASSWORD='<manager-password>' \
+TEST_PASSWORD='<test-user-password>' \
 python3 scripts/on_live_reports/on_live_reports_make.py \
-    --base-url "https://127.0.0.1:$PORT" \
-    --root-password "$ROOT_PASSWORD"
+    --base-url "https://127.0.0.1:$PORT"
 ```
 
 This is a symlink to `scripts/security/gate/on_live_reports_make.py`. It also
-writes a summary to `runtime/reports/security/production_gate/`.
+writes a summary to `$HACKME_RUNTIME_DIR/reports/security/production_gate/`.
 
 For production-gate acceptance, this one-shot generation is necessary but not
 sufficient. You must also prove the live server rejects:
@@ -70,7 +76,8 @@ the live server's current `target_commit`.
   was modified before the run, you still need to review/approve those expected
   findings before the final `integrity_guard` report can pass.
 - These shortcuts intentionally do not move runtime artifacts. Each underlying
-  driver still writes to its canonical location under `runtime/reports/`.
+  driver still writes to the configured external runtime; standalone QA defaults
+  to `/tmp/hackme_web_test_artifacts/` when no deployment runtime is selected.
 - When the live server is started through `test_for_develop.sh`, keep
   `HTML_LEARNING_GIT_REPO_DIR` pointed at a real git repo. A `/tmp` copy without
   `.git` will break current-target detection and make `target_commit` gate

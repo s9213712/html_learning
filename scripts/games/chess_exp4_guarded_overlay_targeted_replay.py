@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -18,7 +17,10 @@ from services.games.chess_pv_guarded_overlay import exp4_runtime_overlay_allows_
 
 
 ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_RESULTS_ROOT = Path(os.environ.get("HACKME_CHESS_RESULTS_DIR", str(ROOT / "runtime" / "reports" / "games" / "chess_results")))
+from scripts.games.common_paths import chess_results_root  # noqa: E402
+
+
+DEFAULT_RESULTS_ROOT = chess_results_root()
 DEFAULT_AUDIT_JSON = Path(
     DEFAULT_RESULTS_ROOT
     / "exp4_23_guarded_overlay_broad_sanity_gate_full"

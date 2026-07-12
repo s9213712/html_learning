@@ -532,7 +532,8 @@ def register_public_routes(app, deps):
             html = handle.read()
         autofill_block = login_autofill_block_enabled()
         html = (
-            html.replace("__LOGIN_AUTOFILL_BLOCK__", "1" if autofill_block else "0")
+            html.replace("__ASSET_VERSION__", str(SERVER_RELEASE_ID))
+            .replace("__LOGIN_AUTOFILL_BLOCK__", "1" if autofill_block else "0")
             .replace("__LOGIN_USER_AUTOCOMPLETE__", "off" if autofill_block else "username")
             .replace("__LOGIN_PASSWORD_AUTOCOMPLETE__", "off" if autofill_block else "current-password")
         )

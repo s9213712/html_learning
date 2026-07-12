@@ -7,10 +7,16 @@ import argparse
 import http.cookiejar
 import json
 import ssl
+import sys
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 
 class Client:
@@ -59,9 +65,11 @@ class Client:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", required=True)
-    parser.add_argument("--root-password", default="root")
+    from scripts.testing.probe_credentials import add_root_password_argument
+    add_root_password_argument(parser)
     parser.add_argument("--manager-username", default="admin")
-    parser.add_argument("--manager-password", default="admin")
+    from scripts.testing.probe_credentials import add_manager_password_argument
+    add_manager_password_argument(parser)
     parser.add_argument("--incident-tx-hash", required=True)
     parser.add_argument("--victim-wallet", required=True)
     parser.add_argument("--claim-amount", type=int, required=True)

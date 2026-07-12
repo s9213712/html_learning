@@ -282,7 +282,8 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--username", default="root")
-    parser.add_argument("--password", default="root")
+    from scripts.testing.probe_credentials import add_root_password_argument
+    add_root_password_argument(parser, "--password")
     parser.add_argument("--runtime-root", default="/tmp/hackme_web_isolated_54343/hackme_web/runtime")
     parser.add_argument("--out", required=True)
     parser.add_argument("--mode", default="dev_ready")

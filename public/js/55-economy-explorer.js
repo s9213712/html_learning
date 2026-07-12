@@ -91,12 +91,47 @@ function updateEconomyExplorerAccelerateEstimate() {
 
 let economyTransferFeeEstimateTimer = null;
 
-function scheduleEconomyTransferFeeEstimate() {
+function resetEconomyExplorerAccountState() {
+  if (economyExplorerCountdownTimer) clearInterval(economyExplorerCountdownTimer);
   if (economyTransferFeeEstimateTimer) clearTimeout(economyTransferFeeEstimateTimer);
-  economyTransferFeeEstimateTimer = setTimeout(loadEconomyTransferFeeEstimate, 250);
+  economyExplorerCountdownTimer = null;
+  economyTransferFeeEstimateTimer = null;
+  economyExplorerLastQuery = "";
+  economyExplorerActiveLayer = "pc1";
+  ["economy-explorer-query", "economy-explorer-accelerate-fee"].forEach((id) => {
+    const input = $(id);
+    if (input) input.value = "";
+  });
+  ["economy-explorer-result", "economy-explorer-accelerate-estimate", "economy-transfer-fee-estimate"].forEach((id) => {
+    const el = $(id);
+    if (el) el.replaceChildren();
+  });
+  const msg = $("economy-explorer-msg");
+  if (msg) {
+    msg.textContent = "";
+    msg.className = "msg";
+  }
+  document.querySelectorAll("[data-economy-explorer-layer]").forEach((btn) => {
+    const active = btn.dataset.economyExplorerLayer === "pc1";
+    btn.classList.toggle("active", active);
+    btn.setAttribute("aria-selected", active ? "true" : "false");
+  });
 }
 
-async function loadEconomyTransferFeeEstimate() {
+window.resetEconomyExplorerAccountState = resetEconomyExplorerAccountState;
+
+function scheduleEconomyTransferFeeEstimate() {
+  if (economyTransferFeeEstimateTimer) clearTimeout(economyTransferFeeEstimateTimer);
+  const operation = economyOperationContext();
+  economyTransferFeeEstimateTimer = setTimeout(() => {
+    economyTransferFeeEstimateTimer = null;
+    if (economyOperationIsCurrent(operation)) loadEconomyTransferFeeEstimate(operation);
+  }, 250);
+}
+
+async function loadEconomyTransferFeeEstimate(operation = null) {
+  const operationContext = operation || economyOperationContext();
+  economyAssertOperationCurrent(operationContext);
   const target = $("economy-transfer-fee-estimate");
   if (!target) return;
   const feeInput = $("economy-transfer-fee");
@@ -115,12 +150,14 @@ async function loadEconomyTransferFeeEstimate() {
   }
   try {
     const json = await fetchEconomyJson(`/points/explorer/fee-estimate?fee_points=${encodeURIComponent(String(fee))}`);
+    economyAssertOperationCurrent(operationContext);
     const estimate = json.estimate || {};
     const network = estimate.network_fee_state || {};
     const label = network.congestion_label || "idle";
     const suggested = Number(network.suggested_total_fee_points || 0);
     target.textContent = `預估 Proved ${economyExplorerSecondsRangeText(estimate.estimated_seconds_min, estimate.estimated_seconds_max)} · 鏈上 ${label} · 建議費用 ${formatEconomyPointsValue(suggested)} 點`;
   } catch (err) {
+    if (!economyOperationIsCurrent(operationContext) || err?.name === "AbortError") return;
     target.textContent = err.message || "預估 Proved 時間讀取失敗";
   }
 }

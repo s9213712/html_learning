@@ -47,7 +47,7 @@ def test_root_quick_settings_expose_service_fee_pricing_for_feature_pages():
     assert "/root/economy/catalog" in js
     assert "root-module-pricing-panel" in js
     assert "root-module-pricing-panel" in css
-    assert "/js/01-root-quick-settings.js?v=20260611-ai-agent-vision-preset" in html
+    assert "/js/01-root-quick-settings.js?v=__ASSET_VERSION__" in html
     assert "服務費小帳本" not in js
     assert "pc0 站內帳本即時" in js
 

@@ -19,8 +19,11 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-DEFAULT_QUALITY_PATH = ROOT / "runtime/private/games/exp6/quality_1000_games.jsonl"
-DEFAULT_OUT_PATH = ROOT / "runtime/private/games/exp6/played_moves.jsonl"
+from scripts.games.common_paths import exp6_private_dir  # noqa: E402
+
+
+DEFAULT_QUALITY_PATH = exp6_private_dir() / "quality_1000_games.jsonl"
+DEFAULT_OUT_PATH = exp6_private_dir() / "played_moves.jsonl"
 
 # Must match curriculum's _SHUFFLE_SEED so the game_idx we produce
 # here corresponds to the same game ordering as labels.jsonl

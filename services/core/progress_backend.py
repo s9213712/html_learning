@@ -8,6 +8,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from services.server.runtime import default_runtime_root_path
+
 
 DEFAULT_PROGRESS_TTL_SECONDS = 6 * 60 * 60
 
@@ -40,7 +42,7 @@ def _safe_cache_name(namespace: str, key: str) -> str:
 def _default_file_cache_dir() -> Path:
     runtime_dir = _env_text("HACKME_RUNTIME_DIR")
     if not runtime_dir:
-        runtime_dir = str(Path.cwd() / "runtime")
+        runtime_dir = str(default_runtime_root_path())
     return Path(runtime_dir) / "job_progress_cache"
 
 

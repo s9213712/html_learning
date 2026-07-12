@@ -32,19 +32,28 @@ python3 -m pip install -r requirements-dev.txt
 若你需要完整依賴總表，而不是只看最短路線，請直接看
 [SYSTEM_DEPENDENCIES.md](SYSTEM_DEPENDENCIES.md)。
 
-### 最短部署流程
+### 本機 / staging 最短流程
 
-先檢查 runtime 環境：
-
-```bash
-python3 server.py --doctor
-```
-
-若 doctor 尚未通過，請先建立 runtime 目錄與部署環境；若你只是要開發，改用：
+一般開發與功能驗證直接使用隔離啟動：
 
 ```bash
 ./test_for_develop.sh --port 50785
 ```
+
+它會把程式、runtime、cache 與測試資料放到 `/tmp`，不需要先在 source checkout
+建立 `runtime/`。
+
+只有在你已準備 checkout 外部 runtime、要驗直接啟動時才執行：
+
+```bash
+export HACKME_RUNTIME_DIR=/absolute/path/to/runtime
+python3 server.py --doctor
+python3 server.py
+```
+
+doctor 不會替你建立 production runtime；缺少目錄、金鑰或權限時會失敗。正式
+runtime 的建立與 systemd/Nginx 設定請接著看
+[02_DEPLOY_PRODUCTION.md](02_DEPLOY_PRODUCTION.md)。
 
 臨時用 LAN / NAT public IP 測試開發站時，明確加入 public Host allowlist：
 
@@ -126,8 +135,9 @@ python3 server.py
    - `root/root`
    - `admin/admin`
    - `test/test`
-6. 第一次登入後，預設密碼會被要求立刻修改。
-7. 改完 bootstrap 密碼後，請重新登入；高權限 session 會被立即撤銷，這是預期安全行為。
+6. 直接 runtime 第一次登入後，預設密碼會被要求立刻修改。
+7. `test_for_develop.sh` 會停用強制改密碼並保留弱化的開發安全設定；該站不可直接暴露到 LAN、Internet 或 production。
+8. 直接 runtime 改完 bootstrap 密碼後請重新登入；高權限 session 會被立即撤銷，這是預期安全行為。
 
 ### 若要改第一次密碼
 

@@ -18,6 +18,7 @@ class CheckResult:
     message: str = ""
     details: list[dict[str, Any]] = field(default_factory=list)
     remediation: str = ""
+    elapsed_seconds: float = 0.0
 
     @classmethod
     def pass_(cls, name: str, message: str = "ok", **kwargs: Any) -> "CheckResult":
@@ -73,4 +74,5 @@ class CheckResult:
             "message": self.message,
             "details": self.details,
             "remediation": self.remediation,
+            "elapsed_seconds": self.elapsed_seconds,
         }

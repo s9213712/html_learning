@@ -2,7 +2,7 @@
 
 [English README](../README.md)
 
-目前 Release ID：`05_2026.07.10-001`
+目前 Release ID：`05_2026.07.12-002`
 
 這份文件只做導覽，不放功能流水帳。近期變更看
 [UPDATE_SUMMARY.md](UPDATE_SUMMARY.md)，完整英文索引看
@@ -26,9 +26,15 @@
 本機 / staging：
 
 ```bash
+./test_for_develop.sh --port 50785
+```
+
+只有在已準備 checkout 外部 runtime、需要驗直接啟動時，才另外執行：
+
+```bash
+export HACKME_RUNTIME_DIR=/absolute/path/to/runtime
 python3 server.py --doctor
 python3 server.py
-./test_for_develop.sh --port 50785
 ```
 
 正式對外服務：
@@ -45,13 +51,14 @@ Nginx 對外，Gunicorn 只綁 127.0.0.1:8000。
 - 臨時 LAN / NAT public IP 測試可看 [01_DEPLOY_QUICKSTART.md](01_DEPLOY_QUICKSTART.md) 的 `--public-host`、背景 log 與 `--shutdown` 用法。
 - 不要把 Flask development server 直接暴露給使用者。
 - 不要直接把 runtime、cache、pytest 產物留在 repo 工作樹。
+- `test_for_develop.sh` 會保留弱化的開發帳密與安全設定，不可直接暴露到 LAN、Internet 或 production。
 
 ## 主題路線
 
 | 主題 | 文件 |
 |---|---|
 | 安全模型 | [06_SECURITY_MODEL.md](06_SECURITY_MODEL.md), [SECURITY.md](SECURITY.md) |
-| PointsChain | [07_POINTSCHAIN.md](07_POINTSCHAIN.md), [architecture/POINTSCHAIN_FINANCIAL_SETTLEMENT_NETWORK.md](architecture/POINTSCHAIN_FINANCIAL_SETTLEMENT_NETWORK.md), [architecture/BLOCKCHAIN_WALLET_IDENTITY_CONTRACT.md](architecture/BLOCKCHAIN_WALLET_IDENTITY_CONTRACT.md), [architecture/ECONOMY_LAYER_GUARDRAILS.md](architecture/ECONOMY_LAYER_GUARDRAILS.md) |
+| PointsChain | [07_POINTSCHAIN.md](07_POINTSCHAIN.md), [BLOCKCHAIN/README.md](BLOCKCHAIN/README.md), [architecture/POINTSCHAIN_FINANCIAL_SETTLEMENT_NETWORK.md](architecture/POINTSCHAIN_FINANCIAL_SETTLEMENT_NETWORK.md), [architecture/BLOCKCHAIN_WALLET_IDENTITY_CONTRACT.md](architecture/BLOCKCHAIN_WALLET_IDENTITY_CONTRACT.md) |
 | 帳本 / DB 架構 | [architecture/PC0_DUAL_RAIL_WALLET_MODEL.md](architecture/PC0_DUAL_RAIL_WALLET_MODEL.md), [architecture/DATABASE_DOMAIN_SPLIT.md](architecture/DATABASE_DOMAIN_SPLIT.md) |
 | 設定 UI 重整 | [architecture/SETTINGS_UI_REDESIGN_TODO.md](architecture/SETTINGS_UI_REDESIGN_TODO.md) |
 | Trading | [08_TRADING_ENGINE.md](08_TRADING_ENGINE.md), [trading/README.md](trading/README.md) |

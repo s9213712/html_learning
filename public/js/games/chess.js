@@ -36,6 +36,12 @@ const chessCompetitionClock = window.createHackmeCompetitionClock?.({
   },
 }) || null;
 
+window.resetChessAccountState = function resetChessAccountState() {
+  closeChessDialog(null);
+  chessClockMeta = { matchId: null, moveCount: 0, turn: "" };
+  chessCompetitionClock?.stop?.();
+};
+
 function ensureChessDialogOverlay() {
   let overlay = $("chess-action-dialog");
   if (overlay) return overlay;
@@ -750,6 +756,8 @@ function renderChessBoard(match) {
 
 async function submitChessMove(match, chosenMove, { from, to, promotion = null, optimisticMessage = "已送出走棋，等待電腦回應..." } = {}) {
   if (!match || chessMoveInFlight) return;
+  const operation = gameAccountOperationContext();
+  const moveToken = {};
   const clockSnapshot = chessCompetitionClock?.snapshot?.() || {};
   if (clockSnapshot.enabled && clockSnapshot.expiredSide) {
     setGameMsg("棋鐘已超時，不能再走棋。", false);
@@ -757,27 +765,35 @@ async function submitChessMove(match, chosenMove, { from, to, promotion = null, 
     return;
   }
   const previousMatch = match;
+  const targetMatchId = previousMatch.id;
   const optimisticMatch = buildOptimisticChessMatch(match, chosenMove);
   gameSelectedSquare = null;
   chessMoveInFlight = true;
+  chessMoveToken = moveToken;
   gameState.matches = gameState.matches.map((item) => item.id === previousMatch.id ? optimisticMatch : item);
   renderGameMatches(gameState.matches);
   setGameMsg(optimisticMessage, true);
   try {
-    const json = await gameRequest(`/games/chess/matches/${encodeURIComponent(gameSelectedMatchId)}/move`, {
+    const json = await gameRequest(`/games/chess/matches/${encodeURIComponent(targetMatchId)}/move`, {
       method: "POST",
       body: { from, to, promotion },
     });
+    gameAccountAssertOperationCurrent(operation);
+    if (chessMoveToken !== moveToken) return;
     const updated = json.match;
     gameState.matches = gameState.matches.map((item) => item.id === updated.id ? updated : item);
     renderGameMatches(gameState.matches);
     await loadGameZone();
+    gameAccountAssertOperationCurrent(operation);
   } catch (err) {
+    if (!gameAccountOperationIsCurrent(operation) || chessMoveToken !== moveToken || err?.name === "AbortError") return;
     gameState.matches = gameState.matches.map((item) => item.id === previousMatch.id ? previousMatch : item);
     setGameMsg(err.message || "走棋失敗", false);
   } finally {
+    if (!gameAccountOperationIsCurrent(operation) || chessMoveToken !== moveToken) return;
+    chessMoveToken = null;
     chessMoveInFlight = false;
-    const latest = (gameState.matches || []).find((item) => item.id === gameSelectedMatchId);
+    const latest = (gameState.matches || []).find((item) => item.id === targetMatchId);
     if (latest) renderChessBoard(latest);
   }
 }

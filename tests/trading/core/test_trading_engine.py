@@ -381,6 +381,32 @@ def test_trading_asset_overview_uses_lightweight_read_model(tmp_path):
     assert overview["read_model_source"] == "trading_asset_overview_v1"
 
 
+def test_trading_asset_overview_uses_current_legacy_wallet_columns_without_identity_balance(tmp_path):
+    _points, trading = _services(tmp_path)
+    conn = trading.get_db()
+    try:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO points_wallets (
+                user_id, soft_balance, hard_balance, soft_frozen, hard_frozen, created_at, updated_at
+            ) VALUES (2, 0, 0, 0, 0, ?, ?)
+            """,
+            (utc_now(), utc_now()),
+        )
+        conn.execute(
+            "UPDATE points_wallets SET soft_balance=321, hard_balance=9, soft_frozen=4, hard_frozen=2 WHERE user_id=2"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    overview = trading.user_asset_overview(user_id=2)
+
+    assert overview["available_points"] == 330
+    assert overview["locked_points"] == 6
+    assert overview["read_model_source"] == "trading_asset_overview_v1"
+
+
 def test_trading_asset_overview_route_does_not_call_full_dashboard():
     trading_routes = (ROOT / "routes" / "trading.py").read_text(encoding="utf-8")
     route_body = trading_routes.split("def trading_asset_overview", 1)[1].split('@app.route("/api/admin/trading/asset-overview"', 1)[0]

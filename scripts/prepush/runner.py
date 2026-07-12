@@ -3,16 +3,24 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 import traceback
 from collections import Counter
 from pathlib import Path
 from typing import Callable
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+if __name__ == "__main__":
+    sys.dont_write_bytecode = True
 
 from scripts.prepush.checks import (
     api_contract_check,
     ci_safety_check,
     cleanup_check,
     config_safety_check,
+    docs_command_targets_check,
     forbidden_paths_check,
     frontend_check,
     git_clean_check,
@@ -44,6 +52,7 @@ QUICK_CHECKS: list[Check] = [
     forbidden_paths_check.run,
     local_path_check.run,
     markdown_links_check.run,
+    docs_command_targets_check.run,
     scripts_index_check.run,
     secrets_check.run,
     pii_check.run,
@@ -86,21 +95,24 @@ def collect_checks(ctx: PrepushContext) -> list[Check]:
 
 
 def run_check(check: Check, ctx: PrepushContext) -> CheckResult:
+    started = time.perf_counter()
     try:
-        return check(ctx)
+        result = check(ctx)
     except Exception as exc:  # noqa: BLE001
-        return CheckResult.fail(
+        result = CheckResult.fail(
             getattr(check, "__name__", "internal check"),
             f"internal error: {sanitize_path(str(exc))}",
             severity="critical",
             details=[{"trace": sanitize_path(traceback.format_exc(limit=4))}],
             remediation="Fix the pre-push check implementation before relying on this gate.",
         )
+    result.elapsed_seconds = round(time.perf_counter() - started, 3)
+    return result
 
 
 def render_text(results: list[CheckResult]) -> None:
     for result in results:
-        print(f"[{result.status}] {result.name}: {result.message}")
+        print(f"[{result.status}] {result.name} ({result.elapsed_seconds:.3f}s): {result.message}")
         for detail in result.details[:8]:
             fragments = ", ".join(f"{key}: {sanitize_path(str(value))}" for key, value in detail.items())
             print(f"  {fragments}")
@@ -133,9 +145,8 @@ def to_payload(results: list[CheckResult]) -> dict[str, object]:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     mode = "full" if args.full else "quick"
-    repo_root = Path(__file__).resolve().parents[2]
     ctx = PrepushContext.build(
-        repo_root=repo_root,
+        repo_root=ROOT,
         mode=mode,
         is_ci=args.ci,
         json_output=args.json,
@@ -163,11 +174,14 @@ def main(argv: list[str] | None = None) -> int:
 
     for check in collect_checks(ctx):
         if not args.json:
-            print(f"[RUN] {check.__module__.rsplit('.', 1)[-1]}")
+            print(f"[RUN] {check.__module__.rsplit('.', 1)[-1]}", flush=True)
         result = run_check(check, ctx)
         results.append(result)
         if not args.json:
-            print(f"[{result.status}] {result.name}: {result.message}")
+            print(
+                f"[{result.status}] {result.name} ({result.elapsed_seconds:.3f}s): {result.message}",
+                flush=True,
+            )
 
     payload = to_payload(results)
     if args.json:

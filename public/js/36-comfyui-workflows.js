@@ -1,6 +1,10 @@
 let comfyuiTemplatePromptShareMode = "independent";
 let comfyuiTemplateSdxlSkipRefiner = false;
 let comfyuiTemplateGgufProfileState = { bundleId: "", profileId: "", variantId: "" };
+let comfyuiWorkflowAccountGeneration = 0;
+let comfyuiTemplateDetailLoadGeneration = 0;
+let comfyuiWorkflowPresetsLoadGeneration = 0;
+let comfyuiWorkflowEditorLoadGeneration = 0;
 const COMFYUI_TEMPLATE_MEDIA_BINDING_KINDS = new Set(["image", "video"]);
 const COMFYUI_TEMPLATE_VIDEO_ACCEPT = "video/mp4,video/webm,video/quicktime,video/x-matroska,video/x-msvideo,.mp4,.webm,.mov,.mkv,.avi";
 const COMFYUI_BUILTIN_VAE_LABEL = "使用各自大模型內建 VAE";
@@ -50,6 +54,7 @@ function setComfyuiWorkflowStatus(text) {
 }
 
 function resetComfyuiWorkflowEditor({ keepStatus = false } = {}) {
+  comfyuiWorkflowEditorLoadGeneration += 1;
   comfyuiWorkflowCurrentPresetId = null;
   comfyuiWorkflowEditorDefaults = null;
   setComfyuiFieldValue("comfyui-workflow-title", "");
@@ -517,6 +522,36 @@ let comfyuiTemplateLastFocusedTextFieldId = "";
 let comfyuiMultiCompareState = { bundleId: "", checkpoints: [], loras: [] };
 let comfyuiUpscaleBreakpointState = { bundleId: "", stage: COMFYUI_UPSCALE_BREAKPOINT_DEFAULT };
 
+function resetComfyuiWorkflowAccountState() {
+  comfyuiWorkflowAccountGeneration += 1;
+  comfyuiTemplateDetailLoadGeneration += 1;
+  comfyuiWorkflowPresetsLoadGeneration += 1;
+  comfyuiWorkflowEditorLoadGeneration += 1;
+  if (comfyuiTemplateRenderTimer) clearTimeout(comfyuiTemplateRenderTimer);
+  comfyuiTemplateRenderTimer = null;
+  comfyuiTemplatePromptShareMode = "independent";
+  comfyuiTemplateSdxlSkipRefiner = false;
+  comfyuiTemplateGgufProfileState = { bundleId: "", profileId: "", variantId: "" };
+  comfyuiTemplateLoraOverrides = {};
+  comfyuiTemplateFieldOverrides = {};
+  comfyuiTemplateEditableModelFields = {};
+  comfyuiTemplateModelShowAllFields = {};
+  comfyuiTemplateLastFocusedTextFieldId = "";
+  comfyuiMultiCompareState = { bundleId: "", checkpoints: [], loras: [] };
+  comfyuiUpscaleBreakpointState = { bundleId: "", stage: COMFYUI_UPSCALE_BREAKPOINT_DEFAULT };
+  resetComfyuiWorkflowEditor();
+  const select = $("comfyui-template-select");
+  if (select) select.innerHTML = '<option value="">先選擇 workflow</option>';
+  ["comfyui-template-summary", "comfyui-template-panels"].forEach((id) => {
+    const el = $(id);
+    if (el) el.replaceChildren();
+  });
+  const hint = $("comfyui-template-select-hint");
+  if (hint) hint.textContent = "";
+}
+
+window.resetComfyuiWorkflowAccountState = resetComfyuiWorkflowAccountState;
+
 function queueRenderSelectedComfyuiTemplate() {
   if (comfyuiTemplateRenderTimer) clearTimeout(comfyuiTemplateRenderTimer);
   comfyuiTemplateRenderTimer = setTimeout(() => {
@@ -556,6 +591,7 @@ function renderComfyuiTemplateSelector(payload = {}, { silentReload = true } = {
   if (select.dataset.comfyuiTemplateBound !== "1") {
     select.dataset.comfyuiTemplateBound = "1";
     select.addEventListener("change", () => {
+      comfyuiTemplateDetailLoadGeneration += 1;
       const presetId = Number(select.value || 0);
       if (!presetId) {
         comfyuiSelectedTemplatePresetId = null;
@@ -575,7 +611,7 @@ function renderComfyuiTemplateSelector(payload = {}, { silentReload = true } = {
         return;
       }
       loadComfyuiSelectedTemplateDetail(presetId, { silent: false }).catch((err) => {
-        setComfyuiMessage(err.message || "模板讀取失敗", false);
+        if (err?.name !== "AbortError") setComfyuiMessage(err.message || "模板讀取失敗", false);
       });
     });
   }
@@ -587,7 +623,9 @@ function renderComfyuiTemplateSelector(payload = {}, { silentReload = true } = {
       loadComfyuiSelectedTemplateDetail(comfyuiSelectedTemplatePresetId, {
         silent: silentReload,
         applyDefaults: !silentReload,
-      }).catch(() => {});
+      }).catch((err) => {
+        if (err?.name !== "AbortError") reportFrontendFailure("comfyui-template-silent-reload", err);
+      });
     }
   } else {
     if (typeof updateComfyuiPreviewCardForOutputKinds === "function") updateComfyuiPreviewCardForOutputKinds(["image"]);
@@ -595,14 +633,20 @@ function renderComfyuiTemplateSelector(payload = {}, { silentReload = true } = {
   }
 }
 
-async function loadComfyuiSelectedTemplateDetail(presetId, { silent = false, applyDefaults = true } = {}) {
+async function loadComfyuiSelectedTemplateDetail(presetId, { silent = false, applyDefaults = true, operation = null } = {}) {
   if (!presetId) return;
+  const operationContext = operation || comfyuiOperationContext();
+  const loadGeneration = ++comfyuiTemplateDetailLoadGeneration;
+  comfyuiAssertOperationCurrent(operationContext);
   await fetchCsrfToken();
+  comfyuiAssertOperationCurrent(operationContext);
   const res = await apiFetch(API + `/comfyui/workflows/${encodeURIComponent(presetId)}`, {
     credentials: "same-origin",
     headers: { "X-CSRF-Token": getCsrfToken() || "" }
   });
   const json = await res.json().catch(() => ({}));
+  comfyuiAssertOperationCurrent(operationContext);
+  if (loadGeneration !== comfyuiTemplateDetailLoadGeneration) throw comfyuiAccountAbortError();
   if (!res.ok || !json.ok) throw new Error(json.msg || `模板讀取失敗（HTTP ${res.status}）`);
   comfyuiSelectedTemplatePresetId = Number(presetId);
   comfyuiTemplateLoraOverrides = {};
@@ -671,14 +715,19 @@ function comfyuiWorkflowPresetsForMode(mode) {
   return comfyuiWorkflowPresets.filter((item) => comfyuiWorkflowPresetSupportsMode(item, mode));
 }
 
-async function runSelectedComfyuiWorkflowTemplateFromGenerate(mode) {
+async function runSelectedComfyuiWorkflowTemplateFromGenerate(mode, options = {}) {
+  const operation = options.operation || comfyuiOperationContext();
+  const runToken = options.runToken || null;
+  comfyuiAssertOperationCurrent(operation);
   let normalized = typeof normalizeComfyuiGenerationModeAlias === "function"
     ? normalizeComfyuiGenerationModeAlias(mode)
     : String(mode || "").trim().toLowerCase();
   let label = comfyuiReadableModeLabel(normalized);
   const select = $("comfyui-template-select");
   if (!comfyuiWorkflowPresets.length && typeof loadComfyuiWorkflowPresets === "function") {
-    await loadComfyuiWorkflowPresets({ silentTemplateReload: true });
+    await loadComfyuiWorkflowPresets({ silentTemplateReload: true, operation });
+    if (runToken) comfyuiAssertGenerationCurrent(operation, runToken);
+    else comfyuiAssertOperationCurrent(operation);
   }
   let presetId = Number(comfyuiSelectedTemplatePresetId || select?.value || 0);
   let autoSelected = false;
@@ -697,7 +746,9 @@ async function runSelectedComfyuiWorkflowTemplateFromGenerate(mode) {
     return false;
   }
   if (Number(comfyuiSelectedTemplateDetail?.id || 0) !== Number(presetId)) {
-    await loadComfyuiSelectedTemplateDetail(presetId, { silent: !autoSelected, applyDefaults: autoSelected });
+    await loadComfyuiSelectedTemplateDetail(presetId, { silent: !autoSelected, applyDefaults: autoSelected, operation });
+    if (runToken) comfyuiAssertGenerationCurrent(operation, runToken);
+    else comfyuiAssertOperationCurrent(operation);
   }
   const detail = Number(comfyuiSelectedTemplateDetail?.id || 0) === Number(presetId)
     ? comfyuiSelectedTemplateDetail
@@ -721,7 +772,7 @@ async function runSelectedComfyuiWorkflowTemplateFromGenerate(mode) {
     if (select) select.focus();
     return false;
   }
-  await runComfyuiWorkflowPreset(presetId);
+  await runComfyuiWorkflowPreset(presetId, { operation, runToken });
   return true;
 }
 
@@ -2305,7 +2356,9 @@ function collectComfyuiTemplateImageAssignments(detail) {
   return { assignments, missing };
 }
 
-async function ensureComfyuiTemplateImageAssignments(detail) {
+async function ensureComfyuiTemplateImageAssignments(detail, operation = null) {
+  const operationContext = operation || comfyuiOperationContext();
+  comfyuiAssertOperationCurrent(operationContext);
   let imageAssignmentState = collectComfyuiTemplateImageAssignments(detail);
   const localAssetKeys = Array.from(new Set(
     imageAssignmentState.missing
@@ -2321,7 +2374,8 @@ async function ensureComfyuiTemplateImageAssignments(detail) {
   const titleByKey = (key) => assetMeta[key]?.title || key;
   setComfyuiMessage(`正在將本機媒體匯入雲端硬碟供 workflow 安全重映射：${localAssetKeys.map(titleByKey).join("、")}`, true);
   for (const assetKey of localAssetKeys) {
-    await importer(assetKey);
+    await importer(assetKey, operationContext);
+    comfyuiAssertOperationCurrent(operationContext);
   }
   renderSelectedComfyuiTemplate();
   return collectComfyuiTemplateImageAssignments(detail);
@@ -3181,7 +3235,7 @@ function bindRenderedComfyuiTemplateFields(detail) {
     button.dataset.boundComfyuiTemplate = "1";
     button.addEventListener("click", () => {
       openComfyuiImagePicker(button.getAttribute("data-comfyui-template-image-picker"))
-        .catch((err) => setComfyuiMessage(err.message || "圖片選擇器開啟失敗", false));
+        .catch((err) => handleComfyuiActionError(err, "圖片選擇器開啟失敗"));
     });
   });
   host.querySelectorAll("[data-comfyui-template-mask-editor]").forEach((button) => {
@@ -3370,42 +3424,54 @@ function renderComfyuiWorkflowPresetList(targetId, items, emptyText) {
   list.querySelectorAll("[data-comfyui-workflow-run-apply]").forEach((button) => {
     button.addEventListener("click", () => {
       applyComfyuiWorkflowRunToForm(Number(button.getAttribute("data-comfyui-workflow-run-apply")))
-        .catch((err) => setComfyuiMessage(err.message || "workflow 執行紀錄套回失敗", false));
+        .catch((err) => handleComfyuiActionError(err, "workflow 執行紀錄套回失敗"));
     });
   });
   list.querySelectorAll("[data-comfyui-workflow-run]").forEach((button) => {
     button.addEventListener("click", () => {
-      runComfyuiWorkflowPreset(Number(button.getAttribute("data-comfyui-workflow-run"))).catch((err) => setComfyuiMessage(err.message || "workflow 執行失敗", false));
+      runComfyuiWorkflowPreset(Number(button.getAttribute("data-comfyui-workflow-run"))).catch((err) => {
+        if (err?.name !== "AbortError") setComfyuiMessage(err.message || "workflow 執行失敗", false);
+      });
     });
   });
   list.querySelectorAll("[data-comfyui-workflow-export]").forEach((button) => {
     button.addEventListener("click", () => {
-      exportComfyuiWorkflowPreset(Number(button.getAttribute("data-comfyui-workflow-export"))).catch((err) => setComfyuiMessage(err.message || "workflow 匯出失敗", false));
+      exportComfyuiWorkflowPreset(Number(button.getAttribute("data-comfyui-workflow-export"))).catch((err) => handleComfyuiActionError(err, "workflow 匯出失敗"));
     });
   });
   list.querySelectorAll("[data-comfyui-workflow-edit]").forEach((button) => {
     button.addEventListener("click", () => {
-      loadComfyuiWorkflowPresetIntoEditor(Number(button.getAttribute("data-comfyui-workflow-edit"))).catch((err) => setComfyuiMessage(err.message || "workflow 讀取失敗", false));
+      loadComfyuiWorkflowPresetIntoEditor(Number(button.getAttribute("data-comfyui-workflow-edit"))).catch((err) => {
+        if (err?.name !== "AbortError") setComfyuiMessage(err.message || "workflow 讀取失敗", false);
+      });
     });
   });
   list.querySelectorAll("[data-comfyui-workflow-duplicate]").forEach((button) => {
     button.addEventListener("click", () => {
-      duplicateComfyuiWorkflowPreset(Number(button.getAttribute("data-comfyui-workflow-duplicate"))).catch((err) => setComfyuiMessage(err.message || "workflow 複製失敗", false));
+      duplicateComfyuiWorkflowPreset(Number(button.getAttribute("data-comfyui-workflow-duplicate"))).catch((err) => {
+        if (err?.name !== "AbortError") setComfyuiMessage(err.message || "workflow 複製失敗", false);
+      });
     });
   });
   list.querySelectorAll("[data-comfyui-workflow-default]").forEach((button) => {
     button.addEventListener("click", () => {
-      setDefaultComfyuiWorkflowPreset(Number(button.getAttribute("data-comfyui-workflow-default"))).catch((err) => setComfyuiMessage(err.message || "預設版面設定失敗", false));
+      setDefaultComfyuiWorkflowPreset(Number(button.getAttribute("data-comfyui-workflow-default"))).catch((err) => {
+        if (err?.name !== "AbortError") setComfyuiMessage(err.message || "預設版面設定失敗", false);
+      });
     });
   });
   list.querySelectorAll("[data-comfyui-workflow-publish]").forEach((button) => {
     button.addEventListener("click", () => {
-      publishComfyuiWorkflowPresetOfficial(Number(button.getAttribute("data-comfyui-workflow-publish"))).catch((err) => setComfyuiMessage(err.message || "官方 preset 發布失敗", false));
+      publishComfyuiWorkflowPresetOfficial(Number(button.getAttribute("data-comfyui-workflow-publish"))).catch((err) => {
+        if (err?.name !== "AbortError") setComfyuiMessage(err.message || "官方 preset 發布失敗", false);
+      });
     });
   });
   list.querySelectorAll("[data-comfyui-workflow-delete]").forEach((button) => {
     button.addEventListener("click", () => {
-      deleteComfyuiWorkflowPreset(Number(button.getAttribute("data-comfyui-workflow-delete"))).catch((err) => setComfyuiMessage(err.message || "workflow 刪除失敗", false));
+      deleteComfyuiWorkflowPreset(Number(button.getAttribute("data-comfyui-workflow-delete"))).catch((err) => {
+        if (err?.name !== "AbortError") setComfyuiMessage(err.message || "workflow 刪除失敗", false);
+      });
     });
   });
 }
@@ -3421,16 +3487,22 @@ function renderComfyuiWorkflowPresets(payload = {}, { silentTemplateReload = tru
   setComfyuiWorkflowStatus(`目前可見 ${total} 個 workflow 版面${warning}`);
 }
 
-async function loadComfyuiWorkflowPresets() {
-  const { silentTemplateReload = true } = arguments[0] || {};
+async function loadComfyuiWorkflowPresets(options = {}) {
+  const { silentTemplateReload = true } = options || {};
+  const operation = options?.operation || comfyuiOperationContext();
+  const loadGeneration = ++comfyuiWorkflowPresetsLoadGeneration;
+  comfyuiAssertOperationCurrent(operation);
   if (!currentUser || !canAccessModule("comfyui")) return [];
   setComfyuiWorkflowStatus("正在讀取 workflow preset...");
   await fetchCsrfToken({ force: true });
+  comfyuiAssertOperationCurrent(operation);
   const res = await apiFetch(API + "/comfyui/workflows", {
     credentials: "same-origin",
     headers: { "X-CSRF-Token": getCsrfToken() || "" }
   });
   const json = await res.json().catch(() => ({}));
+  comfyuiAssertOperationCurrent(operation);
+  if (loadGeneration !== comfyuiWorkflowPresetsLoadGeneration) throw comfyuiAccountAbortError();
   if (!res.ok || !json.ok) {
     const message = json.msg || `workflow preset 讀取失敗（HTTP ${res.status}）`;
     setComfyuiWorkflowStatus(message);
@@ -3498,12 +3570,17 @@ function applyComfyuiWorkflowPresetToForm(presetId) {
 }
 
 async function loadComfyuiWorkflowPresetIntoEditor(presetId) {
+  const operation = comfyuiOperationContext();
+  const loadGeneration = ++comfyuiWorkflowEditorLoadGeneration;
   await fetchCsrfToken({ force: true });
+  comfyuiAssertOperationCurrent(operation);
   const res = await apiFetch(API + `/comfyui/workflows/${encodeURIComponent(presetId)}`, {
     credentials: "same-origin",
     headers: { "X-CSRF-Token": getCsrfToken() || "" }
   });
   const json = await res.json().catch(() => ({}));
+  comfyuiAssertOperationCurrent(operation);
+  if (loadGeneration !== comfyuiWorkflowEditorLoadGeneration) throw comfyuiAccountAbortError();
   if (!res.ok || !json.ok) throw new Error(json.msg || `workflow 讀取失敗（HTTP ${res.status}）`);
   const preset = json.preset || {};
   comfyuiWorkflowCurrentPresetId = Number(preset.id) || null;
@@ -3633,7 +3710,9 @@ async function updateComfyuiWorkflowPreset() {
   setComfyuiMessage(json.msg || "已更新 workflow preset。", true);
 }
 
-async function runComfyuiWorkflowPreset(presetId) {
+async function runComfyuiWorkflowPreset(presetId, options = {}) {
+  const operation = options.operation || comfyuiOperationContext();
+  comfyuiAssertOperationCurrent(operation);
   if (!presetId) return;
   const preset = comfyuiWorkflowPresetById(presetId);
   const templateDetail = Number(comfyuiSelectedTemplateDetail?.id || 0) === Number(presetId) ? comfyuiSelectedTemplateDetail : null;
@@ -3642,8 +3721,11 @@ async function runComfyuiWorkflowPreset(presetId) {
   const collectRunUserInputs = () => (templateDetail ? collectComfyuiTemplateUserInputs(templateDetail) : {});
   let imageAssignmentState = { assignments: {}, missing: [] };
   try {
-    imageAssignmentState = templateDetail ? await ensureComfyuiTemplateImageAssignments(templateDetail) : imageAssignmentState;
+    imageAssignmentState = templateDetail ? await ensureComfyuiTemplateImageAssignments(templateDetail, operation) : imageAssignmentState;
+    if (options.runToken) comfyuiAssertGenerationCurrent(operation, options.runToken);
+    else comfyuiAssertOperationCurrent(operation);
   } catch (err) {
+    if (!comfyuiOperationIsCurrent(operation) || err?.name === "AbortError") throw err;
     setComfyuiMessage(err.message || "模板媒體匯入失敗，請重新選擇本機檔案。", false);
     return;
   }
@@ -3677,7 +3759,13 @@ async function runComfyuiWorkflowPreset(presetId) {
     );
     if (!confirmPaidApiNodes) return;
   }
+  const inheritedRunToken = options.runToken || null;
+  const runToken = inheritedRunToken || {};
+  const ownsRunToken = !inheritedRunToken;
+  if (ownsRunToken && comfyuiGenerateAbortController) comfyuiGenerateAbortController.abort();
+  comfyuiGenerationRunToken = runToken;
   await fetchCsrfToken({ force: true });
+  comfyuiAssertGenerationCurrent(operation, runToken);
   const expectedOutputKinds = comfyuiWorkflowPresetOutputKinds(templateDetail || preset);
   if (typeof updateComfyuiPreviewCardForOutputKinds === "function") updateComfyuiPreviewCardForOutputKinds(expectedOutputKinds);
   const preview = $("comfyui-preview");
@@ -3742,6 +3830,7 @@ async function runComfyuiWorkflowPreset(presetId) {
     })
     .join("\n");
   const renderPartialWorkflowResult = async (partialResult) => {
+    comfyuiAssertGenerationCurrent(operation, runToken);
     if (!multiCompareSpec) return;
     const rawImages = Array.isArray(partialResult?.images) && partialResult.images.length
       ? partialResult.images
@@ -3749,7 +3838,8 @@ async function runComfyuiWorkflowPreset(presetId) {
     const signature = partialImageSignature(rawImages);
     if (!signature || signature === partialRenderState.signature) return;
     partialRenderState.signature = signature;
-    const images = await hydrateComfyuiGeneratedImages(rawImages);
+    const images = await hydrateComfyuiGeneratedImages(rawImages, operation);
+    comfyuiAssertGenerationCurrent(operation, runToken);
     if (!images.length) return;
     const selectedIndex = Math.max(0, Math.min(comfyuiSelectedImageIndex || 0, images.length - 1));
     comfyuiGeneratedImages = images;
@@ -3765,11 +3855,13 @@ async function runComfyuiWorkflowPreset(presetId) {
     const generatedImages = [];
     const generatedMedia = [];
     for (let runIndex = 0; runIndex < runCount; runIndex += 1) {
+      comfyuiAssertGenerationCurrent(operation, runToken);
       if (controller.signal.aborted) throw new DOMException("Aborted", "AbortError");
       partialRenderState.signature = "";
       setComfyuiMessage(`正在執行 workflow 第 ${runIndex + 1} / ${runCount} 次...`, true);
       let res = await runRequest(paidApiConfirmed, collectRunUserInputs());
       let json = await res.json().catch(() => ({}));
+      comfyuiAssertGenerationCurrent(operation, runToken);
       if ((!res.ok || !json.ok) && json.stage === "paid_api_confirmation_required") {
         const nodes = Array.isArray(json.paid_api_nodes?.nodes) ? json.paid_api_nodes.nodes : [];
         const labels = nodes.map((node) => `${node.node_id || "-"}:${node.class_type || node.title || "API node"}`).slice(0, 8);
@@ -3779,19 +3871,25 @@ async function runComfyuiWorkflowPreset(presetId) {
         paidApiConfirmed = true;
         res = await runRequest(true, collectRunUserInputs());
         json = await res.json().catch(() => ({}));
+        comfyuiAssertGenerationCurrent(operation, runToken);
       }
       if (!res.ok || !json.ok) throw new Error(json.msg || `workflow 執行失敗（HTTP ${res.status}）`);
       const jobId = json.job?.job_id;
       if (!jobId) throw new Error("Workflow 執行未回傳工作編號");
       const result = await pollComfyuiJobUntilDone(jobId, controller, workflowTimeoutSeconds, {
+        operation,
+        runToken,
         onPartialResult: renderPartialWorkflowResult,
         onPartialError: (err) => {
-          console.warn("Multi-Compare partial preview failed", err);
+          if (err?.name !== "AbortError") console.warn("Multi-Compare partial preview failed", err);
         },
       });
+      comfyuiAssertGenerationCurrent(operation, runToken);
       const rawImages = Array.isArray(result.images) && result.images.length ? result.images : [result.image].filter(Boolean);
-      const images = await hydrateComfyuiGeneratedImages(rawImages);
-      const media = await hydrateComfyuiGeneratedMedia(Array.isArray(result.media) ? result.media : [], jobId);
+      const images = await hydrateComfyuiGeneratedImages(rawImages, operation);
+      comfyuiAssertGenerationCurrent(operation, runToken);
+      const media = await hydrateComfyuiGeneratedMedia(Array.isArray(result.media) ? result.media : [], jobId, operation);
+      comfyuiAssertGenerationCurrent(operation, runToken);
       images.forEach((image, index) => generatedImages.push({ ...image, run_index: runIndex, batch_index: index, run_count: runCount }));
       media.forEach((item, index) => generatedMedia.push({ ...item, run_index: runIndex, batch_index: index, run_count: runCount }));
       comfyuiGeneratedImages = generatedImages.slice();
@@ -3806,11 +3904,17 @@ async function runComfyuiWorkflowPreset(presetId) {
     if (!comfyuiGeneratedImages.length && !comfyuiGeneratedMedia.length) renderComfyuiGeneratedImages([]);
     stopComfyuiProgress({ complete: true });
     updateComfyuiResultButtons(!!comfyuiGeneratedImages.length);
-    await loadComfyuiWorkflowPresets();
-    if (typeof loadComfyuiHistory === "function") loadComfyuiHistory().catch((err) => setComfyuiHistoryActionMessage(err?.message || "ComfyUI 歷史重新整理失敗", false));
+    await loadComfyuiWorkflowPresets({ operation });
+    comfyuiAssertGenerationCurrent(operation, runToken);
+    if (typeof loadComfyuiHistory === "function") loadComfyuiHistory(operation).catch((err) => {
+      if (comfyuiOperationIsCurrent(operation) && comfyuiGenerationRunToken === runToken && err?.name !== "AbortError") {
+        setComfyuiHistoryActionMessage(err?.message || "ComfyUI 歷史重新整理失敗", false);
+      }
+    });
     if (typeof applyComfyuiSeedAfterGenerate === "function") applyComfyuiSeedAfterGenerate(comfyuiGeneratedImages[comfyuiGeneratedImages.length - 1]?.seed);
     setComfyuiMessage(`已執行 workflow preset #${presetId} ${runCount} 次，輸出 ${comfyuiGeneratedImages.length} 張圖片、${comfyuiGeneratedMedia.length} 個媒體檔。`, true);
   } catch (err) {
+    if (!comfyuiOperationIsCurrent(operation) || comfyuiGenerationRunToken !== runToken) return;
     const timedOut = typeof isComfyuiForegroundTimeoutError === "function" && isComfyuiForegroundTimeoutError(err);
     const message = timedOut && typeof comfyuiForegroundTimeoutMessage === "function"
       ? comfyuiForegroundTimeoutMessage(err)
@@ -3821,8 +3925,11 @@ async function runComfyuiWorkflowPreset(presetId) {
     });
     setComfyuiMessage(message, false);
   } finally {
-    if (comfyuiGenerateAbortController === controller) comfyuiGenerateAbortController = null;
-    setComfyuiBusy(false);
+    if (comfyuiOperationIsCurrent(operation) && comfyuiGenerationRunToken === runToken) {
+      if (comfyuiGenerateAbortController === controller) comfyuiGenerateAbortController = null;
+      setComfyuiBusy(false);
+      if (ownsRunToken) comfyuiGenerationRunToken = null;
+    }
   }
 }
 
@@ -3933,9 +4040,18 @@ async function publishComfyuiWorkflowPresetOfficial(presetId) {
 }
 
 async function loadComfyuiWorkflowFile() {
-  const file = $("comfyui-workflow-file")?.files?.[0] || null;
+  const input = $("comfyui-workflow-file");
+  const file = input?.files?.[0] || null;
   if (!file) return;
+  const accountGeneration = comfyuiWorkflowAccountGeneration;
+  const editorLoadGeneration = ++comfyuiWorkflowEditorLoadGeneration;
   const text = await file.text();
+  if (
+    accountGeneration !== comfyuiWorkflowAccountGeneration
+    || editorLoadGeneration !== comfyuiWorkflowEditorLoadGeneration
+    || input !== $("comfyui-workflow-file")
+    || input?.files?.[0] !== file
+  ) return;
   setComfyuiFieldValue("comfyui-workflow-json", text);
   try {
     const parsed = JSON.parse(text);

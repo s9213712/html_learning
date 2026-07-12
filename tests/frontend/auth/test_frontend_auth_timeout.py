@@ -22,7 +22,8 @@ def test_inactivity_timeout_message_uses_configured_duration():
     assert "markIdleTimeoutLogoutPending();" in auth
     assert "clearIdleTimeoutLogoutPending();" in auth
     assert "showLoginScreen();" in auth
-    assert "if (!res.ok && !immediate)" in auth
+    assert "if (res.ok) clearIdleTimeoutLogoutPending();" in auth
+    assert "閒置登出尚未獲伺服器確認" in auth
     assert "已超過 3 分鐘未操作" not in core
     assert 'label.textContent = currentUser && inactivityLogoutMs <= 0 ? "閒置登出：停用"' in core
     assert 's.session_idle_timeout_minutes ?? ""' in (ROOT / "public" / "js" / "50-admin.js").read_text(encoding="utf-8")
@@ -38,8 +39,8 @@ def test_settings_success_banner_auto_clears_and_is_not_reused_by_idle_warning()
     assert "let settingsStatusAutoClearTimer = null;" in admin
     assert "const autoClearMs = Number(options.autoClearMs || 0);" in admin
     assert "settingsStatusAutoClearTimer = setTimeout(() => {" in admin
-    assert 'setSettingsStatus(\n      `${warnings.length ? "設定已儲存，但功能組合仍未完整" : "✅ 設定已儲存"}' in admin
-    assert "{ autoClearMs: warnings.length ? 0 : 4000 }" in admin
+    assert 'setSettingsStatus(\n      `${warnings.length || authUiRefreshFailed ? "設定已儲存，但仍有項目需確認" : "✅ 設定已儲存"}' in admin
+    assert "{ autoClearMs: warnings.length || authUiRefreshFailed ? 0 : 4000 }" in admin
 
 
 def test_pending_idle_timeout_blocks_auto_session_restore_on_refresh():

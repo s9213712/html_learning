@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -12,7 +13,14 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_OUT = ROOT / "artifacts" / "qa" / "pointschain_rc1_1_gate.json"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.test_artifacts import test_artifact_path  # noqa: E402
+
+
+DEFAULT_OUT = test_artifact_path("qa", "pointschain_rc1_1_gate.json")
+PYTEST_WRAPPER = ROOT / "scripts" / "testing" / "pytest_in_tmp.sh"
 
 
 def utc_now() -> str:
@@ -21,22 +29,34 @@ def utc_now() -> str:
 
 def run_step(name: str, cmd: list[str], *, timeout: int = 300) -> dict:
     started_at = utc_now()
-    proc = subprocess.run(
-        cmd,
-        cwd=ROOT,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        timeout=timeout,
-    )
+    env = os.environ.copy()
+    env["PYTHONPYCACHEPREFIX"] = str(test_artifact_path("pycache"))
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=ROOT,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=timeout,
+        )
+        returncode = proc.returncode
+        output = proc.stdout or ""
+    except subprocess.TimeoutExpired as exc:
+        returncode = 124
+        output = f"step timed out after {timeout}s\n{exc.stdout or ''}"
+    except OSError as exc:
+        returncode = 127
+        output = f"step could not start: {exc}"
     return {
         "name": name,
-        "ok": proc.returncode == 0,
-        "returncode": proc.returncode,
+        "ok": returncode == 0,
+        "returncode": returncode,
         "started_at": started_at,
         "finished_at": utc_now(),
         "command": cmd,
-        "output_tail": (proc.stdout or "")[-6000:],
+        "output_tail": output[-6000:],
     }
 
 
@@ -51,6 +71,8 @@ def main() -> int:
     args = build_parser().parse_args()
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
+    restore_out = test_artifact_path("ops", "restore_drill_rc1_1_gate.json")
+    support_manifest_out = test_artifact_path("qa", "rc1_1_gate_support_manifest.json")
     steps = [
         run_step(
             "rc1_1_ops_py_compile",
@@ -67,9 +89,7 @@ def main() -> int:
         run_step(
             "rc1_1_operational_tests",
             [
-                sys.executable,
-                "-m",
-                "pytest",
+                str(PYTEST_WRAPPER),
                 "-q",
                 "tests/points/test_rc1_1_operational_integrity.py",
                 "tests/snapshots/test_snapshots.py",
@@ -85,23 +105,24 @@ def main() -> int:
                     sys.executable,
                     "scripts/ops/rc1_restore_drill.py",
                     "--out",
-                    str(ROOT / "artifacts" / "ops" / "restore_drill_rc1_1_gate.json"),
+                    str(restore_out),
                 ],
                 timeout=240,
             )
         )
-    steps.append(
-        run_step(
-            "artifact_manifest_and_secret_scan",
-            [
-                sys.executable,
-                "scripts/ops/rc1_1_artifact_manifest.py",
-                "--out",
-                str(ROOT / "artifacts" / "qa" / "rc1_1_a_artifact_manifest.json"),
-            ],
-            timeout=120,
+        steps.append(
+            run_step(
+                "restore_artifact_secret_scan",
+                [
+                    sys.executable,
+                    "scripts/ops/rc1_1_artifact_manifest.py",
+                    "--out",
+                    str(support_manifest_out),
+                    str(restore_out),
+                ],
+                timeout=120,
+            )
         )
-    )
     ok = all(step["ok"] for step in steps)
     payload = {
         "release_candidate": "PointsChain RC1.1 Operational Integrity",

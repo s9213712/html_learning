@@ -49,7 +49,7 @@ def test_cloud_drive_preview_ui_is_wired():
     assert "壓縮後" in drive_js
     assert '".7z", ".rar", ".tar", ".gz"' in drive_js
     assert "closeDrivePreview()" in drive_js
-    assert "async function previewDriveE2eeFile(fileId)" in drive_js
+    assert "async function previewDriveE2eeFile(fileId, options = {})" in drive_js
     assert "decryptDriveE2eeFileForSession" in drive_js
     assert "function normalizeDrivePreviewBlobMime(blob, expectedMime = \"\")" in drive_js
     assert "new Blob([blob], { type: targetMime })" in drive_js
@@ -84,7 +84,7 @@ def test_cloud_drive_preview_ui_is_wired():
     assert "driveE2eeSessionPassphrases" in drive_js
     assert "driveE2eeRecentSessionPassphrases" in drive_js
     assert "clearDriveE2eeSessionPassphrases" in (ROOT / "public" / "js" / "00-core.js").read_text(encoding="utf-8")
-    assert "return previewAlbumFileFullscreen(fileId, options.fileName || \"\")" in drive_js
+    assert 'return previewAlbumFileFullscreen(fileId, options.fileName || "", { ...options, operation });' in drive_js
     assert 'preview.category === "video"' in drive_js
     assert 'preview.category === "audio"' in drive_js
     assert "function driveDirectPlayerMarkup(fileId, preview, url" in drive_js
@@ -360,8 +360,8 @@ def test_storage_browser_bulk_selection_actions_are_wired():
     assert "const { files, folders } = effectiveSelectedStorageItems();" in drive_js
     assert 'storageAction("/storage/folders/trash", "POST", { path })' in drive_js
     assert 'storageAction("/storage/folders/trash", "DELETE"' not in drive_js
-    assert 'storageAction("/storage/albums", "POST", {' in drive_js
-    assert 'storageAction(`/storage/albums/${encodeURIComponent(albumId)}/files`, "POST", { storage_file_id: file.id })' in drive_js
+    assert 'storageAction("/storage/albums/batch-share", "POST", {' in drive_js
+    assert "storage_file_ids: files.map((file) => file.id)" in drive_js
     assert "triggerBrowserDownload(`${API}/storage/files/${encodeURIComponent(file.id)}/download`, storageFileDisplayName(file));" in drive_js
     assert "回收" not in drive_js
     assert "垃圾桶" not in drive_js
@@ -634,7 +634,7 @@ def test_cloud_drive_toolbar_buttons_wrap_on_mobile():
     index_html = (ROOT / "public" / "index.html").read_text(encoding="utf-8")
     css = (ROOT / "public" / "styles.css").read_text(encoding="utf-8")
 
-    assert '/styles.css?v=20260623-account-actions-mobile-v2' in index_html
+    assert '/styles.css?v=__ASSET_VERSION__' in index_html
     assert 'data-drive-action="open-text-document-modal">新增文檔</button>' in index_html
     assert 'data-drive-action="set-drive-e2ee-session-passphrase">套用到本次瀏覽器</button>' in index_html
     assert 'data-drive-action="clear-drive-e2ee-session-passphrase">清除</button>' in index_html
@@ -674,7 +674,7 @@ def test_cloud_drive_privacy_modes_use_human_labels():
     assert "需密碼預覽" in drive_js
     assert "解密預覽" in drive_js
     assert "isDriveE2eeServerPreviewError" in drive_js
-    assert "return previewDriveE2eeFile(fileId);" in drive_js
+    assert "return previewDriveE2eeFile(fileId, { operation });" in drive_js
     assert "root 上限：全用戶容量設定（磁碟總容量 95%）" in drive_js
     assert "root_global_capacity_limit_mb" in drive_js
     assert "manager 上限：1 GB" in drive_js
@@ -720,7 +720,8 @@ def test_core_api_fetch_refreshes_csrf_once():
     assert "async function apiFetch" in core_js
     assert 'payload.error !== "csrf_invalid"' in core_js
     assert "fetchCsrfToken({ force: true })" in core_js
-    assert "const retried = await apiFetch(url, { ...options, credentials: opts.credentials, headers: retryHeaders }, false);" in core_js
+    assert "{ ...options, credentials: opts.credentials, headers: retryHeaders }," in core_js
+    assert "requestGeneration\n    );" in core_js
     assert "return retried;" in core_js
     assert 'headers.set(' in core_js
     assert '"X-CSRF-Token",' in core_js
@@ -731,7 +732,7 @@ def test_core_api_fetch_refreshes_csrf_once():
 def test_cloud_drive_e2ee_upload_prepares_required_crypto_fields():
     drive_js = ((ROOT / "public" / "js" / "35-drive.js").read_text(encoding="utf-8") + "\n" + (ROOT / "public" / "js" / "35-drive-preview-share.js").read_text(encoding="utf-8"))
 
-    assert "async function prepareDriveE2eeUpload(file, passphrase)" in drive_js
+    assert "async function prepareDriveE2eeUpload(file, passphrase, operation = null)" in drive_js
     assert "includeClientScanReport" not in drive_js
     assert 'form.append("client_scan_report"' not in drive_js
     assert "window.crypto.subtle.generateKey" in drive_js
@@ -758,8 +759,8 @@ def test_cloud_drive_e2ee_upload_prepares_required_crypto_fields():
 def test_cloud_drive_e2ee_download_decrypts_in_browser():
     drive_js = ((ROOT / "public" / "js" / "35-drive.js").read_text(encoding="utf-8") + "\n" + (ROOT / "public" / "js" / "35-drive-preview-share.js").read_text(encoding="utf-8"))
 
-    assert "async function unwrapDriveFileKey(encryptedFileKey, passphrase)" in drive_js
-    assert "async function decryptDriveE2eeBlob(blob, e2ee, passphrase)" in drive_js
+    assert "async function unwrapDriveFileKey(encryptedFileKey, passphrase, operation = null)" in drive_js
+    assert "async function decryptDriveE2eeBlob(blob, e2ee, passphrase, operation = null)" in drive_js
     assert "/e2ee-key" in drive_js
     assert "/preview/content" in drive_js
     assert "askDriveE2eePassphrase" in drive_js
@@ -772,14 +773,15 @@ def test_cloud_drive_e2ee_download_decrypts_in_browser():
     assert "rememberDriveE2eeRecentSessionPassphrase(passphrase);" in drive_js
     assert "const candidates = getDriveE2eeSessionPassphraseCandidates(fileId);" in drive_js
     assert "for (const passphrase of candidates)" in drive_js
-    assert "{ promptOnMiss = true }" in drive_js
+    assert "{ promptOnMiss = true, operation = null }" in drive_js
     assert "if (!promptOnMiss && !candidates.length)" in drive_js
     assert "DRIVE_E2EE_PREVIEW_NO_RECENT_PASSWORD" in drive_js
     assert "DRIVE_E2EE_PREVIEW_DECRYPT_FAILED" in drive_js
     assert "正在使用最近輸入過的 E2EE 密碼嘗試預覽" in drive_js
     assert "等待 E2EE 密碼並在瀏覽器解密中" not in drive_js
-    assert "const passphrase = await getDriveE2eeSessionPassphrase(fileId, promptText, { force: true, allowPrompt: true });" in drive_js
-    assert "const decrypted = await decryptDriveE2eeBlob(blob, keyJson.e2ee, passphrase);" in drive_js
+    assert "const passphrase = await getDriveE2eeSessionPassphrase(fileId, promptText, {" in drive_js
+    assert "operation: operationContext," in drive_js
+    assert "const decrypted = await decryptDriveE2eeBlob(blob, keyJson.e2ee, passphrase, operation);" in drive_js
     assert "rememberDriveE2eeSessionPassphrase(fileId, passphrase);" in drive_js
     assert "if (!getDriveE2eeSessionPassphraseCandidates(file.file_id).length) throw err;" in drive_js
     assert "buildDriveE2eePreview(file.file_id, csrf)" in drive_js

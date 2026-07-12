@@ -24,7 +24,13 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_OUT_DIR = ROOT / "artifacts" / "ops"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.test_artifacts import test_artifact_path  # noqa: E402
+
+
+DEFAULT_OUT_DIR = test_artifact_path("ops")
 
 
 def utc_now() -> str:
@@ -284,11 +290,22 @@ def default_out_path(out_dir: Path) -> Path:
     return out_dir / f"restore_drill_{stamp}.json"
 
 
+def prepare_explicit_workdir(value: str) -> Path:
+    workdir = Path(value).expanduser().resolve()
+    tmp_root = Path(tempfile.gettempdir()).resolve()
+    if workdir == tmp_root or tmp_root not in workdir.parents:
+        raise SystemExit("--workdir must resolve below the system temporary directory")
+    if workdir.exists() or workdir.is_symlink():
+        raise SystemExit(f"--workdir must not already exist: {workdir}")
+    workdir.mkdir(parents=True)
+    return workdir
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run an isolated RC1.1 snapshot-boundary drill.")
-    parser.add_argument("--out", default="", help="Output JSON path. Defaults to artifacts/ops/restore_drill_<timestamp>.json.")
+    parser.add_argument("--out", default="", help="Output JSON path. Defaults under /tmp/hackme_web_test_artifacts/ops.")
     parser.add_argument("--out-dir", default=str(DEFAULT_OUT_DIR))
-    parser.add_argument("--workdir", default="", help="Optional workdir. Defaults to a temporary directory.")
+    parser.add_argument("--workdir", default="", help="Optional new directory below /tmp. Existing paths are refused.")
     parser.add_argument("--keep-workdir", action="store_true", help="Keep and report the workdir for debugging.")
     return parser
 
@@ -298,20 +315,18 @@ def main() -> int:
     out = Path(args.out) if args.out else default_out_path(Path(args.out_dir))
     out.parent.mkdir(parents=True, exist_ok=True)
     if args.workdir:
-        workdir = Path(args.workdir)
-        if workdir.exists():
-            shutil.rmtree(workdir)
-        workdir.mkdir(parents=True)
-        payload = run_drill(workdir, keep_workdir=True)
-        if not args.keep_workdir:
-            shutil.rmtree(workdir, ignore_errors=True)
-            payload["workdir"] = ""
+        workdir = prepare_explicit_workdir(args.workdir)
+        try:
+            payload = run_drill(workdir, keep_workdir=args.keep_workdir)
+        finally:
+            if not args.keep_workdir:
+                shutil.rmtree(workdir, ignore_errors=True)
     else:
         with tempfile.TemporaryDirectory(prefix="pointschain_rc1_1_restore_drill_") as tmp:
             payload = run_drill(Path(tmp), keep_workdir=args.keep_workdir)
             if args.keep_workdir:
                 # TemporaryDirectory will be removed, so keep-workdir only has
-                # durable meaning with --workdir.
+                # durable meaning with an explicit new --workdir.
                 payload["workdir"] = ""
     out.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(json.dumps({

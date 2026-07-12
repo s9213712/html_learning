@@ -61,6 +61,8 @@ const DRIVE_E2EE_BROWSER_SESSION_KEY_PREFIX = "hackme_web.drive_e2ee_session_pas
 const DRIVE_SHARE_COPY_RESET_MS = 1800;
 const driveE2eeSessionPassphrases = new Map();
 const driveE2eeRecentSessionPassphrases = [];
+const driveActiveXhrs = new Set();
+const drivePendingAccountCancels = new Set();
 const ATTACHMENT_FILE_SELECT_IDS = [
   "chat-attachment-existing-file-id",
   "dm-attachment-existing-file-id",
@@ -79,6 +81,7 @@ let driveRemoteDownloadCapabilitiesRetryTimer = null;
 let driveRemoteDownloadCapabilitiesRetryCount = 0;
 let driveLatestQuota = null;
 let driveDashboardInFlight = null;
+let driveAccountGeneration = 0;
 let driveDashboardLoadedAt = 0;
 let driveDashboardNavigationAbortController = null;
 let driveDashboardLifecycleGeneration = 0;
@@ -119,6 +122,30 @@ function cancelDriveDashboardNavigationLoad() {
   }
 }
 
+function driveOperationContext() {
+  return {
+    generation: driveAccountGeneration,
+    scope: typeof getCurrentAccountStorageScope === "function"
+      ? getCurrentAccountStorageScope()
+      : String(currentUserId || currentUser || "anonymous"),
+  };
+}
+
+function driveOperationIsCurrent(operation) {
+  if (!operation || Number(operation.generation) !== driveAccountGeneration) return false;
+  const scope = typeof getCurrentAccountStorageScope === "function"
+    ? getCurrentAccountStorageScope()
+    : String(currentUserId || currentUser || "anonymous");
+  return operation.scope === scope;
+}
+
+function driveAssertOperationCurrent(operation) {
+  if (driveOperationIsCurrent(operation)) return;
+  const err = new Error("Account context changed");
+  err.name = "AbortError";
+  throw err;
+}
+
 function isDriveDashboardNavigationCurrent(generation) {
   return generation === driveDashboardLifecycleGeneration
     && currentModuleTab === "drive"
@@ -132,6 +159,75 @@ document.addEventListener("hackme:module-changed", (event) => {
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) cancelDriveDashboardNavigationLoad();
 });
+
+function resetDriveAccountState() {
+  driveAccountGeneration += 1;
+  cancelDriveDashboardNavigationLoad();
+  drivePendingAccountCancels.forEach((cancel) => cancel());
+  drivePendingAccountCancels.clear();
+  driveRemoteTaskListGeneration += 1;
+  driveRemoteTaskListInFlight = null;
+  driveRemoteTaskListCache = [];
+  driveRemoteTaskListLoadedAt = 0;
+  driveActiveXhrs.forEach((xhr) => {
+    try { xhr.abort(); } catch (_) {}
+  });
+  driveActiveXhrs.clear();
+  driveRemotePollingTaskIds.clear();
+  clearDriveE2eeSessionPassphrases();
+  clearDriveShareFragments();
+  driveTransferRows = [];
+  driveTaskCenterLocalJobs = [];
+  driveAttachmentFileOptions = [];
+  driveAttachmentFileOptionsLoadedAt = 0;
+  driveStorageUpgradeCatalog = [];
+  driveStorageUpgradeCanPurchase = false;
+  driveStorageUpgradeMessage = "";
+  driveLatestQuota = null;
+  driveDashboardInFlight = null;
+  driveDashboardLoadedAt = 0;
+  lastDriveFiles = [];
+  storageFilesCache = [];
+  storageFoldersCache = [];
+  storageAlbumsCache = [];
+  selectedStorageFileId = "";
+  selectedStorageFilePath = "";
+  selectedStorageFileIds = new Set();
+  selectedStorageFolderPaths = new Set();
+  selectedAlbumId = "";
+  selectedAlbumViewerId = "";
+  currentStoragePath = "/";
+  albumPreviewSequence = [];
+  albumPreviewIndex = -1;
+  if (pendingAlbumPickerResolve) pendingAlbumPickerResolve("");
+  pendingAlbumPickerResolve = null;
+  clearAlbumThumbObjectUrls();
+  closeDrivePreview();
+  closeAlbumFullPreview();
+  closeDriveShareDialog();
+  closeDriveTextDocumentModal({ clear: true });
+  if (typeof closeAlbumDetail === "function") closeAlbumDetail();
+  if (typeof closeAlbumViewer === "function") closeAlbumViewer();
+  renderDriveFiles([]);
+  renderStorageBrowser();
+  renderStorageTrash([]);
+  renderAlbums([]);
+  [
+    "drive-upload-file",
+    "storage-upload-file",
+    "storage-upload-folder",
+    "storage-upload-path",
+    "drive-remote-url",
+    "drive-remote-virtual-path",
+    "drive-remote-torrent-file",
+  ].forEach((id) => {
+    const input = $(id);
+    if (input && "value" in input) input.value = "";
+  });
+  syncDriveTransferIdleSuspend();
+}
+
+document.addEventListener("hackme:account-context-changed", resetDriveAccountState);
 
 function isDriveTransferActive(item = {}) {
   return !["completed", "failed", "paused", "cancelled", "waiting_resume"].includes(String(item.status || ""));
@@ -432,7 +528,12 @@ function rememberDriveE2eeBrowserSessionPassphrase(passphrase) {
 
 function clearDriveE2eeBrowserSessionPassphrase() {
   try {
-    sessionStorage.removeItem(driveE2eeBrowserSessionKey());
+    const keys = [];
+    for (let index = 0; index < sessionStorage.length; index += 1) {
+      const key = sessionStorage.key(index) || "";
+      if (key.startsWith(DRIVE_E2EE_BROWSER_SESSION_KEY_PREFIX)) keys.push(key);
+    }
+    keys.forEach((key) => sessionStorage.removeItem(key));
   } catch (_) {}
 }
 
@@ -461,6 +562,7 @@ function clearDriveE2eeSessionPassphraseFromUi() {
 }
 
 function askDriveUploadPrivacyOptions({ allowE2ee = true, title = "選擇隱私模式" } = {}) {
+  const operation = driveOperationContext();
   return new Promise((resolve) => {
     syncDriveE2eePassphrasePolicyHints();
     const overlay = $("drive-upload-mode-overlay");
@@ -473,9 +575,12 @@ function askDriveUploadPrivacyOptions({ allowE2ee = true, title = "選擇隱私�
     const confirmBtn = $("drive-upload-mode-confirm-btn");
     const cancelBtn = $("drive-upload-mode-cancel-btn");
     if (!overlay || !confirmBtn || !cancelBtn) {
-      resolve({ privacyMode: "standard_plain", passphrase: "" });
+      resolve(driveOperationIsCurrent(operation)
+        ? { privacyMode: "standard_plain", passphrase: "" }
+        : null);
       return;
     }
+    let done = false;
     const radios = Array.from(document.querySelectorAll("input[name='drive-upload-mode-choice']"));
     const setMsg = (text = "", ok = false) => {
       if (!msg) return;
@@ -496,6 +601,8 @@ function askDriveUploadPrivacyOptions({ allowE2ee = true, title = "選擇隱私�
       }
     };
     const cleanup = (value) => {
+      if (done) return;
+      done = true;
       confirmBtn.removeEventListener("click", onConfirm);
       cancelBtn.removeEventListener("click", onCancel);
       overlay.removeEventListener("click", onOverlayClick);
@@ -504,8 +611,13 @@ function askDriveUploadPrivacyOptions({ allowE2ee = true, title = "選擇隱私�
       overlay.classList.remove("show");
       overlay.setAttribute("aria-hidden", "true");
       document.body.classList.remove("modal-open");
-      resolve(value);
+      if (passphraseInput) passphraseInput.value = "";
+      if (passphraseConfirm) passphraseConfirm.value = "";
+      setMsg("");
+      drivePendingAccountCancels.delete(cancelForAccountChange);
+      resolve(driveOperationIsCurrent(operation) ? value : null);
     };
+    const cancelForAccountChange = () => cleanup(null);
     const onCancel = () => cleanup(null);
     const onOverlayClick = (event) => {
       if (event.target === overlay) cleanup(null);
@@ -514,6 +626,10 @@ function askDriveUploadPrivacyOptions({ allowE2ee = true, title = "選擇隱私�
       if (event.key === "Escape") cleanup(null);
     };
     const onConfirm = () => {
+      if (!driveOperationIsCurrent(operation)) {
+        cleanup(null);
+        return;
+      }
       const privacyMode = selectedMode();
       const options = { privacyMode, passphrase: "" };
       if (privacyMode === "e2ee") {
@@ -549,10 +665,12 @@ function askDriveUploadPrivacyOptions({ allowE2ee = true, title = "選擇隱私�
     cancelBtn.addEventListener("click", onCancel);
     overlay.addEventListener("click", onOverlayClick);
     document.addEventListener("keydown", onKeyDown);
+    drivePendingAccountCancels.add(cancelForAccountChange);
     overlay.classList.add("show");
     overlay.setAttribute("aria-hidden", "false");
     document.body.classList.add("modal-open");
     setTimeout(() => {
+      if (!driveOperationIsCurrent(operation) || done) return;
       const checked = radios.find((radio) => radio.checked && !radio.disabled);
       (checked || confirmBtn).focus?.();
     }, 0);
@@ -604,6 +722,17 @@ function clearDriveE2eeSessionPassphrases() {
   driveE2eeSessionPassphrases.clear();
   driveE2eeRecentSessionPassphrases.length = 0;
   clearDriveE2eeBrowserSessionPassphrase();
+  [
+    "drive-e2ee-session-passphrase",
+    "drive-e2ee-passphrase",
+    "drive-e2ee-passphrase-confirm",
+    "drive-upload-mode-passphrase",
+    "drive-upload-mode-passphrase-confirm",
+    "drive-e2ee-passphrase-input",
+  ].forEach((id) => {
+    const input = $(id);
+    if (input && "value" in input) input.value = "";
+  });
 }
 
 function hasActiveDriveUploads() {
@@ -703,17 +832,22 @@ function rememberDriveE2eeSessionPassphrase(fileId, passphrase) {
   rememberDriveE2eeRecentSessionPassphrase(passphrase);
 }
 
-async function getDriveE2eeSessionPassphrase(fileId, promptText, { force = false, allowPrompt = false } = {}) {
+async function getDriveE2eeSessionPassphrase(fileId, promptText, { force = false, allowPrompt = false, operation = null } = {}) {
+  const operationContext = operation || driveOperationContext();
+  driveAssertOperationCurrent(operationContext);
   if (!force) {
     const remembered = getRememberedDriveE2eeSessionPassphrase(fileId);
     if (remembered) return remembered;
   }
   if (!allowPrompt) return "";
   const passphrase = await askDriveE2eePassphrase(promptText);
+  driveAssertOperationCurrent(operationContext);
   return passphrase || "";
 }
 
-async function deriveDriveE2eePassphraseKey(passphrase, salt, iterations = DRIVE_E2EE_PBKDF2_ITERATIONS) {
+async function deriveDriveE2eePassphraseKey(passphrase, salt, iterations = DRIVE_E2EE_PBKDF2_ITERATIONS, operation = null) {
+  const operationContext = operation || driveOperationContext();
+  driveAssertOperationCurrent(operationContext);
   if (!window.crypto?.subtle) {
     throw new Error("此瀏覽器不支援端到端加密上傳，請改用私密檔案或換用支援 WebCrypto 的瀏覽器。");
   }
@@ -724,7 +858,8 @@ async function deriveDriveE2eePassphraseKey(passphrase, salt, iterations = DRIVE
     false,
     ["deriveKey"]
   );
-  return window.crypto.subtle.deriveKey(
+  driveAssertOperationCurrent(operationContext);
+  const key = await window.crypto.subtle.deriveKey(
     {
       name: "PBKDF2",
       hash: "SHA-256",
@@ -736,12 +871,17 @@ async function deriveDriveE2eePassphraseKey(passphrase, salt, iterations = DRIVE
     false,
     ["encrypt", "decrypt"]
   );
+  driveAssertOperationCurrent(operationContext);
+  return key;
 }
 
-async function encryptDriveJsonMetadata(fileKey, payload) {
+async function encryptDriveJsonMetadata(fileKey, payload, operation = null) {
+  const operationContext = operation || driveOperationContext();
+  driveAssertOperationCurrent(operationContext);
   const nonce = driveRandomNonce();
   const encoded = new TextEncoder().encode(JSON.stringify(payload || {}));
   const ciphertext = await window.crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce }, fileKey, encoded);
+  driveAssertOperationCurrent(operationContext);
   return JSON.stringify({
     alg: "AES-GCM",
     v: 1,
@@ -750,12 +890,19 @@ async function encryptDriveJsonMetadata(fileKey, payload) {
   });
 }
 
-async function wrapDriveFileKey(fileKey, passphrase) {
-  const rawKey = await window.crypto.subtle.exportKey("raw", fileKey);
+async function wrapDriveFileKey(fileKey, passphrase, operation = null) {
+  const operationContext = operation || driveOperationContext();
+  driveAssertOperationCurrent(operationContext);
+  let rawKey = null;
+  try {
+  rawKey = await window.crypto.subtle.exportKey("raw", fileKey);
+  driveAssertOperationCurrent(operationContext);
   const salt = driveRandomNonce(16);
   const nonce = driveRandomNonce();
-  const wrappingKey = await deriveDriveE2eePassphraseKey(passphrase, salt);
+  const wrappingKey = await deriveDriveE2eePassphraseKey(passphrase, salt, DRIVE_E2EE_PBKDF2_ITERATIONS, operationContext);
+  driveAssertOperationCurrent(operationContext);
   const wrapped = await window.crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce }, wrappingKey, rawKey);
+  driveAssertOperationCurrent(operationContext);
   return JSON.stringify({
     alg: "AES-GCM",
     v: 2,
@@ -766,23 +913,39 @@ async function wrapDriveFileKey(fileKey, passphrase) {
     nonce: driveBytesToBase64(nonce),
     ciphertext: driveBytesToBase64(wrapped),
   });
+  } finally {
+    if (rawKey) new Uint8Array(rawKey).fill(0);
+  }
 }
 
-async function unwrapDriveFileKey(encryptedFileKey, passphrase) {
+async function unwrapDriveFileKey(encryptedFileKey, passphrase, operation = null) {
+  const operationContext = operation || driveOperationContext();
+  driveAssertOperationCurrent(operationContext);
   const envelope = JSON.parse(encryptedFileKey || "{}");
   if (envelope.wrapped_by !== DRIVE_E2EE_PASSPHRASE_WRAPPER || !envelope.salt) {
     throw new Error("此檔案使用舊版本機 vault key 包裝，無法用密碼解密；請重新上傳為新版 E2EE。");
   }
-  const wrappingKey = await deriveDriveE2eePassphraseKey(passphrase, envelope.salt, envelope.iterations);
-  const rawKey = await window.crypto.subtle.decrypt(
+  const wrappingKey = await deriveDriveE2eePassphraseKey(passphrase, envelope.salt, envelope.iterations, operationContext);
+  driveAssertOperationCurrent(operationContext);
+  let rawKey = null;
+  try {
+  rawKey = await window.crypto.subtle.decrypt(
     { name: "AES-GCM", iv: driveBase64ToBytes(envelope.nonce) },
     wrappingKey,
     driveBase64ToBytes(envelope.ciphertext)
   );
-  return window.crypto.subtle.importKey("raw", rawKey, { name: "AES-GCM" }, true, ["encrypt", "decrypt"]);
+  driveAssertOperationCurrent(operationContext);
+  const key = await window.crypto.subtle.importKey("raw", rawKey, { name: "AES-GCM" }, true, ["encrypt", "decrypt"]);
+  driveAssertOperationCurrent(operationContext);
+  return key;
+  } finally {
+    if (rawKey) new Uint8Array(rawKey).fill(0);
+  }
 }
 
-async function decryptDriveJsonMetadata(fileKey, encryptedMetadata) {
+async function decryptDriveJsonMetadata(fileKey, encryptedMetadata, operation = null) {
+  const operationContext = operation || driveOperationContext();
+  driveAssertOperationCurrent(operationContext);
   if (!encryptedMetadata) return {};
   const envelope = JSON.parse(encryptedMetadata || "{}");
   const plaintext = await window.crypto.subtle.decrypt(
@@ -790,41 +953,66 @@ async function decryptDriveJsonMetadata(fileKey, encryptedMetadata) {
     fileKey,
     driveBase64ToBytes(envelope.ciphertext)
   );
-  return JSON.parse(new TextDecoder().decode(plaintext));
+  try {
+    driveAssertOperationCurrent(operationContext);
+    return JSON.parse(new TextDecoder().decode(plaintext));
+  } finally {
+    new Uint8Array(plaintext).fill(0);
+  }
 }
 
-async function decryptDriveE2eeBlob(blob, e2ee, passphrase) {
-  const fileKey = await unwrapDriveFileKey(e2ee.encrypted_file_key, passphrase);
+async function decryptDriveE2eeBlob(blob, e2ee, passphrase, operation = null) {
+  const operationContext = operation || driveOperationContext();
+  driveAssertOperationCurrent(operationContext);
+  const fileKey = await unwrapDriveFileKey(e2ee.encrypted_file_key, passphrase, operationContext);
+  driveAssertOperationCurrent(operationContext);
+  const ciphertext = await blob.arrayBuffer();
+  driveAssertOperationCurrent(operationContext);
   const plaintext = await window.crypto.subtle.decrypt(
     { name: "AES-GCM", iv: driveBase64ToBytes(e2ee.nonce) },
     fileKey,
-    await blob.arrayBuffer()
+    ciphertext
   );
-  const metadata = await decryptDriveJsonMetadata(fileKey, e2ee.encrypted_metadata);
-  return {
-    blob: new Blob([plaintext], { type: metadata.mime_type || "application/octet-stream" }),
-    filename: metadata.filename || "download",
-  };
+  try {
+    driveAssertOperationCurrent(operationContext);
+    const metadata = await decryptDriveJsonMetadata(fileKey, e2ee.encrypted_metadata, operationContext);
+    driveAssertOperationCurrent(operationContext);
+    return {
+      blob: new Blob([plaintext], { type: metadata.mime_type || "application/octet-stream" }),
+      filename: metadata.filename || "download",
+    };
+  } finally {
+    new Uint8Array(plaintext).fill(0);
+  }
 }
 
-async function prepareDriveE2eeUpload(file, passphrase) {
+async function prepareDriveE2eeUpload(file, passphrase, operation = null) {
+  const operationContext = operation || driveOperationContext();
+  driveAssertOperationCurrent(operationContext);
   if (!window.crypto?.subtle) {
     throw new Error("此瀏覽器不支援端到端加密上傳，請改用私密檔案或換用支援 WebCrypto 的瀏覽器。");
   }
   const originalName = file.name || "未命名檔案";
   const plaintext = await file.arrayBuffer();
+  driveAssertOperationCurrent(operationContext);
+  try {
   const fileKey = await window.crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, true, ["encrypt", "decrypt"]);
+  driveAssertOperationCurrent(operationContext);
   const nonce = driveRandomNonce();
   const ciphertext = await window.crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce }, fileKey, plaintext);
+  driveAssertOperationCurrent(operationContext);
   const encryptedBlob = new Blob([ciphertext], { type: "application/octet-stream" });
   const encryptedMetadata = await encryptDriveJsonMetadata(fileKey, {
     filename: originalName,
     mime_type: file.type || "application/octet-stream",
     size_bytes: file.size,
     encrypted_at: new Date().toISOString(),
-  });
-  const encryptedFileKey = await wrapDriveFileKey(fileKey, passphrase);
+  }, operationContext);
+  driveAssertOperationCurrent(operationContext);
+  const encryptedFileKey = await wrapDriveFileKey(fileKey, passphrase, operationContext);
+  driveAssertOperationCurrent(operationContext);
   const ciphertextHash = await window.crypto.subtle.digest("SHA-256", ciphertext);
+  driveAssertOperationCurrent(operationContext);
   return {
     blob: encryptedBlob,
     filename: originalName,
@@ -836,6 +1024,9 @@ async function prepareDriveE2eeUpload(file, passphrase) {
     encryption_version: "browser-passphrase-v2",
     nonce: driveBytesToBase64(nonce),
   };
+  } finally {
+    new Uint8Array(plaintext).fill(0);
+  }
 }
 
 const ALBUM_VISIBILITY_LABELS = {
@@ -1558,7 +1749,7 @@ async function dismissRemoteDownloadTask(taskId, transferId) {
       method: "DELETE",
       credentials: "same-origin",
       headers: { "X-CSRF-Token": getCsrfToken() || "" },
-    }).catch(() => {});
+    }).catch((err) => reportFrontendFailure("remote-download-dismiss", err));
     invalidateRemoteDownloadTaskList();
   }
   removeDriveTransferRow(transferId);
@@ -1785,52 +1976,94 @@ function closeDriveShareDialog() {
   if (!overlay) return;
   overlay.classList.remove("show");
   overlay.setAttribute("aria-hidden", "true");
+  [
+    "drive-share-file-id",
+    "drive-share-storage-file-id",
+    "drive-share-file-name",
+    "drive-share-account",
+    "drive-share-password",
+    "drive-share-link",
+  ].forEach((id) => {
+    const input = $(id);
+    if (input && "value" in input) input.value = "";
+  });
+  if ($("drive-share-file-label")) $("drive-share-file-label").textContent = "-";
+  if ($("drive-share-result")) {
+    $("drive-share-result").textContent = "";
+    $("drive-share-result").style.display = "none";
+  }
+  if ($("drive-share-msg")) $("drive-share-msg").textContent = "";
   const anyOverlayOpen = document.querySelector(".user-edit-overlay.show, .album-full-preview-overlay.show");
   if (!anyOverlayOpen) document.body.classList.remove("modal-open");
 }
 
-async function ensureDriveE2eeShareUnlocked(fileId) {
+async function ensureDriveE2eeShareUnlocked(fileId, operation = driveOperationContext()) {
+  driveAssertOperationCurrent(operation);
   const file = driveShareFileMeta(fileId) || {};
   if (!driveFileIsE2ee(file)) return true;
   await fetchCsrfToken();
+  driveAssertOperationCurrent(operation);
   const csrf = getCsrfToken() || "";
   const e2ee = await fetchDriveE2eeKey(fileId, csrf);
+  driveAssertOperationCurrent(operation);
   const passphrase = await getDriveE2eeSessionPassphrase(
     fileId,
     "分享 E2EE 檔案前需先在瀏覽器解密確認。密碼不會送到伺服器。",
     { allowPrompt: true }
   );
+  driveAssertOperationCurrent(operation);
   if (!passphrase) return false;
-  await unwrapDriveFileKey(e2ee.encrypted_file_key, passphrase);
+  await unwrapDriveFileKey(e2ee.encrypted_file_key, passphrase, operation);
+  driveAssertOperationCurrent(operation);
   rememberDriveE2eeSessionPassphrase(fileId, passphrase);
   return true;
 }
 
 async function openDriveShareDialogAfterDecrypt(fileId, name = "", storageFileId = "") {
-  if (!(await ensureDriveE2eeShareUnlocked(fileId))) return;
-  openDriveShareDialog(fileId, name, storageFileId);
+  const operation = driveOperationContext();
+  try {
+    if (!(await ensureDriveE2eeShareUnlocked(fileId, operation))) return;
+    driveAssertOperationCurrent(operation);
+    openDriveShareDialog(fileId, name, storageFileId);
+  } catch (err) {
+    if (!driveOperationIsCurrent(operation) || err?.name === "AbortError") return;
+    reportFrontendFailure("drive-share-unlock", err);
+    const msg = $("drive-msg");
+    if (msg) flash(msg, err?.message || "E2EE 分享解鎖失敗", false);
+  }
 }
 
-async function buildDriveE2eeShareEnvelope(fileId) {
+async function buildDriveE2eeShareEnvelope(fileId, operation = driveOperationContext()) {
+  driveAssertOperationCurrent(operation);
   if (!window.crypto?.subtle) {
     throw new Error("此瀏覽器不支援建立 E2EE 分享授權。");
   }
+  let rawFileKey = null;
+  let shareKeyBytes = null;
+  try {
   await fetchCsrfToken();
+  driveAssertOperationCurrent(operation);
   const csrf = getCsrfToken() || "";
   const e2ee = await fetchDriveE2eeKey(fileId, csrf);
+  driveAssertOperationCurrent(operation);
   const passphrase = await getDriveE2eeSessionPassphrase(
     fileId,
     "請輸入此 E2EE 檔案的原始加密密碼。密碼只在瀏覽器端使用，用來建立分享下載授權。",
     { allowPrompt: true }
   );
+  driveAssertOperationCurrent(operation);
   if (!passphrase) throw new Error("E2EE 檔案需要輸入原始加密密碼才能分享。");
-  const fileKey = await unwrapDriveFileKey(e2ee.encrypted_file_key, passphrase);
+  const fileKey = await unwrapDriveFileKey(e2ee.encrypted_file_key, passphrase, operation);
+  driveAssertOperationCurrent(operation);
   rememberDriveE2eeSessionPassphrase(fileId, passphrase);
-  const rawFileKey = await window.crypto.subtle.exportKey("raw", fileKey);
-  const shareKeyBytes = driveRandomNonce(32);
+  rawFileKey = await window.crypto.subtle.exportKey("raw", fileKey);
+  driveAssertOperationCurrent(operation);
+  shareKeyBytes = driveRandomNonce(32);
   const shareKey = await window.crypto.subtle.importKey("raw", shareKeyBytes, { name: "AES-GCM", length: 256 }, false, ["encrypt"]);
+  driveAssertOperationCurrent(operation);
   const nonce = driveRandomNonce();
   const ciphertext = await window.crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce }, shareKey, rawFileKey);
+  driveAssertOperationCurrent(operation);
   return {
     wrapped_file_key_envelope: JSON.stringify({
       alg: "AES-GCM",
@@ -1840,6 +2073,10 @@ async function buildDriveE2eeShareEnvelope(fileId) {
     }),
     fragment_key: driveBytesToBase64Url(shareKeyBytes),
   };
+  } finally {
+    if (rawFileKey) new Uint8Array(rawFileKey).fill(0);
+    if (shareKeyBytes) shareKeyBytes.fill(0);
+  }
 }
 
 function driveShareAbsoluteUrl(url, fragmentKey = "") {
@@ -1858,9 +2095,28 @@ function normalizeDriveShareFragmentStorageUrl(url) {
   }
 }
 
+function driveShareFragmentStorageKey() {
+  return typeof accountScopedStorageKey === "function"
+    ? accountScopedStorageKey(DRIVE_SHARE_FRAGMENT_STORAGE_KEY)
+    : DRIVE_SHARE_FRAGMENT_STORAGE_KEY;
+}
+
+function clearDriveShareFragments() {
+  try {
+    const keys = [];
+    for (let index = 0; index < sessionStorage.length; index += 1) {
+      const key = sessionStorage.key(index) || "";
+      if (key === DRIVE_SHARE_FRAGMENT_STORAGE_KEY || key.endsWith(`:${DRIVE_SHARE_FRAGMENT_STORAGE_KEY}`)) {
+        keys.push(key);
+      }
+    }
+    keys.forEach((key) => sessionStorage.removeItem(key));
+  } catch (_) {}
+}
+
 function loadDriveShareFragments() {
   try {
-    return JSON.parse(sessionStorage.getItem(DRIVE_SHARE_FRAGMENT_STORAGE_KEY) || "{}") || {};
+    return JSON.parse(sessionStorage.getItem(driveShareFragmentStorageKey()) || "{}") || {};
   } catch (_) {
     return {};
   }
@@ -1868,7 +2124,7 @@ function loadDriveShareFragments() {
 
 function saveDriveShareFragments(data) {
   try {
-    sessionStorage.setItem(DRIVE_SHARE_FRAGMENT_STORAGE_KEY, JSON.stringify(data || {}));
+    sessionStorage.setItem(driveShareFragmentStorageKey(), JSON.stringify(data || {}));
   } catch (_) {
     // ignore session storage failure
   }
@@ -1931,6 +2187,7 @@ function setDriveShareCopyStatus(text, ok = true, button = null) {
 }
 
 async function createDriveShareLink() {
+  const operation = driveOperationContext();
   const fileId = $("drive-share-file-id")?.value || "";
   const storageFileId = $("drive-share-storage-file-id")?.value || "";
   const file = driveShareFileMeta(fileId) || {};
@@ -1965,11 +2222,13 @@ async function createDriveShareLink() {
   try {
     if (requiresFragment) {
       if (msg) flash(msg, "正在建立 E2EE 分享授權...", true);
-      const envelope = await buildDriveE2eeShareEnvelope(fileId);
+      const envelope = await buildDriveE2eeShareEnvelope(fileId, operation);
+      driveAssertOperationCurrent(operation);
       payload.wrapped_file_key_envelope = envelope.wrapped_file_key_envelope;
       fragmentKey = envelope.fragment_key;
     }
     await fetchCsrfToken({ force: true });
+    driveAssertOperationCurrent(operation);
     const res = await apiFetch(API + "/storage/share-links", {
       method: "POST",
       credentials: "same-origin",
@@ -1980,8 +2239,10 @@ async function createDriveShareLink() {
       body: JSON.stringify(payload),
     });
     const json = await res.json().catch(() => ({}));
+    driveAssertOperationCurrent(operation);
     if (!res.ok || !json.ok) throw new Error(json.msg || "分享連結建立失敗");
     const link = json.share_link || {};
+    if ($("drive-share-password")) $("drive-share-password").value = "";
     const bareShareUrl = driveShareAbsoluteUrl(link.share_url || (link.token ? `/shared/files/${link.token}` : ""), "");
     if (fragmentKey) rememberDriveShareFragment(bareShareUrl, fragmentKey);
     const shareUrl = driveShareUrlWithRememberedFragment(bareShareUrl, fragmentKey);
@@ -2008,11 +2269,13 @@ async function createDriveShareLink() {
     }
     if (msg) flash(msg, "分享連結已建立", true);
   } catch (err) {
+    if (!driveOperationIsCurrent(operation) || err?.name === "AbortError") return;
     if (msg) flash(msg, err?.message || "分享連結建立失敗", false);
   }
 }
 
 async function copyDriveShareUrl(url, options = {}) {
+  const operation = driveOperationContext();
   const button = options.button || null;
   const requiresFragment = Boolean(options.requiresFragment);
   let shareUrl = String(url || "");
@@ -2026,8 +2289,10 @@ async function copyDriveShareUrl(url, options = {}) {
   }
   try {
     await navigator.clipboard.writeText(shareUrl);
+    if (!driveOperationIsCurrent(operation)) return;
     setDriveShareCopyStatus("連結已複製", true, button);
   } catch (_) {
+    if (!driveOperationIsCurrent(operation)) return;
     setDriveShareCopyStatus("請在彈出視窗複製完整連結。", true, button);
     window.prompt("分享連結", shareUrl);
   }
@@ -2076,6 +2341,7 @@ function renderDriveFiles(files) {
 }
 
 function askDriveE2eePassphrase(promptText = "請輸入此檔案的 E2EE 加密密碼。") {
+  const operation = driveOperationContext();
   return new Promise((resolve) => {
     const overlay = $("drive-e2ee-passphrase-overlay");
     const input = $("drive-e2ee-passphrase-input");
@@ -2084,7 +2350,8 @@ function askDriveE2eePassphrase(promptText = "請輸入此檔案的 E2EE 加密�
     const confirmBtn = $("drive-e2ee-passphrase-confirm-btn");
     const cancelBtn = $("drive-e2ee-passphrase-cancel-btn");
     if (!overlay || !input || !confirmBtn || !cancelBtn) {
-      resolve(window.prompt(promptText) || "");
+      const value = window.prompt(promptText) || "";
+      resolve(driveOperationIsCurrent(operation) ? value : "");
       return;
     }
     let done = false;
@@ -2100,9 +2367,15 @@ function askDriveE2eePassphrase(promptText = "請輸入此檔案的 E2EE 加密�
       input.removeEventListener("keydown", onKeydown);
       input.value = "";
       if (msg) msg.textContent = "";
-      resolve(value || "");
+      drivePendingAccountCancels.delete(cancelForAccountChange);
+      resolve(driveOperationIsCurrent(operation) ? (value || "") : "");
     };
+    const cancelForAccountChange = () => cleanup("");
     const onConfirm = () => {
+      if (!driveOperationIsCurrent(operation)) {
+        cleanup("");
+        return;
+      }
       if (!input.value) {
         if (msg) flash(msg, "請輸入 E2EE 加密密碼", false);
         return;
@@ -2121,7 +2394,10 @@ function askDriveE2eePassphrase(promptText = "請輸入此檔案的 E2EE 加密�
     confirmBtn.addEventListener("click", onConfirm);
     cancelBtn.addEventListener("click", onCancel);
     input.addEventListener("keydown", onKeydown);
-    setTimeout(() => input.focus(), 0);
+    drivePendingAccountCancels.add(cancelForAccountChange);
+    setTimeout(() => {
+      if (driveOperationIsCurrent(operation) && !done) input.focus();
+    }, 0);
   });
 }
 
@@ -2146,6 +2422,7 @@ async function loadDriveFiles(csrf, { signal } = {}) {
 }
 
 async function uploadDriveFile() {
+  const operation = driveOperationContext();
   const input = $("drive-upload-file");
   if (!input || !input.files || !input.files[0]) {
     alert("請先選擇檔案");
@@ -2156,6 +2433,7 @@ async function uploadDriveFile() {
     input.value = "";
     return;
   }
+  if (!driveOperationIsCurrent(operation)) return;
   const transferId = addDriveTransferRow({
     kind: "upload",
     name: file.name,
@@ -2165,6 +2443,7 @@ async function uploadDriveFile() {
     msg: "等待上傳",
   });
   await fetchCsrfToken();
+  if (!driveOperationIsCurrent(operation)) return;
   const csrf = getCsrfToken();
   const privacyMode = $("drive-upload-privacy-mode")?.value || "standard_plain";
   const form = new FormData();
@@ -2175,7 +2454,8 @@ async function uploadDriveFile() {
     let uploadFields = {};
     if (isDriveE2eeMode(privacyMode)) {
       updateDriveTransferRow(transferId, { phase: "encrypting", msg: "瀏覽器端加密中", progress_percent: null });
-      const encrypted = await prepareDriveE2eeUpload(file, getDriveE2eeUploadPassphrase());
+      const encrypted = await prepareDriveE2eeUpload(file, getDriveE2eeUploadPassphrase(), operation);
+      driveAssertOperationCurrent(operation);
       const encryptedQuotaError = driveUploadQuotaError(encrypted.blob.size, `加密後檔案「${file.name || encrypted.filename}」`);
       if (encryptedQuotaError) throw new Error(encryptedQuotaError);
       uploadBlob = encrypted.blob;
@@ -2197,6 +2477,7 @@ async function uploadDriveFile() {
         transferId,
         csrf,
         label: uploadFilename,
+        operation,
       });
     } else {
       form.append("file", uploadBlob, uploadFilename);
@@ -2220,6 +2501,7 @@ async function uploadDriveFile() {
           });
         }
       });
+      driveAssertOperationCurrent(operation);
       json = upload.json || {};
       if (upload.status < 200 || upload.status >= 300 || !json.ok) {
         const detail = json.error_code ? `${json.msg || "雲端硬碟上傳失敗"}（${json.error_code}）` : (json.msg || `雲端硬碟上傳失敗（HTTP ${upload.status}）`);
@@ -2240,8 +2522,12 @@ async function uploadDriveFile() {
     input.value = "";
     if (isDriveE2eeMode(privacyMode)) clearDriveE2eeUploadPassphrase();
     await loadDriveDashboard();
-    setTimeout(() => removeDriveTransferRow(transferId), DRIVE_TRANSFER_COMPLETED_VISIBLE_MS);
+    driveAssertOperationCurrent(operation);
+    setTimeout(() => {
+      if (driveOperationIsCurrent(operation)) removeDriveTransferRow(transferId);
+    }, DRIVE_TRANSFER_COMPLETED_VISIBLE_MS);
   } catch (err) {
+    if (!driveOperationIsCurrent(operation) || err?.name === "AbortError") return;
     const detail = err.message || "雲端硬碟上傳失敗";
     const row = driveTransferRows.find((item) => item.id === transferId) || {};
     if (row.kind === "resumable_upload" && row.session_id) {
@@ -2251,7 +2537,13 @@ async function uploadDriveFile() {
         msg: `${detail}；請按「選同檔續傳」接續已上傳分段`,
         progress_percent: row.progress_percent,
       });
-      try { await restoreResumableUploadSessions(); } catch (_) {}
+      try {
+        await restoreResumableUploadSessions();
+        driveAssertOperationCurrent(operation);
+      } catch (restoreErr) {
+        if (!driveOperationIsCurrent(operation) || restoreErr?.name === "AbortError") return;
+        reportFrontendFailure("drive-resumable-restore-after-upload-failure", restoreErr);
+      }
     } else {
       updateDriveTransferRow(transferId, { status: "failed", phase: "failed", msg: detail, progress_percent: 100 });
     }
@@ -2279,25 +2571,67 @@ function driveUploadSleep(ms) {
 
 function driveUploadRetryDelayMs(result, attempt) {
   const retryAfter = Number(result?.retry_after || result?.json?.retry_after_seconds || 0);
-  if (retryAfter > 0) return Math.min(15000, retryAfter * 1000);
-  return Math.min(8000, 750 * Math.max(1, attempt));
+  if (retryAfter > 0) return Math.min(3000, Math.max(250, retryAfter * 1000));
+  return Math.min(3000, 750 * Math.max(1, attempt));
 }
 
 function driveUploadShouldRetryResult(result) {
   const status = Number(result?.status || 0);
-  return status === 429 || status === 503 || result?.json?.error === "server_busy" || result?.json?.code === "server_busy";
+  if (status === 503) {
+    return result?.backpressure_rejected === "1" && result?.json?.error === "server_busy";
+  }
+  return status === 429
+    && Boolean(result?.edge_guard)
+    && result?.json?.error === "edge_rate_limited";
 }
 
 async function xhrUploadWithProgress(url, form, csrf, onProgress, { retryOnCsrf = true } = {}) {
+  const uploadScope = typeof getCurrentAccountStorageScope === "function"
+    ? getCurrentAccountStorageScope()
+    : String(currentUserId || currentUser || "anonymous");
+  const assertUploadScope = () => {
+    const currentScope = typeof getCurrentAccountStorageScope === "function"
+      ? getCurrentAccountStorageScope()
+      : String(currentUserId || currentUser || "anonymous");
+    if (currentScope === uploadScope) return;
+    const error = new Error("帳戶已切換，上傳已取消");
+    error.name = "AbortError";
+    throw error;
+  };
   const sendOnce = (token) => new Promise((resolve, reject) => {
+    try {
+      assertUploadScope();
+    } catch (err) {
+      reject(err);
+      return;
+    }
     const xhr = new XMLHttpRequest();
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      driveActiveXhrs.delete(xhr);
+      callback(value);
+    };
     xhr.open("POST", url);
     xhr.withCredentials = true;
     if (token) xhr.setRequestHeader("X-CSRF-Token", token);
     xhr.upload.onprogress = (event) => {
+      try {
+        assertUploadScope();
+      } catch (_) {
+        xhr.abort();
+        return;
+      }
       if (typeof onProgress === "function") onProgress(event);
     };
     xhr.onload = () => {
+      try {
+        assertUploadScope();
+      } catch (err) {
+        finish(reject, err);
+        return;
+      }
       let json = {};
       try {
         json = JSON.parse(xhr.responseText || "{}");
@@ -2305,21 +2639,33 @@ async function xhrUploadWithProgress(url, form, csrf, onProgress, { retryOnCsrf 
         json = {};
       }
       syncDriveCsrfFromCookie();
-      resolve({
+      finish(resolve, {
         status: xhr.status,
         json,
         retry_after: xhr.getResponseHeader("Retry-After") || "",
         backpressure: xhr.getResponseHeader("X-Hackme-Backpressure") || "",
+        backpressure_rejected: xhr.getResponseHeader("X-Hackme-Backpressure-Rejected") || "",
+        edge_guard: xhr.getResponseHeader("X-Hackme-Edge-Guard") || "",
       });
     };
-    xhr.onerror = () => reject(new Error("上傳連線失敗"));
-    xhr.ontimeout = () => reject(new Error("上傳逾時"));
+    xhr.onerror = () => finish(reject, new Error("上傳連線失敗"));
+    xhr.ontimeout = () => finish(reject, new Error("上傳逾時"));
+    xhr.onabort = () => {
+      const error = new Error("上傳已取消");
+      error.name = "AbortError";
+      finish(reject, error);
+    };
+    driveActiveXhrs.add(xhr);
     xhr.send(form);
   });
+  assertUploadScope();
   const token = await currentDriveCsrfToken();
+  assertUploadScope();
   let result = await sendOnce(token || csrf || "");
   if (retryOnCsrf && result.status === 403 && result.json?.error === "csrf_invalid") {
+    assertUploadScope();
     const retryCsrf = await currentDriveCsrfToken({ force: true });
+    assertUploadScope();
     if (retryCsrf) result = await sendOnce(retryCsrf);
   }
   return result;
@@ -2366,30 +2712,54 @@ async function completeDriveResumableUpload(sessionId, csrf = "") {
   });
 }
 
-function chooseResumableResumeFile(session = {}) {
+function chooseResumableResumeFile(session = {}, operation = driveOperationContext()) {
   return new Promise((resolve) => {
     const input = document.createElement("input");
     input.type = "file";
     input.style.position = "fixed";
     input.style.left = "-9999px";
     input.setAttribute("aria-hidden", "true");
-    input.addEventListener("change", () => {
-      const file = input.files && input.files[0] ? input.files[0] : null;
+    let done = false;
+    const cleanup = () => {
+      if (done) return;
+      done = true;
+      drivePendingAccountCancels.delete(cancelForAccountChange);
+      const selectedFile = input.files && input.files[0] ? input.files[0] : null;
       input.remove();
-      resolve(file);
-    }, { once: true });
+      resolve(driveOperationIsCurrent(operation) ? selectedFile : null);
+    };
+    const cancelForAccountChange = () => cleanup();
+    input.addEventListener("change", cleanup, { once: true });
+    input.addEventListener("cancel", cleanup, { once: true });
+    drivePendingAccountCancels.add(cancelForAccountChange);
     document.body.appendChild(input);
     input.click();
   });
 }
 
 async function resumeResumableUploadSession(sessionId, transferId = "") {
+  const operation = driveOperationContext();
+  try {
+    return await resumeResumableUploadSessionForOperation(sessionId, transferId, operation);
+  } catch (err) {
+    if (!driveOperationIsCurrent(operation) || err?.name === "AbortError") return null;
+    reportFrontendFailure("drive-resumable-resume", err);
+    alert(err?.message || "續傳失敗");
+    return null;
+  }
+}
+
+async function resumeResumableUploadSessionForOperation(sessionId, transferId, operation) {
+  driveAssertOperationCurrent(operation);
   if (!sessionId) return null;
   await fetchCsrfToken({ force: true });
+  driveAssertOperationCurrent(operation);
   const csrf = getCsrfToken();
   const session = await getDriveResumableUploadStatus(sessionId, csrf);
+  driveAssertOperationCurrent(operation);
   if (!session?.session_id) throw new Error("找不到等待續傳的 upload session");
-  const selected = await chooseResumableResumeFile(session);
+  const selected = await chooseResumableResumeFile(session, operation);
+  driveAssertOperationCurrent(operation);
   if (!selected) return null;
   const expectedName = String(session.filename || "");
   const actualName = String(selected.name || "");
@@ -2428,7 +2798,9 @@ async function resumeResumableUploadSession(sessionId, transferId = "") {
       csrf,
       label: expectedName || actualName || "upload.bin",
       resumeSession: session,
+      operation,
     });
+    driveAssertOperationCurrent(operation);
     updateDriveTransferRow(rowId, {
       status: "completed",
       phase: "completed",
@@ -2439,9 +2811,13 @@ async function resumeResumableUploadSession(sessionId, transferId = "") {
       source_ref: json.file?.file_id ? `cloud_file:${json.file.file_id}` : driveResumableUploadSourceRef(sessionId),
     });
     await loadDriveDashboard();
-    setTimeout(() => removeDriveTransferRow(rowId), DRIVE_TRANSFER_COMPLETED_VISIBLE_MS);
+    driveAssertOperationCurrent(operation);
+    setTimeout(() => {
+      if (driveOperationIsCurrent(operation)) removeDriveTransferRow(rowId);
+    }, DRIVE_TRANSFER_COMPLETED_VISIBLE_MS);
     return json;
   } catch (err) {
+    if (!driveOperationIsCurrent(operation) || err?.name === "AbortError") return null;
     updateDriveTransferRow(rowId, {
       status: "waiting_resume",
       phase: "waiting_resume",
@@ -2470,7 +2846,10 @@ async function uploadDriveBlobResumable({
   label = "",
   exposeSessionAsTransfer = true,
   resumeSession = null,
+  operation = null,
 } = {}) {
+  const operationContext = operation || driveOperationContext();
+  driveAssertOperationCurrent(operationContext);
   if (!blob) throw new Error("缺少要上傳的檔案資料");
   const totalBytes = Number(blob.size || 0);
   const chunkSize = DRIVE_RESUMABLE_UPLOAD_CHUNK_BYTES;
@@ -2490,6 +2869,7 @@ async function uploadDriveBlobResumable({
   const remembered = session ? "" : rememberedDriveResumableUpload(storageKey);
   if (remembered) {
     const existing = await getDriveResumableUploadStatus(remembered, csrf);
+    driveAssertOperationCurrent(operationContext);
     if (driveResumableUploadCanResumeSession(existing, { filename, totalBytes, target, privacyMode })) {
       session = existing;
     } else {
@@ -2498,6 +2878,7 @@ async function uploadDriveBlobResumable({
   }
   if (!session) {
     session = await findDriveResumableUploadSessionForBlob({ filename, totalBytes, target, privacyMode, csrf });
+    driveAssertOperationCurrent(operationContext);
   }
   if (!session) {
     session = await startDriveResumableUploadSession({
@@ -2511,6 +2892,7 @@ async function uploadDriveBlobResumable({
       display_name: displayName,
       ...fields,
     }, csrf);
+    driveAssertOperationCurrent(operationContext);
   }
   rememberDriveResumableUpload(storageKey, session.session_id);
   if (exposeSessionAsTransfer) {
@@ -2558,6 +2940,7 @@ async function uploadDriveBlobResumable({
           });
         }
       );
+      driveAssertOperationCurrent(operationContext);
       if (!driveUploadShouldRetryResult(uploadResult)) break;
       const delayMs = driveUploadRetryDelayMs(uploadResult, attempt);
       updateDriveTransferRow(transferId, {
@@ -2566,6 +2949,7 @@ async function uploadDriveBlobResumable({
         msg: `${label || filename} 分段 ${index + 1}/${totalChunks} 暫時被限流，${Math.ceil(delayMs / 1000)} 秒後重試`,
       });
       await driveUploadSleep(delayMs);
+      driveAssertOperationCurrent(operationContext);
     }
     const status = Number(uploadResult?.status || 0);
     const json = uploadResult?.json || {};
@@ -2590,15 +2974,19 @@ async function uploadDriveBlobResumable({
     msg: `${label || filename} 分段合併、掃描與保存中`,
   });
   const completed = await completeDriveResumableUpload(session.session_id, csrf);
+  driveAssertOperationCurrent(operationContext);
   forgetDriveResumableUpload(storageKey);
   return completed;
 }
 
-async function loadRemoteDownloadCapabilities({ signal } = {}) {
+async function loadRemoteDownloadCapabilities({ signal, operation = null } = {}) {
+  const operationContext = operation || driveOperationContext();
+  driveAssertOperationCurrent(operationContext);
   const status = $("drive-remote-download-status");
   const torrentButtons = [$("drive-remote-torrent-inline-btn"), $("drive-remote-torrent-btn")].filter(Boolean);
   if (!currentUser || !canAccessModule("privacy_uploads")) return;
   await abortableWait(fetchCsrfToken(), signal, "Drive capability load aborted");
+  driveAssertOperationCurrent(operationContext);
   try {
     const res = await apiFetch(API + "/cloud-drive/remote-download/capabilities", {
       credentials: "same-origin",
@@ -2606,6 +2994,7 @@ async function loadRemoteDownloadCapabilities({ signal } = {}) {
       signal,
     });
     const json = await res.json().catch(() => ({}));
+    driveAssertOperationCurrent(operationContext);
     if (!json.ok) {
       driveRemoteDownloadCapabilities = { direct: true, bt_magnet: false, bt_file: false };
       if (status) status.textContent = json.msg || "BT 能力讀取失敗；Direct link 仍可用";
@@ -2613,7 +3002,7 @@ async function loadRemoteDownloadCapabilities({ signal } = {}) {
         button.disabled = true;
         button.title = "BT 能力讀取失敗，請稍後重新整理";
       });
-      scheduleDriveRemoteDownloadCapabilitiesRetry(status, torrentButtons, json.msg || `HTTP ${res.status}`);
+      scheduleDriveRemoteDownloadCapabilitiesRetry(status, torrentButtons, json.msg || `HTTP ${res.status}`, operationContext);
       return;
     }
     if (driveRemoteDownloadCapabilitiesRetryTimer) {
@@ -2642,18 +3031,20 @@ async function loadRemoteDownloadCapabilities({ signal } = {}) {
         : "Direct link 可用；BT/magnet 不可用，請設定 Transmission RPC 或安裝 aria2c";
     }
   } catch (err) {
-    if (err?.name === "AbortError") return;
+    if (!driveOperationIsCurrent(operationContext) || err?.name === "AbortError") return;
     driveRemoteDownloadCapabilities = { direct: true, bt_magnet: false, bt_file: false };
     if (status) status.textContent = "BT 能力檢查失敗；Direct link 仍可用";
     torrentButtons.forEach((button) => {
       button.disabled = true;
       button.title = "BT 能力檢查失敗，請稍後重新整理";
     });
-    scheduleDriveRemoteDownloadCapabilitiesRetry(status, torrentButtons, err?.message || "");
+    scheduleDriveRemoteDownloadCapabilitiesRetry(status, torrentButtons, err?.message || "", operationContext);
   }
 }
 
-function scheduleDriveRemoteDownloadCapabilitiesRetry(status, torrentButtons, reason = "") {
+function scheduleDriveRemoteDownloadCapabilitiesRetry(status, torrentButtons, reason = "", operation = null) {
+  const operationContext = operation || driveOperationContext();
+  if (!driveOperationIsCurrent(operationContext)) return;
   if (driveRemoteDownloadCapabilitiesRetryTimer || driveRemoteDownloadCapabilitiesRetryCount >= DRIVE_REMOTE_CAPABILITY_RETRY_LIMIT) return;
   const delayMs = Math.min(8000, 1500 * (2 ** driveRemoteDownloadCapabilitiesRetryCount));
   driveRemoteDownloadCapabilitiesRetryCount += 1;
@@ -2667,7 +3058,7 @@ function scheduleDriveRemoteDownloadCapabilitiesRetry(status, torrentButtons, re
   });
   driveRemoteDownloadCapabilitiesRetryTimer = setTimeout(() => {
     driveRemoteDownloadCapabilitiesRetryTimer = null;
-    loadRemoteDownloadCapabilities();
+    if (driveOperationIsCurrent(operationContext)) loadRemoteDownloadCapabilities({ operation: operationContext });
   }, delayMs);
 }
 
@@ -2724,6 +3115,7 @@ function openRemoteTorrentPicker() {
 }
 
 async function startRemoteDriveDownload({ source = "auto", downloadMode = "direct", triggerButton = null } = {}) {
+  const operation = driveOperationContext();
   const url = source === "torrent" ? "" : ($("drive-remote-url")?.value || "").trim();
   const torrentInput = $("drive-remote-torrent-file");
   const torrentFile = source === "url" || source === "torrent-url" ? null : (torrentInput?.files?.[0] || null);
@@ -2755,6 +3147,7 @@ async function startRemoteDriveDownload({ source = "auto", downloadMode = "direc
   }
   const options = await askDriveUploadPrivacyOptions({ allowE2ee: false, title: `${detected.label || "遠端下載"}儲存前選擇隱私模式` });
   if (!options) return;
+  driveAssertOperationCurrent(operation);
   if ($("drive-remote-privacy-mode")) $("drive-remote-privacy-mode").value = options.privacyMode;
   const transferId = addDriveTransferRow({
     kind: "remote_download",
@@ -2801,6 +3194,7 @@ async function startRemoteDriveDownload({ source = "auto", downloadMode = "direc
       });
     }
     const json = await res.json().catch(() => ({}));
+    driveAssertOperationCurrent(operation);
     if (!res.ok || !json.ok) throw new Error(json.msg || `遠端下載失敗（HTTP ${res.status}）`);
     const task = json.task || {};
     if (!task.id) throw new Error("遠端下載任務建立失敗");
@@ -2815,11 +3209,13 @@ async function startRemoteDriveDownload({ source = "auto", downloadMode = "direc
     if ($("drive-remote-url")) $("drive-remote-url").value = "";
     if (torrentInput) torrentInput.value = "";
     flash($("drive-msg"), json.msg || "遠端下載任務已建立，可繼續操作頁面", true);
-    resumeRemoteDownloadTaskPolling(task);
+    resumeRemoteDownloadTaskPolling(task, operation);
   } catch (err) {
+    if (!driveOperationIsCurrent(operation) || err?.name === "AbortError") return;
     updateDriveTransferRow(transferId, { status: "failed", phase: "failed", msg: err.message || "遠端下載失敗", progress_percent: 100 });
     alert(err.message || "遠端下載失敗");
   } finally {
+    if (!driveOperationIsCurrent(operation)) return;
     if (button) {
       button.disabled = false;
       button.textContent = oldText || "開始下載";
@@ -2831,11 +3227,14 @@ function driveSleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function pollRemoteDownloadTask(taskId, transferId) {
+async function pollRemoteDownloadTask(taskId, transferId, operation = null) {
+  const operationContext = operation || driveOperationContext();
+  driveAssertOperationCurrent(operationContext);
   if (!taskId) throw new Error("遠端下載任務建立失敗");
   let consecutiveStatusErrors = 0;
   while (true) {
     await driveSleep(900);
+    driveAssertOperationCurrent(operationContext);
     let res;
     let json = {};
     try {
@@ -2845,11 +3244,13 @@ async function pollRemoteDownloadTask(taskId, transferId) {
         headers: { "X-CSRF-Token": getCsrfToken() || "" }
       });
       json = await res.json().catch(() => ({}));
+      driveAssertOperationCurrent(operationContext);
       if (!res.ok || !json.ok) {
         throw new Error(json.msg || `遠端下載狀態讀取失敗（HTTP ${res.status}）`);
       }
       consecutiveStatusErrors = 0;
     } catch (err) {
+      if (!driveOperationIsCurrent(operationContext) || err?.name === "AbortError") throw err;
       consecutiveStatusErrors += 1;
       updateDriveTransferRow(transferId, {
         status: "running",
@@ -2969,17 +3370,21 @@ async function cancelResumableUploadSession(sessionId, transferId) {
   return session;
 }
 
-function resumeRemoteDownloadTaskPolling(task) {
+function resumeRemoteDownloadTaskPolling(task, operation = null) {
+  const operationContext = operation || driveOperationContext();
+  if (!driveOperationIsCurrent(operationContext)) return;
   if (!task?.id || !["queued", "running"].includes(task.status)) return;
   if (driveRemotePollingTaskIds.has(task.id)) return;
   const transferId = applyRemoteDownloadTaskToTransfer(task);
   if (!transferId) return;
   driveRemotePollingTaskIds.add(task.id);
-  pollRemoteDownloadTask(task.id, transferId)
+  pollRemoteDownloadTask(task.id, transferId, operationContext)
     .then(async () => {
+      driveAssertOperationCurrent(operationContext);
       await loadDriveDashboard();
     })
     .catch((err) => {
+      if (!driveOperationIsCurrent(operationContext) || err?.name === "AbortError") return;
       if (err?.remoteStatusTransient) {
         updateDriveTransferRow(transferId, {
           status: "running",
@@ -2988,8 +3393,9 @@ function resumeRemoteDownloadTaskPolling(task) {
           progress_percent: null,
         });
         setTimeout(() => {
+          if (!driveOperationIsCurrent(operationContext)) return;
           driveRemotePollingTaskIds.delete(task.id);
-          resumeRemoteDownloadTaskPolling({ ...task, status: "running" });
+          resumeRemoteDownloadTaskPolling({ ...task, status: "running" }, operationContext);
         }, 5000);
         return;
       }
@@ -3001,7 +3407,7 @@ function resumeRemoteDownloadTaskPolling(task) {
       });
     })
     .finally(() => {
-      driveRemotePollingTaskIds.delete(task.id);
+      if (driveOperationIsCurrent(operationContext)) driveRemotePollingTaskIds.delete(task.id);
     });
 }
 
@@ -3068,6 +3474,18 @@ function triggerBrowserDownload(url, filename = "") {
 }
 
 async function downloadDriveFile(fileId, likelyHighRisk) {
+  const operation = driveOperationContext();
+  try {
+    return await downloadDriveFileForOperation(fileId, likelyHighRisk, operation);
+  } catch (err) {
+    if (!driveOperationIsCurrent(operation) || err?.name === "AbortError") return;
+    reportFrontendFailure("drive-download", err);
+    alert(err?.message || "下載失敗");
+  }
+}
+
+async function downloadDriveFileForOperation(fileId, likelyHighRisk, operation) {
+  driveAssertOperationCurrent(operation);
   const known = findKnownDriveFile(fileId);
   const isE2ee = driveFileIsE2ee(known);
   const confirmed = likelyHighRisk
@@ -3081,6 +3499,7 @@ async function downloadDriveFile(fileId, likelyHighRisk) {
   }
 
   await fetchCsrfToken({ force: true });
+  driveAssertOperationCurrent(operation);
   const csrf = getCsrfToken();
   const res = await apiFetch(downloadUrl, {
     credentials: "same-origin",
@@ -3092,6 +3511,7 @@ async function downloadDriveFile(fileId, likelyHighRisk) {
     return;
   }
   const blob = await res.blob();
+  driveAssertOperationCurrent(operation);
   const disposition = res.headers.get("Content-Disposition") || "";
   const match = disposition.match(/filename="?([^"]+)"?/i);
   let name = match ? match[1] : "download.bin";
@@ -3102,25 +3522,30 @@ async function downloadDriveFile(fileId, likelyHighRisk) {
   });
   if (keyRes.ok) {
     const keyJson = await keyRes.json().catch(() => ({}));
+    driveAssertOperationCurrent(operation);
     if (keyJson.ok && keyJson.e2ee) {
       try {
         const passphrase = await getDriveE2eeSessionPassphrase(
           fileId,
           "請輸入此 E2EE 檔案的加密密碼。密碼不會送到伺服器；本次登入期間會暫存在瀏覽器記憶體。",
-          { allowPrompt: true }
+          { allowPrompt: true, operation }
         );
+        driveAssertOperationCurrent(operation);
         if (!passphrase) return;
-        const decrypted = await decryptDriveE2eeBlob(blob, keyJson.e2ee, passphrase);
+        const decrypted = await decryptDriveE2eeBlob(blob, keyJson.e2ee, passphrase, operation);
+        driveAssertOperationCurrent(operation);
         rememberDriveE2eeSessionPassphrase(fileId, passphrase);
         outputBlob = decrypted.blob;
         name = decrypted.filename || name;
       } catch (err) {
+        if (!driveOperationIsCurrent(operation) || err?.name === "AbortError") return;
         forgetDriveE2eeSessionPassphrase(fileId);
         alert(`${err.message || "端到端加密檔案解密失敗"}\n\n請確認輸入的是上傳此檔案時設定的 E2EE 加密密碼；伺服器無法重設或找回此密碼。`);
         return;
       }
     }
   }
+  driveAssertOperationCurrent(operation);
   const url = URL.createObjectURL(outputBlob);
   triggerBrowserDownload(url, name);
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
@@ -3252,19 +3677,25 @@ async function fetchDriveE2eeCiphertext(fileId, csrf) {
   return res.blob();
 }
 
-async function decryptDriveE2eeFileForSession(fileId, csrf, promptText, { promptOnMiss = true } = {}) {
+async function decryptDriveE2eeFileForSession(fileId, csrf, promptText, { promptOnMiss = true, operation = null } = {}) {
+  const operationContext = operation || driveOperationContext();
+  driveAssertOperationCurrent(operationContext);
   const e2ee = await fetchDriveE2eeKey(fileId, csrf);
+  driveAssertOperationCurrent(operationContext);
   const ciphertext = await fetchDriveE2eeCiphertext(fileId, csrf);
+  driveAssertOperationCurrent(operationContext);
   const candidates = getDriveE2eeSessionPassphraseCandidates(fileId);
   if (!promptOnMiss && !candidates.length) {
     throw new Error(DRIVE_E2EE_PREVIEW_NO_RECENT_PASSWORD);
   }
   for (const passphrase of candidates) {
     try {
-      const decrypted = await decryptDriveE2eeBlob(ciphertext, e2ee, passphrase);
+      const decrypted = await decryptDriveE2eeBlob(ciphertext, e2ee, passphrase, operationContext);
+      driveAssertOperationCurrent(operationContext);
       rememberDriveE2eeSessionPassphrase(fileId, passphrase);
       return decrypted;
     } catch (err) {
+      if (!driveOperationIsCurrent(operationContext) || err?.name === "AbortError") throw err;
       forgetDriveE2eeSessionPassphrase(fileId);
     }
   }
@@ -3272,13 +3703,20 @@ async function decryptDriveE2eeFileForSession(fileId, csrf, promptText, { prompt
     throw new Error(DRIVE_E2EE_PREVIEW_DECRYPT_FAILED);
   }
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    const passphrase = await getDriveE2eeSessionPassphrase(fileId, promptText, { force: true, allowPrompt: true });
+    const passphrase = await getDriveE2eeSessionPassphrase(fileId, promptText, {
+      force: true,
+      allowPrompt: true,
+      operation: operationContext,
+    });
+    driveAssertOperationCurrent(operationContext);
     if (!passphrase) return null;
     try {
-      const decrypted = await decryptDriveE2eeBlob(ciphertext, e2ee, passphrase);
+      const decrypted = await decryptDriveE2eeBlob(ciphertext, e2ee, passphrase, operationContext);
+      driveAssertOperationCurrent(operationContext);
       rememberDriveE2eeSessionPassphrase(fileId, passphrase);
       return decrypted;
     } catch (err) {
+      if (!driveOperationIsCurrent(operationContext) || err?.name === "AbortError") throw err;
       forgetDriveE2eeSessionPassphrase(fileId);
       if (attempt > 0) throw err;
       alert("E2EE 密碼不正確或檔案已損壞，請重新輸入。");
@@ -3287,13 +3725,15 @@ async function decryptDriveE2eeFileForSession(fileId, csrf, promptText, { prompt
   return null;
 }
 
-async function buildDriveE2eePreview(fileId, csrf) {
+async function buildDriveE2eePreview(fileId, csrf, operation = driveOperationContext()) {
+  driveAssertOperationCurrent(operation);
   const decrypted = await decryptDriveE2eeFileForSession(
     fileId,
     csrf,
     "請輸入此 E2EE 檔案的加密密碼。密碼不會送到伺服器；本次登入期間會暫存在瀏覽器記憶體。",
-    { promptOnMiss: true }
+    { promptOnMiss: true, operation }
   );
+  driveAssertOperationCurrent(operation);
   if (!decrypted) return null;
   const known = findKnownDriveFile(fileId) || {};
   const filename = decrypted.filename || known.display_name || known.original_filename_plain_for_public || "download";
@@ -3331,6 +3771,7 @@ async function buildDriveE2eePreview(fileId, csrf) {
     preview.render_mode = "text";
     preview.truncated = decrypted.blob.size > maxBytes;
     preview.text = await decrypted.blob.slice(0, maxBytes).text();
+    driveAssertOperationCurrent(operation);
     return { preview, blob: decrypted.blob };
   }
   return { preview, blob: decrypted.blob };
@@ -4157,29 +4598,33 @@ function renderDriveArchiveEntries(entries) {
 }
 
 async function previewDriveFile(fileId, options = {}) {
+  const operation = options.operation || driveOperationContext();
+  driveAssertOperationCurrent(operation);
   const knownFile = findKnownDriveFile(fileId);
   if (driveFileIsE2ee(knownFile)) {
     if (shouldOpenDriveFullscreen(fileId, options)) {
-      return previewAlbumFileFullscreen(fileId, options.fileName || "");
+      return previewAlbumFileFullscreen(fileId, options.fileName || "", { ...options, operation });
     }
-    return previewDriveE2eeFile(fileId);
+    return previewDriveE2eeFile(fileId, { operation });
   }
   if (shouldOpenDriveFullscreen(fileId, options)) {
-    return previewAlbumFileFullscreen(fileId, options.fileName || "");
+    return previewAlbumFileFullscreen(fileId, options.fileName || "", { ...options, operation });
   }
   const panel = $("drive-preview-panel");
   showDrivePreviewCard();
   if (panel) panel.innerHTML = `<div class="drive-empty">讀取預覽中...</div>`;
   try {
     await fetchCsrfToken();
+    driveAssertOperationCurrent(operation);
     const csrf = getCsrfToken();
     const res = await apiFetch(API + `/cloud-drive/files/${encodeURIComponent(fileId)}/preview`, {
       credentials: "same-origin",
       headers: { "X-CSRF-Token": csrf || "" }
     });
     const json = await res.json().catch(() => ({}));
+    driveAssertOperationCurrent(operation);
     if (!json.ok && isDriveE2eeServerPreviewError(res, json)) {
-      return previewDriveE2eeFile(fileId);
+      return previewDriveE2eeFile(fileId, { operation });
     }
     if (!json.ok) throw new Error(json.msg || "預覽失敗");
     const preview = json.preview || {};
@@ -4203,6 +4648,7 @@ async function previewDriveFile(fileId, options = {}) {
       if (["audio", "video"].includes(preview.category) && serviceMode === "prepared_hls" && drivePreviewHasReadyHls(preview)) {
         panel.innerHTML += driveHlsPlayerMarkup(preview, { fileId });
         await attachDriveHlsPreview(fileId, preview);
+        driveAssertOperationCurrent(operation);
         return;
       }
       if (["audio", "video"].includes(preview.category) && serviceMode === "realtime_proxy") {
@@ -4211,6 +4657,7 @@ async function previewDriveFile(fileId, options = {}) {
         return;
       }
       const url = await resolveDrivePreviewMediaUrl(fileId, csrf, preview);
+      driveAssertOperationCurrent(operation);
       if (preview.category === "audio") {
         panel.innerHTML += driveDirectPlayerMarkup(fileId, preview, url);
         attachDrivePlainMediaPreview(fileId, preview);
@@ -4226,19 +4673,24 @@ async function previewDriveFile(fileId, options = {}) {
     }
     panel.innerHTML += `<div class="drive-empty">此檔案類型目前只提供 metadata，不支援 inline 預覽。</div>`;
   } catch (err) {
+    if (!driveOperationIsCurrent(operation) || err?.name === "AbortError") return;
     clearDrivePreviewUrl();
     if (panel) panel.innerHTML = `<div class="drive-empty">${sanitize(err.message || "預覽失敗")}</div>`;
   }
 }
 
-async function previewDriveE2eeFile(fileId) {
+async function previewDriveE2eeFile(fileId, options = {}) {
+  const operation = options.operation || driveOperationContext();
+  driveAssertOperationCurrent(operation);
   const panel = $("drive-preview-panel");
   showDrivePreviewCard();
   if (panel) panel.innerHTML = `<div class="drive-empty">正在使用最近輸入過的 E2EE 密碼嘗試預覽...</div>`;
   try {
     await fetchCsrfToken();
+    driveAssertOperationCurrent(operation);
     const csrf = getCsrfToken();
-    const decrypted = await buildDriveE2eePreview(fileId, csrf);
+    const decrypted = await buildDriveE2eePreview(fileId, csrf, operation);
+    driveAssertOperationCurrent(operation);
     if (!decrypted || !panel) return;
     const { preview, blob } = decrypted;
     panel.innerHTML = renderDrivePreviewMetadata(preview, fileId);
@@ -4252,12 +4704,15 @@ async function previewDriveE2eeFile(fileId) {
     }
     panel.innerHTML += `<div class="drive-empty">此 E2EE 檔案已在瀏覽器解密，但目前只提供 metadata 預覽。</div>`;
   } catch (err) {
+    if (!driveOperationIsCurrent(operation) || err?.name === "AbortError") return;
     clearDrivePreviewUrl();
     if (panel) panel.innerHTML = `<div class="drive-empty">${sanitize(err.message || "E2EE 預覽失敗")}</div>`;
   }
 }
 
 async function previewAlbumFileFullscreen(fileId, fileName = "", options = {}) {
+  const operation = options.operation || driveOperationContext();
+  driveAssertOperationCurrent(operation);
   if (Array.isArray(options.files)) {
     setAlbumPreviewSequence(options.files, fileId);
   } else if (!albumPreviewSequence.some((file) => String(file.file_id) === String(fileId || ""))) {
@@ -4269,7 +4724,12 @@ async function previewAlbumFileFullscreen(fileId, fileName = "", options = {}) {
   const title = $("album-full-preview-title");
   const meta = $("album-full-preview-meta");
   const body = $("album-full-preview-body");
-  if (!overlay || !body) return previewDriveFile(fileId, { skipRepeatCheck: true, forceInlinePreview: true, fileName });
+  if (!overlay || !body) return previewDriveFile(fileId, {
+    skipRepeatCheck: true,
+    forceInlinePreview: true,
+    fileName,
+    operation,
+  });
   clearAlbumFullPreviewUrl();
   overlay.classList.add("show");
   overlay.setAttribute("aria-hidden", "false");
@@ -4280,10 +4740,12 @@ async function previewAlbumFileFullscreen(fileId, fileName = "", options = {}) {
   body.innerHTML = `<div class="drive-empty">讀取檔案中...</div>`;
   try {
     await fetchCsrfToken();
+    driveAssertOperationCurrent(operation);
     const csrf = getCsrfToken();
     const knownFile = findKnownDriveFile(fileId);
     if (driveFileIsE2ee(knownFile)) {
-      const decrypted = await buildDriveE2eePreview(fileId, csrf);
+      const decrypted = await buildDriveE2eePreview(fileId, csrf, operation);
+      driveAssertOperationCurrent(operation);
       if (!decrypted) return;
       const { preview, blob } = decrypted;
       if (title) title.textContent = preview.filename || fileName || "E2EE 預覽";
@@ -4306,6 +4768,7 @@ async function previewAlbumFileFullscreen(fileId, fileName = "", options = {}) {
       headers: { "X-CSRF-Token": csrf || "" }
     });
     const json = await res.json().catch(() => ({}));
+    driveAssertOperationCurrent(operation);
     if (!json.ok) throw new Error(json.msg || "預覽失敗");
     const preview = json.preview || {};
     if (title) title.textContent = preview.filename || fileName || albumPreviewFileName(albumPreviewSequence[albumPreviewIndex]) || "檔案預覽";
@@ -4334,6 +4797,7 @@ async function previewAlbumFileFullscreen(fileId, fileName = "", options = {}) {
       if (meta) meta.textContent = `${formatDriveBytes(preview.size_bytes || 0)} · ${preview.mime_type || "-"} · HLS 串流已就緒 · 字幕 ${drivePreviewSubtitles(preview).length} 軌`;
       body.innerHTML = driveHlsPlayerMarkup(preview, { fullscreen: true, fileId });
       await attachDriveHlsPreview(fileId, preview, { fullscreen: true });
+      driveAssertOperationCurrent(operation);
       return;
     }
     if (["audio", "video"].includes(preview.category) && serviceMode === "realtime_proxy") {
@@ -4343,6 +4807,7 @@ async function previewAlbumFileFullscreen(fileId, fileName = "", options = {}) {
       return;
     }
     const url = await resolveDrivePreviewMediaUrl(fileId, csrf, preview, { fullscreen: true });
+    driveAssertOperationCurrent(operation);
     currentAlbumFullPreviewUrl = drivePreviewUsesDirectStream(preview) ? "" : url;
     if (meta) meta.textContent = `${formatDriveBytes(preview.size_bytes || 0)} · ${preview.mime_type || "-"} · scan=${preview.scan_status || "-"}`;
     if (preview.category === "image") {
@@ -4359,6 +4824,7 @@ async function previewAlbumFileFullscreen(fileId, fileName = "", options = {}) {
       throw new Error("這個檔案類型目前只支援右側預覽");
     }
   } catch (err) {
+    if (!driveOperationIsCurrent(operation) || err?.name === "AbortError") return;
     clearAlbumFullPreviewUrl();
     updateAlbumPreviewControls();
     if (meta) meta.textContent = "";
@@ -4376,17 +4842,20 @@ function stepAlbumPreview(direction) {
 }
 
 async function editDriveTextFile(fileId) {
+  const operation = driveOperationContext();
   const panel = $("drive-preview-panel");
   showDrivePreviewCard();
   if (panel) panel.innerHTML = `<div class="drive-empty">讀取文字內容中...</div>`;
   try {
     await fetchCsrfToken();
+    driveAssertOperationCurrent(operation);
     const csrf = getCsrfToken();
     const res = await apiFetch(API + `/cloud-drive/files/${encodeURIComponent(fileId)}/preview`, {
       credentials: "same-origin",
       headers: { "X-CSRF-Token": csrf || "" }
     });
     const json = await res.json().catch(() => ({}));
+    driveAssertOperationCurrent(operation);
     if (!json.ok) throw new Error(json.msg || "讀取失敗");
     const preview = json.preview || {};
     if (preview.render_mode !== "text") throw new Error("目前只支援文字類檔案線上修改");
@@ -4401,18 +4870,23 @@ async function editDriveTextFile(fileId) {
       `;
     }
   } catch (err) {
+    if (!driveOperationIsCurrent(operation) || err?.name === "AbortError") return;
     if (panel) panel.innerHTML = `<div class="drive-empty">${sanitize(err.message || "讀取失敗")}</div>`;
   }
 }
 
 async function saveDriveTextFile(fileId) {
+  const operation = driveOperationContext();
   const editor = $("drive-text-editor");
   if (!editor) return;
   try {
-    await storageAction(`/cloud-drive/files/${encodeURIComponent(fileId)}/text`, "PUT", { content: editor.value });
+    await storageAction(`/cloud-drive/files/${encodeURIComponent(fileId)}/text`, "PUT", { content: editor.value }, operation);
+    driveAssertOperationCurrent(operation);
     await loadDriveDashboard();
-    await previewDriveFile(fileId, { skipRepeatCheck: true });
+    driveAssertOperationCurrent(operation);
+    await previewDriveFile(fileId, { skipRepeatCheck: true, operation });
   } catch (err) {
+    if (!driveOperationIsCurrent(operation) || err?.name === "AbortError") return;
     alert(err.message || "儲存失敗");
   }
 }
@@ -4444,6 +4918,7 @@ function closeDriveTextDocumentModal({ clear = false } = {}) {
 }
 
 async function createDriveTextDocument() {
+  const operation = driveOperationContext();
   const filename = ($("drive-new-doc-name")?.value || "").trim() || "untitled.txt";
   const content = $("drive-new-doc-content")?.value || "";
   const privacyMode = $("drive-new-doc-privacy-mode")?.value || "standard_plain";
@@ -4454,15 +4929,18 @@ async function createDriveTextDocument() {
       content,
       privacy_mode: privacyMode,
       virtual_path: joinStoragePath(currentStoragePath, filename),
-    });
+    }, operation);
+    driveAssertOperationCurrent(operation);
     if ($("drive-new-doc-name")) $("drive-new-doc-name").value = "";
     if ($("drive-new-doc-content")) $("drive-new-doc-content").value = "";
     if (msg) flash(msg, "文檔已建立", true);
     await loadDriveDashboard();
+    driveAssertOperationCurrent(operation);
     closeDriveTextDocumentModal({ clear: true });
     const fileId = json.file?.file_id || json.file?.id;
-    if (fileId) await previewDriveFile(fileId, { skipRepeatCheck: true });
+    if (fileId) await previewDriveFile(fileId, { skipRepeatCheck: true, operation });
   } catch (err) {
+    if (!driveOperationIsCurrent(operation) || err?.name === "AbortError") return;
     if (msg) flash(msg, err.message || "建立文檔失敗", false);
     else alert(err.message || "建立文檔失敗");
   }
@@ -5377,21 +5855,19 @@ async function shareSelectedStorageItems() {
     return;
   }
   try {
-    const albumJson = await storageAction("/storage/albums", "POST", {
+    const albumJson = await storageAction("/storage/albums/batch-share", "POST", {
       title: cleanTitle,
       description: `由雲端硬碟批次選取 ${files.length} 個檔案建立`,
-      visibility: "private"
+      storage_file_ids: files.map((file) => file.id),
     });
-    const albumId = albumJson.album?.id || "";
+    const album = albumJson.album || {};
+    const albumId = album.id || "";
     if (!albumId) throw new Error("相簿建立失敗");
-    for (const file of files) {
-      await storageAction(`/storage/albums/${encodeURIComponent(albumId)}/files`, "POST", { storage_file_id: file.id });
-    }
     selectedAlbumId = albumId;
     selectedAlbumViewerId = albumId;
     clearStorageSelection();
-    if (typeof shareAlbum === "function") {
-      await shareAlbum(albumId);
+    if (typeof openAlbumShareManagement === "function") {
+      await openAlbumShareManagement(album);
     } else {
       await loadDriveDashboard();
       await loadAlbumGallery();
@@ -5643,7 +6119,8 @@ function findStorageFileByVirtualPath(virtualPath) {
   }) || null;
 }
 
-async function confirmStorageUploadReplacement(existing, options, csrf, virtualPath) {
+async function confirmStorageUploadReplacement(existing, options, csrf, virtualPath, operation = driveOperationContext()) {
+  driveAssertOperationCurrent(operation);
   if (!existing) return {};
   const label = existing.display_name || storageBaseName(existing.virtual_path || virtualPath) || "既有檔案";
   const ok = window.confirm(`同一路徑已有檔案「${label}」。要覆蓋並更新此檔案嗎？`);
@@ -5655,6 +6132,7 @@ async function confirmStorageUploadReplacement(existing, options, csrf, virtualP
   if (existingIsE2ee) {
     const fileId = existing.file_id || existing.id;
     const e2ee = await fetchDriveE2eeKey(fileId, csrf);
+    driveAssertOperationCurrent(operation);
     let verified = false;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const passphrase = await getDriveE2eeSessionPassphrase(
@@ -5662,13 +6140,16 @@ async function confirmStorageUploadReplacement(existing, options, csrf, virtualP
         "覆蓋或變更 E2EE 檔案前，請輸入原始檔案密碼。密碼不會送到伺服器。",
         { force: true, allowPrompt: true }
       );
+      driveAssertOperationCurrent(operation);
       if (!passphrase) throw new Error("覆蓋 E2EE 檔案需要輸入原始密碼");
       try {
-        await unwrapDriveFileKey(e2ee.encrypted_file_key, passphrase);
+        await unwrapDriveFileKey(e2ee.encrypted_file_key, passphrase, operation);
+        driveAssertOperationCurrent(operation);
         rememberDriveE2eeSessionPassphrase(fileId, passphrase);
         verified = true;
         break;
       } catch (err) {
+        if (!driveOperationIsCurrent(operation) || err?.name === "AbortError") throw err;
         forgetDriveE2eeSessionPassphrase(fileId);
         if (attempt > 0) throw new Error("E2EE 原始密碼不正確，無法覆蓋檔案");
         alert("E2EE 原始密碼不正確，請重新輸入。");
@@ -5684,6 +6165,7 @@ async function confirmStorageUploadReplacement(existing, options, csrf, virtualP
 }
 
 async function uploadStorageFile() {
+  const operation = driveOperationContext();
   const input = $("storage-upload-file");
   const pathInput = $("storage-upload-path");
   if (!input || !input.files || !input.files[0]) {
@@ -5695,7 +6177,9 @@ async function uploadStorageFile() {
     input.value = "";
     return;
   }
+  if (!driveOperationIsCurrent(operation)) return;
   const options = await askDriveUploadPrivacyOptions({ allowE2ee: true, title: `上傳「${file.name}」前選擇隱私模式` });
+  if (!driveOperationIsCurrent(operation)) return;
   if (!options) {
     input.value = "";
     return;
@@ -5710,6 +6194,7 @@ async function uploadStorageFile() {
     msg: "等待上傳",
   });
   await fetchCsrfToken({ force: true });
+  if (!driveOperationIsCurrent(operation)) return;
   const csrf = getCsrfToken();
   const form = new FormData();
   try {
@@ -5719,7 +6204,8 @@ async function uploadStorageFile() {
     let uploadFields = {};
     const virtualPath = pathInput?.value || joinStoragePath(currentStoragePath, file.name);
     const existingStorageFile = findStorageFileByVirtualPath(virtualPath);
-    const replacementFields = await confirmStorageUploadReplacement(existingStorageFile, options, csrf, virtualPath);
+    const replacementFields = await confirmStorageUploadReplacement(existingStorageFile, options, csrf, virtualPath, operation);
+    driveAssertOperationCurrent(operation);
     uploadFields = { ...uploadFields, ...replacementFields };
     const duplicate = existingStorageFile ? null : findDuplicateDriveUploadCandidate(file, options.privacyMode);
     if (duplicate?.id) {
@@ -5729,14 +6215,19 @@ async function uploadStorageFile() {
         virtual_path: virtualPath,
         display_name: file.name || storageBaseName(virtualPath),
       });
+      driveAssertOperationCurrent(operation);
       input.value = "";
       await loadDriveDashboard();
-      setTimeout(() => removeDriveTransferRow(transferId), DRIVE_TRANSFER_COMPLETED_VISIBLE_MS);
+      driveAssertOperationCurrent(operation);
+      setTimeout(() => {
+        if (driveOperationIsCurrent(operation)) removeDriveTransferRow(transferId);
+      }, DRIVE_TRANSFER_COMPLETED_VISIBLE_MS);
       return;
     }
     if (isDriveE2eeMode(options.privacyMode)) {
       updateDriveTransferRow(transferId, { phase: "encrypting", msg: "瀏覽器端加密中", progress_percent: null });
-      const encrypted = await prepareDriveE2eeUpload(file, options.passphrase);
+      const encrypted = await prepareDriveE2eeUpload(file, options.passphrase, operation);
+      driveAssertOperationCurrent(operation);
       const encryptedQuotaError = driveUploadQuotaError(encrypted.blob.size, `加密後檔案「${file.name || encrypted.filename}」`);
       if (encryptedQuotaError) throw new Error(encryptedQuotaError);
       uploadBlob = encrypted.blob;
@@ -5760,6 +6251,7 @@ async function uploadStorageFile() {
         transferId,
         csrf,
         label: uploadFilename,
+        operation,
       });
     } else {
       form.append("file", uploadBlob, uploadFilename);
@@ -5784,6 +6276,7 @@ async function uploadStorageFile() {
           });
         }
       });
+      driveAssertOperationCurrent(operation);
       json = upload.json || {};
       if (upload.status < 200 || upload.status >= 300 || !json.ok) {
         const detail = json.msg || `Storage 上傳失敗（HTTP ${upload.status}）`;
@@ -5804,8 +6297,12 @@ async function uploadStorageFile() {
     input.value = "";
     if (pathInput) pathInput.value = "";
     await loadDriveDashboard();
-    setTimeout(() => removeDriveTransferRow(transferId), DRIVE_TRANSFER_COMPLETED_VISIBLE_MS);
+    driveAssertOperationCurrent(operation);
+    setTimeout(() => {
+      if (driveOperationIsCurrent(operation)) removeDriveTransferRow(transferId);
+    }, DRIVE_TRANSFER_COMPLETED_VISIBLE_MS);
   } catch (err) {
+    if (!driveOperationIsCurrent(operation) || err?.name === "AbortError") return;
     const detail = err.message || "Storage 上傳失敗";
     updateDriveTransferRow(transferId, { status: "failed", phase: "failed", msg: detail, progress_percent: 100 });
     alert(detail);
@@ -5813,6 +6310,7 @@ async function uploadStorageFile() {
 }
 
 async function uploadStorageFolder() {
+  const operation = driveOperationContext();
   const input = $("storage-upload-folder");
   const files = Array.from(input?.files || []).filter((file) => file && file.name);
   if (!input || !files.length) {
@@ -5824,7 +6322,9 @@ async function uploadStorageFolder() {
     input.value = "";
     return;
   }
+  if (!driveOperationIsCurrent(operation)) return;
   const quota = await ensureDriveUploadQuota();
+  if (!driveOperationIsCurrent(operation)) return;
   const oversizedFile = files.find((file) => driveUploadQuotaError(Number(file.size || 0), `檔案「${storageUploadRelativePath(file) || file.name}」`, { quota }));
   if (oversizedFile) {
     const detail = driveUploadQuotaError(Number(oversizedFile.size || 0), `檔案「${storageUploadRelativePath(oversizedFile) || oversizedFile.name}」`, { quota });
@@ -5835,6 +6335,7 @@ async function uploadStorageFolder() {
     return;
   }
   const options = await askDriveUploadPrivacyOptions({ allowE2ee: true, title: `上傳資料夾（${files.length} 個檔案）前選擇隱私模式` });
+  if (!driveOperationIsCurrent(operation)) return;
   if (!options) {
     input.value = "";
     return;
@@ -5849,12 +6350,14 @@ async function uploadStorageFolder() {
     msg: "資料夾上傳準備中",
   });
   await fetchCsrfToken({ force: true });
+  if (!driveOperationIsCurrent(operation)) return;
   const csrf = getCsrfToken();
   let uploadedBytes = 0;
   let progressTotalBytes = totalBytes;
   let okCount = 0;
   const failures = [];
   for (const file of files) {
+    if (!driveOperationIsCurrent(operation)) return;
     const relativePath = storageUploadRelativePath(file);
     const virtualPath = joinStoragePath(currentStoragePath, relativePath || file.name);
     const fileSize = Number(file.size || 0);
@@ -5879,7 +6382,8 @@ async function uploadStorageFolder() {
           phase: "encrypting",
           msg: `瀏覽器端加密中：${relativePath || file.name}`,
         });
-        const encrypted = await prepareDriveE2eeUpload(file, options.passphrase);
+        const encrypted = await prepareDriveE2eeUpload(file, options.passphrase, operation);
+        driveAssertOperationCurrent(operation);
         const encryptedQuotaError = driveUploadQuotaError(encrypted.blob.size, `加密後檔案「${relativePath || file.name}」`);
         if (encryptedQuotaError) throw new Error(encryptedQuotaError);
         uploadBlob = encrypted.blob;
@@ -5897,6 +6401,7 @@ async function uploadStorageFolder() {
         });
       }
     } catch (err) {
+      if (!driveOperationIsCurrent(operation) || err?.name === "AbortError") return;
       failures.push(`${relativePath || file.name}: ${err.message || "加密失敗"}`);
       uploadedBytes += Number(file.size || 0);
       continue;
@@ -5919,7 +6424,9 @@ async function uploadStorageFolder() {
           aggregateTotalBytes: progressTotalBytes,
           label: relativePath || file.name,
           exposeSessionAsTransfer: false,
+          operation,
         });
+        driveAssertOperationCurrent(operation);
         okCount += 1;
       } else {
         form.append("file", uploadBlob, uploadFilename);
@@ -5939,6 +6446,7 @@ async function uploadStorageFolder() {
             : `上傳中：${relativePath || file.name}（等待瀏覽器回報大小）`,
         });
       });
+      driveAssertOperationCurrent(operation);
       if (status < 200 || status >= 300 || !json.ok) {
         failures.push(`${relativePath || file.name}: ${json.msg || `HTTP ${status}`}`);
       } else {
@@ -5946,6 +6454,7 @@ async function uploadStorageFolder() {
       }
       }
     } catch (err) {
+      if (!driveOperationIsCurrent(operation) || err?.name === "AbortError") return;
       failures.push(`${relativePath || file.name}: ${err.message || "上傳失敗"}`);
     }
     uploadedBytes += uploadDisplayBytes;
@@ -5960,16 +6469,22 @@ async function uploadStorageFolder() {
   });
   input.value = "";
   await loadDriveDashboard();
+  if (!driveOperationIsCurrent(operation)) return;
   if (failures.length) {
     alert(`資料夾上傳完成，但有 ${failures.length} 個檔案失敗：\n${failures.slice(0, 5).join("\n")}${failures.length > 5 ? "\n..." : ""}`);
   } else {
-    setTimeout(() => removeDriveTransferRow(transferId), DRIVE_TRANSFER_COMPLETED_VISIBLE_MS);
+    setTimeout(() => {
+      if (driveOperationIsCurrent(operation)) removeDriveTransferRow(transferId);
+    }, DRIVE_TRANSFER_COMPLETED_VISIBLE_MS);
   }
 }
 
-async function storageAction(path, method = "POST", body = null) {
+async function storageAction(path, method = "POST", body = null, operation = null) {
+  const operationContext = operation || driveOperationContext();
+  driveAssertOperationCurrent(operationContext);
   const upperMethod = String(method || "GET").toUpperCase();
   const csrf = await fetchCsrfToken({ force: upperMethod !== "GET" });
+  driveAssertOperationCurrent(operationContext);
   const headers = { "X-CSRF-Token": csrf || "" };
   if (body) headers["Content-Type"] = "application/json";
   const options = {
@@ -5983,14 +6498,21 @@ async function storageAction(path, method = "POST", body = null) {
   try {
     res = await apiFetch(API + path, options);
   } catch (err) {
+    if (!driveOperationIsCurrent(operationContext) || err?.name === "AbortError") throw err;
+    if (!["GET", "HEAD"].includes(upperMethod)) {
+      throw new Error(`連線中斷，操作結果尚未確認；請先重新整理確認狀態，避免重複送出。${err.message ? `（${err.message}）` : ""}`);
+    }
     await new Promise((resolve) => setTimeout(resolve, 250));
+    driveAssertOperationCurrent(operationContext);
     try {
       res = await apiFetch(API + path, options);
     } catch (retryErr) {
+      if (!driveOperationIsCurrent(operationContext) || retryErr?.name === "AbortError") throw retryErr;
       throw new Error(`連線失敗：${retryErr.message || err.message || "無法連到 API"}`);
     }
   }
   const text = await res.text().catch(() => "");
+  driveAssertOperationCurrent(operationContext);
   let json = {};
   try {
     json = text ? JSON.parse(text) : {};
@@ -6340,7 +6862,7 @@ document.addEventListener("dblclick", (event) => {
 
 document.addEventListener("focusin", (event) => {
   if (event.target?.matches?.(ATTACHMENT_FILE_SELECT_IDS.map((id) => `#${id}`).join(","))) {
-    ensureAttachmentFileOptionsLoaded().catch(() => {});
+    ensureAttachmentFileOptionsLoaded().catch((err) => reportFrontendFailure("attachment-file-options", err));
   }
 });
 

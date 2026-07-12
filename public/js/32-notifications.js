@@ -155,7 +155,7 @@ function scheduleNotificationInitialPoll(delayMs = NOTIFICATION_INITIAL_DELAY_MS
   clearNotificationInitialPoll();
   notificationInitialPollTimer = setTimeout(() => {
     notificationInitialPollTimer = null;
-    loadNotifications().catch(() => {});
+    loadNotifications().catch((err) => reportFrontendFailure("notification-initial-poll", err));
   }, Math.max(0, delayMs));
 }
 
@@ -176,6 +176,7 @@ async function loadNotifications(options = {}) {
       : await apiFetch(API + "/notifications/unread-count", requestOptions);
     const json = await res.json().catch(() => ({}));
     if (!json.ok) {
+      reportFrontendFailure("notification-load", new Error(json.msg || `HTTP ${res.status}`));
       if (res.status === 503) setNotificationBadge(0);
       const list = $("notification-list");
       if (notificationsOpen && list) {
@@ -188,7 +189,8 @@ async function loadNotifications(options = {}) {
       return;
     }
     renderNotifications(json.notifications, json.unread_count);
-  } catch (_) {
+  } catch (err) {
+    reportFrontendFailure("notification-load", err);
     const list = $("notification-list");
     if (notificationsOpen && list) {
       list.innerHTML = "<p style='color:#ffb74d;'>通知讀取失敗，請稍後重試。</p>";
@@ -268,7 +270,7 @@ function startNotificationPoll() {
   if (!currentUser) return;
   scheduleNotificationInitialPoll();
   notificationPollTimer = setInterval(() => {
-    loadNotifications().catch(() => {});
+    loadNotifications().catch((err) => reportFrontendFailure("notification-poll", err));
   }, notificationPollMs());
 }
 
@@ -291,7 +293,7 @@ function restartNotificationPoll() {
   if (!currentUser) return;
   scheduleNotificationInitialPoll();
   notificationPollTimer = setInterval(() => {
-    loadNotifications().catch(() => {});
+    loadNotifications().catch((err) => reportFrontendFailure("notification-restart-poll", err));
   }, notificationPollMs());
 }
 
@@ -299,3 +301,12 @@ document.addEventListener("visibilitychange", () => {
   if (document.hidden || !currentUser || !notificationPollTimer) return;
   scheduleNotificationInitialPoll(1500);
 });
+
+function resetNotificationAccountState() {
+  stopNotificationPoll();
+  notificationPollBusy = false;
+  const list = $("notification-list");
+  if (list) list.innerHTML = "<p style='color:var(--muted);'>尚未載入通知</p>";
+}
+
+document.addEventListener("hackme:account-context-changed", resetNotificationAccountState);

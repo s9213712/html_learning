@@ -1,6 +1,64 @@
 # Update Summary
 
-Release ID: `05_2026.07.10-001`
+Release ID: `05_2026.07.12-002`
+
+## 05_2026.07.12-002
+
+- Added an explicit pre-handler rejection contract for backpressure. Browser,
+  Playwright, stress, capacity, and pentest clients retry/classify a 503 as
+  controlled only when the response has
+  `X-Hackme-Backpressure-Rejected: 1` and exact `error=server_busy`; normal
+  business 503s and edge 429s cannot be mistaken for safe-to-replay writes.
+- Replaced Cloud Drive multi-request batch sharing with one SQLite savepoint
+  transaction. Creating the unlisted album, share link, and 1-100 file
+  memberships either completes fully or rolls back, and network errors no
+  longer blindly replay uncertain mutations.
+- Enforced accepted friendship for direct strict-E2EE key sharing at both route
+  and service boundaries, with denied attempts audited. Game invite, PM/private
+  group, and E2EE documentation now matches the backend policy.
+- Made admin readiness use the schema-only DB summary while retaining full
+  `PRAGMA quick_check` on the dedicated integrity endpoint. Mobile Drive
+  breadcrumbs wrap instead of clipping, and silent active-operation failures
+  now enter the bounded frontend failure buffer or show a user-facing warning.
+- Unified main-app CSS/JS cache busting on `SERVER_RELEASE_ID`, including
+  dynamically loaded game modules, so immutable asset caching cannot preserve
+  stale frontend code across a release.
+- Expanded real-browser coverage to dynamically visit every visible module for
+  root and a 390px member session. Root Agent QA now executes the launch
+  preflight dry-run, verifies the mode is unchanged, and confirms that an
+  implicit production switch is rejected without exact `GO_LIVE`.
+- Hardened the eight-hour operational soak with environment-only child
+  credentials, atomic checkpoints, source-harness SHA-256 drift detection,
+  exact backpressure evidence, sentinel p95 SLOs, early child reaping, and
+  dynamic Gunicorn process-tree RSS plus DB/WAL/memory/disk evidence.
+- Added canonical-doc command target validation and fixed broken-symlink
+  reporting in prepush. Archived completed AI Agent/RC1 evidence, added a
+  PointsChain document map, repaired a stale game archive link, and removed
+  machine-specific paths from active operator tutorials.
+
+## 05_2026.07.11-001
+
+- Made Root AI Agent launch preflight dry-run by default. Production switching
+  now requires an explicit `auto_switch=true` request and exact `GO_LIVE`
+  confirmation at the backend boundary; missing reports return actionable
+  report-generation commands instead of a false success.
+- Reworked full-feature stress into true per-account sessions with deterministic
+  operation rotation, account/operation coverage evidence, and configurable
+  server-busy SLA enforcement. The legacy long-needle runner now provisions
+  real accounts instead of cloning one `test` session under fake names.
+- Added an eight-hour minimum operational soak orchestrator with concurrent
+  member traffic, root/manager sentinels, PointsChain destructive stress,
+  repeated Playwright checks, and `/tmp`-only artifacts. Non-loopback targets
+  require an explicit ownership acknowledgement.
+- Expanded deep browser QA across every visible module at 360x800, 390x844,
+  768x1024, and desktop viewports. Added a bounded, redacted frontend failure
+  buffer and wired previously silent background failures into browser evidence.
+- Updated production-gate timing to match real suite duration: 7,200 seconds
+  for nested full pytest and 10,800 seconds for the outer whole-site wrapper.
+- Hardened repository readiness checks with recursive canonical-document link
+  validation, reverse script-index validation, and broken symlink detection.
+  Removed stale release evidence and documented the current Agent, deployment,
+  mobile, and operational-soak workflows.
 
 ## 05_2026.07.10-001
 

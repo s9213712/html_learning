@@ -25,8 +25,6 @@ class ServerModeService:
         self.save_settings = save_settings
         if snapshot_service:
             self.runtime_base_dir = Path(snapshot_service.runtime_base_dir)
-        elif integrity_guard and getattr(integrity_guard, "base_dir", None):
-            self.runtime_base_dir = Path(integrity_guard.base_dir) / "runtime"
         else:
             self.runtime_base_dir = _default_runtime_base_dir()
         self.audit_export_dir = self.runtime_base_dir / "reports" / "server_mode_audit"

@@ -234,6 +234,71 @@ def browser_kind(playwright, name: str):
     raise ValueError(f"unsupported browser: {name}")
 
 
+def evaluate_browser_coverage(
+    checks: list[dict[str, Any]],
+    *,
+    requested_browsers: list[str],
+    include_mobile: bool,
+    require_all_browsers: bool,
+) -> dict[str, Any]:
+    """Apply legacy-tolerant or formal browser-completeness semantics."""
+
+    requested_viewports = ["desktop", "mobile"] if include_mobile else ["desktop"]
+    expected = [
+        {"browser": browser, "viewport": viewport}
+        for browser in requested_browsers
+        for viewport in requested_viewports
+    ]
+    observed = {
+        (str(item.get("browser") or ""), str(item.get("viewport") or ""))
+        for item in checks
+    }
+    missing = [
+        item
+        for item in expected
+        if (item["browser"], item["viewport"]) not in observed
+    ]
+    skipped = [
+        {
+            "browser": str(item.get("browser") or ""),
+            "viewport": str(item.get("viewport") or ""),
+            "reason": str(item.get("skip_reason") or ""),
+        }
+        for item in checks
+        if item.get("skipped")
+    ]
+    failed = [
+        {
+            "browser": str(item.get("browser") or ""),
+            "viewport": str(item.get("viewport") or ""),
+            "skipped": bool(item.get("skipped")),
+            "exception": str(item.get("exception") or ""),
+        }
+        for item in checks
+        if not item.get("ok")
+    ]
+    runnable = [item for item in checks if not item.get("skipped")]
+    legacy_ok = bool(runnable) and all(item.get("ok") for item in runnable)
+    formal_ok = (
+        bool(expected)
+        and not missing
+        and not skipped
+        and len(checks) >= len(expected)
+        and all(item.get("ok") for item in checks)
+    )
+    return {
+        "ok": bool(formal_ok if require_all_browsers else legacy_ok),
+        "mode": "require_all_browsers" if require_all_browsers else "allow_dependency_skips",
+        "requested": expected,
+        "expected_check_count": len(expected),
+        "observed_check_count": len(checks),
+        "runnable_check_count": len(runnable),
+        "missing": missing,
+        "skipped": skipped,
+        "failed": failed,
+    }
+
+
 def inspect_media_page(page) -> dict[str, Any]:
     return page.evaluate(
         """() => {
@@ -540,6 +605,7 @@ def write_outputs(runtime_root: Path, payload: dict[str, Any]) -> tuple[Path, Pa
         f"- Base URL: `{payload.get('base_url')}`",
         f"- Runtime root: `{payload.get('runtime_root')}`",
         f"- Video ID: `{(payload.get('fixture') or {}).get('video_id')}`",
+        f"- Require all browsers: `{payload.get('require_all_browsers')}`",
         f"- OK: `{payload.get('ok')}`",
         "",
         "## Browsers",
@@ -566,19 +632,29 @@ def write_outputs(runtime_root: Path, payload: dict[str, Any]) -> tuple[Path, Pa
     return json_path, md_path
 
 
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--runtime-root", default="")
     parser.add_argument("--keep-server", action="store_true")
     parser.add_argument("--headed", action="store_true")
     parser.add_argument("--browsers", default="chromium,firefox,webkit")
     parser.add_argument("--skip-mobile", action="store_true")
-    args = parser.parse_args()
+    parser.add_argument(
+        "--require-all-browsers",
+        action="store_true",
+        help="Fail when any requested browser/viewport check is skipped, missing, or unsuccessful.",
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
 
     stamp = utc_stamp()
     runtime_root = Path(args.runtime_root).resolve() if args.runtime_root else Path("/tmp") / f"hackme_web_browser_video_{stamp}"
     mkdirs(runtime_root)
     port = free_port()
+    browser_names = [item.strip().lower() for item in args.browsers.split(",") if item.strip()]
     os.environ.setdefault("HACKME_MEDIA_REALTIME_PROXY_ENABLED", "1")
     os.environ.setdefault("HACKME_MEDIA_REALTIME_PROXY_MAX_CONCURRENT", "2")
     server = start_server(runtime_root, port)
@@ -586,6 +662,9 @@ def main() -> int:
     payload: dict[str, Any] = {
         "started_at": datetime.now(timezone.utc).isoformat(),
         "runtime_root": str(runtime_root),
+        "requested_browsers": browser_names,
+        "include_mobile": not args.skip_mobile,
+        "require_all_browsers": bool(args.require_all_browsers),
         "checks": [],
     }
     try:
@@ -602,7 +681,6 @@ def main() -> int:
             share_url = str(fixture.get("share_url") or "")
             if not share_url:
                 raise RuntimeError(f"fixture did not produce share_url: {fixture}")
-            browser_names = [item.strip().lower() for item in args.browsers.split(",") if item.strip()]
             for name in browser_names:
                 btype = browser_kind(p, name)
                 for mobile in ([False] if args.skip_mobile else [False, True]):
@@ -619,8 +697,14 @@ def main() -> int:
                     print(f"[{mark}] {name} {'mobile' if mobile else 'desktop'}", flush=True)
     finally:
         payload["finished_at"] = datetime.now(timezone.utc).isoformat()
-        runnable_checks = [item for item in payload.get("checks", []) if not item.get("skipped")]
-        payload["ok"] = bool(runnable_checks) and all(item.get("ok") for item in runnable_checks)
+        coverage = evaluate_browser_coverage(
+            payload.get("checks", []),
+            requested_browsers=browser_names,
+            include_mobile=not args.skip_mobile,
+            require_all_browsers=bool(args.require_all_browsers),
+        )
+        payload["browser_coverage"] = coverage
+        payload["ok"] = coverage["ok"]
         json_path, md_path = write_outputs(runtime_root, payload)
         print(json.dumps({"ok": payload["ok"], "json": str(json_path), "md": str(md_path), "base_url": base_url}, ensure_ascii=False), flush=True)
         if server.poll() is None and not args.keep_server:

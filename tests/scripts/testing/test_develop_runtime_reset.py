@@ -153,3 +153,12 @@ def test_restart_shortcut_pins_effective_runtime_root():
 
     assert 'append_arg_if_value restart_args --runtime-root "$RUNTIME_ROOT"' in body
     assert 'append_arg_if_value restart_args --runtime-root "$CUSTOM_RUNTIME_ROOT"' not in body
+
+
+def test_develop_launcher_refuses_source_runtime_layouts():
+    body = SCRIPT.read_text(encoding="utf-8")
+
+    assert "source-checkout runtime is disabled" in body
+    assert "runtime root must stay outside the source checkout" in body
+    assert "run root must resolve below /tmp" in body
+    assert "Retired unsafe aliases" in body

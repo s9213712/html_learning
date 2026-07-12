@@ -447,14 +447,13 @@ def start_gunicorn_server(run_root: Path, runtime_root: Path, port: int, args: a
         "--security",
         "off",
         "--no-capacity-probe",
-        "--root-password",
-        ROOT_PASSWORD,
-        "--manager-password",
-        MANAGER_PASSWORD,
-        "--test-password",
-        TEST_PASSWORD,
     ]
     env = os.environ.copy()
+    env.update({
+        "ROOT_PASSWORD": ROOT_PASSWORD,
+        "MANAGER_PASSWORD": MANAGER_PASSWORD,
+        "TEST_PASSWORD": TEST_PASSWORD,
+    })
     env.setdefault("HACKME_DEV_BACKTEST_PROBE_ON_STARTUP", "0")
     completed = subprocess.run(command, cwd=str(ROOT), env=env, capture_output=True, text=True, timeout=90)
     launcher_log.write_text(

@@ -19,6 +19,25 @@ function albumShareButtonMarkup(album) {
   return `<button class="btn btn-sm btn-primary" type="button" data-drive-action="share-album" data-album-id="${sanitize(albumId)}">分享</button>`;
 }
 
+async function openAlbumShareManagement(album) {
+  const targetId = album?.id || selectedAlbumId || selectedAlbumViewerId || "";
+  if (!targetId) {
+    alert("請先選擇相簿");
+    return;
+  }
+  const shareId = album?.share_link?.id || "";
+  selectedAlbumId = targetId;
+  selectedAlbumViewerId = targetId;
+  await loadDriveDashboard();
+  await loadAlbumGallery();
+  if (typeof switchModuleTab === "function") switchModuleTab("shares");
+  if (typeof openShareCenterEditor === "function" && shareId) {
+    await openShareCenterEditor("album", shareId);
+  } else if (typeof loadShareCenter === "function") {
+    await loadShareCenter();
+  }
+}
+
 async function shareAlbum(albumId) {
   const targetId = albumId || selectedAlbumId || selectedAlbumViewerId || "";
   if (!targetId) {
@@ -28,17 +47,7 @@ async function shareAlbum(albumId) {
   try {
     const json = await storageAction(`/storage/albums/${encodeURIComponent(targetId)}`, "PUT", { visibility: "unlisted" });
     const album = json.album || {};
-    const shareId = album?.share_link?.id || "";
-    selectedAlbumId = album.id || targetId;
-    selectedAlbumViewerId = album.id || targetId;
-    await loadDriveDashboard();
-    await loadAlbumGallery();
-    if (typeof switchModuleTab === "function") switchModuleTab("shares");
-    if (typeof openShareCenterEditor === "function") {
-      await openShareCenterEditor("album", shareId);
-    } else if (typeof loadShareCenter === "function") {
-      await loadShareCenter();
-    }
+    await openAlbumShareManagement({ ...album, id: album.id || targetId });
   } catch (err) {
     alert(err.message || "相簿分享設定開啟失敗");
   }
@@ -254,7 +263,7 @@ async function openAlbumViewer(id, options = {}) {
     setAlbumThumbSize(getAlbumThumbSize());
     filesEl.classList.add("album-photo-grid");
     filesEl.innerHTML = files.length ? files.map(renderAlbumPreviewTile).join("") : `<div class="drive-empty">這本相簿還沒有檔案</div>`;
-    hydrateAlbumViewerThumbnails(files).catch(() => {});
+    hydrateAlbumViewerThumbnails(files).catch((err) => reportFrontendFailure("album-thumbnail-hydration", err));
   } catch (err) {
     if (filesEl) filesEl.innerHTML = `<div class="drive-empty">${sanitize(err.message || "相簿讀取失敗")}</div>`;
   }
@@ -351,7 +360,10 @@ function openStorageUpgradePanel() {
   overlay.classList.add("show");
   overlay.setAttribute("aria-hidden", "false");
   document.body.classList.add("modal-open");
-  loadStorageUpgradeOptions().catch(() => {});
+  loadStorageUpgradeOptions().catch((err) => {
+    reportFrontendFailure("storage-upgrade-options", err);
+    renderStorageUpgrade({ ok: false, can_purchase: false, message: err.message || "容量方案讀取失敗", catalog: [], active_purchases: [] });
+  });
 }
 
 function closeStorageUpgradePanel() {
@@ -397,7 +409,7 @@ async function purchaseStorageUpgrade() {
     renderDriveDashboard({ quota: json.usage });
     await loadStorageUpgradeOptions();
     if (typeof loadEconomyDashboard === "function") {
-      loadEconomyDashboard().catch(() => {});
+      loadEconomyDashboard().catch((err) => reportFrontendFailure("storage-upgrade-economy-refresh", err));
     }
   } catch (err) {
     if (msg) flash(msg, err.message || "容量購買失敗", false);

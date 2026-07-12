@@ -6,16 +6,24 @@ hackme_web instance and prints the JSON response. Exit code is 0 if the chain
 is intact (`ok=true`), 1 otherwise.
 
 Usage:
+    export HACKME_PROBE_ROOT_PASSWORD
     python3 scripts/on_live_reports/log_chain_verify.py \
-        --base-url "https://127.0.0.1:$PORT" \
-        --root-password "$ROOT_PASSWORD"
+        --base-url "https://127.0.0.1:$PORT"
 """
 import argparse
 import json
+from pathlib import Path
 import sys
 import urllib.parse
 import urllib.request
 import ssl
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from scripts.testing.probe_credentials import add_root_password_argument  # noqa: E402
 
 
 def _post(url, data=None, cookies=None, csrf=None, ctx=None):
@@ -39,7 +47,7 @@ def _get(url, cookies=None, ctx=None):
 def main(argv=None):
     p = argparse.ArgumentParser()
     p.add_argument("--base-url", default="https://127.0.0.1:5000")
-    p.add_argument("--root-password", required=True)
+    add_root_password_argument(p)
     p.add_argument("--insecure", action="store_true", default=True, help="skip TLS verify")
     args = p.parse_args(argv)
 

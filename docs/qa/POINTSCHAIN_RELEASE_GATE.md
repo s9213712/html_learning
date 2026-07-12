@@ -11,11 +11,16 @@ python3 scripts/qa/points_chain_release_gate.py
 Live isolated gate:
 
 ```bash
+export HACKME_ROOT_PASSWORD='<root-password-from-secret-manager>'
 python3 scripts/qa/points_chain_release_gate.py \
   --base-url https://127.0.0.1:54343 \
-  --runtime-root /tmp/hackme_web_isolated_54343/hackme_web/runtime \
-  --root-password root
+  --runtime-root /tmp/hackme_web_isolated_54343/hackme_web/runtime
 ```
+
+Gate reports default to `/tmp/hackme_web_test_artifacts`. Set an absolute
+`HACKME_TEST_OUTPUT_ROOT` when CI or release automation needs a durable external
+artifact directory. Passwords are passed to child probes through the
+environment and are redacted from gate command records.
 
 Required pass criteria:
 

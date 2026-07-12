@@ -146,12 +146,57 @@ def read_rss_kb(pid: int) -> int:
     return 0
 
 
+def read_proc_process_table() -> dict[int, dict[str, int]]:
+    table: dict[int, dict[str, int]] = {}
+    for stat_path in Path("/proc").glob("[0-9]*/stat"):
+        try:
+            pid = int(stat_path.parent.name)
+            raw = stat_path.read_text(encoding="utf-8")
+            fields = raw.rsplit(")", 1)[1].strip().split()
+            table[pid] = {
+                "ppid": int(fields[1]),
+                "start_time": int(fields[19]),
+            }
+        except Exception:
+            continue
+    return table
+
+
+def process_tree_pids(root_identities: dict[int, int], table: dict[int, dict[str, int]] | None = None) -> list[int]:
+    table = table or read_proc_process_table()
+    live_roots = {
+        int(pid)
+        for pid, start_time in root_identities.items()
+        if pid in table and int(table[pid].get("start_time") or -1) == int(start_time)
+    }
+    children: dict[int, list[int]] = {}
+    for pid, item in table.items():
+        children.setdefault(int(item.get("ppid") or 0), []).append(int(pid))
+    selected = set(live_roots)
+    pending = list(live_roots)
+    while pending:
+        parent = pending.pop()
+        for child in children.get(parent, []):
+            if child in selected:
+                continue
+            selected.add(child)
+            pending.append(child)
+    return sorted(selected)
+
+
 class ResourceMonitor:
     def __init__(self, *, runtime_root: Path, paths: dict[str, Path], interval: float, pids: list[int] | None = None):
         self.runtime_root = runtime_root
         self.paths = paths
         self.interval = max(0.1, float(interval or 1.0))
         self.pids = list(pids or [])
+        process_table = read_proc_process_table()
+        self._pid_identities = {
+            int(pid): int(process_table[int(pid)]["start_time"])
+            for pid in self.pids
+            if int(pid) in process_table
+        }
+        self._monitored_pids_seen: set[int] = set()
         self.samples: list[dict[str, Any]] = []
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -217,6 +262,8 @@ class ResourceMonitor:
             load = os.getloadavg()
         except Exception:
             load = (0.0, 0.0, 0.0)
+        monitored_pids = process_tree_pids(self._pid_identities)
+        self._monitored_pids_seen.update(monitored_pids)
         sample = {
             "ts": time.time(),
             "cpu_percent": self._cpu_percent(),
@@ -228,7 +275,9 @@ class ResourceMonitor:
             "swap_free_mb": round(mem.get("SwapFree", 0) / 1024, 2),
             "runtime_disk_used_mb": round(disk.used / 1024 / 1024, 2),
             "runtime_disk_free_mb": round(disk.free / 1024 / 1024, 2),
-            "monitored_rss_mb": round(sum(read_rss_kb(pid) for pid in self.pids) / 1024, 2),
+            "monitored_rss_mb": round(sum(read_rss_kb(pid) for pid in monitored_pids) / 1024, 2),
+            "monitored_pids": monitored_pids,
+            "monitored_pid_count": len(monitored_pids),
             "db": {label: self._db_snapshot(label, path) for label, path in self.paths.items()},
         }
         self.samples.append(sample)
@@ -255,6 +304,8 @@ class ResourceMonitor:
             "load1_max": max((float(item.get("load1") or 0) for item in samples), default=0.0),
             "mem_available_min_mb": min((float(item.get("mem_available_mb") or 0) for item in samples), default=0.0),
             "monitored_rss_max_mb": max((float(item.get("monitored_rss_mb") or 0) for item in samples), default=0.0),
+            "monitored_pid_count_max": max((int(item.get("monitored_pid_count") or 0) for item in samples), default=0),
+            "monitored_pids_seen": sorted(self._monitored_pids_seen),
             "runtime_disk_free_min_mb": min((float(item.get("runtime_disk_free_mb") or 0) for item in samples), default=0.0),
             "db_peak": db_peak,
             "first_sample": samples[0] if samples else {},

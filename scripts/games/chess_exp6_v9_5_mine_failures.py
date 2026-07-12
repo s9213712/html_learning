@@ -13,7 +13,7 @@ Pipeline:
    - last 2-4 plies before mate/blunder
 3. Re-label failure positions at Stockfish depth 6 (deeper than the
    training depth-4 baseline).
-4. Save: ~/exp6_output/v9_5_failure_positions.jsonl
+4. Save under the configured external Exp6 artifact root.
    Schema: {game_idx, fen, cp_white_d6, outcome_white, played_move,
             stockfish_best_move, failure_reason, source_game_result}
 
@@ -42,12 +42,13 @@ from services.games.chess_exp6 import _move_order_score, _SEARCH_PROFILES  # noq
 from services.games.chess_stockfish_teacher import (  # noqa: E402
     UciStockfish, analysis_limit, resolve_stockfish_path,
 )
+from scripts.games.common_paths import exp6_artifacts_root, exp6_private_dir  # noqa: E402
 
 sys.path.insert(0, str(ROOT / "scripts/games"))
 import chess_exp6_curriculum as cc  # noqa: E402
 
 
-OUT_PATH = ROOT / "runtime/private/games/exp6/v9_5_failure_positions.jsonl"
+OUT_PATH = exp6_private_dir() / "v9_5_failure_positions.jsonl"
 STAGED_OPENINGS = cc.STAGED_OPENINGS  # ('start', 'open_game', 'queen_pawn', 'sicilian', 'english')
 ENGINE_SEARCH_PROFILE = "balanced"
 RELABEL_DEPTH = 6
@@ -192,7 +193,7 @@ def is_failure_position(prev_move: dict | None, this_move: dict, game: dict, idx
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--weights", type=Path,
-                    default=Path.home() / "exp6_output/v7_3_snapshots/v9_3_best.npz",
+                    default=exp6_artifacts_root() / "v7_3" / "snapshots" / "v9_3_best.npz",
                     help="Engine under test (default v9.3 best)")
     ap.add_argument("--games-per-depth", type=int, default=10,
                     help="Games per Stockfish depth (1-5). Default 10 → 50 games total.")

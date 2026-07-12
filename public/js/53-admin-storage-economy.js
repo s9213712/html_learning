@@ -326,6 +326,26 @@ const ROOT_SERVICE_FEE_PRICING_PRESETS = Array.isArray(window.HACKME_SERVICE_FEE
   ? window.HACKME_SERVICE_FEE_PRICING_PRESETS
   : [];
 
+function resetRootStorageEconomyAdminAccountState() {
+  rootEconomyCatalogCache = [];
+  ["root-catalog-list", "root-service-fee-quick-pricing-list", "root-storage-users", "root-storage-capacity-summary"].forEach((id) => {
+    const el = $(id);
+    if (el) el.replaceChildren();
+  });
+  document.querySelectorAll('input[id^="root-catalog-"], textarea[id^="root-catalog-"], select[id^="root-catalog-"]').forEach((control) => {
+    if (control.type === "checkbox" || control.type === "radio") control.checked = false;
+    else if (control.tagName === "SELECT") control.selectedIndex = -1;
+    else control.value = "";
+  });
+  ["root-catalog-msg", "root-storage-msg", "cloud-drive-policy-msg"].forEach((id) => {
+    const el = $(id);
+    if (el) el.textContent = "";
+  });
+}
+
+document.addEventListener("hackme:account-context-changed", resetRootStorageEconomyAdminAccountState);
+window.resetRootStorageEconomyAdminAccountState = resetRootStorageEconomyAdminAccountState;
+
 function rootCatalogMsg(text, ok = true) {
   const msg = $("root-catalog-msg");
   if (!msg) return;

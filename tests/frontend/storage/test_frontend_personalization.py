@@ -65,7 +65,7 @@ def test_personal_appearance_editor_and_routes_are_wired():
     assert 'function setUserAppearanceEditorDisabled(disabled)' in auth_js
     assert 'if (resetBtn) resetBtn.style.display = "none";' in auth_js
     assert 'if (resetBtn) resetBtn.disabled = !enabled;' in auth_js
-    assert 'function saveUserAppearanceSettings()' in auth_js
+    assert 'function saveUserAppearanceSettings(operation = authUsersOperationContext(editingUserId))' in auth_js
     assert 'API + "/me/appearance"' in auth_js
     assert 'function updateUserAppearanceEditorVisibility()' in auth_js
     assert '@app.route("/api/me/appearance", methods=["GET", "PUT", "DELETE"])' in public_py

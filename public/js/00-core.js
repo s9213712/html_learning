@@ -2,6 +2,10 @@
 
 const API = "/api";
 let _csrfToken = null;
+let _csrfTokenRequest = null;
+let _csrfTokenRequestGeneration = -1;
+let accountRequestGeneration = 0;
+let accountRequestController = typeof AbortController === "function" ? new AbortController() : null;
 const CSRF_STORAGE_KEY = "hackme_web.csrf_token";
 const CSRF_BROADCAST_CHANNEL = "hackme_web.csrf";
 let csrfBroadcast = null;
@@ -143,6 +147,41 @@ let lastServerBusyToastAt = 0;
 let appDialogResolve = null;
 let appDialogPreviousFocus = null;
 const SERVER_BUSY_USER_MESSAGE = "目前是流量高峰，伺服器正在保護服務品質。請稍候再試。";
+const FRONTEND_FAILURE_BUFFER_LIMIT = 100;
+
+function redactFrontendFailureText(value) {
+  return String(value || "")
+    .replace(/([?&](?:token|key|password|secret|signature)=)[^&\s]+/gi, "$1[redacted]")
+    .replace(/(bearer\s+)[a-z0-9._~+\/-]+/gi, "$1[redacted]")
+    .slice(0, 500);
+}
+
+function reportFrontendFailure(scope, error, options = {}) {
+  const err = error instanceof Error ? error : new Error(String(error || "unknown frontend failure"));
+  if (options.ignoreAbort !== false && err.name === "AbortError") return null;
+  const item = {
+    at: new Date().toISOString(),
+    scope: String(scope || "frontend").slice(0, 120),
+    name: String(err.name || "Error").slice(0, 80),
+    message: redactFrontendFailureText(err.message || err),
+    module: String(currentModuleTab || ""),
+    expected: options.expected === true,
+  };
+  const buffer = Array.isArray(window.__hackmeFrontendFailures) ? window.__hackmeFrontendFailures : [];
+  buffer.push(item);
+  if (buffer.length > FRONTEND_FAILURE_BUFFER_LIMIT) buffer.splice(0, buffer.length - FRONTEND_FAILURE_BUFFER_LIMIT);
+  window.__hackmeFrontendFailures = buffer;
+  if (!item.expected && typeof console !== "undefined" && typeof console.warn === "function") {
+    console.warn(`[frontend:${item.scope}] ${item.message}`);
+  }
+  try {
+    window.dispatchEvent(new CustomEvent("hackme:frontend-failure", { detail: item }));
+  } catch (_) {}
+  return item;
+}
+
+window.__hackmeFrontendFailures = Array.isArray(window.__hackmeFrontendFailures) ? window.__hackmeFrontendFailures : [];
+window.reportFrontendFailure = reportFrontendFailure;
 
 function clientRoleRank(role) {
   if (role === "super_admin") return 3;
@@ -306,13 +345,102 @@ function accountScopedStorageKey(key, scope = getCurrentAccountStorageScope()) {
   return `hackme_web:${scope}:${String(key || "state")}`;
 }
 
-function syncActiveAccountStorageScope(previousScope = null) {
+function rotateAccountRequestScope() {
+  accountRequestGeneration += 1;
+  if (accountRequestController) accountRequestController.abort();
+  accountRequestController = typeof AbortController === "function" ? new AbortController() : null;
+  _csrfTokenRequest = null;
+  _csrfTokenRequestGeneration = -1;
+  tradingSnapshotRefreshPromise = null;
+  tradingSnapshotRefreshLastAt = 0;
+  setCsrfToken(readCookie("csrf_token") || null);
+}
+
+function composeAccountRequestSignal(callerSignal, accountScoped = true) {
+  const accountSignal = accountScoped ? accountRequestController?.signal : null;
+  const signals = [callerSignal, accountSignal].filter(Boolean);
+  if (!signals.length) return { signal: undefined, cleanup() {} };
+  if (signals.length === 1) return { signal: signals[0], cleanup() {} };
+  if (typeof AbortSignal !== "undefined" && typeof AbortSignal.any === "function") {
+    return { signal: AbortSignal.any(signals), cleanup() {} };
+  }
+  const controller = new AbortController();
+  const listeners = [];
+  signals.forEach((signal) => {
+    const onAbort = () => controller.abort();
+    if (signal.aborted) onAbort();
+    else {
+      signal.addEventListener("abort", onAbort, { once: true });
+      listeners.push([signal, onAbort]);
+    }
+  });
+  return {
+    signal: controller.signal,
+    cleanup() {
+      listeners.forEach(([signal, onAbort]) => signal.removeEventListener("abort", onAbort));
+    },
+  };
+}
+
+function accountRequestAbortError(message = "Account context changed") {
+  const err = new Error(message);
+  err.name = "AbortError";
+  err.code = "account_context_changed";
+  return err;
+}
+
+function isAccountContextAbortError(error) {
+  return Boolean(
+    error
+    && error.name === "AbortError"
+    && (error.code === "account_context_changed" || error.message === "Account context changed")
+  );
+}
+
+window.isAccountContextAbortError = isAccountContextAbortError;
+window.addEventListener("unhandledrejection", (event) => {
+  if (isAccountContextAbortError(event?.reason)) event.preventDefault();
+});
+
+function assertAccountRequestGeneration(expectedGeneration, accountScoped = true) {
+  if (accountScoped && expectedGeneration !== accountRequestGeneration) {
+    throw accountRequestAbortError();
+  }
+}
+
+function guardAccountScopedResponse(response, expectedGeneration, accountScoped = true) {
+  if (!accountScoped || !response || typeof Proxy !== "function") return response;
+  const bodyReaders = new Set(["arrayBuffer", "blob", "bytes", "formData", "json", "text"]);
+  return new Proxy(response, {
+    get(target, property) {
+      const value = Reflect.get(target, property, target);
+      if (property === "clone" && typeof value === "function") {
+        return (...args) => {
+          assertAccountRequestGeneration(expectedGeneration, true);
+          return guardAccountScopedResponse(value.apply(target, args), expectedGeneration, true);
+        };
+      }
+      if (bodyReaders.has(property) && typeof value === "function") {
+        return async (...args) => {
+          assertAccountRequestGeneration(expectedGeneration, true);
+          const result = await value.apply(target, args);
+          assertAccountRequestGeneration(expectedGeneration, true);
+          return result;
+        };
+      }
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+
+function syncActiveAccountStorageScope(previousScope = null, options = {}) {
   const nextScope = getCurrentAccountStorageScope();
   try {
     if (nextScope === "anonymous") localStorage.removeItem(ACCOUNT_SCOPE_STORAGE_KEY);
     else localStorage.setItem(ACCOUNT_SCOPE_STORAGE_KEY, nextScope);
   } catch (err) {}
   if (previousScope !== null && previousScope !== nextScope) {
+    if (!options.requestsRotated) rotateAccountRequestScope();
     document.dispatchEvent(new CustomEvent("hackme:account-context-changed", {
       detail: {
         previousScope,
@@ -1076,14 +1204,16 @@ window.getShareExpiryPickerValue = getShareExpiryPickerValue;
 
 async function enqueueTradingSnapshotRefreshOnce(reason = "missing_snapshot") {
   if (currentUser !== "root") return { ok: false, skipped: true, reason: "not_root" };
+  const requestGeneration = accountRequestGeneration;
   const now = Date.now();
   if (tradingSnapshotRefreshPromise) return tradingSnapshotRefreshPromise;
   if (now - tradingSnapshotRefreshLastAt < 15000) {
     return { ok: true, throttled: true, reason: "recently_queued" };
   }
   tradingSnapshotRefreshLastAt = now;
-  tradingSnapshotRefreshPromise = (async () => {
+  const refreshPromise = (async () => {
     await fetchCsrfToken({ force: true });
+    assertAccountRequestGeneration(requestGeneration, true);
     const res = await apiFetch(`${API}/root/trading/background/run-once`, {
       method: "POST",
       credentials: "same-origin",
@@ -1096,8 +1226,9 @@ async function enqueueTradingSnapshotRefreshOnce(reason = "missing_snapshot") {
         confirm: "RUN_TRADING_JOB_ONCE",
         reason,
       }),
-    });
+    }, true, requestGeneration);
     const json = await res.json().catch(() => ({}));
+    assertAccountRequestGeneration(requestGeneration, true);
     if (!res.ok || !json.ok) {
       return {
         ok: false,
@@ -1107,11 +1238,12 @@ async function enqueueTradingSnapshotRefreshOnce(reason = "missing_snapshot") {
     }
     return json;
   })();
+  tradingSnapshotRefreshPromise = refreshPromise;
   try {
-    return await tradingSnapshotRefreshPromise;
+    return await refreshPromise;
   } finally {
     window.setTimeout(() => {
-      tradingSnapshotRefreshPromise = null;
+      if (tradingSnapshotRefreshPromise === refreshPromise) tradingSnapshotRefreshPromise = null;
     }, 500);
   }
 }
@@ -1559,8 +1691,6 @@ window.addEventListener("storage", (event) => {
   if (event.key === CSRF_STORAGE_KEY) _csrfToken = event.newValue || null;
 });
 
-let _csrfTokenRequest = null;
-
 function loadHackmeScriptOnce(src) {
   const target = String(src || "").trim();
   if (!target) return Promise.reject(new Error("missing script src"));
@@ -1604,32 +1734,48 @@ function hasIdleTimeoutLogoutPending() {
 }
 
 async function fetchCsrfToken({ force = false } = {}) {
+  const requestGeneration = accountRequestGeneration;
   const cookieToken = readCookie("csrf_token");
   if (!force && (_csrfToken || cookieToken)) {
     setCsrfToken(cookieToken || _csrfToken || null);
     return _csrfToken;
   }
-  if (_csrfTokenRequest) {
+  if (_csrfTokenRequest && _csrfTokenRequestGeneration === requestGeneration) {
     await _csrfTokenRequest;
+    assertAccountRequestGeneration(requestGeneration, true);
     return _csrfToken;
   }
-  _csrfTokenRequest = (async () => {
+  const request = (async () => {
     try {
-      const res = await fetch(API + '/csrf-token', { credentials: 'same-origin' });
+      const res = await fetch(API + '/csrf-token', {
+        credentials: 'same-origin',
+        signal: accountRequestController?.signal,
+      });
       const json = await res.json().catch(() => ({}));
-      if (json && json.ok && typeof json.csrf_token === "string" && json.csrf_token) {
+      if (
+        requestGeneration === accountRequestGeneration
+        && json && json.ok && typeof json.csrf_token === "string" && json.csrf_token
+      ) {
         setCsrfToken(json.csrf_token);
         return;
       }
     } catch (_) {}
+    if (requestGeneration !== accountRequestGeneration) return;
     const latestCookieToken = readCookie("csrf_token");
     setCsrfToken(latestCookieToken || null);
   })();
+  _csrfTokenRequest = request;
+  _csrfTokenRequestGeneration = requestGeneration;
   try {
-    await _csrfTokenRequest;
+    await request;
+    assertAccountRequestGeneration(requestGeneration, true);
   } finally {
-    _csrfTokenRequest = null;
+    if (_csrfTokenRequest === request) {
+      _csrfTokenRequest = null;
+      _csrfTokenRequestGeneration = -1;
+    }
   }
+  assertAccountRequestGeneration(requestGeneration, true);
   return _csrfToken;
 }
 
@@ -1657,46 +1803,111 @@ function isStateChangingMethod(method) {
   return ["POST", "PUT", "PATCH", "DELETE"].includes(String(method || "GET").toUpperCase());
 }
 
-async function apiFetch(url, options = {}, retryOnCsrf = true) {
+function isReplayableFetchBody(body) {
+  return !body || typeof body.getReader !== "function";
+}
+
+function isExplicitBackpressureRejection(response, payload = null) {
+  return Boolean(
+    response
+    && response.status === 503
+    && response.headers?.get?.("X-Hackme-Backpressure-Rejected") === "1"
+    && payload?.error === "server_busy"
+  );
+}
+
+function serverBusyRetryDelayMs(response, payload = null) {
+  const header = response?.headers?.get?.("Retry-After") || "";
+  let seconds = Number(payload?.retry_after_seconds || header || 0);
+  if (!Number.isFinite(seconds) && header) {
+    const retryAt = Date.parse(header);
+    seconds = Number.isFinite(retryAt) ? Math.max(0, (retryAt - Date.now()) / 1000) : 0;
+  }
+  const delay = Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 250;
+  return Math.min(3000, Math.max(250, delay));
+}
+
+async function apiFetch(url, options = {}, retryOnCsrf = true, expectedAccountGeneration = null) {
   const opts = { ...options };
+  const accountScoped = opts.accountScoped !== false;
+  const requestGeneration = expectedAccountGeneration === null
+    ? accountRequestGeneration
+    : expectedAccountGeneration;
+  assertAccountRequestGeneration(requestGeneration, accountScoped);
+  delete opts.accountScoped;
+  const scopedSignal = composeAccountRequestSignal(opts.signal, accountScoped);
+  opts.signal = scopedSignal.signal;
   opts.credentials = opts.credentials || "same-origin";
-  const method = String(opts.method || "GET").toUpperCase();
-  const headers = new Headers(opts.headers || {});
-  if (isStateChangingMethod(method) && !headers.has("X-CSRF-Token")) {
-    headers.set(
-      "X-CSRF-Token",
-      await abortableWait(fetchCsrfToken(), opts.signal, "CSRF token request aborted")
+  try {
+    const method = String(opts.method || "GET").toUpperCase();
+    const headers = new Headers(opts.headers || {});
+    if (isStateChangingMethod(method) && !headers.has("X-CSRF-Token")) {
+      headers.set(
+        "X-CSRF-Token",
+        await abortableWait(fetchCsrfToken(), opts.signal, "CSRF token request aborted")
+      );
+    }
+    opts.headers = headers;
+    const maxAttempts = isReplayableFetchBody(opts.body) ? 3 : 1;
+    let response = null;
+    let responsePayload = null;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      response = await fetch(url, opts);
+      assertAccountRequestGeneration(requestGeneration, accountScoped);
+      responsePayload = null;
+      if (response.status === 503) {
+        responsePayload = await response.clone().json().catch(() => ({}));
+        assertAccountRequestGeneration(requestGeneration, accountScoped);
+        if (isExplicitBackpressureRejection(response, responsePayload) && attempt < maxAttempts) {
+          await abortableWait(
+            new Promise((resolve) => setTimeout(resolve, serverBusyRetryDelayMs(response, responsePayload))),
+            opts.signal,
+            "Backpressure retry aborted"
+          );
+          continue;
+        }
+      }
+      break;
+    }
+    const latestCookieToken = readCookie("csrf_token");
+    if (latestCookieToken) setCsrfToken(latestCookieToken);
+    if (response.status !== 403 || !retryOnCsrf) {
+      await notifyServerBusyResponse(response, responsePayload);
+      assertAccountRequestGeneration(requestGeneration, accountScoped);
+      return guardAccountScopedResponse(response, requestGeneration, accountScoped);
+    }
+    const payload = await response.clone().json().catch(() => ({}));
+    assertAccountRequestGeneration(requestGeneration, accountScoped);
+    if (!payload || payload.error !== "csrf_invalid") {
+      await notifyServerBusyResponse(response, payload);
+      assertAccountRequestGeneration(requestGeneration, accountScoped);
+      return guardAccountScopedResponse(response, requestGeneration, accountScoped);
+    }
+    const refreshed = await fetchCsrfToken({ force: true });
+    assertAccountRequestGeneration(requestGeneration, accountScoped);
+    if (!refreshed) return guardAccountScopedResponse(response, requestGeneration, accountScoped);
+    const retryHeaders = new Headers(options.headers || {});
+    if (isStateChangingMethod(method)) retryHeaders.set("X-CSRF-Token", refreshed);
+    const retried = await apiFetch(
+      url,
+      { ...options, credentials: opts.credentials, headers: retryHeaders },
+      false,
+      requestGeneration
     );
+    assertAccountRequestGeneration(requestGeneration, accountScoped);
+    const retryCookieToken = readCookie("csrf_token");
+    if (retryCookieToken) setCsrfToken(retryCookieToken);
+    return retried;
+  } finally {
+    scopedSignal.cleanup();
   }
-  opts.headers = headers;
-  const response = await fetch(url, opts);
-  const latestCookieToken = readCookie("csrf_token");
-  if (latestCookieToken) setCsrfToken(latestCookieToken);
-  if (response.status !== 403 || !retryOnCsrf) {
-    await notifyServerBusyResponse(response);
-    return response;
-  }
-  const payload = await response.clone().json().catch(() => ({}));
-  if (!payload || payload.error !== "csrf_invalid") {
-    await notifyServerBusyResponse(response, payload);
-    return response;
-  }
-  const refreshed = await fetchCsrfToken({ force: true });
-  if (!refreshed) return response;
-  const retryHeaders = new Headers(options.headers || {});
-  if (isStateChangingMethod(method)) retryHeaders.set("X-CSRF-Token", refreshed);
-  const retried = await apiFetch(url, { ...options, credentials: opts.credentials, headers: retryHeaders }, false);
-  const retryCookieToken = readCookie("csrf_token");
-  if (retryCookieToken) setCsrfToken(retryCookieToken);
-  return retried;
 }
 
 async function notifyServerBusyResponse(response, payload = null) {
   if (!response || response.status !== 503) return;
   let body = payload;
   if (!body) body = await response.clone().json().catch(() => ({}));
-  const isServerBusy = response.headers?.get?.("X-Hackme-Backpressure") || body?.error === "server_busy";
-  if (!isServerBusy) return;
+  if (!isExplicitBackpressureRejection(response, body)) return;
   const retryAfter = Number(body.retry_after_seconds || response.headers?.get?.("Retry-After") || 0);
   const suffix = retryAfter > 0 ? `約 ${retryAfter} 秒後再試。` : "請稍候再試。";
   const message = body.user_message || body.message || body.msg || `${SERVER_BUSY_USER_MESSAGE}${suffix}`;
@@ -2393,6 +2604,8 @@ function setAuthState(json, showLoginHero = false) {
   setUserDisplayTimezone(json.display_timezone || "auto");
   setCurrentAllowedFeatures(json.allowed_features || json._allowed_features || []);
   currentMustChangePassword = !!json.must_change_password;
+  const accountScopeChanged = previousAccountScope !== getCurrentAccountStorageScope();
+  if (accountScopeChanged) rotateAccountRequestScope();
   try {
     localStorage.setItem(AUTH_SESSION_HINT_STORAGE_KEY, "1");
   } catch (err) {}
@@ -2547,7 +2760,7 @@ function setAuthState(json, showLoginHero = false) {
 	  if (typeof setDriveActivePage === "function") {
 	    setDriveActivePage(document.querySelector("[data-drive-page-tab].active")?.dataset.drivePageTab || "files");
 	  }
-	  syncActiveAccountStorageScope(previousAccountScope);
+	  syncActiveAccountStorageScope(previousAccountScope, { requestsRotated: accountScopeChanged });
 
   if (currentMustChangePassword) {
     resetInactivityTimer();
@@ -2618,6 +2831,16 @@ function resetAuthState() {
   canManageUsers = false;
   syncActiveAccountStorageScope(previousAccountScope);
   users = [];
+  adminUsersPagination = { page: 1, page_size: adminUsersPageSize, total: 0, total_pages: 1, sort: "id", order: "asc", q: "" };
+  adminUsersRoleCounts = {};
+  selectedPendingUserIds.clear();
+  selectedAppealIds.clear();
+  selectedReportIds.clear();
+  adminReports = [];
+  adminReportPage = 0;
+  adminReportStatus = "pending";
+  userViolationFines = [];
+  userFeatureRestrictions = [];
   currentServerTab = "overview";
   currentSystemTab = "health";
   editingUserIsSelf = false;
@@ -2681,6 +2904,7 @@ function resetAuthState() {
   $("me-nickname").textContent = "-";
   selectedChatRoomId = null;
   chatRooms = [];
+  chatMessageCache = [];
   const chatWarn = $("chat-room-warn");
   if (chatWarn) chatWarn.className = "msg";
   const chatRoomList = $("chat-room-list");

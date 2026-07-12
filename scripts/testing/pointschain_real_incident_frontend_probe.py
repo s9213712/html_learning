@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,6 +19,11 @@ from typing import Any
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
+
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 
 def now_text() -> str:
@@ -113,8 +119,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Run live frontend PointsChain incident-hardening checks.")
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--out", required=True)
-    parser.add_argument("--root-password", default="root")
-    parser.add_argument("--admin-password", default="admin")
+    from scripts.testing.probe_credentials import add_root_password_argument
+    add_root_password_argument(parser)
+    from scripts.testing.probe_credentials import add_manager_password_argument
+    add_manager_password_argument(parser, "--admin-password")
     args = parser.parse_args()
 
     base_url = args.base_url.rstrip("/")

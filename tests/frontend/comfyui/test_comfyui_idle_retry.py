@@ -22,7 +22,7 @@ def test_comfyui_generate_retries_stale_unavailable_state():
     assert "generate.disabled = !!busy;" in comfyui_js
     assert "generate.disabled = !!busy || unavailable;" not in comfyui_js
     assert 'setComfyuiMessage("正在重新檢查 ComfyUI 連線...", true);' in comfyui_js
-    assert "const available = await refreshComfyuiStatus({ switchAway: false });" in comfyui_js
+    assert "const available = await refreshComfyuiStatus({ switchAway: false, operation });" in comfyui_js
     assert 'setComfyuiMessage("正在載入 ComfyUI 模型清單...", true);' in comfyui_js
 
 
@@ -39,4 +39,4 @@ def test_comfyui_stop_button_stays_visible_while_local_runtime_is_starting():
 
 def test_comfyui_static_asset_cache_busted_for_idle_retry_fix():
     index_html = _read("public/index.html")
-    assert "/js/36-comfyui.js?v=20260621-comfyui-draft-restore" in index_html
+    assert "/js/36-comfyui.js?v=__ASSET_VERSION__" in index_html

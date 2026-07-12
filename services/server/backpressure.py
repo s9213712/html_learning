@@ -49,6 +49,23 @@ BOOTSTRAP_FAST_LANE_PATHS = {
     "/robots.txt",
 }
 
+STATIC_ASSET_SUFFIXES = (
+    ".html",
+    ".css",
+    ".js",
+    ".map",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+    ".svg",
+    ".ico",
+    ".woff",
+    ".woff2",
+    ".ttf",
+)
+
 CSRF_EDGE_GUARD_PATHS = {
     "/api/csrf-token",
 }
@@ -425,11 +442,18 @@ def is_health_fast_lane_path(path: str) -> bool:
     return (path or "") in HEALTH_FAST_LANE_PATHS
 
 
+def is_static_asset_path(path: str) -> bool:
+    normalized = str(path or "").lower()
+    return bool(normalized.startswith("/") and not normalized.startswith("/api/") and normalized.endswith(STATIC_ASSET_SUFFIXES))
+
+
 def is_backpressure_fast_lane_path(path: str) -> bool:
     path = path or ""
     if path in BOOTSTRAP_FAST_LANE_PATHS:
         return True
     if path in AUTH_FAST_LANE_PATHS:
+        return True
+    if is_static_asset_path(path):
         return True
     return any(path == prefix or path.startswith(prefix) for prefix in BACKPRESSURE_FAST_LANE_PREFIXES)
 
@@ -468,7 +492,7 @@ def classify_request_qos(path: str, method: str = "GET") -> str:
         return "health"
     if path in BOOTSTRAP_FAST_LANE_PATHS:
         return "bootstrap"
-    if path.startswith("/js/") or path.startswith("/assets/") or path in {"/styles.css", "/experiments.css", "/i18n-language-switcher.css"}:
+    if is_static_asset_path(path) or path.startswith("/js/") or path.startswith("/assets/"):
         return "static"
     if path in AUTH_FAST_LANE_PATHS:
         return "auth"
@@ -874,6 +898,7 @@ def _busy_response(label: str, retry_after: int):
     response.status_code = 503
     response.headers["Retry-After"] = str(retry_after)
     response.headers["X-Hackme-Backpressure"] = label
+    response.headers["X-Hackme-Backpressure-Rejected"] = "1"
     return response
 
 

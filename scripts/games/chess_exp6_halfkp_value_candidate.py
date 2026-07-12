@@ -50,16 +50,17 @@ from services.games.chess_exp6 import (  # noqa: E402
 from services.games.chess_neural import static_baseline_cp_white  # noqa: E402
 from services.games.chess_search import ZobristHasher, opening_sanity_filter, search_best_move  # noqa: E402
 from services.games.chess_stockfish_teacher import UciStockfish, analysis_limit, resolve_stockfish_path  # noqa: E402
+from scripts.games.common_paths import exp6_artifacts_root, exp6_private_dir, runtime_model_path  # noqa: E402
 
 sys.path.insert(0, str(ROOT / "scripts/games"))
 import chess_exp6_curriculum as cc  # noqa: E402
 
 
 SEED = 20260520
-DEFAULT_LABELS = ROOT / "runtime/private/games/exp6/curriculum_labels_10k.jsonl"
-DEFAULT_CHAMPION = ROOT / "runtime/games/models/chess_experiment_6_neural.npz"
-DEFAULT_OUT = Path.home() / "exp6_output/halfkp_value/exp6_halfkp_v1.pt"
-DEFAULT_REPORT = Path.home() / "exp6_output/halfkp_value/exp6_halfkp_v1_report.json"
+DEFAULT_LABELS = exp6_private_dir() / "curriculum_labels_10k.jsonl"
+DEFAULT_CHAMPION = runtime_model_path("chess_experiment_6_neural.npz")
+DEFAULT_OUT = exp6_artifacts_root() / "halfkp_value" / "exp6_halfkp_v1.pt"
+DEFAULT_REPORT = exp6_artifacts_root() / "halfkp_value" / "exp6_halfkp_v1_report.json"
 EXPECTED_CHAMPION_MD5 = "1c27627adb3c4597561bc7509438e25c"
 
 FEATURE_DIM = 64 * 12 * 64

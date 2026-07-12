@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
+import secrets
 import sqlite3
 import ssl
 import string
@@ -654,7 +656,11 @@ def main() -> int:
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--runtime-root", required=True)
     parser.add_argument("--out", required=True)
-    parser.add_argument("--root-password", default="root")
+    from scripts.testing.probe_credentials import ROOT_PASSWORD_ENV_NAMES, add_root_password_argument
+    add_root_password_argument(
+        parser,
+        env_names=("HACKME_POINTS_STRESS_ROOT_PASSWORD", *ROOT_PASSWORD_ENV_NAMES),
+    )
     parser.add_argument("--accounts", type=int, default=20)
     parser.add_argument("--grant-points", type=int, default=5000)
     parser.add_argument("--transfer-ops", type=int, default=50)
@@ -665,7 +671,7 @@ def main() -> int:
     parser.add_argument("--max-external-transfers", type=int, default=0, help="Maximum unowned pc1 bridge/withdrawal transfers. 0 means unlimited.")
     parser.add_argument("--timeout", type=float, default=20.0)
     parser.add_argument("--mode", default="dev_ready")
-    parser.add_argument("--server-pids", default="", help="Comma/space separated server process PIDs to sample during the probe.")
+    parser.add_argument("--server-pids", default=os.environ.get("HACKME_SERVER_PIDS", ""), help="Comma/space separated server process PIDs to sample during the probe.")
     parser.add_argument("--resource-interval", type=float, default=1.0)
     args = parser.parse_args()
 
@@ -716,7 +722,7 @@ def main() -> int:
     fee_market_samples.append(fee_market_snapshot(root, "baseline_before_internal_grants"))
 
     users: list[dict[str, Any]] = []
-    password = "StressQa123!"
+    password = os.environ.get("HACKME_POINTS_STRESS_ACCOUNT_PASSWORD") or f"Dstress-{secrets.token_urlsafe(18)}"
     for idx in range(max(1, int(args.accounts))):
         username = f"dstress_{datetime.now(timezone.utc).strftime('%H%M%S')}_{idx:02d}"
         users.append(create_or_get_user(root, username, password))

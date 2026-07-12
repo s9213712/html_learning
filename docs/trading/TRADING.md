@@ -675,9 +675,9 @@ python3 scripts/prepush/pre_push_checks.py
 Focused trading stress/security run:
 
 ```bash
-PYTHONPATH=. python3 scripts/security/pentest/trading_stress_pentest.py \
+export PENTEST_ROOT_PASSWORD='<root-password-from-secret-manager>'
+python3 scripts/security/pentest/trading_stress_pentest.py \
   --base-url https://127.0.0.1:5000 \
-  --root-password root \
   --mode full \
   --users 3 \
   --orders-per-user 8 \
@@ -694,7 +694,7 @@ Workflow / backtest validator follow-up:
 PYTHONPATH=. python3 scripts/trading/validation/trading_workflow_template_validation.py \
   --no-download --limit 200 --out /tmp/trading_workflow_validation_followup
 
-PYTHONPATH=. python3 scripts/trading/probes/backtest_20000_probe.py \
+python3 scripts/trading/probes/backtest_20000_probe.py \
   --include-route --json-out /tmp/trading_backtest_20000_followup.json
 ```
 

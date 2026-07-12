@@ -10,9 +10,11 @@ cleanup predictable, reviewable, and reversible.
 
 - Keep the repository root small.
 - Keep `README.md` as an entry wizard, not a feature encyclopedia.
-- Keep runtime data under `runtime/`, especially `runtime/reports/security/`,
-  never under new
-  ad-hoc top-level folders.
+- Keep mutable runtime data outside the source checkout under the configured
+  `HACKME_RUNTIME_DIR`; standalone test artifacts belong under `/tmp`.
+- Keep QA reports reviewable and small. Raw generated images, video/HLS media,
+  databases, logs, browser traces, and soak artifacts belong under `/tmp` or
+  retained CI/release artifact storage, not `docs/AGENTS/reports/`.
 - Split by bounded domain, not by tiny helper count.
 - Prefer one stable canonical location per concept.
 - When moving a public script or module path, keep a compatibility wrapper for
@@ -28,7 +30,6 @@ The repository root should contain only:
 - operator and validation tree: `scripts/`
 - production deployment templates: `deploy/`
 - documentation and tests: `docs/`, `tests/`
-- runtime boundary: `runtime/`
 
 The following root folders are treated as legacy runtime baggage and must not
 be used for new features:
@@ -39,7 +40,7 @@ be used for new features:
 - `uploads/`
 
 If they appear on a deployment host, they should be migrated into
-`runtime/storage/` or removed after confirming they are empty. Snapshot/runtime
+`$HACKME_RUNTIME_DIR/storage/` or removed after confirming they are empty. Snapshot/runtime
 cleanup flows must never recreate them as fresh repo-root directories.
 
 ## Docs Placement Logic
@@ -211,6 +212,11 @@ When deciding whether to keep or remove historical artifacts:
 - Keep if it is still linked from canonical docs or still protects a regression.
 - Archive if it is useful evidence but no longer active guidance.
 - Remove only if it is untracked, duplicated, and no longer referenced.
+
+The legacy binary-heavy i2i bundles already under `docs/AGENTS/reports/` are
+historical migration debt. Do not load them as canonical docs or copy/scan them
+in normal test gates; migrate them to artifact storage in a dedicated history
+change rather than silently deleting evidence during unrelated hardening.
 
 Do not delete history until a canonical replacement exists.
 

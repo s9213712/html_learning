@@ -48,6 +48,9 @@ def test_live_report_helper_covers_all_required_report_types_and_runtime_outputs
     assert "client.fetch_csrf()" in helper
     assert "MODE_CONFIRM_PHRASES" in helper
     assert "functional_port" in helper
+    assert "--operational-campaign-report" in helper
+    assert 'payloads["operational_campaign_24h"]' in helper
+    assert "OPERATIONAL_CAMPAIGN_MIN_SECONDS = 86_400" in helper
     assert '{"production", "internal_test", "test", "dev_ready"}' in helper
     assert '_switch_live_mode(client, "dev_ready", notes="go_live trading stress precheck")' in helper
 
@@ -116,8 +119,10 @@ def test_go_live_scope_excludes_optional_product_suites_from_core_gate():
     assert 'if [[ "${GO_LIVE_CORE_ONLY:-0}" != "1" ]]; then\n    login_smoke_user || return 1' in functional_source
 
 
-def test_full_generator_root_password_defaults_to_environment(monkeypatch):
+def test_full_generator_passwords_default_to_environment(monkeypatch):
     monkeypatch.setenv("ROOT_PASSWORD", "RootFromEnv123!")
+    monkeypatch.setenv("MANAGER_PASSWORD", "ManagerFromEnv123!")
+    monkeypatch.setenv("TEST_PASSWORD", "TestFromEnv123!")
     monkeypatch.setattr(
         sys,
         "argv",
@@ -133,6 +138,8 @@ def test_full_generator_root_password_defaults_to_environment(monkeypatch):
     args = full_gate.parse_args()
 
     assert args.root_password == "RootFromEnv123!"
+    assert args.manager_password == "ManagerFromEnv123!"
+    assert args.test_password == "TestFromEnv123!"
 
 
 def test_full_generator_login_failure_records_attempt_without_noninteractive_prompt(monkeypatch):
@@ -182,8 +189,13 @@ def test_docs_and_frontend_expose_the_same_canonical_production_gate_paths():
         + (ROOT / "public" / "js" / "51-admin-server-mode-launch-check.js").read_text(encoding="utf-8")
     )
 
-    assert "python3 scripts/security/gate/on_live_reports_make.py --base-url https://127.0.0.1:5000 --root-password '<ROOT_PASSWORD>'" in qa_docs
-    assert "python3 scripts/security/gate/on_live_reports_make.py --base-url https://<host> --root-password '<ROOT_PASSWORD>'" in prod_docs
+    assert "python3 scripts/security/gate/on_live_reports_make.py --base-url https://127.0.0.1:5000" in qa_docs
+    assert "python3 scripts/security/gate/on_live_reports_make.py --base-url https://<host>" in prod_docs
+    assert "ROOT_PASSWORD='<root-password>'" in qa_docs
+    assert "MANAGER_PASSWORD='<manager-password>'" in qa_docs
+    assert "TEST_PASSWORD='<test-user-password>'" in qa_docs
+    assert "--root-password" not in qa_docs
+    assert "--root-password" not in prod_docs
     assert "runtime/reports/security/production_gate/log_chain_verify_report.json" in qa_docs
     assert "runtime/reports/security/production_gate/integrity_guard_report.json" in qa_docs
     assert "GET /api/root/server-mode/logs/verify" in qa_docs
@@ -308,3 +320,86 @@ def test_make_payload_uses_meta_server_mode_by_default(tmp_path):
 
     assert captured["server_mode"] == "dev_ready"
     assert payload["server_mode"] == "dev_ready"
+
+
+def test_operational_campaign_report_requires_formal_duration_scenarios_and_matching_source(tmp_path):
+    from scripts.testing.operational_campaign_24h import manifest_digest, source_manifest
+
+    class _Signer:
+        def build(self, **kwargs):
+            return {
+                "report_type": kwargs["report_type"],
+                "test_result": kwargs["test_result"],
+                "pass": kwargs["passed"],
+                "report_hash": "sha256:" + ("b" * 64),
+                "signature": "hmac_sha256:" + ("c" * 64),
+                "key_version": "test-v1",
+                "target_branch": kwargs["target_branch"],
+                "target_commit": kwargs["target_commit"],
+                "server_mode": kwargs["server_mode"],
+                "report_source": kwargs["report_source"],
+                "raw_report": kwargs["raw_report"],
+                "unresolved_findings": kwargs["unresolved"],
+            }
+
+    report_path = tmp_path / "operational_campaign_24h.json"
+    report_path.write_text(json.dumps({
+        "ok": True,
+        "verdict": "PASS",
+        "formal_campaign": True,
+        "production_signoff_eligible": True,
+        "active_test_seconds": 86_401,
+        "required_active_test_seconds": 86_400,
+        "authorization_wait_seconds_included": 0,
+        "findings": [],
+        "source_drift": {},
+        "source_manifest_digest": manifest_digest(source_manifest()),
+        "scenarios": {name: {"ok": True} for name in helper.OPERATIONAL_CAMPAIGN_SCENARIOS},
+        "secret_scan": {"ok": True},
+        "control_checks": {"primary": {"ok": True}, "recovery": {"ok": True}},
+    }), encoding="utf-8")
+
+    accepted = helper._operational_campaign_report(
+        tmp_path / "gate",
+        str(report_path),
+        signer=_Signer(),
+        meta={"target_commit": "abc", "target_branch": "main", "server_mode": "dev_ready"},
+    )
+    assert accepted["pass"] is True
+    assert accepted["raw_report"]["campaign"]["checks"]["source_manifest_matches"] is True
+
+    data = json.loads(report_path.read_text(encoding="utf-8"))
+    data["source_manifest_digest"] = "stale-source"
+    report_path.write_text(json.dumps(data), encoding="utf-8")
+    rejected = helper._operational_campaign_report(
+        tmp_path / "gate-stale",
+        str(report_path),
+        signer=_Signer(),
+        meta={"target_commit": "abc", "target_branch": "main", "server_mode": "dev_ready"},
+    )
+    assert rejected["pass"] is False
+    assert "source_manifest_matches" in rejected["unresolved_findings"]
+
+    data.update({
+        "source_manifest_digest": manifest_digest(source_manifest()),
+        "findings": {},
+        "source_drift": [],
+        "scenarios": {name: "not-an-object" for name in helper.OPERATIONAL_CAMPAIGN_SCENARIOS},
+        "secret_scan": [],
+        "control_checks": {"primary": "not-an-object"},
+    })
+    report_path.write_text(json.dumps(data), encoding="utf-8")
+    malformed = helper._operational_campaign_report(
+        tmp_path / "gate-malformed",
+        str(report_path),
+        signer=_Signer(),
+        meta={"target_commit": "abc", "target_branch": "main", "server_mode": "dev_ready"},
+    )
+    assert malformed["pass"] is False
+    assert {
+        "findings_shape",
+        "source_drift_shape",
+        "scenario_shape",
+        "secret_scan_shape",
+        "control_checks_shape",
+    }.issubset(set(malformed["unresolved_findings"]))

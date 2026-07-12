@@ -8,8 +8,8 @@ and color swaps, before being promoted to runtime.
 
 Usage:
     python chess_exp6_match.py \\
-        --candidate ~/exp6_output/v7_snapshots/iterNN.npz \\
-        --baseline  ~/exp6_output/v6_2_snapshots/chess_experiment_6_neural_stage02.npz \\
+        --candidate /tmp/hackme_web_test_artifacts/games/exp6/selfplay_curriculum/snapshots/iterNN.npz \\
+        --baseline /tmp/hackme_web_test_artifacts/games/exp6/curriculum/snapshots/chess_experiment_6_neural_stage02.npz \\
         --games 100 \\
         --search-profile fixed_depth_d2
 
@@ -37,6 +37,7 @@ if str(ROOT) not in sys.path:
 
 from services.games.chess import FEN_KEY  # noqa: E402
 from services.games.chess_exp6 import choose_experiment_neural_move  # noqa: E402
+from scripts.games.common_paths import exp6_artifacts_root, runtime_model_path  # noqa: E402
 
 # Reuse the curriculum's opening list.
 sys.path.insert(0, str(ROOT / "scripts/games"))
@@ -122,7 +123,7 @@ def main() -> int:
     ap.add_argument("--baseline", required=True, type=Path, help="Current best weights file")
     ap.add_argument("--games", type=int, default=100, help="Total games (split evenly between mirrored openings)")
     ap.add_argument("--search-profile", default="fixed_depth_d2", help="Search profile both sides use")
-    ap.add_argument("--out", type=Path, default=Path.home() / "exp6_output/v7_match_report.json")
+    ap.add_argument("--out", type=Path, default=exp6_artifacts_root() / "v7_match_report.json")
     ap.add_argument("--promote-on-pass", action="store_true",
                     help="If candidate wins, copy it to runtime/games/models/chess_experiment_6_neural.npz")
     args = ap.parse_args()
@@ -192,7 +193,8 @@ def main() -> int:
     print(f"  saved -> {args.out}", flush=True)
     if decision == "PROMOTE" and args.promote_on_pass:
         import shutil
-        runtime_path = ROOT / "runtime/games/models/chess_experiment_6_neural.npz"
+        runtime_path = runtime_model_path("chess_experiment_6_neural.npz")
+        runtime_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(args.candidate, runtime_path)
         print(f"  promoted -> {runtime_path}", flush=True)
     return 0

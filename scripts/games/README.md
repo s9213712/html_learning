@@ -4,6 +4,12 @@ This directory contains operator scripts for board-game AI benchmarking and the
 chess experiment pipeline. Runtime artifacts, downloaded PGNs, full replay
 JSONL, validation detail JSONL, and private question sets do not belong here.
 
+Standalone benchmark/validation output defaults to
+`/tmp/hackme_web_test_artifacts/games/`. Production models and private training
+data follow an explicitly configured external `HACKME_RUNTIME_DIR`; Exp6 output
+can be redirected to persistent storage with `HACKME_EXP6_OUTPUT_DIR`. No game
+script should create `<repo>/runtime` or `~/exp6_output` implicitly.
+
 ## Current Chess Restart Entry
 
 Exp5 experiments are paused at V28e. Restart from:

@@ -6,7 +6,7 @@
 
 第一階段已落地。現有系統已具備 `user_profiles`、唯一隨機 `friend_code`、`user_friends` 共用關係表、全站 `/api/friends/*` API，以及主側欄「個人面板」入口。`/api/chat/friends` 仍保留為聊天頁相容入口，但好友關係的主要管理位置是個人面板與全站好友 API。
 
-仍待後續完成的部分：留言、貼文、影音、排行榜、遊戲紀錄與通知中的所有使用者名稱 / 頭像尚需逐步接到公開主頁；遊戲邀請與直接 strict-E2EE 檔案金鑰分享也仍需補上完整後端 friend-gated enforcement。PM / private group targeting 已改由後端檢查好友關係或 root / manager 管理例外。
+仍待後續完成的部分：留言、貼文、影音、排行榜、遊戲紀錄與通知中的所有使用者名稱 / 頭像尚需逐步接到公開主頁。PM / private group、遊戲邀請與直接 strict-E2EE 檔案金鑰分享均已由後端檢查好友關係；只有 PM / private chat context 有明確的 root / manager 管理例外。
 
 ## 設計目的
 
@@ -204,7 +204,7 @@ root 與 manager 是特殊權限帳號：
 - 被封鎖者不可申請好友、PM 或邀約遊戲。
 - root / manager 可查看全部使用者，但好友列表與一般好友系統相容。
 - PM / private group 必須在後端檢查 `accepted` 好友關係或 root / manager 管理例外權限；目前已落地。
-- 遊戲邀請與直接 strict-E2EE 檔案金鑰分享必須補上同一套檢查，不能只靠前端清單過濾。
+- 遊戲邀請與直接 strict-E2EE 檔案金鑰分享均在 route / service 邊界檢查 `accepted` 好友關係，非好友直接呼叫 API 也會被拒絕。
 - 前端按鈕隱藏只能提升體驗，不能作為安全邊界。
 
 ## UI 要求
@@ -235,7 +235,7 @@ root 與 manager 是特殊權限帳號：
 14. root / manager 可查看所有主頁。
 15. root / manager 若在好友列表中固定置頂並有特殊標記。
 16. PM / private group API 直接呼叫也會拒絕非好友，不只前端隱藏按鈕。
-17. 遊戲邀請與直接 strict-E2EE 檔案金鑰分享完成後，也要通過同一組非好友拒絕測試。
+17. 遊戲邀請與直接 strict-E2EE 檔案金鑰分享都要持續通過非好友 403、好友成功與 service defense-in-depth 測試。
 18. 所有好友 mutation 都有 CSRF、audit 與權限驗證。
 
 ## Phase Plan
@@ -264,9 +264,9 @@ root 與 manager 是特殊權限帳號：
 
 - 已完成：PM / private group 後端檢查好友關係。
 - 已完成：root / manager 可為管理目的 PM 非好友，且不影響一般使用者限制。
-- 待完成：遊戲邀請後端檢查好友關係。
-- 待完成：直接 strict-E2EE 檔案金鑰分享後端檢查好友關係。
-- 待完成：root / manager 例外權限在遊戲邀請、雲端硬碟分享等 context 集中處理並 audit。
+- 已完成：遊戲邀請後端檢查好友關係。
+- 已完成：直接 strict-E2EE 檔案金鑰分享在 route 與 service 兩層檢查好友關係。
+- 已完成：指定對象 context 集中處理；PM / private chat 保留管理例外，遊戲邀請與雲端硬碟私人物件分享不繼承該例外。
 
 ### Phase 4：Sitewide Profile Entry Points
 

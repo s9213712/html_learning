@@ -19,7 +19,6 @@ if str(ROOT) not in sys.path:
 from services.system.audit import audit, configure_audit_service
 from services.users.auth import hash_password, verify_password
 from services.security.password_strength import enforce_password_strength, score_password_strength
-from services.server.runtime import default_runtime_root_path
 
 
 def _env_path(name: str, default_path: Path) -> Path:
@@ -31,7 +30,10 @@ def _env_path(name: str, default_path: Path) -> Path:
 
 
 def default_runtime_dir() -> Path:
-    return _env_path("HACKME_RUNTIME_DIR", default_runtime_root_path())
+    raw = str(os.environ.get("HACKME_RUNTIME_DIR") or "").strip()
+    if not raw:
+        raise ValueError("HACKME_RUNTIME_DIR or --runtime-dir is required")
+    return _env_path("HACKME_RUNTIME_DIR", Path(raw)).resolve()
 
 
 def default_db_path(runtime_dir: Path) -> Path:
@@ -227,7 +229,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="離線 root recovery CLI：直接在 runtime DB 重設 root 密碼並撤銷現有 session。"
     )
-    parser.add_argument("--runtime-dir", help="runtime 根目錄；預設讀 HACKME_RUNTIME_DIR 或 repo/runtime")
+    parser.add_argument("--runtime-dir", help="runtime 根目錄；未指定時必須設定 HACKME_RUNTIME_DIR")
     parser.add_argument("--db-path", help="直接指定 database.db；未指定時從 runtime 推導")
     parser.add_argument("--password", help="直接指定新的 root 臨時密碼（不建議，會留在 shell history）")
     parser.add_argument("--prompt-password", action="store_true", help="互動式輸入新的 root 臨時密碼")
@@ -242,9 +244,17 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.password and args.prompt_password:
         parser.error("--password 與 --prompt-password 不可同時使用")
-    runtime_dir = Path(args.runtime_dir).resolve() if args.runtime_dir else default_runtime_dir().resolve()
-    db_path = Path(args.db_path).resolve() if args.db_path else default_db_path(runtime_dir).resolve()
     try:
+        if args.runtime_dir:
+            runtime_dir = Path(args.runtime_dir).expanduser().resolve()
+        elif args.db_path:
+            explicit_db = Path(args.db_path).expanduser().resolve()
+            runtime_dir = explicit_db.parent.parent if explicit_db.parent.name == "database" else explicit_db.parent
+        elif str(os.environ.get("HACKME_RUNTIME_DIR") or "").strip():
+            runtime_dir = default_runtime_dir()
+        else:
+            parser.error("HACKME_RUNTIME_DIR, --runtime-dir, or --db-path is required")
+        db_path = Path(args.db_path).expanduser().resolve() if args.db_path else default_db_path(runtime_dir).resolve()
         password = args.password
         if args.prompt_password:
             password = _prompt_password()

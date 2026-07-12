@@ -8,6 +8,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from services.server.runtime import default_runtime_root_path
+
 
 ROOT = Path(__file__).resolve().parents[2]
 BOARD_AI_GAME_KEYS = {"reversi", "go", "gomoku"}
@@ -152,7 +154,8 @@ def _go_index_from_vertex(vertex):
 
 
 def _katago_home():
-    return Path(os.getenv("HACKME_KATAGO_HOME") or (ROOT / "runtime" / "katago")).expanduser()
+    runtime_root = Path(os.getenv("HACKME_RUNTIME_DIR") or default_runtime_root_path())
+    return Path(os.getenv("HACKME_KATAGO_HOME") or (runtime_root / "katago")).expanduser()
 
 
 def _katago_default_binary(home):

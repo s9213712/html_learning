@@ -6,6 +6,9 @@ let economyInlineEventsBound = false;
 let economyDocumentEventsBound = false;
 let economyAutoRefreshTimer = null;
 let economyAutoRefreshBusy = false;
+let economyAccountGeneration = 0;
+const economyActiveFileReaders = new Set();
+const economyPendingFilePickerCancels = new Set();
 let economyColdWalletDraft = null;
 let economyColdWalletBindCandidate = null;
 let economyColdWalletSigningSessions = new Map();
@@ -160,6 +163,83 @@ function stopEconomyAutoRefresh() {
     clearInterval(economyAutoRefreshTimer);
     economyAutoRefreshTimer = null;
   }
+}
+
+function economyOperationContext() {
+  return {
+    generation: economyAccountGeneration,
+    scope: typeof getCurrentAccountStorageScope === "function"
+      ? getCurrentAccountStorageScope()
+      : String(currentUserId || currentUser || "anonymous"),
+  };
+}
+
+function economyOperationIsCurrent(operation) {
+  if (!operation || Number(operation.generation) !== economyAccountGeneration) return false;
+  const scope = typeof getCurrentAccountStorageScope === "function"
+    ? getCurrentAccountStorageScope()
+    : String(currentUserId || currentUser || "anonymous");
+  return operation.scope === scope;
+}
+
+function economyAccountAbortError() {
+  const err = new Error("Account context changed");
+  err.name = "AbortError";
+  return err;
+}
+
+function economyAssertOperationCurrent(operation) {
+  if (!economyOperationIsCurrent(operation)) throw economyAccountAbortError();
+}
+
+function economyScrubPrivateJwk(jwk) {
+  if (jwk && typeof jwk === "object" && "d" in jwk) jwk.d = "";
+}
+
+function resetEconomyAccountState() {
+  economyAccountGeneration += 1;
+  stopEconomyAutoRefresh();
+  economyActiveFileReaders.forEach((reader) => {
+    try { reader.abort(); } catch (_) {}
+  });
+  economyActiveFileReaders.clear();
+  economyPendingFilePickerCancels.forEach((cancel) => cancel());
+  economyPendingFilePickerCancels.clear();
+  destroyEconomyColdWalletSecrets();
+  if (typeof window.resetEconomyExplorerAccountState === "function") {
+    window.resetEconomyExplorerAccountState();
+  }
+  if (economyBlockCountdownTimer) clearInterval(economyBlockCountdownTimer);
+  economyBlockCountdownTimer = null;
+  economyBlockSchedule = null;
+  economyAutoRefreshBusy = false;
+  economyLedgerOffset = 0;
+  economyLedgerCache = [];
+  economyColdWalletSigningSessions.clear();
+  economyWalletOnboardingState = {};
+  economyCurrentChainBranch = "main";
+  economyCatalogCache = [];
+  economyFundAddressCache = {};
+  economyGovernanceProposalCache.clear();
+  economyTreasurySignerCenterCache = null;
+  economySelectedDisputeUuid = "";
+  economySelectedDisputeProposalUuids.clear();
+  economyTransactionDisputeCache = [];
+  economyExpandedGovernanceProposalUuids.clear();
+  economyOfficialHotWalletLabels = {};
+  [
+    "economy-ledger-list",
+    "economy-wallet-list",
+    "economy-transaction-list",
+    "economy-transaction-dispute-list",
+    "economy-governance-list",
+    "economy-catalog-list",
+    "economy-root-report",
+    "economy-treasury-signer-center",
+  ].forEach((id) => {
+    const element = $(id);
+    if (element) element.replaceChildren();
+  });
 }
 
 function startEconomyAutoRefresh() {
@@ -351,6 +431,8 @@ function destroyEconomyColdWalletSecrets({ hideGenerated = true } = {}) {
   });
   const fileInput = $("economy-wallet-file-input");
   if (fileInput && "value" in fileInput) fileInput.value = "";
+  const signingFileInput = $("economy-wallet-signing-file-input");
+  if (signingFileInput && "value" in signingFileInput) signingFileInput.value = "";
   const confirmed = $("economy-wallet-private-key-confirmed");
   if (confirmed) confirmed.checked = false;
   const selectionStatus = $("economy-wallet-generated-selection-status");
@@ -540,7 +622,8 @@ function economyCanonicalPublicJwk(jwk) {
   };
 }
 
-async function economyDerivedColdWalletTradePassword(privateJwk, address) {
+async function economyDerivedColdWalletTradePassword(privateJwk, address, operation = economyOperationContext()) {
+  economyAssertOperationCurrent(operation);
   const material = [
     "hackme-pcw1-trade-password-v1",
     String(address || "").trim().toLowerCase(),
@@ -550,10 +633,12 @@ async function economyDerivedColdWalletTradePassword(privateJwk, address) {
     String(privateJwk?.d || ""),
   ].join("|");
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(material));
+  economyAssertOperationCurrent(operation);
   return economyColdUnlockMnemonicFromWords(economyMnemonicWordsFromDigest(digest));
 }
 
-async function economyDeriveColdWalletFileKey(password, salt, iterations = ECONOMY_COLD_WALLET_KDF_ITERATIONS) {
+async function economyDeriveColdWalletFileKey(password, salt, iterations = ECONOMY_COLD_WALLET_KDF_ITERATIONS, operation = economyOperationContext()) {
+  economyAssertOperationCurrent(operation);
   const passphrase = economyNormalizeColdWalletUnlockSecret(password);
   if (!passphrase) throw new Error("請輸入冷錢包解鎖助記詞");
   const baseKey = await crypto.subtle.importKey(
@@ -563,7 +648,8 @@ async function economyDeriveColdWalletFileKey(password, salt, iterations = ECONO
     false,
     ["deriveKey"]
   );
-  return crypto.subtle.deriveKey(
+  economyAssertOperationCurrent(operation);
+  const key = await crypto.subtle.deriveKey(
     {
       name: "PBKDF2",
       hash: "SHA-256",
@@ -575,6 +661,8 @@ async function economyDeriveColdWalletFileKey(password, salt, iterations = ECONO
     false,
     ["encrypt", "decrypt"]
   );
+  economyAssertOperationCurrent(operation);
+  return key;
 }
 
 function economyIsEncryptedColdWalletFilePayload(payload) {
@@ -586,10 +674,12 @@ function economyIsEncryptedColdWalletFilePayload(payload) {
     && payload.address;
 }
 
-async function economyEncryptColdWalletFile({ privateJwk, publicJwk, address, password }) {
+async function economyEncryptColdWalletFile({ privateJwk, publicJwk, address, password, operation = economyOperationContext() }) {
+  economyAssertOperationCurrent(operation);
   const salt = crypto.getRandomValues(new Uint8Array(32));
   const iv = crypto.getRandomValues(new Uint8Array(12));
-  const key = await economyDeriveColdWalletFileKey(password, salt);
+  const key = await economyDeriveColdWalletFileKey(password, salt, ECONOMY_COLD_WALLET_KDF_ITERATIONS, operation);
+  economyAssertOperationCurrent(operation);
   const plaintext = {
     address,
     public_key_jwk: economyCanonicalPublicJwk(publicJwk),
@@ -601,6 +691,7 @@ async function economyEncryptColdWalletFile({ privateJwk, publicJwk, address, pa
     key,
     new TextEncoder().encode(JSON.stringify(plaintext))
   );
+  economyAssertOperationCurrent(operation);
   return {
     format: ECONOMY_COLD_WALLET_FILE_FORMAT,
     version: ECONOMY_COLD_WALLET_FILE_VERSION,
@@ -625,29 +716,41 @@ async function economyEncryptColdWalletFile({ privateJwk, publicJwk, address, pa
   };
 }
 
-async function economyDecryptColdWalletFilePayload(payload, password) {
+async function economyDecryptColdWalletFilePayload(payload, password, operation = economyOperationContext()) {
+  economyAssertOperationCurrent(operation);
   if (!economyIsEncryptedColdWalletFilePayload(payload)) {
     throw new Error("冷錢包檔格式不正確");
   }
   const salt = economyBytesFromBase64Url(payload.kdf?.salt || "");
   const iv = economyBytesFromBase64Url(payload.cipher?.iv || "");
   const ciphertext = economyBytesFromBase64Url(payload.cipher?.ciphertext || "");
-  const key = await economyDeriveColdWalletFileKey(password, salt, payload.kdf?.iterations);
+  const key = await economyDeriveColdWalletFileKey(password, salt, payload.kdf?.iterations, operation);
+  economyAssertOperationCurrent(operation);
   let decoded = null;
+  let plaintext = null;
   try {
-    const plaintext = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ciphertext);
+    plaintext = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ciphertext);
     decoded = JSON.parse(new TextDecoder().decode(plaintext));
   } catch (_) {
     throw new Error("冷錢包解鎖助記詞錯誤或冷錢包檔已損毀");
+  } finally {
+    if (plaintext) new Uint8Array(plaintext).fill(0);
   }
+  economyAssertOperationCurrent(operation);
   const privateJwk = decoded?.private_key_jwk;
   if (!privateJwk?.d || !privateJwk?.x || !privateJwk?.y) throw new Error("冷錢包檔缺少私鑰資料");
-  const publicJwk = economyCanonicalPublicJwk(privateJwk);
-  const { address } = await economyWalletAddressFromPublicJwk(publicJwk);
-  if (String(address || "").trim().toLowerCase() !== String(payload.address || "").trim().toLowerCase()) {
-    throw new Error("冷錢包檔地址與私鑰不一致");
+  try {
+    const publicJwk = economyCanonicalPublicJwk(privateJwk);
+    const { address } = await economyWalletAddressFromPublicJwk(publicJwk);
+    economyAssertOperationCurrent(operation);
+    if (String(address || "").trim().toLowerCase() !== String(payload.address || "").trim().toLowerCase()) {
+      throw new Error("冷錢包檔地址與私鑰不一致");
+    }
+    return privateJwk;
+  } catch (err) {
+    economyScrubPrivateJwk(privateJwk);
+    throw err;
   }
-  return privateJwk;
 }
 
 function economyColdWalletFileName(address) {
@@ -684,41 +787,71 @@ async function economyCopyDraftTradePassword() {
   await copyEconomyText(password, "冷錢包解鎖助記詞已複製；請離線保存", { contentLabel: "冷錢包解鎖助記詞" });
 }
 
-async function economyReadTextFile(file) {
+async function economyReadTextFile(file, operation = economyOperationContext()) {
+  economyAssertOperationCurrent(operation);
   if (!file) throw new Error("請選擇冷錢包檔");
-  if (typeof file.text === "function") return file.text();
+  if (typeof file.text === "function") {
+    const text = await file.text();
+    economyAssertOperationCurrent(operation);
+    return text;
+  }
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result || ""));
-    reader.onerror = () => reject(new Error("讀取冷錢包檔失敗"));
+    const cleanup = () => economyActiveFileReaders.delete(reader);
+    reader.onload = () => {
+      cleanup();
+      if (!economyOperationIsCurrent(operation)) {
+        reject(economyAccountAbortError());
+        return;
+      }
+      resolve(String(reader.result || ""));
+    };
+    reader.onerror = () => {
+      cleanup();
+      reject(new Error("讀取冷錢包檔失敗"));
+    };
+    reader.onabort = () => {
+      cleanup();
+      reject(economyAccountAbortError());
+    };
+    economyActiveFileReaders.add(reader);
     reader.readAsText(file);
   });
 }
 
-async function economyLoadEncryptedColdWalletFile(raw, password, { imported = true } = {}) {
+async function economyLoadEncryptedColdWalletFile(raw, password, { imported = true, operation = null } = {}) {
+  const operationContext = operation || economyOperationContext();
+  economyAssertOperationCurrent(operationContext);
   let payload = null;
   try {
     payload = JSON.parse(String(raw || "").trim());
   } catch (_) {
     throw new Error("冷錢包檔不是有效 JSON");
   }
-  const privateJwk = await economyDecryptColdWalletFilePayload(payload, password);
-  const publicJwk = economyCanonicalPublicJwk(privateJwk);
-  const { address } = await economyWalletAddressFromPublicJwk(publicJwk);
-  const privateKey = await crypto.subtle.importKey(
-    "jwk",
-    privateJwk,
-    { name: "ECDSA", namedCurve: "P-256" },
-    false,
-    ["sign"]
-  );
-  privateJwk.d = "";
-  return {
-    address,
-    privateKey,
-    publicJwk,
-    imported,
-  };
+  let privateJwk = null;
+  try {
+    privateJwk = await economyDecryptColdWalletFilePayload(payload, password, operationContext);
+    economyAssertOperationCurrent(operationContext);
+    const publicJwk = economyCanonicalPublicJwk(privateJwk);
+    const { address } = await economyWalletAddressFromPublicJwk(publicJwk);
+    economyAssertOperationCurrent(operationContext);
+    const privateKey = await crypto.subtle.importKey(
+      "jwk",
+      privateJwk,
+      { name: "ECDSA", namedCurve: "P-256" },
+      false,
+      ["sign"]
+    );
+    economyAssertOperationCurrent(operationContext);
+    return {
+      address,
+      privateKey,
+      publicJwk,
+      imported,
+    };
+  } finally {
+    economyScrubPrivateJwk(privateJwk);
+  }
 }
 
 async function economySha256Hex(text) {
@@ -820,6 +953,8 @@ function economyNormalizeEvidenceInput(raw) {
 }
 
 async function economyBuildAddressDisputeProof({ purpose, signerAddress, txHash, from, to, amount, statement, evidence, chainBranch, runtimeMode }) {
+  const operation = economyOperationContext();
+  economyAssertOperationCurrent(operation);
   if (!window.crypto?.subtle) throw new Error("此瀏覽器不支援 WebCrypto，無法本機簽署地址證明");
   let loaded = null;
   try {
@@ -828,9 +963,12 @@ async function economyBuildAddressDisputeProof({ purpose, signerAddress, txHash,
       purposeLabel: "地址證明",
       cancelMessage: "已取消地址證明簽署，疑義案件未送出",
       mismatchMessage: "冷錢包檔地址與本次需證明的地址不一致",
+      operation,
     });
     const statementHash = await economySha256Hex(String(statement || ""));
+    economyAssertOperationCurrent(operation);
     const evidenceHash = await economySha256Hex(JSON.stringify(economyNormalizeEvidenceInput(evidence)));
+    economyAssertOperationCurrent(operation);
     const nonce = window.crypto?.randomUUID ? window.crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
     const signatureRuntimeMode = String(runtimeMode || economyAddressDisputeRuntimeMode()).trim() || "unknown";
     const payload = economyAddressDisputePayload({
@@ -847,7 +985,7 @@ async function economyBuildAddressDisputeProof({ purpose, signerAddress, txHash,
     });
     return {
       public_key_jwk: economyCanonicalPublicJwk(loaded.publicJwk),
-      signature: await economySignWalletBinding(loaded.privateKey, payload),
+      signature: await economySignWalletBinding(loaded.privateKey, payload, operation),
       signature_nonce: nonce,
       signature_runtime_mode: signatureRuntimeMode,
       statement_hash: statementHash,
@@ -858,19 +996,24 @@ async function economyBuildAddressDisputeProof({ purpose, signerAddress, txHash,
   }
 }
 
-async function economySignWalletBinding(privateKey, payload) {
+async function economySignWalletBinding(privateKey, payload, operation = economyOperationContext()) {
+  economyAssertOperationCurrent(operation);
   const signature = await crypto.subtle.sign(
     { name: "ECDSA", hash: "SHA-256" },
     privateKey,
     new TextEncoder().encode(payload)
   );
+  economyAssertOperationCurrent(operation);
   return economyBase64UrlFromBytes(signature);
 }
 
-async function economyBuildWalletBindPayload({ privateKey, publicJwk, walletType }) {
+async function economyBuildWalletBindPayload({ privateKey, publicJwk, walletType, operation = null }) {
+  const operationContext = operation || economyOperationContext();
+  economyAssertOperationCurrent(operationContext);
   const { address, publicKeyHash } = await economyWalletAddressFromPublicJwk(publicJwk);
+  economyAssertOperationCurrent(operationContext);
   const payload = economyWalletBindingPayload({ address, publicKeyHash, walletType });
-  const signature = await economySignWalletBinding(privateKey, payload);
+  const signature = await economySignWalletBinding(privateKey, payload, operationContext);
   return {
     mode: walletType,
     address,
@@ -928,7 +1071,9 @@ function economyColdWalletSigningSession(address) {
   return session;
 }
 
-async function economyVerifyColdWalletSigningSession(session, { purposeLabel = "", cancelMessage = "" } = {}) {
+async function economyVerifyColdWalletSigningSession(session, { purposeLabel = "", cancelMessage = "", operation = null } = {}) {
+  const operationContext = operation || economyOperationContext();
+  economyAssertOperationCurrent(operationContext);
   const quiz = economyBuildColdWalletMnemonicQuiz(session?.mnemonicWords || []);
   if (!quiz.length) {
     economyForgetColdWalletSigningSession(session?.address || "");
@@ -940,6 +1085,7 @@ async function economyVerifyColdWalletSigningSession(session, { purposeLabel = "
     "不需要輸入完整解鎖助記詞；答案只在本機比對，不會送到伺服器。",
   ].join("\n");
   const raw = window.prompt(promptText, "");
+  economyAssertOperationCurrent(operationContext);
   if (raw === null) throw economyColdWalletSigningCancelled(cancelMessage);
   const answers = String(raw || "").trim().toLowerCase().split(/\s+/).filter(Boolean);
   const ok = quiz.every((item, index) => answers[index] === String(item.word || "").toLowerCase());
@@ -962,7 +1108,9 @@ function economyColdWalletSigningCancelled(cancelMessage) {
   return err;
 }
 
-async function economyPickColdWalletFileForSigning({ cancelMessage = "" } = {}) {
+async function economyPickColdWalletFileForSigning({ cancelMessage = "", operation = null } = {}) {
+  const operationContext = operation || economyOperationContext();
+  economyAssertOperationCurrent(operationContext);
   if (window.showOpenFilePicker && window.isSecureContext) {
     try {
       const handles = await window.showOpenFilePicker({
@@ -972,9 +1120,14 @@ async function economyPickColdWalletFileForSigning({ cancelMessage = "" } = {}) 
           accept: { "application/json": [".pcw1.json", ".json"] },
         }],
       });
+      economyAssertOperationCurrent(operationContext);
       const file = await handles?.[0]?.getFile();
+      economyAssertOperationCurrent(operationContext);
       if (file) return file;
-    } catch (_) {
+    } catch (err) {
+      if (!economyOperationIsCurrent(operationContext) || err?.name === "AbortError") {
+        throw economyAccountAbortError();
+      }
       throw economyColdWalletSigningCancelled(cancelMessage);
     }
     throw economyColdWalletSigningCancelled(cancelMessage);
@@ -992,12 +1145,17 @@ async function economyPickColdWalletFileForSigning({ cancelMessage = "" } = {}) 
     const cleanup = () => {
       input.removeEventListener("change", onChange);
       input.removeEventListener("cancel", onCancel);
+      economyPendingFilePickerCancels.delete(cancelForAccountChange);
       if (created) input.remove();
     };
     const finish = (file) => {
       if (settled) return;
       settled = true;
       cleanup();
+      if (!economyOperationIsCurrent(operationContext)) {
+        reject(economyAccountAbortError());
+        return;
+      }
       if (file) resolve(file);
       else reject(economyColdWalletSigningCancelled(cancelMessage));
     };
@@ -1007,18 +1165,28 @@ async function economyPickColdWalletFileForSigning({ cancelMessage = "" } = {}) 
     function onCancel() {
       finish(null);
     }
+    function cancelForAccountChange() {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(economyAccountAbortError());
+    }
     input.addEventListener("change", onChange, { once: true });
     input.addEventListener("cancel", onCancel, { once: true });
+    economyPendingFilePickerCancels.add(cancelForAccountChange);
     input.value = "";
     input.click();
   });
 }
 
-async function economyPromptColdWalletForSigning({ expectedAddress, purposeLabel, cancelMessage, mismatchMessage }) {
+async function economyPromptColdWalletForSigning({ expectedAddress, purposeLabel, cancelMessage, mismatchMessage, operation = null }) {
+  const operationContext = operation || economyOperationContext();
+  economyAssertOperationCurrent(operationContext);
   const normalizedExpected = String(expectedAddress || "").trim().toLowerCase();
   const session = economyColdWalletSigningSession(normalizedExpected);
   if (session) {
-    await economyVerifyColdWalletSigningSession(session, { purposeLabel, cancelMessage });
+    await economyVerifyColdWalletSigningSession(session, { purposeLabel, cancelMessage, operation: operationContext });
+    economyAssertOperationCurrent(operationContext);
     return {
       address: session.address,
       privateKey: session.privateKey,
@@ -1028,20 +1196,31 @@ async function economyPromptColdWalletForSigning({ expectedAddress, purposeLabel
     };
   }
   let loaded = null;
-  const file = await economyPickColdWalletFileForSigning({ cancelMessage });
+  const file = await economyPickColdWalletFileForSigning({ cancelMessage, operation: operationContext });
+  economyAssertOperationCurrent(operationContext);
   const unlockMnemonic = window.prompt(`首次解鎖或本機簽署會話逾期時，需輸入完整冷錢包解鎖助記詞以本機解密錢包檔；之後同一頁面短時間內簽署${purposeLabel || "交易"}只會隨機詢問幾個詞。助記詞不會送到伺服器。`, "");
+  economyAssertOperationCurrent(operationContext);
   if (unlockMnemonic === null) {
     throw economyColdWalletSigningCancelled(cancelMessage);
   }
-  loaded = await economyLoadEncryptedColdWalletFile(await economyReadTextFile(file), unlockMnemonic, { imported: true });
+  const raw = await economyReadTextFile(file, operationContext);
+  economyAssertOperationCurrent(operationContext);
+  loaded = await economyLoadEncryptedColdWalletFile(raw, unlockMnemonic, {
+    imported: true,
+    operation: operationContext,
+  });
+  economyAssertOperationCurrent(operationContext);
   if (normalizedExpected && String(loaded?.address || "").trim().toLowerCase() !== normalizedExpected) {
     throw new Error(mismatchMessage || "冷錢包檔地址與本次付款錢包不一致");
   }
+  economyAssertOperationCurrent(operationContext);
   economyRememberColdWalletSigningSession(loaded, unlockMnemonic);
   return loaded;
 }
 
 async function economyBuildTransferSignature({ source, destination, amount, fee, memo, requestUuid }) {
+  const operation = economyOperationContext();
+  economyAssertOperationCurrent(operation);
   const wallet = economyWalletByAddress(source);
   if (!economyWalletRequiresSignature(wallet)) return "";
   if (!window.crypto?.subtle) throw new Error("此瀏覽器不支援 WebCrypto，無法簽署冷錢包交易");
@@ -1052,15 +1231,19 @@ async function economyBuildTransferSignature({ source, destination, amount, fee,
       purposeLabel: "交易",
       cancelMessage: "已取消冷錢包簽署，交易未送出",
       mismatchMessage: "冷錢包檔地址與付款錢包不一致，交易未送出",
+      operation,
     });
+    economyAssertOperationCurrent(operation);
     const payload = economyWalletTransferPayload({ source, destination, amount, fee, memo, requestUuid });
-    return economySignWalletBinding(loaded.privateKey, payload);
+    return await economySignWalletBinding(loaded.privateKey, payload, operation);
   } finally {
     loaded = null;
   }
 }
 
 async function economyBuildGovernanceMultisigSignature({ signer, destination, amount, payloadHash, requestUuid, custodyMode = "", walletType = "" }) {
+  const operation = economyOperationContext();
+  economyAssertOperationCurrent(operation);
   const wallet = economyWalletByAddress(signer);
   const needsSignature = economyWalletRequiresSignature(wallet)
     || String(custodyMode || "").trim() === "self_custody"
@@ -1074,7 +1257,9 @@ async function economyBuildGovernanceMultisigSignature({ signer, destination, am
       purposeLabel: "官方多簽",
       cancelMessage: "已取消官方多簽簽署，提案尚未授權",
       mismatchMessage: "冷錢包檔地址與 signer 錢包不一致，多簽未送出",
+      operation,
     });
+    economyAssertOperationCurrent(operation);
     const payload = economyWalletTransferPayload({
       source: signer,
       destination: destination || signer,
@@ -1087,13 +1272,15 @@ async function economyBuildGovernanceMultisigSignature({ signer, destination, am
       payloadHash,
       signerKeyId: economyWalletSignerKeyId(signer),
     });
-    return economySignWalletBinding(loaded.privateKey, payload);
+    return await economySignWalletBinding(loaded.privateKey, payload, operation);
   } finally {
     loaded = null;
   }
 }
 
-async function economyBuildServiceFeeSignature({ source, itemKey, quantity, amount, requestUuid, referenceType, referenceId }) {
+async function economyBuildServiceFeeSignature({ source, itemKey, quantity, amount, requestUuid, referenceType, referenceId, operation = null }) {
+  const operationContext = operation || economyOperationContext();
+  economyAssertOperationCurrent(operationContext);
   const wallet = economyWalletByAddress(source);
   if (!economyWalletRequiresSignature(wallet)) return "";
   if (!window.crypto?.subtle) throw new Error("此瀏覽器不支援 WebCrypto，無法簽署冷錢包服務費");
@@ -1104,9 +1291,11 @@ async function economyBuildServiceFeeSignature({ source, itemKey, quantity, amou
       purposeLabel: "服務費",
       cancelMessage: "已取消冷錢包簽署，服務費未送出",
       mismatchMessage: "冷錢包檔地址與付款錢包不一致，服務費未送出",
+      operation: operationContext,
     });
+    economyAssertOperationCurrent(operationContext);
     const payload = economyWalletServiceFeePayload({ source, itemKey, quantity, amount, requestUuid, referenceType, referenceId });
-    return economySignWalletBinding(loaded.privateKey, payload);
+    return await economySignWalletBinding(loaded.privateKey, payload, operationContext);
   } finally {
     loaded = null;
   }
@@ -1673,7 +1862,9 @@ function renderEconomyWalletCreationFeeOptions(onboarding = {}) {
   }
 }
 
-async function economyWalletCreationFeePayload(mode) {
+async function economyWalletCreationFeePayload(mode, operation = null) {
+  const operationContext = operation || economyOperationContext();
+  economyAssertOperationCurrent(operationContext);
   const quote = economyWalletCreationFeeQuote();
   const amount = Math.floor(Number(quote.amount_points || quote.amount || 0));
   if (!Number.isFinite(amount) || amount <= 0) return {};
@@ -1692,7 +1883,9 @@ async function economyWalletCreationFeePayload(mode) {
     requestUuid,
     referenceType,
     referenceId,
+    operation: operationContext,
   });
+  economyAssertOperationCurrent(operationContext);
   return {
     fee_source_wallet_address: source,
     fee_request_uuid: requestUuid,
@@ -2419,25 +2612,33 @@ async function submitEconomyWalletTransfer() {
   }
 }
 
-async function postEconomyWalletOnboarding(payload) {
+async function postEconomyWalletOnboarding(payload, operation = null) {
+  const operationContext = operation || economyOperationContext();
+  economyAssertOperationCurrent(operationContext);
   await fetchCsrfToken({ force: true });
+  economyAssertOperationCurrent(operationContext);
   const json = await fetchEconomyJson("/points/wallet/onboarding", {
     method: "POST",
     body: JSON.stringify(payload),
   });
+  economyAssertOperationCurrent(operationContext);
   renderEconomyWalletOnboarding(json.onboarding || {});
   const createdMessages = [];
   if (json.creation_fee?.charged) createdMessages.push(`建立費 ${formatEconomyPointsValue(json.creation_fee.amount_points || 0)} 點已入官方 Treasury`);
   economyWalletMsg(createdMessages.length ? `錢包已綁定，${createdMessages.join("，")}。` : "錢包已綁定。");
   await loadEconomyDashboard();
+  economyAssertOperationCurrent(operationContext);
 }
 
 async function useOfficialHotWallet() {
+  const operation = economyOperationContext();
   try {
-    const feePayload = await economyWalletCreationFeePayload("official_hot");
-    await postEconomyWalletOnboarding({ mode: "official_hot", ...feePayload });
+    const feePayload = await economyWalletCreationFeePayload("official_hot", operation);
+    economyAssertOperationCurrent(operation);
+    await postEconomyWalletOnboarding({ mode: "official_hot", ...feePayload }, operation);
     destroyEconomyColdWalletSecrets();
   } catch (err) {
+    if (!economyOperationIsCurrent(operation) || err?.name === "AbortError") return;
     economyWalletMsg(err.message || "站內託管錢包建立失敗", false);
   }
 }
@@ -2664,6 +2865,7 @@ function setEconomyDefaultWalletFromCard(address) {
 }
 
 async function verifyEconomyColdWalletBackupForAddress(address) {
+  const operation = economyOperationContext();
   const target = String(address || "").trim().toLowerCase();
   if (!target) {
     economyWalletMsg("找不到要驗證的冷錢包地址", false);
@@ -2676,9 +2878,12 @@ async function verifyEconomyColdWalletBackupForAddress(address) {
       purposeLabel: "密鑰驗證",
       cancelMessage: "已取消冷錢包密鑰驗證。",
       mismatchMessage: "冷錢包檔地址與此冷錢包不一致",
+      operation,
     });
+    economyAssertOperationCurrent(operation);
     economyWalletMsg(`錢包檔可控制此地址：${shortEconomyWalletAddress(target)}。私鑰只在瀏覽器本機解密，不會送到伺服器。`);
   } catch (err) {
+    if (!economyOperationIsCurrent(operation) || err?.name === "AbortError") return;
     economyWalletMsg(err.message || "冷錢包密鑰驗證失敗", false);
   } finally {
     loaded = null;
@@ -2708,25 +2913,40 @@ async function deleteEconomyColdWallet(addressOverride = "") {
 }
 
 async function createColdWalletDraft() {
+  const operation = economyOperationContext();
+  economyAssertOperationCurrent(operation);
   if (!window.crypto?.subtle) {
     economyWalletMsg("此瀏覽器不支援 WebCrypto，無法建立冷錢包", false);
     return;
   }
+  let privateJwk = null;
   try {
     const keyPair = await crypto.subtle.generateKey(
       { name: "ECDSA", namedCurve: "P-256" },
       true,
       ["sign", "verify"]
     );
-    const privateJwk = await crypto.subtle.exportKey("jwk", keyPair.privateKey);
+    economyAssertOperationCurrent(operation);
+    privateJwk = await crypto.subtle.exportKey("jwk", keyPair.privateKey);
+    economyAssertOperationCurrent(operation);
     const publicJwk = await crypto.subtle.exportKey("jwk", keyPair.publicKey);
+    economyAssertOperationCurrent(operation);
     const { address } = await economyWalletAddressFromPublicJwk(publicJwk);
-    const tradePassword = await economyDerivedColdWalletTradePassword(privateJwk, address);
+    economyAssertOperationCurrent(operation);
+    const tradePassword = await economyDerivedColdWalletTradePassword(privateJwk, address, operation);
+    economyAssertOperationCurrent(operation);
     const mnemonicWords = economyColdWalletMnemonicWords(tradePassword);
     const mnemonicQuiz = economyBuildColdWalletMnemonicQuiz(mnemonicWords);
-    const walletFile = await economyEncryptColdWalletFile({ privateJwk, publicJwk, address, password: tradePassword });
+    const walletFile = await economyEncryptColdWalletFile({
+      privateJwk,
+      publicJwk,
+      address,
+      password: tradePassword,
+      operation,
+    });
+    economyAssertOperationCurrent(operation);
     const walletFileName = economyColdWalletFileName(address);
-    privateJwk.d = "";
+    economyScrubPrivateJwk(privateJwk);
     destroyEconomyColdWalletSecrets({ hideGenerated: false });
     economyColdWalletDraft = { address, walletFile, walletFileName, tradePassword, mnemonicWords, mnemonicQuiz, quizPassed: false };
     if ($("economy-wallet-generated-panel")) $("economy-wallet-generated-panel").style.display = "";
@@ -2748,7 +2968,10 @@ async function createColdWalletDraft() {
     syncEconomyGeneratedColdWalletSelectionButton();
     economyWalletMsg("冷錢包只建立草稿，尚未匯入或綁定；請先下載錢包檔、離線保存冷錢包解鎖助記詞，再按確認隱藏助記詞進行考試。");
   } catch (err) {
+    if (!economyOperationIsCurrent(operation) || err?.name === "AbortError") return;
     economyWalletMsg(err.message || "冷錢包建立失敗", false);
+  } finally {
+    economyScrubPrivateJwk(privateJwk);
   }
 }
 
@@ -2761,27 +2984,35 @@ async function selectGeneratedColdWalletForImport() {
     economyWalletMsg("請先通過記憶詞考試，再選用此冷錢包。", false);
     return;
   }
+  const operation = economyOperationContext();
+  const draft = economyColdWalletDraft;
   try {
-    const raw = JSON.stringify(economyColdWalletDraft.walletFile || {});
-    economyColdWalletBindCandidate = await economyLoadEncryptedColdWalletFile(raw, economyColdWalletDraft.tradePassword, { imported: false });
-    if (String(economyColdWalletBindCandidate.address || "").toLowerCase() !== String(economyColdWalletDraft.address || "").toLowerCase()) {
+    const raw = JSON.stringify(draft.walletFile || {});
+    const loaded = await economyLoadEncryptedColdWalletFile(raw, draft.tradePassword, {
+      imported: false,
+      operation,
+    });
+    economyAssertOperationCurrent(operation);
+    if (String(loaded.address || "").toLowerCase() !== String(draft.address || "").toLowerCase()) {
       throw new Error("冷錢包檔與草稿地址不一致");
     }
-    economyRememberColdWalletSigningSession(economyColdWalletBindCandidate, economyColdWalletDraft.tradePassword);
+    economyColdWalletBindCandidate = loaded;
+    economyRememberColdWalletSigningSession(loaded, draft.tradePassword);
     if ($("economy-wallet-private-key")) $("economy-wallet-private-key").value = "";
     if ($("economy-wallet-file-input")) $("economy-wallet-file-input").value = "";
     if ($("economy-wallet-file-password")) $("economy-wallet-file-password").value = "";
     if ($("economy-wallet-private-key-confirmed")) $("economy-wallet-private-key-confirmed").checked = false;
     if ($("economy-wallet-generated-selection-status")) {
-      $("economy-wallet-generated-selection-status").textContent = `已選用 ${shortEconomyWalletAddress(economyColdWalletDraft.address)}`;
+      $("economy-wallet-generated-selection-status").textContent = `已選用 ${shortEconomyWalletAddress(draft.address)}`;
     }
     if ($("economy-wallet-use-generated-cold-btn")) {
       $("economy-wallet-use-generated-cold-btn").textContent = "已選用";
       $("economy-wallet-use-generated-cold-btn").disabled = true;
     }
     $("economy-wallet-private-key-confirmed")?.focus();
-    economyWalletMsg(`已選用此冷錢包 ${shortEconomyWalletAddress(economyColdWalletDraft.address)}；確認已保存錢包檔與冷錢包解鎖助記詞後才會綁定。`);
+    economyWalletMsg(`已選用此冷錢包 ${shortEconomyWalletAddress(draft.address)}；確認已保存錢包檔與冷錢包解鎖助記詞後才會綁定。`);
   } catch (err) {
+    if (!economyOperationIsCurrent(operation) || err?.name === "AbortError") return;
     economyColdWalletBindCandidate = null;
     if ($("economy-wallet-generated-selection-status")) $("economy-wallet-generated-selection-status").textContent = "選用失敗";
     economyWalletMsg(err.message || "選用冷錢包失敗", false);
@@ -2793,12 +3024,20 @@ async function importColdWalletFromInputs() {
     economyWalletMsg("此瀏覽器不支援 WebCrypto，無法匯入冷錢包", false);
     return;
   }
+  const operation = economyOperationContext();
   try {
     economyColdWalletBindCandidate = null;
     const file = $("economy-wallet-file-input")?.files?.[0] || null;
     const password = $("economy-wallet-file-password")?.value || "";
     if (file) {
-      economyColdWalletBindCandidate = await economyLoadEncryptedColdWalletFile(await economyReadTextFile(file), password, { imported: true });
+      const raw = await economyReadTextFile(file, operation);
+      economyAssertOperationCurrent(operation);
+      const loaded = await economyLoadEncryptedColdWalletFile(raw, password, {
+        imported: true,
+        operation,
+      });
+      economyAssertOperationCurrent(operation);
+      economyColdWalletBindCandidate = loaded;
     } else {
       economyWalletMsg("請先選擇冷錢包檔並輸入冷錢包解鎖助記詞。", false);
       $("economy-wallet-file-input")?.focus();
@@ -2809,6 +3048,7 @@ async function importColdWalletFromInputs() {
     if ($("economy-wallet-generated-selection-status")) $("economy-wallet-generated-selection-status").textContent = "已改用匯入錢包檔";
     economyWalletMsg("冷錢包已在瀏覽器本機解密。確認已保存錢包檔與冷錢包解鎖助記詞後即可綁定。");
   } catch (err) {
+    if (!economyOperationIsCurrent(operation) || err?.name === "AbortError") return;
     economyWalletMsg(err.message || "冷錢包匯入失敗", false);
   }
 }
@@ -2828,6 +3068,7 @@ async function startColdWalletImport() {
 }
 
 async function confirmColdWalletBinding() {
+  const operation = economyOperationContext();
   let scrubSecrets = false;
   try {
     if (!$("economy-wallet-private-key-confirmed")?.checked) {
@@ -2837,6 +3078,7 @@ async function confirmColdWalletBinding() {
     const file = $("economy-wallet-file-input")?.files?.[0] || null;
     if (file) {
       await importColdWalletFromInputs();
+      economyAssertOperationCurrent(operation);
     }
     if (!economyColdWalletBindCandidate) {
       economyWalletMsg("請先匯入錢包檔或選用新冷錢包", false);
@@ -2847,14 +3089,18 @@ async function confirmColdWalletBinding() {
       privateKey: economyColdWalletBindCandidate.privateKey,
       publicJwk: economyColdWalletBindCandidate.publicJwk,
       walletType,
+      operation,
     });
-    const feePayload = await economyWalletCreationFeePayload(walletType);
+    economyAssertOperationCurrent(operation);
+    const feePayload = await economyWalletCreationFeePayload(walletType, operation);
+    economyAssertOperationCurrent(operation);
     scrubSecrets = true;
-    await postEconomyWalletOnboarding({ ...payload, ...feePayload });
+    await postEconomyWalletOnboarding({ ...payload, ...feePayload }, operation);
   } catch (err) {
+    if (!economyOperationIsCurrent(operation) || err?.name === "AbortError") return;
     economyWalletMsg(err.message || "冷錢包綁定失敗", false);
   } finally {
-    if (scrubSecrets) destroyEconomyColdWalletSecrets();
+    if (scrubSecrets && economyOperationIsCurrent(operation)) destroyEconomyColdWalletSecrets();
   }
 }
 
@@ -4921,6 +5167,7 @@ function bindEconomyInlineEvents() {
   }
   economyDocumentEventsBound = true;
   document.addEventListener("hackme:account-context-changed", () => {
+    resetEconomyAccountState();
     economyActivePage = readEconomyActivePage();
     syncEconomySubpages(currentUser === "root");
   });

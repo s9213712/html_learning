@@ -92,7 +92,8 @@ Generated runtime files remain local and must not be committed:
 - `CIVITAI_API_KEY` 是否存在
   - 影響 root-only Civitai 搜尋 / 下載
 - `scripts/admin/root_recovery.py`
-  - root 忘記密碼時的正式 offline 補救入口
+  - root 忘記密碼時的正式 offline 補救入口；必須明確設定
+    `HACKME_RUNTIME_DIR`、`--runtime-dir` 或 `--db-path`
 
 這些能力提示屬於**可選擴充檢查**，不會阻擋一般部署。
 更完整的 system binary / external service 清單請看

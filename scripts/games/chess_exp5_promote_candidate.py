@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import shutil
 import sys
 from datetime import datetime
@@ -26,7 +25,10 @@ from services.games.chess_nnue import EXPERIMENT_NNUE_DIFFICULTY, default_chess_
 from services.games.chess_promotion import default_chess_candidate_dir, default_chess_promotion_status_path, production_engine_inventory  # noqa: E402
 
 
-DEFAULT_RESULTS_ROOT = Path(os.environ.get("HACKME_CHESS_RESULTS_DIR", str(ROOT / "runtime" / "reports" / "games" / "chess_results")))
+from scripts.games.common_paths import chess_results_root  # noqa: E402
+
+
+DEFAULT_RESULTS_ROOT = chess_results_root()
 DEFAULT_SUMMARY = DEFAULT_RESULTS_ROOT / "exp5_10_production_readiness" / "summary.json"
 DEFAULT_OUTPUT_DIR = DEFAULT_RESULTS_ROOT / "exp5_12_production_promote"
 

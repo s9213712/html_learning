@@ -36,9 +36,12 @@ from services.games.chess_nnue import (  # noqa: E402
 from services.games.self_play_training import _teacher_static_eval, choose_teacher_move  # noqa: E402
 
 
-DEFAULT_RESULTS_ROOT = Path(os.environ.get("HACKME_CHESS_RESULTS_DIR", str(ROOT / "runtime" / "reports" / "games" / "chess_results")))
+from scripts.games.common_paths import chess_results_root, runtime_model_path, runtime_root  # noqa: E402
+
+
+DEFAULT_RESULTS_ROOT = chess_results_root()
 DEFAULT_CANDIDATE = DEFAULT_RESULTS_ROOT / "exp5_08_stage_candidate" / "chess_experiment_5_nnue_stage_candidate.json"
-DEFAULT_BASELINE = ROOT / "runtime" / "games" / "models" / "chess_experiment_5_nnue_experience.json"
+DEFAULT_BASELINE = runtime_model_path("chess_experiment_5_nnue_experience.json")
 DEFAULT_TRAIN_ROWS = DEFAULT_RESULTS_ROOT / "exp5_08_clean_pool" / "inputs" / "exp5_08_train_clean_only.jsonl"
 DEFAULT_SEED_CASES = DEFAULT_RESULTS_ROOT / "exp5_08_clean_pool" / "inputs" / "exp5_09_benchmark_cases.jsonl"
 DEFAULT_OUTPUT_DIR = DEFAULT_RESULTS_ROOT / "exp5_10_production_readiness"
@@ -930,7 +933,7 @@ def main() -> int:
     production_runtime_path = (
         Path(os.environ["HACKME_RUNTIME_DIR"]).expanduser().resolve()
         if os.environ.get("HACKME_RUNTIME_DIR")
-        else ROOT / "runtime"
+        else runtime_root()
     ) / "games" / "models" / "chess_experiment_5_nnue_experience.json"
     production_runtime_exists_before = production_runtime_path.exists()
     production_runtime_hash_before = _hash_optional_file(production_runtime_path)

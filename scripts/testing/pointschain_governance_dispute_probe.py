@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
@@ -14,9 +15,15 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--username", default="root")
-    parser.add_argument("--password", default="root")
+    parser.add_argument(
+        "--password",
+        default=os.environ.get("HACKME_ROOT_PASSWORD") or os.environ.get("HTML_LEARNING_ROOT_PASSWORD", ""),
+        help="Root password. Prefer HACKME_ROOT_PASSWORD over a command-line value.",
+    )
     parser.add_argument("--out", required=True)
     args = parser.parse_args()
+    if not args.password:
+        parser.error("HACKME_ROOT_PASSWORD or --password is required")
 
     result = {"ok": False, "checks": []}
 

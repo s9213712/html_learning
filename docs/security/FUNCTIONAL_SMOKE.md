@@ -41,7 +41,7 @@ scripts/security/pentest/run_functional_smoke.sh --port 50740
 ```bash
 scripts/security/pentest/run_functional_smoke.sh \
   --runtime /tmp/hackme_web_functional_manual \
-  --out runtime/reports/security
+  --out /tmp/hackme_web_test_artifacts/reports/security
 ```
 
 保留 runtime 目錄供人工檢查：
@@ -50,8 +50,9 @@ scripts/security/pentest/run_functional_smoke.sh \
 scripts/security/pentest/run_functional_smoke.sh --keep-runtime
 ```
 
-`--keep-runtime` 不會保留測試產生的髒資料。腳本會在啟動 server 前建立
-`pre_start_runtime_snapshot.tar.gz`，結束時把 runtime 還原到啟動前狀態。
+`--runtime` 只接受 `/tmp/hackme_web_*` 下尚不存在的新目錄，避免覆寫或刪除
+既有資料。`--keep-runtime` 會保留本輪隔離 runtime 的測試狀態供除錯；確認完後由
+操作者自行移除。
 
 ## Options
 
@@ -59,8 +60,8 @@ scripts/security/pentest/run_functional_smoke.sh --keep-runtime
 |---|---|
 | `--port N` | 臨時 server port。預設 `50734`。 |
 | `--runtime DIR` | 隔離 runtime 根目錄。預設 `/tmp/hackme_web_functional_<RUN_ID>`。 |
-| `--out DIR` | 報告根目錄。預設 `runtime/reports/security`。 |
-| `--keep-runtime` | 測試後保留 runtime，但會還原到 pre-start snapshot。 |
+| `--out DIR` | 報告根目錄。預設 `/tmp/hackme_web_test_artifacts/reports/security`，且不可位於 source checkout 或 disposable runtime 內。 |
+| `--keep-runtime` | 測試後保留本輪隔離 runtime 供除錯。 |
 | `--qa-full` | 跑完整 QA functional smoke；包含 community/chat/storage/video/ComfyUI/reports/moderation 等產品回歸。這是預設模式。 |
 | `--core-only` | 只跑上線前必要核心功能與安全邊界；跳過 QA 類產品工作流。production gate 使用這個模式。 |
 | `-h`, `--help` | 顯示腳本內建說明。 |
@@ -72,12 +73,13 @@ scripts/security/pentest/run_functional_smoke.sh --keep-runtime
 | `HOST` | `127.0.0.1` | 臨時 server bind host。 |
 | `PORT` | `50734` | 臨時 server port。 |
 | `SMOKE_SCHEME` | `https` | 測試連線協定；預設配合 server 自動產生的本地 TLS 憑證並使用 `curl -k`。 |
-| `REPORT_ROOT` | `runtime/reports/security` | 報告根目錄。 |
+| `REPORT_ROOT` | `/tmp/hackme_web_test_artifacts/reports/security` | 報告根目錄。 |
+| `HACKME_TEST_OUTPUT_ROOT` | `/tmp/hackme_web_test_artifacts` | 所有隔離 QA 產物的共同外部根目錄。 |
 | `RUNTIME_ROOT` | `/tmp/hackme_web_functional_<RUN_ID>` | 隔離 runtime 根目錄。 |
-| `ROOT_PASSWORD` | `RootSmoke123!` | 測試 root 初始密碼。 |
-| `ROOT_CHANGED_PASSWORD` | `RootSmokeChanged123!` | 若 root 被要求改預設密碼，改成此密碼。 |
-| `MANAGER_PASSWORD` | `ManagerSmoke123!` | bootstrap manager 密碼。 |
-| `TEST_PASSWORD` | `TestSmoke123!` | bootstrap test user 密碼。 |
+| `ROOT_PASSWORD` | 每次隨機生成 | 測試 root 初始密碼；可覆寫以重現問題。 |
+| `ROOT_CHANGED_PASSWORD` | 每次隨機生成 | 若 root 被要求改預設密碼，使用另一組隨機值；可覆寫以重現問題。 |
+| `MANAGER_PASSWORD` | 每次隨機生成 | bootstrap manager 密碼；可覆寫以重現問題。 |
+| `TEST_PASSWORD` | 每次隨機生成 | bootstrap test user 密碼；可覆寫以重現問題。 |
 | `START_TIMEOUT` | `45` | 等待 server ready 的秒數。 |
 | `RESET_OFFLINE_TIMEOUT` | `20` | reset server 後等待服務短暫離線的秒數；若 process 很快完成重啟且 `started_at` 已變更，也視為通過。 |
 | `RESET_RECONNECT_TIMEOUT` | `180` | reset server 後等待服務重新連線且 `started_at` 變更的秒數。 |
@@ -98,10 +100,9 @@ scripts/security/pentest/run_functional_smoke.sh --keep-runtime
 | runtime reports | `HTML_LEARNING_REPORTS_DIR` |
 
 這代表測試不應修改 tracked 的 `bootstrap.schema.sql`，也不應把 runtime
-狀態寫回 repo 根目錄；`runtime/logs/`、`runtime/chats/`、`runtime/anchors/`、
-`runtime/storage/`、`runtime/reports/` 等執行期資料應只存在於隔離 runtime
-或本地 `runtime/` 目錄。腳本也會明確設定 `HACKME_RUNTIME_DIR`，避免撞到 repo
-root 那個故意存在的 `runtime` fail-closed 哨兵檔。
+狀態寫回 repo 根目錄；logs、chats、anchors、storage 與 reports 等執行期資料
+只能存在於本輪新建的隔離 runtime 或 checkout 外部報告目錄。腳本會明確設定
+`HACKME_RUNTIME_DIR`，並拒絕 source checkout runtime。
 
 另外，若預設 port `50734` 已被其他本機 server 佔用，腳本會改挑一個空閒 port，
 並在報告中明確記錄 `server startup port selection`；若你是用 `--port` 或 `PORT`
@@ -173,7 +174,7 @@ bug。若 reset 後沒有短暫離線且 `started_at` 也沒有變更，代表�
 每次執行會建立：
 
 ```text
-runtime/reports/security/functional_<RUN_ID>/
+/tmp/hackme_web_test_artifacts/reports/security/functional_<RUN_ID>/
 ├── 00_FUNCTIONAL_SMOKE.md
 ├── results.tsv
 ├── server.out
@@ -189,11 +190,15 @@ runtime/reports/security/functional_<RUN_ID>/
 | `00_FUNCTIONAL_SMOKE.md` | 人類可讀的總結報告，包含通過、失敗、跳過與覆蓋範圍。 |
 | `results.tsv` | 每個檢查項目的機器可讀結果。 |
 | `server.out` | 臨時 server stdout/stderr。 |
-| `pre_start_runtime_snapshot.tar.gz` | 啟動 server 前的 runtime filesystem snapshot。 |
+| `pre_start_runtime_snapshot.tar.gz` | 新建隔離 runtime 啟動前的證據快照；不會用來覆寫呼叫者既有目錄。 |
 | `raw/` | 每個 API request 的原始 JSON/body 回應。 |
 
-`runtime/reports/security/` 預設不追蹤，測試報告應留在本機；只有需要提交的修復報告才應另行
+`/tmp/hackme_web_test_artifacts/reports/security/` 預設不追蹤；只有需要提交的修復報告才應另行
 整理成可追蹤文件。
+
+cookie jar 只會建立在 disposable runtime，不會放入報告目錄；腳本結束時會刪除它，
+並遞迴遮罩 raw JSON 內的 password、session/CSRF、maintenance bypass、tester token、
+share/signed URL、檔案解密 key、API key 與私鑰類欄位；證據包不得保留可重放憑證。
 
 ## Exit Codes
 

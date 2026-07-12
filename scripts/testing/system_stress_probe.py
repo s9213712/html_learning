@@ -26,6 +26,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.testing.db_stress_probe import ResourceMonitor  # noqa: E402
+from scripts.testing.operation_coverage import (  # noqa: E402
+    ACCOUNT_SUCCESS_REQUIRED_OPERATIONS,
+    GLOBAL_SUCCESS_REQUIRED_OPERATIONS,
+)
 
 
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
@@ -97,10 +101,18 @@ class Stats:
         self.error_buckets: dict[str, list[dict[str, Any]]] = defaultdict(list)
         self.samples: list[dict[str, Any]] = []
         self.bytes_received = 0
+        self.account_ops: dict[str, Counter] = defaultdict(Counter)
+        self.account_successes: dict[str, Counter] = defaultdict(Counter)
+        self.account_failures: Counter = Counter()
 
-    def record(self, name: str, *, status: int = 0, elapsed_ms: float = 0.0, ok: bool = False, error: str = "", body_sample: str = "", bytes_received: int = 0) -> None:
+    def record(self, name: str, *, status: int = 0, elapsed_ms: float = 0.0, ok: bool = False, error: str = "", body_sample: str = "", bytes_received: int = 0, account: str = "", backpressure_rejected: bool = False) -> None:
         body = str(body_sample or error or "")
-        sample_class = self._sample_class(status=status, ok=ok, body=body)
+        sample_class = self._sample_class(
+            status=status,
+            ok=ok,
+            body=body,
+            backpressure_rejected=backpressure_rejected,
+        )
         error_sample = {
             "op": name,
             "status": status,
@@ -113,6 +125,12 @@ class Stats:
             self.statuses[name][str(status)] += 1
             self.classes[name][sample_class] += 1
             self.bytes_received += int(bytes_received or 0)
+            if account:
+                self.account_ops[str(account)][name] += 1
+                if 200 <= int(status or 0) < 300:
+                    self.account_successes[str(account)][name] += 1
+                if error or not ok:
+                    self.account_failures[str(account)] += 1
             if error or not ok:
                 self.errors.append(error_sample)
             bucket = self._error_bucket(status=status, ok=ok, body=body, sample_class=sample_class)
@@ -120,7 +138,7 @@ class Stats:
                 self.error_buckets[bucket].append(error_sample)
 
     @staticmethod
-    def _sample_class(*, status: int, ok: bool, body: str) -> str:
+    def _sample_class(*, status: int, ok: bool, body: str, backpressure_rejected: bool = False) -> str:
         status = int(status or 0)
         if status == 503:
             lowered = str(body or "").lower()
@@ -130,8 +148,9 @@ class Stats:
                 parsed = parsed_obj if isinstance(parsed_obj, dict) else {}
             except Exception:
                 parsed = {}
-            code = str(parsed.get("code") or parsed.get("error") or "").strip().lower()
-            if code == "server_busy" or "server_busy" in lowered:
+            error_code = str(parsed.get("error") or "").strip().lower()
+            code = str(parsed.get("code") or error_code).strip().lower()
+            if backpressure_rejected and error_code == "server_busy":
                 return "server_busy_503"
             if (
                 parsed.get("feature")
@@ -212,6 +231,7 @@ class Stats:
                 for status, count_value in status_counter.items()
                 if status == "0" or (status.startswith("5") and status != "503")
             )
+            op_hard_failed += op_unexpected_503
             failed += op_failed
             hard_failed += op_hard_failed
             server_busy += op_server_busy
@@ -219,12 +239,18 @@ class Stats:
             op_summary[name] = {
                 "count": count,
                 "status": dict(sorted(status_counter.items())),
+                "successful_2xx": sum(
+                    int(count_value)
+                    for status, count_value in status_counter.items()
+                    if str(status).isdigit() and 200 <= int(status) < 300
+                ),
                 "p50_ms": round(float(median(values)), 3) if values else 0.0,
                 "p95_ms": round(percentile(values, 0.95), 3),
                 "p99_ms": round(percentile(values, 0.99), 3),
                 "max_ms": round(values[-1], 3) if values else 0.0,
                 "transport_or_5xx_failures": op_failed,
                 "hard_failures_excluding_503": op_hard_failed,
+                "hard_failures_excluding_controlled_503": op_hard_failed,
                 "server_busy_503": op_server_busy,
                 "feature_disabled_503": op_feature_disabled,
                 "application_limited_503": op_application_limited,
@@ -233,13 +259,24 @@ class Stats:
             }
         all_latencies = sorted(all_latencies)
         ordinary_latencies = sorted(ordinary_latencies)
+        account_summary = {
+            account: {
+                "total_ops": int(sum(ops.values())),
+                "failed_ops": int(self.account_failures.get(account, 0)),
+                "operations": dict(sorted(ops.items())),
+                "successful_operations": dict(sorted(self.account_successes.get(account, Counter()).items())),
+            }
+            for account, ops in sorted(self.account_ops.items())
+        }
         return {
             "total_ops": total,
             "accepted_ops_excluding_server_busy_and_hard_failure": accepted,
             "transport_or_5xx_failures": failed,
             "transport_or_5xx_failure_rate": round((failed / total) if total else 0.0, 6),
             "hard_failures_excluding_503": hard_failed,
+            "hard_failures_excluding_controlled_503": hard_failed,
             "hard_failure_rate_excluding_503": round((hard_failed / total) if total else 0.0, 6),
+            "hard_failure_rate_excluding_controlled_503": round((hard_failed / total) if total else 0.0, 6),
             "server_busy_503": server_busy,
             "server_busy_503_rate": round((server_busy / total) if total else 0.0, 6),
             "bytes_received": self.bytes_received,
@@ -260,6 +297,7 @@ class Stats:
             "ops": op_summary,
             "sample_errors": self.errors[:100],
             "sample_error_buckets": {key: list(value) for key, value in sorted(self.error_buckets.items())},
+            "accounts": account_summary,
         }
 
 
@@ -320,6 +358,7 @@ class Client:
             "bytes": len(res.content or b""),
             "error": "" if res.status_code in expected else body_sample,
             "body_sample": body_sample,
+            "backpressure_rejected": res.headers.get("X-Hackme-Backpressure-Rejected") == "1",
         }
 
     def request(
@@ -522,6 +561,10 @@ def run_operation(name: str, client: Client, seed: dict[str, Any], budget: Opera
         return client.request(name, "GET", "/api/version", expected={200})
     if name == "me":
         return client.request(name, "GET", "/api/me", expected={200})
+    if name == "profile":
+        return client.request(name, "GET", "/api/users/me/profile", expected={200, 403})
+    if name == "friends":
+        return client.request(name, "GET", "/api/friends", expected={200, 403})
     if name == "notifications":
         return client.request(name, "GET", "/api/notifications/unread-count", expected={200, 401, 403})
     if name == "jobs":
@@ -568,6 +611,10 @@ def run_operation(name: str, client: Client, seed: dict[str, Any], budget: Opera
         return client.request(name, "GET", f"/api/videos/{video_id}/hls/master.m3u8", expected={200, 403, 404, 409})
     if name == "share_manage":
         return client.request(name, "GET", "/api/shares", expected={200, 403})
+    if name == "albums":
+        return client.request(name, "GET", "/api/storage/albums", expected={200, 403})
+    if name == "appeals":
+        return client.request(name, "GET", "/api/appeals", expected={200, 403})
     if name == "hf_status":
         return client.request(name, "GET", "/api/comfyui/status", expected={200, 401, 403, 503})
     if name == "hf_quote":
@@ -622,6 +669,14 @@ def run_operation(name: str, client: Client, seed: dict[str, Any], budget: Opera
         return client.request(name, "GET", "/api/trading/markets", expected={200, 403, 503})
     if name == "trading_dashboard":
         return client.request(name, "GET", "/api/trading/dashboard", expected={200, 403, 503})
+    if name == "trading_asset_overview":
+        return client.request(name, "GET", "/api/trading/asset-overview", expected={200, 403, 503})
+    if name == "trading_bots":
+        return client.request(name, "GET", "/api/trading/bots", expected={200, 403, 503})
+    if name == "trading_grid_bots":
+        return client.request(name, "GET", "/api/trading/grid-bots", expected={200, 403, 503})
+    if name == "trading_workflows":
+        return client.request(name, "GET", "/api/trading/workflow-templates", expected={200, 403, 503})
     if name == "trading_grid_preview":
         return client.request(
             name,
@@ -636,6 +691,8 @@ def run_operation(name: str, client: Client, seed: dict[str, Any], budget: Opera
         return client.request(name, "GET", "/api/games/chess/leaderboard", expected={200, 403})
     if name == "community_boards":
         return client.request(name, "GET", "/api/community/boards", expected={200, 403})
+    if name == "community_announcements":
+        return client.request(name, "GET", "/api/community/announcements", expected={200, 403})
     if name == "community_bad_thread":
         if not budget.claim("community_bad_thread"):
             return client.request("community_boards", "GET", "/api/community/boards", expected={200, 403})
@@ -648,6 +705,18 @@ def run_operation(name: str, client: Client, seed: dict[str, Any], budget: Opera
         )
     if name == "chat_rooms":
         return client.request(name, "GET", "/api/chat/rooms", expected={200, 403})
+    if name == "points_wallet":
+        return client.request(name, "GET", "/api/points/wallet", expected={200, 403, 503})
+    if name == "points_ledger":
+        return client.request(name, "GET", "/api/points/ledger?limit=20", expected={200, 403, 503})
+    if name == "points_catalog":
+        return client.request(name, "GET", "/api/points/catalog", expected={200, 403, 503})
+    if name == "points_governance":
+        return client.request(name, "GET", "/api/points/governance/proposals?limit=20", expected={200, 403, 503})
+    if name == "ai_agent_status":
+        return client.request(name, "GET", "/api/ai-agent/status", expected={200, 403, 503})
+    if name == "ai_agent_tools":
+        return client.request(name, "GET", "/api/ai-agent/write-tools", expected={200, 403, 503})
     if name == "chat_bad_message":
         if not budget.claim("chat_bad_message"):
             return client.request("chat_rooms", "GET", "/api/chat/rooms", expected={200, 403})
@@ -680,6 +749,8 @@ def build_weighted_ops() -> list[tuple[str, int]]:
     return [
         ("version", 10),
         ("me", 10),
+        ("profile", 3),
+        ("friends", 3),
         ("notifications", 5),
         ("jobs", 5),
         ("drive_list", 8),
@@ -690,6 +761,8 @@ def build_weighted_ops() -> list[tuple[str, int]]:
         ("video_playback", 2),
         ("hls_master", 2),
         ("share_manage", 2),
+        ("albums", 3),
+        ("appeals", 2),
         ("hf_status", 3),
         ("hf_quote", 2),
         ("hf_generate", 1),
@@ -697,12 +770,23 @@ def build_weighted_ops() -> list[tuple[str, int]]:
         ("bt_reject", 1),
         ("trading_markets", 5),
         ("trading_dashboard", 5),
+        ("trading_asset_overview", 3),
+        ("trading_bots", 2),
+        ("trading_grid_bots", 2),
+        ("trading_workflows", 2),
         ("trading_grid_preview", 2),
         ("games_catalog", 4),
         ("chess_leaderboard", 3),
         ("community_boards", 5),
+        ("community_announcements", 3),
         ("community_bad_thread", 1),
         ("chat_rooms", 5),
+        ("points_wallet", 4),
+        ("points_ledger", 3),
+        ("points_catalog", 2),
+        ("points_governance", 2),
+        ("ai_agent_status", 3),
+        ("ai_agent_tools", 2),
         ("chat_bad_message", 1),
         ("bad_login", 1),
     ]
@@ -720,12 +804,21 @@ def resolve_session_pool_size(*, requested: int, session_mode: str, account_coun
     return max(1, min(256, max(concurrency, min(logical_users, 256)))), "auto_clone"
 
 
+def rotation_operation_account(task_id: int, operation_names: list[str], account_names: list[str]) -> tuple[str, str]:
+    if not operation_names or not account_names:
+        raise ValueError("rotation requires operations and accounts")
+    task_id = max(0, int(task_id))
+    operation = operation_names[task_id % len(operation_names)]
+    account = account_names[(task_id // len(operation_names)) % len(account_names)]
+    return operation, account
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--out", required=True)
     parser.add_argument("--runtime-root", default="")
-    parser.add_argument("--server-pids", default="")
+    parser.add_argument("--server-pids", default=os.environ.get("HACKME_SERVER_PIDS", ""))
     parser.add_argument("--logical-users", type=int, default=10000)
     parser.add_argument("--ops", type=int, default=10000)
     parser.add_argument("--concurrency", type=int, default=512)
@@ -733,11 +826,19 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=20.0)
     parser.add_argument("--qos-interval", type=float, default=1.0)
     parser.add_argument("--resource-interval", type=float, default=1.0)
-    parser.add_argument("--root-password", default="root")
-    parser.add_argument("--test-password", default="test")
-    parser.add_argument("--accounts", default="test:test,test2:test2,test3:test3")
+    parser.add_argument("--root-password", default=os.environ.get("HACKME_STRESS_ROOT_PASSWORD", ""), help="Deprecated compatibility option; this probe authenticates configured member accounts only.")
+    parser.add_argument("--test-password", default=os.environ.get("HACKME_STRESS_TEST_PASSWORD", ""))
+    parser.add_argument("--accounts", default=os.environ.get("HACKME_STRESS_ACCOUNTS", ""))
     parser.add_argument("--session-mode", choices=["clone", "login"], default="clone")
+    parser.add_argument("--operation-mode", choices=["random", "rotation"], default="random", help="rotation deterministically covers every operation for every active account before repeating")
+    parser.add_argument("--require-all-accounts", action="store_true", help="Fail when any configured account cannot authenticate or receives no operation")
+    parser.add_argument("--require-operation-coverage", action="store_true", help="Fail when any registered operation was not exercised")
+    parser.add_argument("--require-operation-success", action="store_true", help="Fail when any required positive-path operation has no HTTP 2xx result")
+    parser.add_argument("--require-account-success", action="store_true", help="Fail when any configured account lacks a 2xx result for a required account-safe operation")
     parser.add_argument("--allow-server-busy", action="store_true", help="Treat HTTP 503 server_busy as controlled degradation instead of a hard failure")
+    parser.add_argument("--max-server-busy-rate", type=float, default=1.0, help="Maximum accepted 503 server_busy ratio when --allow-server-busy is enabled")
+    parser.add_argument("--max-ordinary-p95-ms", type=float, default=1500.0)
+    parser.add_argument("--max-ordinary-p99-ms", type=float, default=5000.0)
     parser.add_argument("--max-drive-uploads", type=int, default=200)
     parser.add_argument("--max-resumable-starts", type=int, default=150)
     parser.add_argument("--max-hf-generates", type=int, default=20)
@@ -765,6 +866,11 @@ def main() -> int:
         username, password = spec.split(":", 1)
         accounts.append((username.strip(), password.strip()))
     if not accounts:
+        if not args.test_password:
+            parser.error(
+                "HACKME_STRESS_ACCOUNTS/--accounts or "
+                "HACKME_STRESS_TEST_PASSWORD/--test-password is required"
+            )
         accounts = [("test", args.test_password)]
     requested_session_pool = int(args.session_pool or 0)
     session_pool, session_pool_mode = resolve_session_pool_size(
@@ -775,8 +881,25 @@ def main() -> int:
         logical_users=args.logical_users,
     )
 
-    seed_client = Client(args.base_url, accounts[0][0], accounts[0][1], timeout=args.timeout)
-    seed_login = seed_client.login()
+    account_seeds: dict[str, Client] = {}
+    account_login_results: dict[str, dict[str, Any]] = {}
+
+    def login_account(account: tuple[str, str]) -> tuple[str, Client, dict[str, Any]]:
+        username, password = account
+        client = Client(args.base_url, username, password, timeout=args.timeout)
+        return username, client, client.login()
+
+    with ThreadPoolExecutor(max_workers=min(max(1, len(accounts)), 16)) as pool:
+        for username, client, result in pool.map(login_account, accounts):
+            account_login_results[username] = {
+                key: result.get(key)
+                for key in ("ok", "status", "elapsed_ms", "error")
+            }
+            if result.get("ok"):
+                account_seeds[username] = client
+
+    seed_client = account_seeds.get(accounts[0][0]) or next(iter(account_seeds.values()), Client(args.base_url, accounts[0][0], accounts[0][1], timeout=args.timeout))
+    seed_login = account_login_results.get(seed_client.username) or {"ok": False, "status": 0, "error": "no account authenticated"}
     seed = setup_seed(seed_client, artifact_dir) if seed_login.get("ok") else {"errors": ["seed login failed"], "login": seed_login}
 
     clients: list[Client] = []
@@ -786,12 +909,13 @@ def main() -> int:
     def make_client(idx: int) -> Client:
         username, password = accounts[idx % len(accounts)]
         client = Client(args.base_url, username, password, timeout=args.timeout)
-        if args.session_mode == "clone" and seed_login.get("ok"):
-            client.clone_auth_from(seed_client)
+        account_seed = account_seeds.get(username)
+        if args.session_mode == "clone" and account_seed is not None:
+            client.clone_auth_from(account_seed)
             result = {"ok": True, "status": 200, "elapsed_ms": 0.0, "error": ""}
         else:
             result = client.login()
-        login_stats.record("login", status=result.get("status", 0), elapsed_ms=result.get("elapsed_ms", 0.0), ok=bool(result.get("ok")), error=result.get("error", ""))
+        login_stats.record("login", status=result.get("status", 0), elapsed_ms=result.get("elapsed_ms", 0.0), ok=bool(result.get("ok")), error=result.get("error", ""), account=username, backpressure_rejected=bool(result.get("backpressure_rejected")))
         if not result.get("ok"):
             client.csrf = ""
         return client
@@ -843,24 +967,36 @@ def main() -> int:
         }
     )
     weighted_ops = build_weighted_ops()
+    operation_names = [name for name, _weight in weighted_ops]
     total_ops = max(1, int(args.ops or args.logical_users))
     concurrency = max(1, int(args.concurrency))
     start_event = threading.Event()
 
     def task(task_id: int) -> None:
         rng = random.Random((task_id + 1) * 7919)
-        client = clients[task_id % len(clients)]
+        if args.operation_mode == "rotation":
+            op, desired_account = rotation_operation_account(
+                task_id,
+                operation_names,
+                [username for username, _password in accounts],
+            )
+            account_clients = [item for item in clients if item.username == desired_account]
+            client = account_clients[(task_id // max(1, len(operation_names) * len(accounts))) % len(account_clients)] if account_clients else clients[task_id % len(clients)]
+        else:
+            client = clients[task_id % len(clients)]
+            op = choose_operation(rng, weighted_ops)
         start_event.wait()
-        op = choose_operation(rng, weighted_ops)
         result = run_operation(op, client, seed, budget, task_id)
         stats.record(
-            result.get("op") or op,
+            op,
             status=int(result.get("status") or 0),
             elapsed_ms=float(result.get("elapsed_ms") or 0.0),
             ok=bool(result.get("ok")),
             error=str(result.get("error") or ""),
             body_sample=str(result.get("body_sample") or ""),
             bytes_received=int(result.get("bytes") or 0),
+            account=client.username,
+            backpressure_rejected=bool(result.get("backpressure_rejected")),
         )
 
     started_at = utc_now()
@@ -882,26 +1018,78 @@ def main() -> int:
     qos = summary.get("ops", {}).get("qos_version", {})
     ordinary_latency = summary.get("ordinary_latency") or summary.get("overall_latency") or {}
     degraded_reasons = []
-    failure_rate_key = "hard_failure_rate_excluding_503" if args.allow_server_busy else "transport_or_5xx_failure_rate"
+    failure_rate_key = "hard_failure_rate_excluding_controlled_503" if args.allow_server_busy else "transport_or_5xx_failure_rate"
     if summary.get(failure_rate_key, 0) > 0.01:
         degraded_reasons.append(
             "hard_failure_excluding_503_rate_gt_1_percent"
             if args.allow_server_busy
             else "transport_or_5xx_failure_rate_gt_1_percent"
         )
-    if ordinary_latency.get("p95_ms", 0) > 1500:
-        degraded_reasons.append("ordinary_p95_gt_1500ms")
-    if ordinary_latency.get("p99_ms", 0) > 5000:
-        degraded_reasons.append("ordinary_p99_gt_5000ms")
+    max_ordinary_p95_ms = max(1.0, float(args.max_ordinary_p95_ms))
+    max_ordinary_p99_ms = max(max_ordinary_p95_ms, float(args.max_ordinary_p99_ms))
+    if ordinary_latency.get("p95_ms", 0) > max_ordinary_p95_ms:
+        degraded_reasons.append("ordinary_p95_above_configured_limit")
+    if ordinary_latency.get("p99_ms", 0) > max_ordinary_p99_ms:
+        degraded_reasons.append("ordinary_p99_above_configured_limit")
     if qos and int(qos.get("count") or 0) >= 10 and (qos.get("p95_ms") or 0) > 1000:
         degraded_reasons.append("qos_version_p95_gt_1000ms")
     if resource_summary.get("mem_available_min_mb") is not None and float(resource_summary.get("mem_available_min_mb") or 0) < 512:
         degraded_reasons.append("available_memory_below_512mb")
-    hard_failure_count = int(summary.get("hard_failures_excluding_503", 0) or 0)
+    hard_failure_count = int(summary.get("hard_failures_excluding_controlled_503", summary.get("hard_failures_excluding_503", 0)) or 0)
     transport_failure_count = int(summary.get("transport_or_5xx_failures", 0) or 0)
     summary_total_ops = int(summary.get("total_ops", total_ops) or total_ops)
     accepted_ops = int(summary.get("accepted_ops_excluding_server_busy_and_hard_failure", 0) or 0)
     server_busy_ops = int(summary.get("server_busy_503", 0) or 0)
+    server_busy_rate = float(summary.get("server_busy_503_rate") or 0.0)
+    max_server_busy_rate = max(0.0, min(1.0, float(args.max_server_busy_rate)))
+    if args.allow_server_busy and server_busy_rate > max_server_busy_rate:
+        degraded_reasons.append("server_busy_rate_above_configured_limit")
+    configured_account_names = [username for username, _password in accounts]
+    active_account_names = sorted({client.username for client in clients})
+    account_operation_counts = {
+        username: int((summary.get("accounts") or {}).get(username, {}).get("total_ops") or 0)
+        for username in configured_account_names
+    }
+    missing_accounts = [username for username in configured_account_names if username not in active_account_names]
+    accounts_without_operations = [username for username, count in account_operation_counts.items() if count <= 0]
+    observed_operation_names = set((summary.get("ops") or {}).keys())
+    missing_operations = sorted(set(operation_names) - observed_operation_names)
+    successful_operation_counts = {
+        name: int((summary.get("ops") or {}).get(name, {}).get("successful_2xx") or 0)
+        for name in operation_names
+    }
+    operations_without_success = sorted(
+        name
+        for name in GLOBAL_SUCCESS_REQUIRED_OPERATIONS
+        if successful_operation_counts.get(name, 0) <= 0
+    )
+    account_success_counts = {
+        username: dict(
+            ((summary.get("accounts") or {}).get(username, {}).get("successful_operations") or {})
+        )
+        for username in configured_account_names
+    }
+    account_success_gaps = {
+        username: sorted(
+            name
+            for name in ACCOUNT_SUCCESS_REQUIRED_OPERATIONS
+            if int(account_success_counts.get(username, {}).get(name) or 0) <= 0
+        )
+        for username in configured_account_names
+    }
+    account_success_gaps = {
+        username: gaps
+        for username, gaps in account_success_gaps.items()
+        if gaps
+    }
+    if args.require_all_accounts and (missing_accounts or accounts_without_operations):
+        degraded_reasons.append("configured_account_coverage_incomplete")
+    if args.require_operation_coverage and missing_operations:
+        degraded_reasons.append("operation_rotation_coverage_incomplete")
+    if args.require_operation_success and operations_without_success:
+        degraded_reasons.append("operation_positive_path_coverage_incomplete")
+    if args.require_account_success and account_success_gaps:
+        degraded_reasons.append("account_positive_path_coverage_incomplete")
     total_ops_per_second = round(summary_total_ops / elapsed_seconds, 2) if elapsed_seconds > 0 else 0.0
     accepted_ops_per_second = round(accepted_ops / elapsed_seconds, 2) if elapsed_seconds > 0 else 0.0
     server_busy_ops_per_second = round(server_busy_ops / elapsed_seconds, 2) if elapsed_seconds > 0 else 0.0
@@ -921,7 +1109,27 @@ def main() -> int:
         "session_pool_mode": session_pool_mode,
         "session_pool_created": len(clients),
         "session_mode": args.session_mode,
+        "operation_mode": args.operation_mode,
+        "configured_accounts": configured_account_names,
+        "active_accounts": active_account_names,
+        "account_login_results": account_login_results,
+        "account_operation_counts": account_operation_counts,
+        "missing_accounts": missing_accounts,
+        "accounts_without_operations": accounts_without_operations,
+        "registered_operations": operation_names,
+        "missing_operations": missing_operations,
+        "successful_operation_counts": successful_operation_counts,
+        "operations_without_success": operations_without_success,
+        "account_success_counts": account_success_counts,
+        "account_success_gaps": account_success_gaps,
+        "require_all_accounts": bool(args.require_all_accounts),
+        "require_operation_coverage": bool(args.require_operation_coverage),
+        "require_operation_success": bool(args.require_operation_success),
+        "require_account_success": bool(args.require_account_success),
         "allow_server_busy": bool(args.allow_server_busy),
+        "max_server_busy_rate": max_server_busy_rate,
+        "max_ordinary_p95_ms": max_ordinary_p95_ms,
+        "max_ordinary_p99_ms": max_ordinary_p99_ms,
         "elapsed_seconds": round(elapsed_seconds, 3),
         "throughput_ops_per_second": total_ops_per_second,
         "total_ops_per_second": total_ops_per_second,

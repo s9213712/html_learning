@@ -18,14 +18,40 @@ PointsChain、snapshot、server mode 一起看。這份文件只保留管理入�
 
 補充：
 
-- root 若忘記密碼，不走一般 Web 忘記密碼流程；正式補救方式是到實體 runtime
-  上執行 `python3 scripts/admin/root_recovery.py`
+- root 若忘記密碼，不走一般 Web 忘記密碼流程；正式補救方式是在主機上先設定
+  `HACKME_RUNTIME_DIR=/srv/hackme-web/runtime`，再執行
+  `python3 scripts/admin/root_recovery.py --prompt-password`
 - 上線前不要只看 UI 能打開；至少再跑一次 [11_QA_TESTING.md](11_QA_TESTING.md)
 
 ## root / admin 分工建議
 
 - `root`：server mode、snapshot restore、system reset、integrity、PointsChain root 操作、部署設定、交易 root 設定、ComfyUI 設定
 - `admin/manager`：使用者審核、檢舉 / 申訴 / 治理通知、社群管理、日常審核；為管理目的可私訊非好友用戶，但一般用戶的好友限制仍由後端執行
+
+## 用 AI Agent 協助管理
+
+AI Agent 可替 root / manager 查詢站內狀態、整理異常、定位管理入口，並在角色允許時
+呼叫白名單工具。它不是 shell，也不會因為使用者是 root 就取得任意檔案或任意 API
+執行權。
+
+建議操作順序：
+
+1. 先要求 Agent 說明目前狀態與建議動作，例如「檢查上線前缺哪些報告」。
+2. 核對 Agent 回傳的 `next_actions`、來源 API、角色邊界與報告狀態。
+3. 只有需要寫入時才明確要求執行；高風險工具仍要確認字串與後端重新授權。
+4. 執行後到 Security Center、Job Center 或對應管理頁確認結果與 audit，不把聊天文字
+   當成唯一成功證據。
+
+上線前檢查有刻意的雙階段安全邊界：
+
+- 「上線前檢查」「檢查是否可上線」只做 dry-run，不切換 server mode。
+- 缺少 required report 時，Agent 會列出對應 `scripts/on_live_reports/*.py` 動作；它不會
+  偽造通過或繞過驗簽。
+- 只有明確要求現在切換 production，且送出精確確認字串 `GO_LIVE`，後端才允許切換。
+- 不論前端 planner 如何解讀，後端在 `auto_switch=true` 且缺少 `GO_LIVE` 時都會拒絕。
+
+manager 可使用治理與日常管理能力，但不能藉 Agent 執行 root-only 的 restore、server
+mode、PointsChain rescue、ComfyUI root 設定或 production switch。
 
 ## 建議的功能啟用順序
 

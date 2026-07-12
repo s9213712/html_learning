@@ -12,19 +12,26 @@ letting operators copy signed chain roots to storage outside the runtime host.
 ## Export Command
 
 ```bash
+export HACKME_RUNTIME_DIR=/srv/hackme-web/runtime
 python3 scripts/ops/export_chain_anchor.py \
-  --db runtime/database/database.db \
-  --anchor-key-file runtime/.anchor_signing_key \
-  --chain-seed-file runtime/.chain_seed \
   --environment production \
-  --release-version "$SERVER_RELEASE_ID"
+  --release-version "$SERVER_RELEASE_ID" \
+  --out-dir /srv/hackme-web-evidence/anchors
 ```
+
+`--db` may be supplied instead of `HACKME_RUNTIME_DIR`. The signing key and
+optional chain seed default beside that selected runtime; the script never
+falls back to a checkout-local `runtime/` directory.
 
 Default output:
 
 ```text
-artifacts/anchors/<timestamp>.json
+/tmp/hackme_web_test_artifacts/anchors/<timestamp>.json
 ```
+
+That default is intended for isolated QA. Production operators must select a
+durable external evidence directory with `--out` or `--out-dir` and copy the
+result off-host.
 
 ## Anchor Payload
 

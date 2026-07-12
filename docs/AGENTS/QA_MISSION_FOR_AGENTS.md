@@ -267,6 +267,10 @@ python3 -m pip install -r requirements-minimal.txt -r requirements-dev.txt
 ```bash
 mkdir -p "$QA_RUNTIME"/{database,logs,chats,anchors,storage,reports}
 
+qa_generate_password() {
+  python3 -c 'import secrets; print("Qa-" + secrets.token_urlsafe(18) + "-Aa1!")'
+}
+
 export HTML_LEARNING_HOST=127.0.0.1
 export HTML_LEARNING_PORT="$QA_PORT"
 export HTML_LEARNING_DB_DIR="$QA_RUNTIME/database"
@@ -275,9 +279,17 @@ export HTML_LEARNING_CHAT_DIR="$QA_RUNTIME/chats"
 export HTML_LEARNING_ANCHOR_DIR="$QA_RUNTIME/anchors"
 export HTML_LEARNING_STORAGE_DIR="$QA_RUNTIME/storage"
 export HTML_LEARNING_REPORTS_DIR="$QA_RUNTIME/reports"
-export HTML_LEARNING_ROOT_PASSWORD='RootQa123!'
-export HTML_LEARNING_MANAGER_PASSWORD='ManagerQa123!'
-export HTML_LEARNING_TEST_PASSWORD='TestQa123!'
+export HTML_LEARNING_ROOT_PASSWORD="${HTML_LEARNING_ROOT_PASSWORD:-$(qa_generate_password)}"
+export HTML_LEARNING_MANAGER_PASSWORD="${HTML_LEARNING_MANAGER_PASSWORD:-$(qa_generate_password)}"
+export HTML_LEARNING_TEST_PASSWORD="${HTML_LEARNING_TEST_PASSWORD:-$(qa_generate_password)}"
+export ROOT_PASSWORD="$HTML_LEARNING_ROOT_PASSWORD"
+export MANAGER_PASSWORD="$HTML_LEARNING_MANAGER_PASSWORD"
+export TEST_PASSWORD="$HTML_LEARNING_TEST_PASSWORD"
+export PLAYWRIGHT_ROOT_PASSWORD="$HTML_LEARNING_ROOT_PASSWORD"
+export PLAYWRIGHT_MANAGER_PASSWORD="$HTML_LEARNING_MANAGER_PASSWORD"
+export PLAYWRIGHT_TEST_PASSWORD="$HTML_LEARNING_TEST_PASSWORD"
+export HACKME_QA_ROOT_PASSWORD="$HTML_LEARNING_ROOT_PASSWORD"
+export HACKME_QA_TEST_PASSWORD="$HTML_LEARNING_TEST_PASSWORD"
 export PYTHONPATH="$QA_REPO"
 
 PYTHONUNBUFFERED=1 python3 server.py >"$QA_LOG" 2>&1 &
@@ -325,10 +337,12 @@ qa_login() {
   local user_pass="$2"
   local csrf_value
   csrf_value="$(qa_csrf | python3 -c 'import sys, json; print(json.load(sys.stdin)["csrf_token"])')"
+  QA_LOGIN_USERNAME="$username" QA_LOGIN_PASSWORD="$user_pass" \
+  python3 -c 'import json, os; print(json.dumps({"username": os.environ["QA_LOGIN_USERNAME"], "password": os.environ["QA_LOGIN_PASSWORD"]}))' | \
   curl -ksS -b "$QA_COOKIE_JAR" -c "$QA_COOKIE_JAR" \
     -H "Content-Type: application/json" \
     -H "X-CSRF-Token: $csrf_value" \
-    -d "{\"username\":\"${username}\",\"password\":\"${user_pass}\"}" \
+    --data-binary @- \
     "$QA_BASE_URL/api/login"
 }
 
@@ -348,13 +362,13 @@ qa_api() {
   else
     curl -ksS -b "$QA_COOKIE_JAR" -c "$QA_COOKIE_JAR" \
       -X "$method" \
-      -H "X-CSRF-Token: $token" \
+      -H "X-CSRF-Token: $csrf_value" \
       "$QA_BASE_URL$path"
   fi
 }
 
 rm -f "$QA_COOKIE_JAR"
-qa_login root 'RootQa123!'
+qa_login root "$HTML_LEARNING_ROOT_PASSWORD"
 qa_api GET /api/me
 ```
 
@@ -511,9 +525,6 @@ scripts/security/pentest/run_pentest.sh --list-checks
 #### 權限 / session / headers
 
 ```bash
-ROOT_PASSWORD='RootQa123!' \
-MANAGER_PASSWORD='ManagerQa123!' \
-TEST_PASSWORD='TestQa123!' \
 PYTHONPATH=. scripts/security/pentest/run_pentest.sh \
   --target "$QA_BASE_URL" \
   --only functional-permissions,session-security,header-security
@@ -556,7 +567,6 @@ PYTHONPATH=. scripts/security/pentest/run_pentest.sh \
 ```bash
 PYTHONPATH=. python3 scripts/security/pentest/trading_stress_pentest.py \
   --base-url "$QA_BASE_URL" \
-  --root-password 'RootQa123!' \
   --mode full \
   --users 3 \
   --orders-per-user 8 \
@@ -567,9 +577,9 @@ PYTHONPATH=. python3 scripts/security/pentest/trading_stress_pentest.py \
 針對 restore / margin / permission probe 單跑：
 
 ```bash
-PYTHONPATH=. python3 scripts/security/pentest/trading_stress_pentest.py --base-url "$QA_BASE_URL" --root-password 'RootQa123!' --mode restore_consistency
-PYTHONPATH=. python3 scripts/security/pentest/trading_stress_pentest.py --base-url "$QA_BASE_URL" --root-password 'RootQa123!' --mode margin_liquidation
-PYTHONPATH=. python3 scripts/security/pentest/trading_stress_pentest.py --base-url "$QA_BASE_URL" --root-password 'RootQa123!' --mode permission_probe
+PYTHONPATH=. python3 scripts/security/pentest/trading_stress_pentest.py --base-url "$QA_BASE_URL" --mode restore_consistency
+PYTHONPATH=. python3 scripts/security/pentest/trading_stress_pentest.py --base-url "$QA_BASE_URL" --mode margin_liquidation
+PYTHONPATH=. python3 scripts/security/pentest/trading_stress_pentest.py --base-url "$QA_BASE_URL" --mode permission_probe
 ```
 
 ### 8. HTTP 壓力基準
@@ -604,7 +614,7 @@ python3 security/stress_test.py \
 
 ```bash
 rm -f "$QA_COOKIE_JAR"
-qa_login root 'RootQa123!'
+qa_login root "$HTML_LEARNING_ROOT_PASSWORD"
 qa_api GET /api/me
 qa_api POST /api/logout
 curl -ksS "$QA_BASE_URL/api/me"
@@ -620,15 +630,15 @@ curl -ksS "$QA_BASE_URL/api/me"
 
 ```bash
 rm -f "$QA_COOKIE_JAR"
-qa_login root 'RootQa123!'
+qa_login root "$HTML_LEARNING_ROOT_PASSWORD"
 qa_api GET /api/admin/users
 
 rm -f "$QA_COOKIE_JAR"
-qa_login admin 'ManagerQa123!'
+qa_login admin "$HTML_LEARNING_MANAGER_PASSWORD"
 qa_api GET /api/admin/users
 
 rm -f "$QA_COOKIE_JAR"
-qa_login test 'TestQa123!'
+qa_login test "$HTML_LEARNING_TEST_PASSWORD"
 qa_api GET /api/admin/users
 ```
 
@@ -642,7 +652,7 @@ qa_api GET /api/admin/users
 
 ```bash
 rm -f "$QA_COOKIE_JAR"
-qa_login root 'RootQa123!'
+qa_login root "$HTML_LEARNING_ROOT_PASSWORD"
 qa_api GET /api/root/server-mode
 qa_api GET /api/root/production-report/status
 qa_api GET /api/root/points/chain/verify
@@ -652,7 +662,7 @@ qa_api GET /api/root/points/chain/verify
 
 ```bash
 PYTHONPATH=. scripts/security/pentest/run_pentest.sh --target "$QA_BASE_URL" --only server-mode-v2-live-http
-PYTHONPATH=. python3 scripts/security/pentest/trading_stress_pentest.py --base-url "$QA_BASE_URL" --root-password 'RootQa123!' --mode restore_consistency
+PYTHONPATH=. python3 scripts/security/pentest/trading_stress_pentest.py --base-url "$QA_BASE_URL" --mode restore_consistency
 scripts/testing/pytest_in_tmp.sh -q tests/test_snapshots.py
 ```
 
@@ -660,7 +670,7 @@ scripts/testing/pytest_in_tmp.sh -q tests/test_snapshots.py
 
 ```bash
 rm -f "$QA_COOKIE_JAR"
-qa_login test 'TestQa123!'
+qa_login test "$HTML_LEARNING_TEST_PASSWORD"
 qa_api GET /api/files/quota
 qa_api GET /api/files/privacy-modes
 qa_api GET /api/cloud-drive/files
@@ -677,7 +687,7 @@ qa_api GET /api/videos
 
 ```bash
 rm -f "$QA_COOKIE_JAR"
-qa_login root 'RootQa123!'
+qa_login root "$HTML_LEARNING_ROOT_PASSWORD"
 qa_api GET /api/trading/markets
 qa_api GET /api/trading/dashboard
 qa_api GET /api/points/wallet

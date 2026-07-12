@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import http.cookiejar
 import json
+import os
 import ssl
 import sys
 import time
@@ -139,7 +140,11 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Smoke-test root ComfyUI local connection and autostart path.")
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--username", default="root")
-    parser.add_argument("--password", required=True)
+    parser.add_argument(
+        "--password",
+        default=os.environ.get("HACKME_ROOT_PASSWORD", ""),
+        help="Root password. Prefer HACKME_ROOT_PASSWORD over a command-line value.",
+    )
     parser.add_argument("--comfyui-base-dir", required=True)
     parser.add_argument("--comfyui-local-script", required=True)
     parser.add_argument("--comfyui-api-host", default="127.0.0.1")
@@ -152,6 +157,8 @@ def parse_args():
 
 def main() -> int:
     args = parse_args()
+    if not args.password:
+        raise SystemExit("HACKME_ROOT_PASSWORD or --password is required")
     client = WebClient(args.base_url, insecure=args.insecure)
     results = []
     report = {

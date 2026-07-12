@@ -35,17 +35,18 @@
 
 - server snapshot：保護主要站台 DB、split runtime DB、runtime file roots、config archive。
 - 主要 DB：`runtime/database/database.db`，仍保留 legacy `db.sqlite3.backup` 檔名，讓舊 snapshot 匯入/驗證可相容。
-- split runtime DB：`auth.db`、`audit.db`、`control.db`、`storage_catalog.db`、`points_chain.db`、`trading.db`、`finance.db`、`jobs.db`、`chess_experiment.db` 會備份到 `databases/*.sqlite3.backup`，restore 時依本機設定的 label 還原。
+- split runtime DB：`auth.db`、`audit.db`、`control.db`、`storage_catalog.db`、`points_chain.db`、`trading.db`、`finance.db`、`jobs.db`、`chess_experiment.db` 會備份到 `databases/*.sqlite3.backup`。其中 `finance`、`points_chain`、`trading` 只作 forensic archive，metadata 會標成 `forensic_archive_only_append_only_recovery`，restore 明確略過；其他 DB 才依本機 label 還原。
 - runtime file roots：`runtime/chats`、`runtime/storage`，以及 PointsChain forensic bundle 目錄。
 - 新增功能資料面：
   - AI Agent 對話、工具執行稽核、Job Center 任務狀態：在 runtime DB / jobs DB 中，由 database backup 覆蓋。
   - ComfyUI 產圖歷史、工作流 preset/run、圖檔 reference：DB 由 database backup 覆蓋；實際圖檔若落在 `runtime/storage` 則由 file root archive 覆蓋。
   - BT/direct download、相簿、雲端分享、E2EE key reference：DB 由 database backup 覆蓋；payload 檔案由 `runtime/storage` archive 覆蓋。
   - HLS / realtime media stream metadata、字幕、變體：DB 由 database backup 覆蓋；segment/asset 檔案若落在 `runtime/storage` 則由 file root archive 覆蓋。
-  - 交易 bot、grid、回測/試用交易、market registry audit：DB 由 split DB/primary DB 覆蓋；production reset 不能用來替代交易/PointsChain 專用一致性驗證。
+  - 交易 bot、grid、回測/試用交易、market registry audit：會進 snapshot 供稽核，但目前正式執行中的 PointsChain 與交易共用 `finance.db` 保持同一 SQLite transaction；因此 restore 不覆寫整個 finance DB，避免只回滾交易或鏈的一側而破壞結算原子性。
 - `runtime/storage/snapshots` 與 `.imports` 是 snapshot repository 本身，不會被打包進 `uploads.tar.gz`，restore 清檔時也會保留，避免 snapshot 自我遞迴或被還原流程刪掉。
 - server snapshot 也會帶入目前設定的 runtime secret files，例如 `runtime/.chain_seed`、`runtime/.csrfkey`、`runtime/.filekey`、`runtime/.fkey`、`runtime/.integrity_key`、`runtime/integrity_manifest.json`、`runtime/cert.pem`、`runtime/key.pem`
-- PointsChain ledger backup/restore：已停用；鏈異常不得以備份覆寫，需走 safe mode、forensic bundle、分支與緊急治理。
+- PointsChain ledger/finance/trading overwrite restore：已停用；snapshot 內副本只作 forensic/export。鏈或結算異常不得以備份覆寫，需走 safe mode、forensic bundle、分支、緊急治理與 append-only correction。
+- `test_for_develop.sh --backup/--restore` 是較低層 runtime archive，不等於 server snapshot：archive 不含 storage payload；restore 必須保留 target 現有 storage、live financial DB 與 `.chain_seed`。若 target 還沒有 live ledger，工具會拒絕從 archive 初始化金融歷史。
 - runtime reset：清掉可重建 runtime 與 live data，並要求重啟
 - server mode checkpoint：保護 mode switch / rollback 場景
 
@@ -75,6 +76,7 @@ runtime reset 不直接清：
 
 - snapshot 先驗證 checksum、SQLite `integrity_check`、tar path safety，再還原。
 - split DB portable restore 以 label 對應本機 DB path；本機未設定的 label 會被略過，不會寫到未知路徑。
+- `finance`、`points_chain`、`trading` 即使 archive 存在也會以 `append_only_financial_restore_disabled` 略過；驗證重點是 snapshot 後的新鏈交易仍存在，而 ordinary dirty state 已回復。
 - restore 成功後會重新寫入 snapshot record、restore event，並跑 PointsChain / trading post-restore validators。
 - runtime secret files 還原後會做 hash 驗證；失敗不能靜默成功。
 
@@ -85,7 +87,7 @@ runtime reset 不直接清：
 - reset 後發現東西都沒了：
   這是設計目的；先去找 `pre_reset` snapshot。
 - 只壞了 PointsChain 卻直接做整站 restore：
-  可能把不需要回滾的其他模組也一起覆蓋。
+  不會覆寫 live finance ledger，但可能回滾其他模組；先走 PointsChain incident/governance recovery，避免造成跨模組時間點不一致。
 - 做了 restore 卻沒驗 post-restore consistency：
   視同沒完成恢復演練。
 
@@ -95,6 +97,8 @@ runtime reset 不直接清：
 - pre-reset snapshot 是否存在
 - reset 後離線 / 重連 / `started_at` 更新
 - restore 後 baseline data 保留、殘留 dirty data 被清掉
+- snapshot 後新建的 PointsChain 交易仍存在，`finance/points_chain/trading` 顯示 protected skip
+- CLI archive restore 後 storage 與 live financial DB hash 保留，沒有把 archive 舊值蓋回去
 - PointsChain verify / recovery / wallet rebuild
 
 ## 相關文件連結

@@ -14,6 +14,12 @@ globals().update(
 
 
 class SnapshotService:
+    # Financial databases are still copied into snapshot packages for
+    # forensics/export, but must never be replayed over the live append-only
+    # ledger. Trading shares transactions with PointsChain in finance.db, so
+    # restoring either side independently would also break settlement atomicity.
+    PROTECTED_RESTORE_DATABASE_LABELS = frozenset({"finance", "points_chain", "trading"})
+
     def __init__(
         self,
         *,
@@ -274,6 +280,11 @@ class SnapshotService:
                 "source_path": self._rel_to_base_text(spec["path"]),
                 "archive_path": rel_path,
                 "exists": False,
+                "restore_policy": (
+                    "forensic_archive_only_append_only_recovery"
+                    if spec["label"] in self.PROTECTED_RESTORE_DATABASE_LABELS
+                    else "restorable"
+                ),
             }
             source = Path(spec["path"])
             if not source.exists():
@@ -832,6 +843,13 @@ class SnapshotService:
                 continue
             label = self._sanitize_database_label(item.get("label"))
             archive_name = str(item.get("archive_path") or "").strip()
+            if label in self.PROTECTED_RESTORE_DATABASE_LABELS:
+                skipped.append({
+                    "label": label,
+                    "reason": "append_only_financial_restore_disabled",
+                    "archive_path": archive_name,
+                })
+                continue
             if not item.get("exists"):
                 skipped.append({"label": label, "reason": "snapshot_missing_source"})
                 continue

@@ -7,7 +7,7 @@
 ![database](https://img.shields.io/badge/database-SQLite-0f6ab4)
 ![security](https://img.shields.io/badge/focus-auth%20%2B%20RBAC%20%2B%20audit-b31d28)
 
-**Current Release ID: `05_2026.07.10-001`**
+**Current Release ID: `05_2026.07.12-002`**
 
 `hackme_web` 是一個部署者優先的 Flask 單機站點，整合了帳號與權限、
 Cloud Drive、ComfyUI、PointsChain、交易實驗、Snapshot/Restore 與
@@ -31,7 +31,7 @@ QoS 分類、app-level edge burst guard、抗 DoS 最後防線與 reverse-proxy 
 [docs/For_developer.md](docs/For_developer.md#server-qos-and-edge-guard)。
 任務中心 list API 的 maintenance sweep 已節流並可觀測；帳號、會員治理、
 註冊禮補發與 auth hot-state 索引的近期調整見
-[docs/UPDATE_SUMMARY.md](docs/UPDATE_SUMMARY.md) 的 `05_2026.07.10-001`。
+[docs/UPDATE_SUMMARY.md](docs/UPDATE_SUMMARY.md) 的 `05_2026.07.12-002`。
 影音直接串流、即時轉封裝、預處理 HLS 三種客戶服務層與費率差異、X-Accel
 送檔 offload、Standard 即時轉封裝的同機併發控制，以及 Premium HLS worker sizing / profile matrix 見
 [docs/video/VIDEO_STREAMING_SERVICE_TIERS.md](docs/video/VIDEO_STREAMING_SERVICE_TIERS.md)。
@@ -47,49 +47,15 @@ ComfyUI / GGUF 的遠端/本地設定，也不會顯示 ComfyUI Account/Civitai
 
 ## AI Agent / ComfyUI Image Editing Status
 
-本輪更新把站內 AI Agent 從固定捷徑式操作往「自然語言理解 + 受控站內工具執行」
-推進：前台聊天介面可由自然語言選用 ComfyUI 生圖、圖生圖、歷史重跑、
-下載/雲端/治理等站內 write tools；root 端可管理可寫 tools；模型列表改由
-後端/供應商設定提供，不再在前台硬寫死已不存在模型。Agent 仍被限制在站內
-runtime、雲端硬碟與已授權 API 範圍，不能直接寫伺服器任意檔案。
+站內 AI Agent 支援自然語言查詢、受控站內 write tools、ComfyUI 生圖/圖生圖與
+root 管理協助。所有寫入仍受角色、白名單、確認字串、audit 與站內 API 邊界約束；
+Agent 不能任意寫伺服器檔案。root 的普通「上線前檢查」只做 dry-run，只有明確要求
+切換且提供 `GO_LIVE` 才會進入 production。
 
-ComfyUI 產圖路徑也做了低 VRAM / 慢速 workflow hardening：Qwen Image Edit
-長步驟不再被過短 stale timeout 誤判失敗；Qwen edit workflow 可從 partial /
-history 取回正式後處理輸出；產圖進度、tokens/s / total tokens、歷史重跑、
-GGUF / Anything2Real / SDXL inpaint workflow profile 與 ComfyUI 設定分區都已納入
-前台與測試覆蓋。完整的大量圖片與對話紀錄保留在本機
-`docs/AGENTS/reports/`，不進 GitHub；GitHub 只保留摘要：
+ComfyUI 長任務、歷史重跑、GGUF profile 與 image-edit 能力已納入 QA，但高強度
+i2i 的姿勢/背景像素級保真仍必須以實際輸出 review 判定，不可只看 queue 成功。
+詳細能力邊界與測試摘要見
 [docs/AGENTS/AI_AGENT_I2I_TEST_SUMMARY.md](docs/AGENTS/AI_AGENT_I2I_TEST_SUMMARY.md)。
-
-目前已確認的 i2i 能力邊界：
-
-- 可用：保留 1080x1920 source 比例、Qwen Image Edit 2509 語意改圖、正式輸出
-  1080x1920 後處理、髮色/髮型/表情/配飾/一般服裝替換、背景保留、進度追蹤。
-- 部分可用：高強度服裝 + 體態混合修改。`denoise=0.85` 能把和服換成白色蕾絲
-  長裙並改體態，但會改變原本雙手 clasped 姿勢，且容易漂到高開衩旗袍感。
-- 已新增候選工具：`write_comfyui_background_composite` 可在使用者明確要求
-  「完全/原樣/exact 複製背景」時，改走站內 exact background plate composite，
-  避免假裝 Qwen Edit 能像素級重畫背景。前台會把 LLM 回傳的圖片檔名字串解析回
-  `image_ref`，因此自然語言 planner 不必硬塞完整 JSON 物件。此工具輸出一律標記
-  `delivery_pass=false`、`review_required=true`，必須經 vision/human review 才能
-  當作該階段通過。
-- 仍需修正：高強度 i2i 時的姿勢保真、negative prompt 合併、透明/高開衩/
-  qipao/cheongsam 漂移、exact background reference 若本身含人物/物件時的前景移除，
-  以及 workflow run `params_json` 中 width/height / denoise 記錄與實際 queue 參數不一致。
-
-本輪關鍵測試參數摘要：
-
-| Run | Source / Output | Workflow | Model / LoRA | Params | Result |
-| --- | --- | --- | --- | --- | --- |
-| v5 body/lace/proportions | source 被錯誤壓成 `1024x1024`，要求 output `1080x1920` | `origin_qwen_image_edit_2509` | `qwen_image_edit_2509_fp8_e4m3fn.safetensors` + Lightning 4-step LoRA | steps 4, cfg 1, denoise 0.55 | FAIL。測試工具先破壞比例，產生上下模糊延展帶，不能當模型能力判定。 |
-| v6 body/lace/proportions | source `1080x1920`，final output `1080x1920` | `origin_qwen_image_edit_2509` | 同上 | steps 4, cfg 1, denoise 0.55 | FAIL。比例修好，但模型過度保守，仍保留和服，服裝/體態目標未達成。 |
-| v7 body/lace/proportions | source `1080x1920`，final output `1080x1920` | `origin_qwen_image_edit_2509` | 同上 | steps 4, cfg 1, denoise 0.85, strengthened English edit prompt | PARTIAL / FAIL。服裝與體態有改，但動作被改、裙子漂到高開衩旗袍感，不符合保真規則。 |
-| exact background composite | source `1024x1024` + background reference `1080x1920` | `write_comfyui_background_composite` | no model queue | LLM planner: 25.291s, 8620 tokens; tool: 8.728s | ROUTING PASS / VISUAL FAIL。Agent 會選正確工具且不走 Qwen Edit；但參考圖含前景人物，無乾淨背景板或 background inpaint 時不能視為通過。完整 artifacts 在 `/mnt/c/share/ComfyUI/output/i2i/exact_background_composite_20260702/`。 |
-
-下一輪建議測試：`denoise=0.70-0.75`，明確加入 `keep both hands clasped in front
-of chest`，並補強 negative prompt：`qipao, cheongsam, high slit, exposed leg,
-transparent dress, pose drift`。若混合任務仍不穩定，改成兩段式：先只換服裝，
-再測體態比例。
 
 ## First-Time Deployer Route
 
@@ -100,7 +66,7 @@ transparent dress, pose drift`。若混合任務仍不穩定，改成兩段式�
 
 ## Quick Start
 
-本 repo 的公開入口現在只保留三條：
+本 repo 先安裝一組依賴，再依用途選擇三個執行入口：
 
 - `python3 -m pip install -r requirements-minimal.txt`
   只安裝最小啟動伺服器所需套件。開發測試請再加
@@ -130,9 +96,16 @@ transparent dress, pose drift`。若混合任務仍不穩定，改成兩段式�
 ## Local Workflow
 
 ```bash
-python3 server.py --doctor
 ./test_for_develop.sh --port 50785
 scripts/testing/pytest_in_tmp.sh -q tests
+```
+
+只有在你已明確準備 checkout 外部的 runtime、要驗直接啟動邊界時，才使用：
+
+```bash
+export HACKME_RUNTIME_DIR=/absolute/path/to/runtime
+python3 server.py --doctor
+python3 server.py
 ```
 
 臨時用 LAN / NAT public IP 測試 dev server 時，請明確加入 public Host allowlist：
@@ -183,9 +156,10 @@ process group / child tree：
 ./test_for_develop.sh --port 5000 --shutdown
 ```
 
-若你真的要在目前工作樹直接啟動，先自己準備好 runtime 目錄，再執行：
+若你真的要從目前工作樹直接啟動，先準備 checkout 外部 runtime，再執行：
 
 ```bash
+export HACKME_RUNTIME_DIR=/absolute/path/to/runtime
 python3 server.py --doctor
 python3 server.py
 ```
@@ -221,13 +195,14 @@ for scheme in https http; do
 done
 ```
 
-Fresh local databases 會建立：
+Fresh direct-runtime databases 會建立：
 
 - `root/root`
 - `admin/admin`
 - `test/test`
 
-`test_for_develop.sh` 會額外關掉強制改密碼、登入安全限制、Integrity Guard、
+直接 runtime 的 bootstrap 帳號首次登入後必須改密碼。`test_for_develop.sh`
+則會額外關掉強制改密碼、登入安全限制、Integrity Guard、
 audit chain 等妨礙開發的保護，並保留預設帳密方便反覆 debug。同時它也會把
 trading market registry 切成開發可測狀態（`allow_spot / allow_margin /
 allow_bots / allow_risk_grade_usage = 1`），避免 `/tmp` 開發站一開機就把現貨、
@@ -237,6 +212,8 @@ Grid Bot 與借貸交易整體封死。若你要手動啟動，
 - `HTML_LEARNING_ROOT_PASSWORD`
 - `HTML_LEARNING_MANAGER_PASSWORD`
 - `HTML_LEARNING_TEST_PASSWORD`
+
+因此隔離開發站的預設帳密與弱化設定不得直接暴露到 LAN、Internet 或 production。
 
 ## Documentation Map
 

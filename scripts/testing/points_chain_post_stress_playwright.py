@@ -3,11 +3,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from playwright.sync_api import sync_playwright
+
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 
 def fetch_json(page, method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -196,9 +202,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Focused Playwright post-stress check for an already running hackme_web server.")
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--out", required=True)
-    parser.add_argument("--root-password", default="root")
+    from scripts.testing.probe_credentials import add_root_password_argument
+    add_root_password_argument(parser)
     parser.add_argument("--member-username", default="admin")
-    parser.add_argument("--member-password", default="admin")
+    from scripts.testing.probe_credentials import add_manager_password_argument
+    add_manager_password_argument(parser, "--member-password")
     args = parser.parse_args()
 
     errors: list[dict[str, str]] = []

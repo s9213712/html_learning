@@ -8,11 +8,12 @@ from services.system.release_artifacts import (
     register_qa_run,
     release_bundle_status,
 )
+from services.server.runtime import default_runtime_root
 
 
 def register_system_admin_runtime_routes(app, ctx):
     BASE_DIR = ctx["BASE_DIR"]
-    REPORTS_DIR = ctx.get("REPORTS_DIR") or os.path.join(BASE_DIR, "runtime", "reports")
+    REPORTS_DIR = ctx.get("REPORTS_DIR") or os.path.join(default_runtime_root(), "reports")
     GIT_REPO_DIR = ctx.get("GIT_REPO_DIR") or BASE_DIR
     require_csrf = ctx["require_csrf"]
     require_csrf_safe = ctx["require_csrf_safe"]

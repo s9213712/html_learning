@@ -1,6 +1,10 @@
 'use strict';
 
+let bugReportCloseTimer = null;
+
 function showBugReportDialog() {
+  if (bugReportCloseTimer) clearTimeout(bugReportCloseTimer);
+  bugReportCloseTimer = null;
   const overlay = $("bug-report-overlay");
   if (!overlay) return;
   const page = window.location.pathname + window.location.hash;
@@ -45,23 +49,52 @@ async function submitBugReport() {
     setBugReportMsg("請填寫標題與問題描述", false);
     return;
   }
-  await fetchCsrfToken({ force: true });
-  const csrf = getCsrfToken();
-  const res = await apiFetch(API + "/bug-reports", {
-    method: "POST",
-    credentials: "same-origin",
-    headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf || "" },
-    body: JSON.stringify(payload)
-  });
-  const json = await res.json().catch(() => ({}));
-  if (!json.ok) {
-    setBugReportMsg(json.msg || "Bug 回報失敗", false);
-    return;
+  try {
+    await fetchCsrfToken({ force: true });
+    const csrf = getCsrfToken();
+    const res = await apiFetch(API + "/bug-reports", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf || "" },
+      body: JSON.stringify(payload)
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!json.ok) {
+      setBugReportMsg(json.msg || "Bug 回報失敗", false);
+      return;
+    }
+    ["bug-report-title", "bug-report-description", "bug-report-steps", "bug-report-expected", "bug-report-actual"].forEach((id) => {
+      const el = $(id);
+      if (el) el.value = "";
+    });
+    setBugReportMsg(`已建立回報：${json.report_id}`, true);
+    bugReportCloseTimer = setTimeout(() => {
+      bugReportCloseTimer = null;
+      hideBugReportDialog();
+    }, 900);
+  } catch (err) {
+    if (err?.name === "AbortError") return;
+    reportFrontendFailure("bug-report-submit", err);
+    setBugReportMsg(err?.message || "Bug 回報失敗，請稍後再試。", false);
   }
-  ["bug-report-title", "bug-report-description", "bug-report-steps", "bug-report-expected", "bug-report-actual"].forEach((id) => {
+}
+
+function resetBugReportAccountState() {
+  if (bugReportCloseTimer) clearTimeout(bugReportCloseTimer);
+  bugReportCloseTimer = null;
+  hideBugReportDialog();
+  [
+    "bug-report-title", "bug-report-description", "bug-report-steps",
+    "bug-report-expected", "bug-report-actual",
+  ].forEach((id) => {
     const el = $(id);
     if (el) el.value = "";
   });
-  setBugReportMsg(`已建立回報：${json.report_id}`, true);
-  setTimeout(hideBugReportDialog, 900);
+  const device = $("bug-report-device");
+  if (device) delete device.dataset.touched;
+  const overlay = $("bug-report-overlay");
+  if (overlay) delete overlay.dataset.page;
+  setBugReportMsg("", true);
 }
+
+document.addEventListener("hackme:account-context-changed", resetBugReportAccountState);

@@ -7,8 +7,9 @@
 | 路徑 | 內容 | 狀態 |
 |---|---|---|
 | `archive/competition_2026-05-06/` | Workflow Template Competition 回測競賽報告、方法、資料腳本 | 歷史證據包；若要重跑，先檢查內部硬編碼輸出路徑 |
-| `archive/agent_qa_reports/` | 2026-05-11 至 2026-05-13 的舊 AGENTS QA 報告 | 歷史 QA 證據；新報告仍寫回 `AGENTS/reports/` |
-| `archive/history/VERSION_STORY.md` | 專案歷史、舊分支故事與已放棄方向 | 歷史脈絡；不是現行操作指南 |
+| `archive/agent_qa_reports/` | 舊 AGENTS QA 報告與 2026-06-23 AI Agent media context 稽核 | 歷史 QA 證據；新報告仍寫回 `AGENTS/reports/` |
+| `archive/history/` | 專案歷史、已完成 phase plan、舊分支故事與已放棄方向 | 歷史脈絡；不是現行操作指南 |
+| `archive/pointschain_rc1/` | 已完成的 RC1 scope、signoff、load profile 與 scanner baseline | 歷史 release 證據；現行入口見 `BLOCKCHAIN/README.md` 與 `RELEASE/RC1_RELEASE_GATE.md` |
 | `archive/FINAL_CODE_REVIEW_2026-05-14.md` | 2026-05-14 一次性 code review / freeze report | 歷史審查證據；部署者不要把它當成現行 runbook |
 | `games/archive/` | 西洋棋 debug、exp3/exp4/exp5 歷史 ledger、舊 replay 證據 | 遊戲 AI 歷史紀錄；主入口見 `games/ARCHIVE_INDEX.md` |
 

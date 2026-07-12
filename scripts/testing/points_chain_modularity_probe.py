@@ -162,8 +162,10 @@ def run_playwright(base_url: str, root_password: str, screenshot_dir: Path):
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", default="https://127.0.0.1:54343")
-    parser.add_argument("--root-password", default="root")
-    parser.add_argument("--admin-password", default="admin")
+    from scripts.testing.probe_credentials import add_root_password_argument
+    add_root_password_argument(parser)
+    from scripts.testing.probe_credentials import add_manager_password_argument
+    add_manager_password_argument(parser, "--admin-password")
     parser.add_argument("--out", required=True)
     args = parser.parse_args(argv)
 

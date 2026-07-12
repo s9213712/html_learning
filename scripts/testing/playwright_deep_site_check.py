@@ -12,6 +12,7 @@ import argparse
 import getpass
 import json
 import os
+import secrets
 import socket
 import ssl
 import subprocess
@@ -37,10 +38,21 @@ from playwright.sync_api import sync_playwright
 from scripts.testing.browser_error_filters import ignored_browser_error
 
 
-ROOT_PASSWORD = "RootDeep123!"
-MANAGER_PASSWORD = "ManagerDeep123!"
-TEST_PASSWORD = "TestDeep123!"
-JOURNEY_PASSWORD = "JourneyDeep123!"
+PLAYWRIGHT_CREDENTIAL_ENV_NAMES = {
+    "root": "PLAYWRIGHT_ROOT_PASSWORD",
+    "manager": "PLAYWRIGHT_MANAGER_PASSWORD",
+    "test": "PLAYWRIGHT_TEST_PASSWORD",
+}
+
+
+def generated_fixture_password(label: str) -> str:
+    return f"{label}-{secrets.token_urlsafe(18)}-Aa1!"
+
+
+ROOT_PASSWORD = os.environ.get(PLAYWRIGHT_CREDENTIAL_ENV_NAMES["root"], "").strip() or generated_fixture_password("RootDeep")
+MANAGER_PASSWORD = os.environ.get(PLAYWRIGHT_CREDENTIAL_ENV_NAMES["manager"], "").strip() or generated_fixture_password("ManagerDeep")
+TEST_PASSWORD = os.environ.get(PLAYWRIGHT_CREDENTIAL_ENV_NAMES["test"], "").strip() or generated_fixture_password("TestDeep")
+JOURNEY_PASSWORD = generated_fixture_password("JourneyDeep")
 
 
 @dataclass
@@ -191,6 +203,21 @@ def env_int(name: str) -> int | None:
         return None
 
 
+def require_external_server_credentials(parser: argparse.ArgumentParser, base_url: str) -> None:
+    if not str(base_url or "").strip():
+        return
+    missing = [
+        env_name
+        for env_name in PLAYWRIGHT_CREDENTIAL_ENV_NAMES.values()
+        if not os.environ.get(env_name, "").strip()
+    ]
+    if missing:
+        parser.error(
+            "--base-url reuses an existing server and requires credentials through: "
+            + ", ".join(missing)
+        )
+
+
 def free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
@@ -329,7 +356,14 @@ def fetch_json(
                     const text = await response.text();
                     let body = null;
                     try { body = text ? JSON.parse(text) : null; } catch (err) { body = {raw: text.slice(0, 500)}; }
-                    return {status: response.status, ok: response.ok, body};
+                    return {
+                        status: response.status,
+                        ok: response.ok,
+                        body,
+                        retryAfter: Number(response.headers.get('retry-after') || 0),
+                        backpressure: response.headers.get('x-hackme-backpressure') || '',
+                        backpressureRejected: response.headers.get('x-hackme-backpressure-rejected') === '1'
+                    };
                 } catch (err) {
                     return {
                         status: 0,
@@ -344,7 +378,13 @@ def fetch_json(
                     clearTimeout(timer);
                 }
             };
-            let result = await send(csrf || cookieValue('csrf_token'));
+            let result = null;
+            for (let attempt = 1; attempt <= 3; attempt += 1) {
+                result = await send(csrf || cookieValue('csrf_token'));
+                result.backpressure_attempts = attempt;
+                if (!(result.status === 503 && result.backpressureRejected && result.body && result.body.error === 'server_busy') || attempt >= 3) break;
+                await new Promise(resolve => setTimeout(resolve, Math.max(250, Math.min(3000, result.retryAfter * 1000 || 500))));
+            }
             if (method !== 'GET' && result.status === 403 && result.body && result.body.error === 'csrf_invalid') {
                 await fetch('/api/csrf-token', {credentials: 'same-origin'});
                 result = await send(cookieValue('csrf_token'));
@@ -368,7 +408,7 @@ def fetch_json_get_retry(
     result: dict[str, Any] = {"status": 0, "ok": False, "body": {"msg": "request not attempted"}}
     for attempt in range(1, max(1, int(attempts)) + 1):
         result = fetch_json(page, "GET", path, timeout_ms=timeout_ms)
-        result["attempts"] = attempt
+        result["get_retry_attempts"] = attempt
         if int(result.get("status") or 0) not in retryable:
             return result
         if attempt < attempts:
@@ -397,30 +437,52 @@ def fetch_json_direct(
     body = b""
     if payload is not None:
         body = json.dumps(payload).encode("utf-8")
-    request = urllib.request.Request(
-        base_url.rstrip("/") + path,
-        data=body if payload is not None else None,
-        method=method,
-        headers={
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "Cookie": direct_headers.get("Cookie", ""),
-            "X-CSRF-Token": direct_headers.get("X-CSRF-Token", ""),
-        },
-    )
     context = ssl._create_unverified_context()
-    try:
-        with urllib.request.urlopen(request, timeout=timeout_seconds, context=context) as response:
-            raw = response.read().decode("utf-8", errors="replace")
-            parsed = json.loads(raw) if raw else {}
-            return {"status": int(response.status), "ok": 200 <= int(response.status) < 300, "body": parsed}
-    except urllib.error.HTTPError as exc:
-        raw = exc.read().decode("utf-8", errors="replace")
+    for attempt in range(1, 4):
+        request = urllib.request.Request(
+            base_url.rstrip("/") + path,
+            data=body if payload is not None else None,
+            method=method,
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "Cookie": direct_headers.get("Cookie", ""),
+                "X-CSRF-Token": direct_headers.get("X-CSRF-Token", ""),
+            },
+        )
         try:
-            parsed = json.loads(raw) if raw else {}
-        except json.JSONDecodeError:
-            parsed = {"raw": raw[:500]}
-        return {"status": int(exc.code), "ok": False, "body": parsed}
+            with urllib.request.urlopen(request, timeout=timeout_seconds, context=context) as response:
+                raw = response.read().decode("utf-8", errors="replace")
+                parsed = json.loads(raw) if raw else {}
+                return {
+                    "status": int(response.status),
+                    "ok": 200 <= int(response.status) < 300,
+                    "body": parsed,
+                    "backpressure_attempts": attempt,
+                }
+        except urllib.error.HTTPError as exc:
+            raw = exc.read().decode("utf-8", errors="replace")
+            try:
+                parsed = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                parsed = {"raw": raw[:500]}
+            controlled_busy = (
+                int(exc.code) == 503
+                and exc.headers.get("X-Hackme-Backpressure-Rejected") == "1"
+                and isinstance(parsed, dict)
+                and parsed.get("error") == "server_busy"
+            )
+            if controlled_busy and attempt < 3:
+                retry_after = float(exc.headers.get("Retry-After") or 0.5)
+                time.sleep(max(0.25, min(3.0, retry_after)))
+                continue
+            return {
+                "status": int(exc.code),
+                "ok": False,
+                "body": parsed,
+                "backpressure_attempts": attempt,
+            }
+    return {"status": 0, "ok": False, "body": {"msg": "backpressure retry exhausted"}, "backpressure_attempts": 3}
 
 
 def fetch_text(page, path: str) -> dict[str, Any]:
@@ -469,9 +531,22 @@ def fetch_multipart(page, path: str, fields: dict[str, Any], files: list[dict[st
                 const text = await response.text();
                 let body = null;
                 try { body = text ? JSON.parse(text) : null; } catch (err) { body = {raw: text.slice(0, 500)}; }
-                return {status: response.status, ok: response.ok, body};
+                return {
+                    status: response.status,
+                    ok: response.ok,
+                    body,
+                    retryAfter: Number(response.headers.get('retry-after') || 0),
+                    backpressure: response.headers.get('x-hackme-backpressure') || '',
+                    backpressureRejected: response.headers.get('x-hackme-backpressure-rejected') === '1'
+                };
             };
-            let result = await send(csrf || cookieValue('csrf_token'));
+            let result = null;
+            for (let attempt = 1; attempt <= 3; attempt += 1) {
+                result = await send(csrf || cookieValue('csrf_token'));
+                result.backpressure_attempts = attempt;
+                if (!(result.status === 503 && result.backpressureRejected && result.body && result.body.error === 'server_busy') || attempt >= 3) break;
+                await new Promise(resolve => setTimeout(resolve, Math.max(250, Math.min(3000, result.retryAfter * 1000 || 500))));
+            }
             if (result.status === 403 && result.body && result.body.error === 'csrf_invalid') {
                 await fetch('/api/csrf-token', {credentials: 'same-origin'});
                 result = await send(cookieValue('csrf_token'));
@@ -543,7 +618,7 @@ def generate_tiny_mp4() -> bytes:
     return fallback
 
 
-def attach_browser_error_handlers(page, record_error) -> None:
+def attach_browser_error_handlers(page, record_error, record_warning=None) -> None:
     def on_console(msg) -> None:
         if msg.type not in {"error"}:
             return
@@ -566,10 +641,19 @@ def attach_browser_error_handlers(page, record_error) -> None:
         if "ERR_ABORTED" not in str(req.failure or "")
         else None,
     )
-    page.on(
-        "response",
-        lambda response: record_error("http", f"{response.status} {response.url}") if response.status >= 500 else None,
-    )
+    def on_response(response) -> None:
+        if response.status < 500:
+            return
+        message = f"{response.status} {response.url}"
+        headers = response.headers or {}
+        controlled_busy = response.status == 503 and headers.get("x-hackme-backpressure-rejected") == "1"
+        if controlled_busy:
+            if record_warning:
+                record_warning("http", message, "controlled server backpressure")
+            return
+        record_error("http", message)
+
+    page.on("response", on_response)
 
 
 def is_recoverable_network_cascade(kind: str, message: str) -> bool:
@@ -605,7 +689,21 @@ class BrowserErrorCollector:
             "network_transition_until": 0.0,
         }
         _DEEP_BROWSER_ERROR_COLLECTORS[id(page)] = self
-        attach_browser_error_handlers(page, lambda kind, message: self.record(page, kind, message))
+        attach_browser_error_handlers(
+            page,
+            lambda kind, message: self.record(page, kind, message),
+            lambda kind, message, reason: self.record_warning(page, kind, message, reason),
+        )
+
+    def record_warning(self, page, kind: str, message: str, reason: str) -> None:
+        state = self.states.get(id(page)) or {"label": "page"}
+        event = {
+            "type": kind,
+            "text": str(message or "").replace("\n", " ")[:500],
+            "page": str(state.get("label") or "page"),
+            "reason": str(reason or "expected transient condition")[:160],
+        }
+        self._append(self.warnings, self.seen_warnings, event)
 
     def _append(self, target: list[dict[str, str]], seen: set[str], event: dict[str, str]) -> None:
         key = f"{event['page']}:{event['type']}:{event['text']}"
@@ -697,6 +795,9 @@ def check_ui_quality(rec: Recorder, page, label: str, *, mobile: bool = False) -
                 if (mobile && (box.width < 44 || box.height < 32) && el.tagName !== 'INPUT') {
                     warnings.push(`small mobile target ${name} ${Math.round(box.width)}x${Math.round(box.height)}`);
                 }
+                if (mobile && (box.left < -6 || box.right > window.innerWidth + 6)) {
+                    problems.push(`control outside viewport ${name} left=${Math.round(box.left)} right=${Math.round(box.right)}`);
+                }
                 if (el.tagName !== 'SELECT' && el.scrollWidth - el.clientWidth > 10 && box.width > 20) {
                     warnings.push(`text/content clipped ${name}`);
                 }
@@ -721,6 +822,27 @@ def check_ui_quality(rec: Recorder, page, label: str, *, mobile: bool = False) -
     else:
         detail = "ok"
     rec.add(f"ui_quality_{label}", not problems, detail, issues=problems, warnings=warnings)
+
+
+def drain_frontend_failures(page) -> list[dict[str, Any]]:
+    return page.evaluate(
+        """() => {
+            const rows = Array.isArray(window.__hackmeFrontendFailures) ? window.__hackmeFrontendFailures : [];
+            window.__hackmeFrontendFailures = [];
+            return rows.slice(-100);
+        }"""
+    )
+
+
+def check_frontend_failure_buffer(rec: Recorder, page, label: str) -> None:
+    failures = drain_frontend_failures(page)
+    unexpected = [item for item in failures if not item.get("expected")]
+    rec.add(
+        f"frontend_failures_{label}",
+        not unexpected,
+        "none" if not unexpected else "; ".join(f"{item.get('scope')}: {item.get('message')}" for item in unexpected[:8]),
+        failures=failures,
+    )
 
 
 def wait_for_auth_app(page, *, timeout: int = 30000) -> None:
@@ -1130,6 +1252,188 @@ def check_auth_registration_journey(rec: Recorder, browser, base_url: str, root_
         ctx.close()
 
 
+def check_account_context_isolation_journey(
+    rec: Recorder,
+    browser,
+    base_url: str,
+    root_page,
+    error_collector: BrowserErrorCollector,
+) -> None:
+    stamp = utc_stamp().lower()
+    suffix = stamp[-8:].replace("-", "").replace("t", "").replace("z", "")
+    alice = ensure_journey_user(root_page, f"qa_scope_a_{suffix}")
+    bob = ensure_journey_user(root_page, f"qa_scope_b_{suffix}")
+    sentinel = f"alice-private-{stamp}"
+    ctx = browser.new_context(ignore_https_errors=True, viewport={"width": 1180, "height": 760})
+    page = ctx.new_page()
+    error_collector.register(page, "account-context-isolation")
+    editor_page = None
+    try:
+        login_as(page, base_url, alice["username"], JOURNEY_PASSWORD, load_app=True)
+        seeded = fetch_json(
+            page,
+            "PUT",
+            "/api/ai-agent/conversation",
+            {
+                "conversation_id": "account-scope-check",
+                "payload": {
+                    "sessionId": "account-scope-check",
+                    "messages": [{"role": "user", "content": sentinel}],
+                    "habits": {},
+                },
+            },
+        )
+        if seeded["status"] != 200 or not (seeded.get("body") or {}).get("ok"):
+            raise RuntimeError(f"Alice conversation seed failed: {seeded}")
+        page.evaluate(
+            """async sentinel => {
+                const scope = getCurrentAccountStorageScope();
+                AI_AGENT_STATE.accountScope = scope;
+                AI_AGENT_STATE.conversationLoadToken += 1;
+                await aiAgentLoadEncryptedConversation("account-scope-check", {
+                    scope,
+                    loadToken: AI_AGENT_STATE.conversationLoadToken,
+                });
+                if (!AI_AGENT_STATE.messages.some(item => String(item.content || "").includes(sentinel))) {
+                    throw new Error("Alice AI conversation was not loaded");
+                }
+                AI_AGENT_STATE.settings = {private_marker: sentinel};
+                AI_AGENT_STATE.actor = {private_marker: sentinel};
+                AI_AGENT_STATE.audit = {private_marker: sentinel};
+                AI_AGENT_STATE.writeToolCatalog = [{name: sentinel}];
+                users = [{username: sentinel}];
+                chatRooms = [{name: sentinel}];
+                userAppeals = [{reason: sentinel}];
+                shareCenterLatestShares = [{name: sentinel}];
+                rootEconomyCatalogCache = [{item_name: sentinel}];
+                economyLedgerCache = [{memo: sentinel}];
+                economyColdWalletDraft = {tradePassword: sentinel, mnemonicWords: [sentinel]};
+                economyColdWalletBindCandidate = {address: sentinel, privateKey: {private: sentinel}};
+                economyColdWalletSigningSessions.set(sentinel, {address: sentinel, mnemonicWords: [sentinel]});
+                videoState.videos = [{title: sentinel}];
+                driveE2eeSessionPassphrases.set(sentinel, sentinel);
+                driveE2eeRecentSessionPassphrases.push(sentinel);
+                sessionStorage.setItem(driveShareFragmentStorageKey(), JSON.stringify({private: sentinel}));
+                sessionStorage.setItem(videoShareFragmentStorageKey(), JSON.stringify({private: sentinel}));
+                rememberDriveE2eeBrowserSessionPassphrase(sentinel);
+                [
+                    "notification-list", "job-center-list", "share-center-list", "video-manage-list",
+                    "admin-appeal-list", "root-catalog-list",
+                ].forEach(id => {
+                    const el = document.getElementById(id);
+                    if (el) el.textContent = sentinel;
+                });
+                [
+                    "drive-share-password", "drive-new-doc-content", "drive-e2ee-session-passphrase",
+                    "video-share-password", "video-publish-description",
+                    "economy-wallet-generated-trade-password", "economy-wallet-file-password",
+                    "profile-friend-code", "community-thread-content", "community-reply-content",
+                    "edit-user-pw", "edit-user-current-pw",
+                ].forEach(id => {
+                    const el = document.getElementById(id);
+                    if (el) el.value = sentinel;
+                });
+            }""",
+            sentinel,
+        )
+
+        with page.expect_popup(timeout=10000) as popup_info:
+            page.evaluate("() => window.open('/comfyui-workflow-editor.html', 'qa-account-scope-editor')")
+        editor_page = popup_info.value
+        error_collector.register(editor_page, "account-context-editor")
+        editor_page.wait_for_load_state("domcontentloaded")
+        editor_page.fill("#workflowDescription", sentinel)
+
+        switched = fetch_json(page, "POST", "/api/login", {"username": bob["username"], "password": JOURNEY_PASSWORD})
+        if switched["status"] != 200 or not (switched.get("body") or {}).get("ok"):
+            fetch_json(page, "POST", "/api/logout", {})
+            switched = fetch_json(page, "POST", "/api/login", {"username": bob["username"], "password": JOURNEY_PASSWORD})
+        if switched["status"] != 200 or not (switched.get("body") or {}).get("ok"):
+            raise RuntimeError(f"Bob account switch failed: {switched}")
+        me = fetch_json(page, "GET", "/api/me")
+        if me["status"] != 200 or not (me.get("body") or {}).get("ok"):
+            raise RuntimeError(f"Bob identity read failed: {me}")
+        page.evaluate("identity => setAuthState(identity)", me["body"])
+        page.wait_for_function(
+            "expected => getCurrentAccountStorageScope() === expected",
+            f"user:{bob['id']}",
+            timeout=10000,
+        )
+        page.wait_for_timeout(400)
+        snapshot = page.evaluate(
+            """sentinel => {
+                const hasSentinel = value => JSON.stringify(value || null).includes(sentinel);
+                return {
+                    scope: getCurrentAccountStorageScope(),
+                    username: currentUser,
+                    bodyHasSentinel: document.body.innerText.includes(sentinel),
+                    aiHasSentinel: hasSentinel({
+                        messages: AI_AGENT_STATE.messages,
+                        settings: AI_AGENT_STATE.settings,
+                        actor: AI_AGENT_STATE.actor,
+                        audit: AI_AGENT_STATE.audit,
+                        writeToolCatalog: AI_AGENT_STATE.writeToolCatalog,
+                    }),
+                    usersHaveSentinel: hasSentinel(users),
+                    chatHasSentinel: hasSentinel(chatRooms),
+                    appealsHaveSentinel: hasSentinel(userAppeals),
+                    sharesHaveSentinel: hasSentinel(shareCenterLatestShares),
+                    catalogHasSentinel: hasSentinel(rootEconomyCatalogCache),
+                    ledgerHasSentinel: hasSentinel(economyLedgerCache),
+                    videosHaveSentinel: hasSentinel(videoState.videos),
+                    economySecretsHaveSentinel: hasSentinel({
+                        draft: economyColdWalletDraft,
+                        bind: economyColdWalletBindCandidate,
+                        sessions: Array.from(economyColdWalletSigningSessions.entries()),
+                    }),
+                    driveSecretsHaveSentinel: hasSentinel({
+                        passphrases: Array.from(driveE2eeSessionPassphrases.entries()),
+                        recent: driveE2eeRecentSessionPassphrases,
+                    }),
+                    fragmentStorageHasSentinel: Object.keys(sessionStorage)
+                        .filter(key => key.includes("share_fragments") || key.includes("drive_e2ee_session_passphrase"))
+                        .some(key => String(sessionStorage.getItem(key) || "").includes(sentinel)),
+                    privateInputsHaveSentinel: [
+                        "drive-share-password", "drive-new-doc-content", "drive-e2ee-session-passphrase",
+                        "video-share-password", "video-publish-description",
+                        "economy-wallet-generated-trade-password", "economy-wallet-file-password",
+                        "profile-friend-code", "community-thread-content", "community-reply-content",
+                        "edit-user-pw", "edit-user-current-pw",
+                    ].some(id => String(document.getElementById(id)?.value || "").includes(sentinel)),
+                };
+            }""",
+            sentinel,
+        )
+        editor_closed = editor_page.is_closed()
+        if not editor_closed:
+            try:
+                editor_closed = "帳戶已切換" in editor_page.locator("body").inner_text(timeout=2000)
+            except Exception:
+                editor_closed = editor_page.is_closed()
+        leaked = [
+            key
+            for key, value in snapshot.items()
+            if (key.endswith("HasSentinel") or key.endswith("HaveSentinel")) and value
+        ]
+        ok = (
+            snapshot.get("scope") == f"user:{bob['id']}"
+            and snapshot.get("username") == bob["username"]
+            and not leaked
+            and editor_closed
+        )
+        rec.add(
+            "account_context_cross_user_isolation",
+            ok,
+            f"alice={alice['id']}, bob={bob['id']}, leaked={leaked or 'none'}, editor_closed={editor_closed}",
+            snapshot=snapshot,
+            editor_closed=editor_closed,
+        )
+    finally:
+        if editor_page is not None and not editor_page.is_closed():
+            editor_page.close()
+        ctx.close()
+
+
 def ensure_journey_user(page, username: str) -> dict[str, Any]:
     users = fetch_json(page, "GET", "/api/admin/users?include_deleted=1")
     for item in users.get("body", {}).get("users") or []:
@@ -1190,11 +1494,22 @@ def check_bug_report_journey(rec: Recorder, page) -> None:
     functions_ready = page.evaluate(
         "() => ['showBugReportDialog', 'hideBugReportDialog', 'submitBugReport'].every(name => typeof window[name] === 'function')"
     )
-    page.locator("#bug-report-open-btn").click(timeout=5000)
+    click_wait_recovered = False
+    try:
+        page.locator("#bug-report-open-btn").click(timeout=10000, no_wait_after=True)
+    except PlaywrightTimeoutError:
+        click_wait_recovered = page.locator("#bug-report-overlay.show").count() == 1
+        if not click_wait_recovered:
+            raise
     page.wait_for_selector("#bug-report-overlay.show", state="visible", timeout=5000)
     page.locator("#bug-report-cancel-btn").click(timeout=5000)
     page.wait_for_selector("#bug-report-overlay.show", state="hidden", timeout=5000)
-    rec.add("bug_report_modal_flow", bool(functions_ready), f"functions_ready={bool(functions_ready)}")
+    rec.add(
+        "bug_report_modal_flow",
+        bool(functions_ready),
+        f"functions_ready={bool(functions_ready)}, click_wait_recovered={click_wait_recovered}",
+        click_wait_recovered=click_wait_recovered,
+    )
 
 
 def check_ai_agent_journey(rec: Recorder, browser, base_url: str, root_page) -> None:
@@ -1224,6 +1539,7 @@ def check_ai_agent_journey(rec: Recorder, browser, base_url: str, root_page) -> 
         raise RuntimeError(f"AI Agent write-mode setup failed: {settings}")
 
     target = ensure_journey_user(root_page, "qa_agent_target")
+    user_file_stamp = utc_stamp().lower()
 
     user_context = browser.new_context(ignore_https_errors=True, viewport={"width": 1280, "height": 800})
     user_page = user_context.new_page()
@@ -1251,9 +1567,9 @@ def check_ai_agent_journey(rec: Recorder, browser, base_url: str, root_page) -> 
             {
                 "tool": "write_cloud_drive_create_text",
                 "arguments": {
-                    "filename": "ai-agent-user-live-qa.txt",
+                    "filename": f"ai-agent-user-live-qa-{user_file_stamp}.txt",
                     "content": "AI Agent user action live QA",
-                    "virtual_path": "/AI Agent QA/ai-agent-user-live-qa.txt",
+                    "virtual_path": f"/AI Agent QA/ai-agent-user-live-qa-{user_file_stamp}.txt",
                 },
                 "confirm": "EXECUTE",
             },
@@ -1340,6 +1656,50 @@ def check_ai_agent_journey(rec: Recorder, browser, base_url: str, root_page) -> 
     root_readonly = fetch_json(root_page, "GET", "/api/ai-agent/readonly?scope=all&limit=10")
     root_audit = fetch_json(root_page, "GET", "/api/ai-agent/audit-status")
     root_history = fetch_json(root_page, "GET", "/api/ai-agent/conversation-history?limit=5")
+    mode_before = fetch_json(root_page, "GET", "/api/root/server-mode")
+    launch_preflight = fetch_json(
+        root_page,
+        "POST",
+        "/api/ai-agent/write-tools/execute",
+        {
+            "tool": "write_launch_preflight_execute",
+            "arguments": {"target_mode": "production", "auto_switch": False, "force_audit": True},
+            "confirm": "EXECUTE",
+        },
+        timeout_ms=120000,
+    )
+    implicit_switch_rejected = fetch_json(
+        root_page,
+        "POST",
+        "/api/ai-agent/write-tools/execute",
+        {
+            "tool": "write_launch_preflight_execute",
+            "arguments": {"target_mode": "production", "auto_switch": True},
+            "confirm": "EXECUTE",
+        },
+        timeout_ms=30000,
+    )
+    mode_after = fetch_json(root_page, "GET", "/api/root/server-mode")
+    preflight_result = launch_preflight.get("body", {}).get("result") or {}
+    mode_unchanged = mode_before.get("body", {}).get("mode") == mode_after.get("body", {}).get("mode")
+    preflight_ok = (
+        mode_before["status"] == 200
+        and launch_preflight["status"] == 200
+        and preflight_result.get("dry_run") is True
+        and isinstance(preflight_result.get("operator_runbook"), list)
+        and bool(preflight_result.get("operator_runbook"))
+        and implicit_switch_rejected["status"] == 400
+        and implicit_switch_rejected.get("body", {}).get("result", {}).get("required_confirm") == "GO_LIVE"
+        and mode_after["status"] == 200
+        and mode_unchanged
+    )
+    rec.add(
+        "ai_agent_root_launch_preflight_dry_run",
+        preflight_ok,
+        f"preflight={launch_preflight['status']}, reject={implicit_switch_rejected['status']}, mode_unchanged={mode_unchanged}",
+        preflight=preflight_result,
+        rejection=implicit_switch_rejected.get("body"),
+    )
     handoff = fetch_json(
         root_page,
         "POST",
@@ -1437,20 +1797,23 @@ def check_forum_journey(rec: Recorder, page) -> dict[str, Any]:
 
 
 def check_drive_e2ee_journey(rec: Recorder, page) -> dict[str, Any]:
+    stamp = utc_stamp().lower()
+    plain_name = f"plain-note-{stamp}.txt"
+    e2ee_name = f"e2ee-note-{stamp}.txt"
     standard = fetch_multipart(
         page,
         "/api/storage/files",
-        {"privacy_mode": "standard_plain", "virtual_path": "/QA/plain-note.txt", "display_name": "plain-note.txt"},
-        [text_file("plain-note.txt", "plain cloud drive qa file")],
+        {"privacy_mode": "standard_plain", "virtual_path": f"/QA/{plain_name}", "display_name": plain_name},
+        [text_file(plain_name, "plain cloud drive qa file")],
     )
     e2ee = fetch_multipart(
         page,
         "/api/storage/files",
         {
             "privacy_mode": "e2ee",
-            "virtual_path": "/QA/e2ee-note.txt",
-            "display_name": "e2ee-note.txt",
-            "encrypted_metadata": json.dumps({"name": "e2ee-note.txt", "qa": True}),
+            "virtual_path": f"/QA/{e2ee_name}",
+            "display_name": e2ee_name,
+            "encrypted_metadata": json.dumps({"name": e2ee_name, "qa": True}),
             "encrypted_file_key": "qa-wrapped-key",
             "wrapped_by": "playwright",
             "ciphertext_sha256": "0" * 64,
@@ -1459,7 +1822,7 @@ def check_drive_e2ee_journey(rec: Recorder, page) -> dict[str, Any]:
             "nonce": "qa-nonce",
             "client_scan_report": json.dumps({"claimed_clean": True, "scanner": "playwright"}),
         },
-        [text_file("e2ee-note.txt", "ciphertext placeholder for e2ee qa")],
+        [text_file(e2ee_name, "ciphertext placeholder for e2ee qa")],
     )
     files = fetch_json(page, "GET", "/api/storage/files")
     switch_module(page, "drive")
@@ -1555,6 +1918,11 @@ def check_drive_bulk_selection_journey(rec: Recorder, page) -> None:
     rec.add("drive_bulk_journey_start", True, "starting")
     switch_module(page, "drive")
     page.wait_for_selector("#module-drive.active #storage-refresh-btn", timeout=8000)
+    stamp = utc_stamp().lower()
+    bulk_dir = f"/QA/bulk-{stamp}"
+    moved_dir = f"/QA/bulk-moved-{stamp}"
+    download_dir = f"/QA/bulk-download-{stamp}"
+    album_title = f"QA bulk share {stamp}"
     names = ["bulk-a.txt", "bulk-b.txt"]
     uploads = []
     for name in names:
@@ -1563,7 +1931,7 @@ def check_drive_bulk_selection_journey(rec: Recorder, page) -> None:
             "/api/storage/files",
             {
                 "privacy_mode": "standard_plain",
-                "virtual_path": f"/QA/bulk/{name}",
+                "virtual_path": f"{bulk_dir}/{name}",
                 "display_name": name,
             },
             [text_file(name, f"bulk qa payload for {name}")],
@@ -1571,7 +1939,7 @@ def check_drive_bulk_selection_journey(rec: Recorder, page) -> None:
     upload_ok = all(item["status"] == 200 and (item.get("body") or {}).get("ok") for item in uploads)
 
     page.set_viewport_size({"width": 1366, "height": 768})
-    open_storage_browser_path(page, "/QA/bulk")
+    open_storage_browser_path(page, bulk_dir)
     selected_count = select_all_visible_storage_files(page)
     toolbar = page.locator("#module-drive.active .storage-browser-bulk-toolbar")
     toolbar_text = toolbar.inner_text(timeout=5000)
@@ -1589,7 +1957,7 @@ def check_drive_bulk_selection_journey(rec: Recorder, page) -> None:
     check_ui_quality(rec, page, "drive_bulk_desktop")
 
     page.set_viewport_size({"width": 390, "height": 844})
-    open_storage_browser_path(page, "/QA/bulk")
+    open_storage_browser_path(page, bulk_dir)
     select_all_visible_storage_files(page)
     mobile_buttons_ok = all(
         page.locator(f'#module-drive.active .storage-browser-bulk-toolbar [data-drive-action="{action}"]').is_visible(timeout=2000)
@@ -1604,12 +1972,12 @@ def check_drive_bulk_selection_journey(rec: Recorder, page) -> None:
     check_ui_quality(rec, page, "drive_bulk_mobile", mobile=True)
 
     page.set_viewport_size({"width": 1366, "height": 768})
-    open_storage_browser_path(page, "/QA/bulk")
+    open_storage_browser_path(page, bulk_dir)
     select_all_visible_storage_files(page)
-    invoke_drive_toolbar_action(page, "move-selected-storage", prompt_value="/QA/bulk-moved")
+    invoke_drive_toolbar_action(page, "move-selected-storage", prompt_value=moved_dir)
     page.wait_for_timeout(1500)
     moved_paths = storage_file_paths(page)
-    expected_moved = [f"/QA/bulk-moved/{name}" for name in names]
+    expected_moved = [f"{moved_dir}/{name}" for name in names]
     rec.add(
         "drive_bulk_move_desktop",
         all(path in moved_paths for path in expected_moved),
@@ -1617,21 +1985,26 @@ def check_drive_bulk_selection_journey(rec: Recorder, page) -> None:
         paths=moved_paths,
     )
 
-    open_storage_browser_path(page, "/QA/bulk-moved")
+    open_storage_browser_path(page, moved_dir)
     select_all_visible_storage_files(page)
-    invoke_drive_toolbar_action(page, "share-selected-storage", prompt_value="QA bulk share")
+    invoke_drive_toolbar_action(page, "share-selected-storage", prompt_value=album_title)
     page.wait_for_timeout(1800)
     albums = fetch_json(page, "GET", "/api/storage/albums")
     album_rows = (albums.get("body") or {}).get("albums") or []
-    bulk_album = next((album for album in album_rows if album.get("title") == "QA bulk share"), None)
+    bulk_album = next((album for album in album_rows if album.get("title") == album_title), None)
     rec.add(
         "drive_bulk_share_desktop",
-        albums["status"] == 200 and bool(bulk_album) and bool((bulk_album or {}).get("share_link")),
-        f"album_id={(bulk_album or {}).get('id')}, share={bool((bulk_album or {}).get('share_link'))}",
+        (
+            albums["status"] == 200
+            and bool(bulk_album)
+            and bool((bulk_album or {}).get("share_link"))
+            and int((bulk_album or {}).get("file_count") or 0) == len(names)
+        ),
+        f"album_id={(bulk_album or {}).get('id')}, share={bool((bulk_album or {}).get('share_link'))}, files={(bulk_album or {}).get('file_count')}",
         album=bulk_album,
     )
 
-    open_storage_browser_path(page, "/QA/bulk-moved")
+    open_storage_browser_path(page, moved_dir)
     select_all_visible_storage_files(page)
     invoke_drive_toolbar_action(page, "delete-selected-storage", confirm_value=True)
     page.wait_for_timeout(1500)
@@ -1653,12 +2026,12 @@ def check_drive_bulk_selection_journey(rec: Recorder, page) -> None:
             "/api/storage/files",
             {
                 "privacy_mode": "standard_plain",
-                "virtual_path": f"/QA/bulk-download/{name}",
+                "virtual_path": f"{download_dir}/{name}",
                 "display_name": name,
             },
             [text_file(name, f"bulk download qa payload for {name}")],
         )
-    open_storage_browser_path(page, "/QA/bulk-download")
+    open_storage_browser_path(page, download_dir)
     select_all_visible_storage_files(page)
     with page.expect_download(timeout=8000) as download_info:
         page.locator('#module-drive.active .storage-browser-bulk-toolbar [data-drive-action="download-selected-storage"]').click()
@@ -1934,11 +2307,11 @@ def check_games_journey(rec: Recorder, page) -> None:
 
 
 def check_launch_security_journey(rec: Recorder, page) -> None:
-    health = fetch_json(page, "GET", "/api/admin/health")
-    readiness = fetch_json(page, "GET", "/api/admin/health/readiness")
-    requirements = fetch_json(page, "GET", "/api/root/server-mode/requirements")
-    production_status = fetch_json(page, "GET", "/api/root/production-report/status")
-    doc = fetch_json(page, "GET", "/api/root/launch-check/doc?path=docs/server_mode_v2/03_production_gate_playbook.md")
+    health = fetch_json_get_retry(page, "/api/admin/health")
+    readiness = fetch_json_get_retry(page, "/api/admin/health/readiness")
+    requirements = fetch_json_get_retry(page, "/api/root/server-mode/requirements")
+    production_status = fetch_json_get_retry(page, "/api/root/production-report/status")
+    doc = fetch_json_get_retry(page, "/api/root/launch-check/doc?path=docs/server_mode_v2/03_production_gate_playbook.md")
     switch_server_tab(page, "server-mode")
     page.evaluate(
         """() => {
@@ -2033,33 +2406,21 @@ def check_comfyui_workflow_builder_flow(rec: Recorder, page) -> None:
     )
 
 
-def check_module_tabs(rec: Recorder, page, base_url: str, viewport: dict[str, int]) -> None:
+def check_module_tabs(rec: Recorder, page, base_url: str, viewport: dict[str, int], *, role_label: str = "root") -> None:
     page.set_viewport_size(viewport)
     load_authenticated_app(page, base_url)
     page.wait_for_timeout(1200)
-    tabs = [
-        ("chat", "#tab-module-chat", "#module-chat"),
-        ("announcements", "#tab-module-announcements", "#module-announcements"),
-        ("community", "#tab-module-community", "#module-community"),
-        ("drive", "#tab-module-drive", "#module-drive"),
-        ("albums", "#tab-module-albums", "#module-albums"),
-        ("videos", "#tab-module-videos", "#module-videos"),
-        ("games", "#tab-module-games", "#module-games"),
-        ("comfyui", "#tab-module-comfyui", "#module-comfyui"),
-        ("economy", "#tab-module-economy", "#module-economy"),
-        ("trading", "#tab-module-trading", "#module-trading"),
-        ("appeals", "#tab-module-appeals", "#module-appeals"),
-        ("accounts", "#tab-module-accounts", "#module-accounts"),
-        ("server", "#tab-module-server", "#module-server"),
-    ]
+    tabs = page.eval_on_selector_all(
+        "#module-main-tabs > .tab[id^='tab-module-']",
+        """elements => elements
+            .filter(el => !el.hidden && getComputedStyle(el).display !== 'none')
+            .map(el => el.id.slice('tab-module-'.length))""",
+    )
     failures: list[str] = []
     visited: list[str] = []
-    for label, tab_sel, section_sel in tabs:
-        if not page.locator(tab_sel).count():
-            continue
-        visible = page.locator(tab_sel).evaluate("el => getComputedStyle(el).display !== 'none' && !el.hidden")
-        if not visible:
-            continue
+    drain_frontend_failures(page)
+    for label in tabs:
+        section_sel = f"#module-{label}"
         try:
             page.evaluate("tab => { if (typeof switchModuleTab !== 'function') throw new Error('switchModuleTab missing'); switchModuleTab(tab); }", label)
             page.wait_for_function(
@@ -2067,18 +2428,28 @@ def check_module_tabs(rec: Recorder, page, base_url: str, viewport: dict[str, in
                 arg=section_sel,
                 timeout=5000,
             )
-            page.wait_for_timeout(250)
+            page.wait_for_timeout(500)
             active = page.locator(section_sel).evaluate("el => el.classList.contains('active')")
             overflow = page.evaluate("() => document.documentElement.scrollWidth - document.documentElement.clientWidth")
             if not active:
                 failures.append(f"{label}: section not active")
             if overflow > 6:
                 failures.append(f"{label}: horizontal overflow {overflow}px")
+            caught = drain_frontend_failures(page)
+            for item in caught:
+                if not item.get("expected"):
+                    failures.append(f"{label}: caught frontend failure {item.get('scope')}: {item.get('message')}")
+            check_ui_quality(
+                rec,
+                page,
+                f"module_{role_label}_{label}_{viewport['width']}x{viewport['height']}",
+                mobile=viewport["width"] <= 768,
+            )
             visited.append(label)
         except Exception as exc:
             failures.append(f"{label}: {type(exc).__name__}: {str(exc)[:240]}")
     rec.add(
-        f"module_tabs_{viewport['width']}x{viewport['height']}",
+        f"module_tabs_{role_label}_{viewport['width']}x{viewport['height']}",
         not failures,
         ", ".join(failures) or f"visited {', '.join(visited)}",
         visited=visited,
@@ -2430,6 +2801,7 @@ def write_reports(runtime_root: Path, stamp: str, summary: dict[str, Any]) -> tu
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--runtime-root", default="")
+    parser.add_argument("--base-url", default="", help="Reuse an already running isolated server instead of starting another one")
     parser.add_argument("--keep-server", action="store_true")
     parser.add_argument("--headed", action="store_true")
     parser.add_argument(
@@ -2452,25 +2824,31 @@ def main() -> int:
     parser.add_argument("--civitai-live-model-type", default=os.environ.get("PLAYWRIGHT_CIVITAI_MODEL_TYPE", "checkpoint"))
     parser.add_argument("--civitai-live-source", default=os.environ.get("PLAYWRIGHT_CIVITAI_SOURCE", "all"))
     args = parser.parse_args()
+    require_external_server_credentials(parser, args.base_url)
     optional_comfyui = collect_optional_comfyui_config(args)
 
     stamp = utc_stamp()
     runtime_root = Path(args.runtime_root).resolve() if args.runtime_root else Path("/tmp") / f"hackme_web_playwright_deep_{stamp}"
     mkdirs(runtime_root)
-    port = free_port()
+    port = free_port() if not args.base_url else 0
     started_at = datetime.now(timezone.utc).isoformat()
     rec = Recorder()
-    server = start_server(runtime_root, port)
-    base_url = ""
+    server = start_server(runtime_root, port) if not args.base_url else None
+    base_url = str(args.base_url or "").rstrip("/")
     browser_errors: list[dict[str, str]] = []
     browser_warnings: list[dict[str, str]] = []
     chess_summary: dict[str, Any] = {}
     try:
-        base_url = wait_for_server(
-            port,
-            timeout_seconds=max(30, min(600, int(args.server_start_timeout_seconds))),
-        )
-        rec.add("server_start", True, base_url, pid=server.pid, runtime_root=str(runtime_root))
+        if server is not None:
+            base_url = wait_for_server(
+                port,
+                timeout_seconds=max(30, min(600, int(args.server_start_timeout_seconds))),
+            )
+        else:
+            version = urlopen_json(base_url + "/api/version", timeout=10)
+            if not version or not version.get("ok"):
+                raise RuntimeError(f"external server is not ready: {base_url}")
+        rec.add("server_start", True, base_url, pid=server.pid if server else None, runtime_root=str(runtime_root), reused=server is None)
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=not args.headed)
             context = browser.new_context(ignore_https_errors=True, viewport={"width": 1366, "height": 768})
@@ -2529,6 +2907,10 @@ def main() -> int:
                 rec.guard("bug_report_journey", lambda: check_bug_report_journey(rec, page))
                 rec.guard("api_surface", lambda: check_api_surface(rec, page, base_url, root_auth_headers))
                 rec.guard("auth_registration_journey", lambda: check_auth_registration_journey(rec, browser, base_url, page))
+                rec.guard(
+                    "account_context_isolation_journey",
+                    lambda: check_account_context_isolation_journey(rec, browser, base_url, page, error_collector),
+                )
                 rec.guard("admin_member_management_journey", lambda: check_admin_member_management(rec, page))
                 rec.guard("ai_agent_role_action_journey", lambda: check_ai_agent_journey(rec, browser, base_url, page))
                 rec.guard("forum_journey", lambda: check_forum_journey(rec, page))
@@ -2539,15 +2921,43 @@ def main() -> int:
                 rec.guard("economy_trading_journey", lambda: check_economy_trading_journey(rec, page, base_url))
                 rec.guard("launch_security_journey", lambda: check_launch_security_journey(rec, page))
                 rec.guard("comfyui_workflow_builder_journey", lambda: check_comfyui_workflow_builder_flow(rec, page))
+                rec.guard("main_frontend_failure_buffer", lambda: check_frontend_failure_buffer(rec, page, "root-main"))
                 page.close()
 
                 desktop_page = new_page({"width": 1366, "height": 768}, label="module-tabs-desktop")
                 rec.guard("module_tabs_desktop", lambda: check_module_tabs(rec, desktop_page, base_url, {"width": 1366, "height": 768}))
                 desktop_page.close()
 
-                mobile_page = new_page({"width": 390, "height": 844}, label="module-tabs-mobile")
-                rec.guard("module_tabs_mobile", lambda: check_module_tabs(rec, mobile_page, base_url, {"width": 390, "height": 844}))
-                mobile_page.close()
+                for mobile_viewport in (
+                    {"width": 360, "height": 800},
+                    {"width": 390, "height": 844},
+                    {"width": 768, "height": 1024},
+                ):
+                    viewport_label = f"{mobile_viewport['width']}x{mobile_viewport['height']}"
+                    mobile_page = new_page(mobile_viewport, label=f"module-tabs-mobile-{viewport_label}")
+                    rec.guard(
+                        f"module_tabs_mobile_{viewport_label}",
+                        lambda page=mobile_page, viewport=mobile_viewport: check_module_tabs(rec, page, base_url, viewport),
+                    )
+                    mobile_page.close()
+
+                member_context = browser.new_context(ignore_https_errors=True, viewport={"width": 390, "height": 844})
+                member_mobile_page = member_context.new_page()
+                error_collector.register(member_mobile_page, "module-tabs-member-mobile-390x844")
+                try:
+                    login_as(member_mobile_page, base_url, "test", TEST_PASSWORD, load_app=False)
+                    rec.guard(
+                        "module_tabs_member_mobile_390x844",
+                        lambda: check_module_tabs(
+                            rec,
+                            member_mobile_page,
+                            base_url,
+                            {"width": 390, "height": 844},
+                            role_label="member",
+                        ),
+                    )
+                finally:
+                    member_context.close()
 
                 editor_page = new_page({"width": 1366, "height": 768}, label="comfyui-editor")
                 rec.guard("comfyui_editor", lambda: check_comfyui_editor(rec, editor_page, base_url))
@@ -2561,7 +2971,7 @@ def main() -> int:
                 api_page.close()
             browser.close()
     finally:
-        if server.poll() is None and not args.keep_server:
+        if server is not None and server.poll() is None and not args.keep_server:
             server.terminate()
             try:
                 server.wait(timeout=8)

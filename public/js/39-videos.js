@@ -12,6 +12,8 @@ const videoState = {
   currentRealtimeSeekHandler: null,
   currentRealtimeSeekPlayer: null,
   currentObjectUrl: "",
+  currentE2eeCleanup: null,
+  currentViewTrackingCleanup: null,
   hlsLibraryPromise: null,
   playbackSessionId: 0,
   streamDebugSnapshot: {},
@@ -43,10 +45,13 @@ const videoState = {
   navigationGeneration: 0,
   detailRequestGeneration: 0,
   detailAbortController: null,
+  accountGeneration: 0,
 };
 let videoPublishDriveFiles = [];
 let videoPendingPublishSelection = null;
 const videoUploadLiveJobs = new Map();
+const videoActiveXhrs = new Set();
+const videoPendingAccountCancels = new Set();
 const VIDEO_SHARE_FRAGMENT_STORAGE_KEY = "hackme_web.video_share_fragments";
 const VIDEO_HLS_JS_URL = "/js/hls.light.min.js?v=20260505-hlsjs";
 const VIDEO_E2EE_STREAM_V2_WORKER_URL = "/js/e2ee-stream-v2-worker.js?v=20260505-e2eev2";
@@ -63,6 +68,39 @@ const VIDEO_DANMAKU_SPECIAL_PRICES = {
   rainbow: 50,
 };
 let activeVideoE2eeLocalTasks = 0;
+
+function videoOperationContext() {
+  return {
+    generation: Number(videoState.accountGeneration || 0),
+    scope: typeof getCurrentAccountStorageScope === "function"
+      ? getCurrentAccountStorageScope()
+      : String(currentUserId || currentUser || "anonymous"),
+  };
+}
+
+function videoOperationIsCurrent(operation) {
+  if (!operation || Number(operation.generation) !== Number(videoState.accountGeneration || 0)) return false;
+  const scope = typeof getCurrentAccountStorageScope === "function"
+    ? getCurrentAccountStorageScope()
+    : String(currentUserId || currentUser || "anonymous");
+  return operation.scope === scope;
+}
+
+function videoAccountAbortError() {
+  const err = new Error("Account context changed");
+  err.name = "AbortError";
+  return err;
+}
+
+function videoAssertOperationCurrent(operation) {
+  if (!videoOperationIsCurrent(operation)) throw videoAccountAbortError();
+}
+
+function videoE2eeLocalTaskStorageKey() {
+  return typeof accountScopedStorageKey === "function"
+    ? accountScopedStorageKey(VIDEO_E2EE_LOCAL_TASK_STORAGE_KEY)
+    : VIDEO_E2EE_LOCAL_TASK_STORAGE_KEY;
+}
 
 function videoUploadLiveJobId() {
   return `video-upload-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -109,35 +147,51 @@ window.getVideoUploadLiveJobs = function getVideoUploadLiveJobs() {
   return Array.from(videoUploadLiveJobs.values());
 };
 
-function rememberVideoE2eeLocalTask(task) {
+function rememberVideoE2eeLocalTask(task, storageKey = videoE2eeLocalTaskStorageKey()) {
   try {
-    localStorage.setItem(VIDEO_E2EE_LOCAL_TASK_STORAGE_KEY, JSON.stringify({
+    localStorage.setItem(storageKey, JSON.stringify({
       ...(task || {}),
       updated_at: new Date().toISOString(),
     }));
   } catch (_) {}
 }
 
-function clearVideoE2eeLocalTask(jobId = "") {
+function clearVideoE2eeLocalTask(jobId = "", storageKey = videoE2eeLocalTaskStorageKey()) {
   activeVideoE2eeLocalTasks = Math.max(0, activeVideoE2eeLocalTasks - 1);
   try {
-    const raw = localStorage.getItem(VIDEO_E2EE_LOCAL_TASK_STORAGE_KEY);
+    const key = storageKey;
+    const raw = localStorage.getItem(key);
     if (!raw) return;
     const task = JSON.parse(raw);
     if (!jobId || String(task?.job_id || "") === String(jobId)) {
-      localStorage.removeItem(VIDEO_E2EE_LOCAL_TASK_STORAGE_KEY);
+      localStorage.removeItem(key);
     }
   } catch (_) {
-    try { localStorage.removeItem(VIDEO_E2EE_LOCAL_TASK_STORAGE_KEY); } catch (_err) {}
+    try { localStorage.removeItem(storageKey); } catch (_err) {}
   }
+}
+
+function clearAllVideoE2eeLocalTasks() {
+  activeVideoE2eeLocalTasks = 0;
+  try {
+    const keys = [];
+    for (let index = 0; index < localStorage.length; index += 1) {
+      const key = localStorage.key(index) || "";
+      if (key === VIDEO_E2EE_LOCAL_TASK_STORAGE_KEY || key.endsWith(`:${VIDEO_E2EE_LOCAL_TASK_STORAGE_KEY}`)) {
+        keys.push(key);
+      }
+    }
+    keys.forEach((key) => localStorage.removeItem(key));
+  } catch (_) {}
 }
 
 function warnInterruptedVideoE2eeLocalTask() {
   try {
-    const raw = localStorage.getItem(VIDEO_E2EE_LOCAL_TASK_STORAGE_KEY);
+    const key = videoE2eeLocalTaskStorageKey();
+    const raw = localStorage.getItem(key);
     if (!raw) return;
     const task = JSON.parse(raw);
-    localStorage.removeItem(VIDEO_E2EE_LOCAL_TASK_STORAGE_KEY);
+    localStorage.removeItem(key);
     if (Date.now() - (Date.parse(task?.updated_at || "") || 0) > 12 * 60 * 60 * 1000) return;
     videoMsg("上一個 E2EE 本機轉檔 / 加密任務因頁面重新整理或關閉而中斷；請重新選擇影音並再次建立分享省流量版本。", false);
   } catch (_) {}
@@ -189,32 +243,79 @@ function setVideoUploadProgress({ visible = true, percent = 0, loaded = 0, total
 }
 
 function videoUploadFormWithProgress(url, form, onProgress) {
+  const uploadScope = typeof getCurrentAccountStorageScope === "function"
+    ? getCurrentAccountStorageScope()
+    : String(currentUserId || currentUser || "anonymous");
+  const assertUploadScope = () => {
+    const currentScope = typeof getCurrentAccountStorageScope === "function"
+      ? getCurrentAccountStorageScope()
+      : String(currentUserId || currentUser || "anonymous");
+    if (currentScope === uploadScope) return;
+    const error = new Error("帳戶已切換，上傳已取消");
+    error.name = "AbortError";
+    throw error;
+  };
   const send = async (csrf) => new Promise((resolve, reject) => {
+    try {
+      assertUploadScope();
+    } catch (err) {
+      reject(err);
+      return;
+    }
     const xhr = new XMLHttpRequest();
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      videoActiveXhrs.delete(xhr);
+      callback(value);
+    };
     xhr.open("POST", url);
     xhr.withCredentials = true;
     if (csrf) xhr.setRequestHeader("X-CSRF-Token", csrf);
     xhr.upload.onprogress = (event) => {
+      try {
+        assertUploadScope();
+      } catch (_) {
+        xhr.abort();
+        return;
+      }
       if (typeof onProgress === "function") onProgress(event);
     };
     xhr.onload = () => {
+      try {
+        assertUploadScope();
+      } catch (err) {
+        finish(reject, err);
+        return;
+      }
       let json = {};
       try {
         json = JSON.parse(xhr.responseText || "{}");
       } catch (err) {
         json = {};
       }
-      resolve({ status: xhr.status, ok: xhr.status >= 200 && xhr.status < 300, json });
+      finish(resolve, { status: xhr.status, ok: xhr.status >= 200 && xhr.status < 300, json });
     };
-    xhr.onerror = () => reject(new Error("上傳連線失敗"));
-    xhr.ontimeout = () => reject(new Error("上傳逾時"));
+    xhr.onerror = () => finish(reject, new Error("上傳連線失敗"));
+    xhr.ontimeout = () => finish(reject, new Error("上傳逾時"));
+    xhr.onabort = () => {
+      const error = new Error("上傳已取消");
+      error.name = "AbortError";
+      finish(reject, error);
+    };
+    videoActiveXhrs.add(xhr);
     xhr.send(form);
   });
   return (async () => {
+    assertUploadScope();
     const firstCsrf = typeof fetchCsrfToken === "function" ? await fetchCsrfToken() : "";
+    assertUploadScope();
     let result = await send(firstCsrf);
     if (result.status === 403 && result.json?.error === "csrf_invalid" && typeof fetchCsrfToken === "function") {
+      assertUploadScope();
       const refreshed = await fetchCsrfToken({ force: true });
+      assertUploadScope();
       result = await send(refreshed);
     }
     return result;
@@ -222,6 +323,14 @@ function videoUploadFormWithProgress(url, form, onProgress) {
 }
 
 function destroyCurrentVideoPlaybackArtifacts() {
+  if (typeof videoState.currentViewTrackingCleanup === "function") {
+    try { videoState.currentViewTrackingCleanup(); } catch (_) {}
+  }
+  videoState.currentViewTrackingCleanup = null;
+  if (typeof videoState.currentE2eeCleanup === "function") {
+    try { videoState.currentE2eeCleanup(); } catch (_) {}
+  }
+  videoState.currentE2eeCleanup = null;
   if (videoState.currentRealtimeSeekHandler && videoState.currentRealtimeSeekPlayer) {
     try {
       videoState.currentRealtimeSeekPlayer.removeEventListener("seeking", videoState.currentRealtimeSeekHandler);
@@ -659,7 +768,7 @@ function videoStreamDebugRequestBurden(snapshot = {}) {
         window.requestAnimationFrame(() => renderVideoStreamDebugPanel());
       }
     })
-    .catch(() => {})
+    .catch((err) => reportFrontendFailure("video-stream-debug-burden", err, { expected: true }))
     .finally(() => {
       videoState.streamDebugBurdenInflight = false;
     });
@@ -1118,7 +1227,7 @@ function loadVideoHlsLibrary() {
 
 function loadVideoShareFragments() {
   try {
-    return JSON.parse(sessionStorage.getItem(VIDEO_SHARE_FRAGMENT_STORAGE_KEY) || "{}") || {};
+    return JSON.parse(sessionStorage.getItem(videoShareFragmentStorageKey()) || "{}") || {};
   } catch (_) {
     return {};
   }
@@ -1126,10 +1235,29 @@ function loadVideoShareFragments() {
 
 function saveVideoShareFragments(data) {
   try {
-    sessionStorage.setItem(VIDEO_SHARE_FRAGMENT_STORAGE_KEY, JSON.stringify(data || {}));
+    sessionStorage.setItem(videoShareFragmentStorageKey(), JSON.stringify(data || {}));
   } catch (_) {
     // ignore session storage failure
   }
+}
+
+function videoShareFragmentStorageKey() {
+  return typeof accountScopedStorageKey === "function"
+    ? accountScopedStorageKey(VIDEO_SHARE_FRAGMENT_STORAGE_KEY)
+    : VIDEO_SHARE_FRAGMENT_STORAGE_KEY;
+}
+
+function clearVideoShareFragments() {
+  try {
+    const keys = [];
+    for (let index = 0; index < sessionStorage.length; index += 1) {
+      const key = sessionStorage.key(index) || "";
+      if (key === VIDEO_SHARE_FRAGMENT_STORAGE_KEY || key.endsWith(`:${VIDEO_SHARE_FRAGMENT_STORAGE_KEY}`)) {
+        keys.push(key);
+      }
+    }
+    keys.forEach((key) => sessionStorage.removeItem(key));
+  } catch (_) {}
 }
 
 function rememberVideoShareFragment(shareUrl, fragmentKey) {
@@ -1177,71 +1305,97 @@ function videoBase64ToBytes(value) {
   return out;
 }
 
-async function exportRawDriveFileKey(fileKey) {
+async function exportRawDriveFileKey(fileKey, operation = videoOperationContext()) {
+  videoAssertOperationCurrent(operation);
   const exported = await window.crypto.subtle.exportKey("raw", fileKey);
+  videoAssertOperationCurrent(operation);
   return new Uint8Array(exported);
 }
 
-async function decryptDriveE2eeBlobWithFileKey(blob, e2ee, fileKey) {
+async function decryptDriveE2eeBlobWithFileKey(blob, e2ee, fileKey, operation = videoOperationContext()) {
+  videoAssertOperationCurrent(operation);
+  const ciphertext = await blob.arrayBuffer();
+  videoAssertOperationCurrent(operation);
   const plaintext = await window.crypto.subtle.decrypt(
     { name: "AES-GCM", iv: videoBase64ToBytes(e2ee.nonce) },
     fileKey,
-    await blob.arrayBuffer()
+    ciphertext
   );
-  const metadata = await decryptDriveJsonMetadata(fileKey, e2ee.encrypted_metadata);
-  return {
-    blob: new Blob([plaintext], { type: metadata.mime_type || "application/octet-stream" }),
-    filename: metadata.filename || "download",
-    metadata,
-  };
+  try {
+    videoAssertOperationCurrent(operation);
+    const metadata = await decryptDriveJsonMetadata(fileKey, e2ee.encrypted_metadata);
+    videoAssertOperationCurrent(operation);
+    return {
+      blob: new Blob([plaintext], { type: metadata.mime_type || "application/octet-stream" }),
+      filename: metadata.filename || "download",
+      metadata,
+    };
+  } finally {
+    new Uint8Array(plaintext).fill(0);
+  }
 }
 
-async function buildVideoE2eeStreamV2Package(fileKey, decryptedBlob, metadata) {
+async function buildVideoE2eeStreamV2Package(fileKey, decryptedBlob, metadata, operation = videoOperationContext()) {
+  videoAssertOperationCurrent(operation);
   const contentType = String(metadata?.mime_type || decryptedBlob?.type || "application/octet-stream").toLowerCase();
   if (!contentType.startsWith("video/") && !contentType.startsWith("audio/")) {
     throw new Error("E2EE Streaming v2 只支援影片或音訊檔。");
   }
   const plaintext = new Uint8Array(await decryptedBlob.arrayBuffer());
-  const rawKey = await exportRawDriveFileKey(fileKey);
+  videoAssertOperationCurrent(operation);
+  const rawKey = await exportRawDriveFileKey(fileKey, operation);
   const chunks = [];
   const bundleParts = [];
-  let ciphertextOffset = 0;
-  for (let index = 0, plainOffset = 0; plainOffset < plaintext.byteLength; index += 1, plainOffset += VIDEO_E2EE_STREAM_V2_CHUNK_SIZE) {
-    const plainChunk = plaintext.slice(plainOffset, Math.min(plainOffset + VIDEO_E2EE_STREAM_V2_CHUNK_SIZE, plaintext.byteLength));
-    const nonce = new Uint8Array(12);
-    window.crypto.getRandomValues(nonce);
+  try {
     const chunkKey = await window.crypto.subtle.importKey("raw", rawKey, { name: "AES-GCM", length: 256 }, false, ["encrypt"]);
-    const ciphertext = await window.crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce }, chunkKey, plainChunk);
-    const cipherBytes = new Uint8Array(ciphertext);
-    const digest = await window.crypto.subtle.digest("SHA-256", cipherBytes);
-    bundleParts.push(cipherBytes);
-    chunks.push({
-      chunk_index: index,
-      nonce: videoShareBytesToBase64(nonce),
-      ciphertext_offset: ciphertextOffset,
-      ciphertext_size: cipherBytes.byteLength,
-      plaintext_offset: plainOffset,
-      plaintext_size: plainChunk.byteLength,
-      ciphertext_sha256: Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, "0")).join(""),
-    });
-    ciphertextOffset += cipherBytes.byteLength;
+    videoAssertOperationCurrent(operation);
+    let ciphertextOffset = 0;
+    for (let index = 0, plainOffset = 0; plainOffset < plaintext.byteLength; index += 1, plainOffset += VIDEO_E2EE_STREAM_V2_CHUNK_SIZE) {
+      videoAssertOperationCurrent(operation);
+      const plainChunk = plaintext.slice(plainOffset, Math.min(plainOffset + VIDEO_E2EE_STREAM_V2_CHUNK_SIZE, plaintext.byteLength));
+      try {
+        const nonce = new Uint8Array(12);
+        window.crypto.getRandomValues(nonce);
+        const ciphertext = await window.crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce }, chunkKey, plainChunk);
+        videoAssertOperationCurrent(operation);
+        const cipherBytes = new Uint8Array(ciphertext);
+        const digest = await window.crypto.subtle.digest("SHA-256", cipherBytes);
+        videoAssertOperationCurrent(operation);
+        bundleParts.push(cipherBytes);
+        chunks.push({
+          chunk_index: index,
+          nonce: videoShareBytesToBase64(nonce),
+          ciphertext_offset: ciphertextOffset,
+          ciphertext_size: cipherBytes.byteLength,
+          plaintext_offset: plainOffset,
+          plaintext_size: plainChunk.byteLength,
+          ciphertext_sha256: Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, "0")).join(""),
+        });
+        ciphertextOffset += cipherBytes.byteLength;
+      } finally {
+        plainChunk.fill(0);
+      }
+    }
+    const bundleBlob = new Blob(bundleParts, { type: "application/octet-stream" });
+    return {
+      manifest_json: JSON.stringify({
+        e2ee_stream_version: 2,
+        algorithm: "AES-GCM",
+        chunk_size: VIDEO_E2EE_STREAM_V2_CHUNK_SIZE,
+        chunk_count: chunks.length,
+        content_type: contentType,
+        duration_hint: 0,
+        byte_range_hint: { total_plaintext_bytes: plaintext.byteLength },
+        created_at: new Date().toISOString(),
+        chunks,
+      }),
+      bundle_blob: bundleBlob,
+    };
+  } finally {
+    plaintext.fill(0);
+    rawKey.fill(0);
+    bundleParts.forEach((part) => part.fill(0));
   }
-  return {
-    manifest_json: JSON.stringify({
-      e2ee_stream_version: 2,
-      algorithm: "AES-GCM",
-      chunk_size: VIDEO_E2EE_STREAM_V2_CHUNK_SIZE,
-      chunk_count: chunks.length,
-      content_type: contentType,
-      duration_hint: 0,
-      byte_range_hint: {
-        total_plaintext_bytes: plaintext.byteLength,
-      },
-      created_at: new Date().toISOString(),
-      chunks,
-    }),
-    bundle_blob: new Blob(bundleParts, { type: "application/octet-stream" }),
-  };
 }
 
 function videoE2eeDerivativeSupported() {
@@ -1265,15 +1419,31 @@ function videoHexDigest(bytes) {
   return Array.from(new Uint8Array(bytes)).map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-function loadVideoMetadataFromBlob(blob) {
+function loadVideoMetadataFromBlob(blob, operation = videoOperationContext()) {
+  videoAssertOperationCurrent(operation);
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(blob);
     const video = document.createElement("video");
     video.preload = "metadata";
     video.muted = true;
     video.playsInline = true;
+    let done = false;
     const cleanup = () => URL.revokeObjectURL(url);
+    const cancelForAccountChange = () => {
+      if (done) return;
+      done = true;
+      video.src = "";
+      cleanup();
+      videoPendingAccountCancels.delete(cancelForAccountChange);
+      reject(videoAccountAbortError());
+    };
     video.onloadedmetadata = () => {
+      if (!videoOperationIsCurrent(operation)) {
+        cancelForAccountChange();
+        return;
+      }
+      done = true;
+      videoPendingAccountCancels.delete(cancelForAccountChange);
       resolve({
         video,
         url,
@@ -1284,17 +1454,23 @@ function loadVideoMetadataFromBlob(blob) {
       });
     };
     video.onerror = () => {
+      if (done) return;
+      done = true;
+      videoPendingAccountCancels.delete(cancelForAccountChange);
       cleanup();
       reject(new Error("瀏覽器無法讀取 E2EE 影音中繼資料，無法產生省流量版本。"));
     };
+    videoPendingAccountCancels.add(cancelForAccountChange);
     video.src = url;
   });
 }
 
-async function transcodeVideoBlobToHeight(sourceBlob, targetHeight) {
+async function transcodeVideoBlobToHeight(sourceBlob, targetHeight, operation = videoOperationContext()) {
+  videoAssertOperationCurrent(operation);
   const mimeType = videoE2eeRecorderMimeType();
   if (!mimeType) throw new Error("目前瀏覽器不支援本機 E2EE 影音轉檔。");
-  const meta = await loadVideoMetadataFromBlob(sourceBlob);
+  const meta = await loadVideoMetadataFromBlob(sourceBlob, operation);
+  videoAssertOperationCurrent(operation);
   const sourceWidth = Math.max(1, meta.width || 1);
   const sourceHeight = Math.max(1, meta.height || 1);
   if (!sourceHeight || sourceHeight <= targetHeight) {
@@ -1323,21 +1499,36 @@ async function transcodeVideoBlobToHeight(sourceBlob, targetHeight) {
     recorder.onstop = () => resolve();
   });
   const draw = () => {
-    if (meta.video.ended || meta.video.paused) return;
+    if (!videoOperationIsCurrent(operation) || meta.video.ended || meta.video.paused) return;
     ctx.drawImage(meta.video, 0, 0, targetWidth, targetHeight);
     requestAnimationFrame(draw);
   };
+  let rejectAccountChange = null;
+  const accountChanged = new Promise((_, reject) => { rejectAccountChange = reject; });
+  const cancelForAccountChange = () => {
+    try { meta.video.pause(); } catch (_) {}
+    try {
+      if (recorder.state !== "inactive") recorder.stop();
+    } catch (_) {}
+    rejectAccountChange?.(videoAccountAbortError());
+  };
+  videoPendingAccountCancels.add(cancelForAccountChange);
   try {
     meta.video.currentTime = 0;
     recorder.start(1000);
     await meta.video.play();
+    videoAssertOperationCurrent(operation);
     draw();
-    await new Promise((resolve) => {
-      meta.video.onended = resolve;
-    });
+    await Promise.race([
+      new Promise((resolve) => { meta.video.onended = resolve; }),
+      accountChanged,
+    ]);
+    videoAssertOperationCurrent(operation);
     if (recorder.state !== "inactive") recorder.stop();
     await done;
+    videoAssertOperationCurrent(operation);
   } finally {
+    videoPendingAccountCancels.delete(cancelForAccountChange);
     stream.getTracks().forEach((track) => track.stop());
     (originalStream?.getTracks?.() || []).forEach((track) => track.stop());
     meta.cleanup();
@@ -1355,7 +1546,8 @@ function allowedVideoE2eeTargetHeights(metadata = {}) {
   return VIDEO_E2EE_DERIVATIVE_TARGET_HEIGHTS.filter((height) => !sourceHeight || sourceHeight > height);
 }
 
-async function buildVideoE2eeDerivativePackages(fileKey, decryptedBlob, metadata, originalCiphertextDigest = "", jobId = "") {
+async function buildVideoE2eeDerivativePackages(fileKey, decryptedBlob, metadata, originalCiphertextDigest = "", jobId = "", operation = videoOperationContext()) {
+  videoAssertOperationCurrent(operation);
   const contentType = String(metadata?.mime_type || decryptedBlob?.type || "").toLowerCase();
   if (!contentType.startsWith("video/")) return [];
   if (!videoE2eeDerivativeSupported()) {
@@ -1367,6 +1559,7 @@ async function buildVideoE2eeDerivativePackages(fileKey, decryptedBlob, metadata
   const packages = [];
   const heights = allowedVideoE2eeTargetHeights(metadata);
   for (const height of heights) {
+    videoAssertOperationCurrent(operation);
     setVideoUploadProgress({
       visible: true,
       percent: 0,
@@ -1386,7 +1579,8 @@ async function buildVideoE2eeDerivativePackages(fileKey, decryptedBlob, metadata
       rememberVideoE2eeLocalTask({ job_id: jobId, stage: "local_transcode", stage_detail: stageDetail });
     }
     try {
-      const derivative = await transcodeVideoBlobToHeight(decryptedBlob, height);
+      const derivative = await transcodeVideoBlobToHeight(decryptedBlob, height, operation);
+      videoAssertOperationCurrent(operation);
       if (!derivative || !derivative.blob || derivative.blob.size <= 0) continue;
       if (sourceSize > 0 && derivative.blob.size >= sourceSize) {
         videoMsg(`E2EE ${height}p 產物比原檔大，已依政策跳過並隱藏該畫質。`, false);
@@ -1394,7 +1588,8 @@ async function buildVideoE2eeDerivativePackages(fileKey, decryptedBlob, metadata
       }
       const streamV2 = await buildVideoE2eeStreamV2Package(fileKey, derivative.blob, {
         mime_type: derivative.blob.type || "video/webm",
-      });
+      }, operation);
+      videoAssertOperationCurrent(operation);
       if (jobId) {
         const stageDetail = `E2EE ${height}p 已本機加密，等待上傳 encrypted derivative。`;
         updateVideoUploadLiveJob(jobId, {
@@ -1416,20 +1611,26 @@ async function buildVideoE2eeDerivativePackages(fileKey, decryptedBlob, metadata
         stream_v2_bundle_blob: streamV2.bundle_blob,
       });
     } catch (err) {
+      if (!videoOperationIsCurrent(operation) || err?.name === "AbortError") throw err;
       videoMsg(err.message || `E2EE ${height}p 省流量版本產生失敗`, false);
     }
   }
   return packages;
 }
 
-async function prepareVideoE2eeShareArtifacts(fileId) {
+async function prepareVideoE2eeShareArtifacts(fileId, operation = videoOperationContext()) {
+  videoAssertOperationCurrent(operation);
   if (!window.crypto?.subtle || typeof fetchDriveE2eeKey !== "function" || typeof unwrapDriveFileKey !== "function") {
     throw new Error("目前瀏覽器無法建立 E2EE 分享串流授權。");
   }
   if (!getCsrfToken()) {
     await fetchCsrfToken();
+    videoAssertOperationCurrent(operation);
   }
   const localJobId = videoUploadLiveJobId();
+  const localTaskStorageKey = videoE2eeLocalTaskStorageKey();
+  let rawFileKey = null;
+  let shareKeyBytes = null;
   activeVideoE2eeLocalTasks += 1;
   updateVideoUploadLiveJob(localJobId, {
     source_module: "video_e2ee_client",
@@ -1444,15 +1645,17 @@ async function prepareVideoE2eeShareArtifacts(fileId) {
     live_status_source: "E2EE local",
     metadata: { file_id: fileId },
   });
-  rememberVideoE2eeLocalTask({ job_id: localJobId, file_id: fileId, stage: "waiting_password", stage_detail: "等待 E2EE 原始密碼。" });
+  rememberVideoE2eeLocalTask({ job_id: localJobId, file_id: fileId, stage: "waiting_password", stage_detail: "等待 E2EE 原始密碼。" }, localTaskStorageKey);
   const csrf = getCsrfToken() || "";
   try {
     const e2ee = await fetchDriveE2eeKey(fileId, csrf);
+    videoAssertOperationCurrent(operation);
     const passphrase = await getDriveE2eeSessionPassphrase(
       fileId,
       "請輸入此 E2EE 影音原始加密密碼。密碼只會在瀏覽器端使用，用來建立分享授權與 Streaming v2 分段。",
       { allowPrompt: true }
     );
+    videoAssertOperationCurrent(operation);
     if (!passphrase) {
       throw new Error("E2EE 影音分享需要先輸入原始加密密碼。");
     }
@@ -1462,28 +1665,48 @@ async function prepareVideoE2eeShareArtifacts(fileId) {
       stage: "local_decrypt",
       stage_detail: "正在瀏覽器端解密原片以建立 encrypted stream；伺服器不會取得明文。",
     });
-    rememberVideoE2eeLocalTask({ job_id: localJobId, file_id: fileId, stage: "local_decrypt", stage_detail: "瀏覽器端解密原片。" });
+    rememberVideoE2eeLocalTask({ job_id: localJobId, file_id: fileId, stage: "local_decrypt", stage_detail: "瀏覽器端解密原片。" }, localTaskStorageKey);
     const fileKey = await unwrapDriveFileKey(e2ee.encrypted_file_key, passphrase);
+    videoAssertOperationCurrent(operation);
     rememberDriveE2eeSessionPassphrase(fileId, passphrase);
-    const rawFileKey = await window.crypto.subtle.exportKey("raw", fileKey);
-    const shareKeyBytes = new Uint8Array(32);
+    rawFileKey = await window.crypto.subtle.exportKey("raw", fileKey);
+    videoAssertOperationCurrent(operation);
+    shareKeyBytes = new Uint8Array(32);
     window.crypto.getRandomValues(shareKeyBytes);
     const shareKey = await window.crypto.subtle.importKey("raw", shareKeyBytes, { name: "AES-GCM", length: 256 }, false, ["encrypt"]);
+    videoAssertOperationCurrent(operation);
     const nonce = new Uint8Array(12);
     window.crypto.getRandomValues(nonce);
     const ciphertext = await window.crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce }, shareKey, rawFileKey);
+    videoAssertOperationCurrent(operation);
     const cipherBlob = await fetchDriveE2eeCiphertext(fileId, csrf);
-    const originalCiphertextDigest = String(e2ee?.ciphertext_sha256 || "").trim()
-      || videoHexDigest(await window.crypto.subtle.digest("SHA-256", await cipherBlob.arrayBuffer()));
-    const decrypted = await decryptDriveE2eeBlobWithFileKey(cipherBlob, e2ee, fileKey);
+    videoAssertOperationCurrent(operation);
+    let originalCiphertextDigest = String(e2ee?.ciphertext_sha256 || "").trim();
+    if (!originalCiphertextDigest) {
+      const cipherBytes = await cipherBlob.arrayBuffer();
+      videoAssertOperationCurrent(operation);
+      originalCiphertextDigest = videoHexDigest(await window.crypto.subtle.digest("SHA-256", cipherBytes));
+      videoAssertOperationCurrent(operation);
+    }
+    const decrypted = await decryptDriveE2eeBlobWithFileKey(cipherBlob, e2ee, fileKey, operation);
+    videoAssertOperationCurrent(operation);
     updateVideoUploadLiveJob(localJobId, {
       status: "running",
       progress_percent: 12,
       stage: "stream_v2_encrypt",
       stage_detail: "正在瀏覽器端建立原畫質 encrypted Streaming v2 bundle。",
     });
-    const streamV2 = await buildVideoE2eeStreamV2Package(fileKey, decrypted.blob, decrypted.metadata);
-    const derivativePackages = await buildVideoE2eeDerivativePackages(fileKey, decrypted.blob, decrypted.metadata, originalCiphertextDigest, localJobId);
+    const streamV2 = await buildVideoE2eeStreamV2Package(fileKey, decrypted.blob, decrypted.metadata, operation);
+    videoAssertOperationCurrent(operation);
+    const derivativePackages = await buildVideoE2eeDerivativePackages(
+      fileKey,
+      decrypted.blob,
+      decrypted.metadata,
+      originalCiphertextDigest,
+      localJobId,
+      operation,
+    );
+    videoAssertOperationCurrent(operation);
     updateVideoUploadLiveJob(localJobId, {
       status: "running",
       progress_percent: 84,
@@ -1491,7 +1714,7 @@ async function prepareVideoE2eeShareArtifacts(fileId) {
       stage_detail: "E2EE 本機加密完成，等待上傳 encrypted bundles。",
       metadata: { file_id: fileId, derivative_count: derivativePackages.length },
     });
-    rememberVideoE2eeLocalTask({ job_id: localJobId, file_id: fileId, stage: "ready_to_upload", stage_detail: "等待上傳 encrypted bundles。" });
+    rememberVideoE2eeLocalTask({ job_id: localJobId, file_id: fileId, stage: "ready_to_upload", stage_detail: "等待上傳 encrypted bundles。" }, localTaskStorageKey);
     return {
       share_wrapped_file_key_envelope: JSON.stringify({
         alg: "AES-GCM",
@@ -1506,19 +1729,23 @@ async function prepareVideoE2eeShareArtifacts(fileId) {
       local_job_id: localJobId,
     };
   } catch (err) {
-    updateVideoUploadLiveJob(localJobId, {
+    if (videoOperationIsCurrent(operation)) updateVideoUploadLiveJob(localJobId, {
       status: "failed",
       progress_percent: 100,
       stage: "failed",
       stage_detail: err?.message || "E2EE 本機轉檔 / 加密失敗",
       error_message: err?.message || "E2EE 本機轉檔 / 加密失敗",
     });
-    clearVideoE2eeLocalTask(localJobId);
+    clearVideoE2eeLocalTask(localJobId, localTaskStorageKey);
     throw err;
+  } finally {
+    if (rawFileKey) new Uint8Array(rawFileKey).fill(0);
+    if (shareKeyBytes) shareKeyBytes.fill(0);
   }
 }
 
-async function uploadVideoE2eeStreamV2Package(fileId, artifacts) {
+async function uploadVideoE2eeStreamV2Package(fileId, artifacts, operation = videoOperationContext()) {
+  videoAssertOperationCurrent(operation);
   if (!artifacts?.stream_v2_manifest_json || !artifacts?.stream_v2_bundle_blob) return null;
   const form = new FormData();
   form.append("manifest_json", artifacts.stream_v2_manifest_json);
@@ -1551,6 +1778,7 @@ async function uploadVideoE2eeStreamV2Package(fileId, artifacts) {
       setVideoUploadProgress({ visible: true, percent: 0, loaded: event.loaded || 0, total: 0, status: "E2EE Streaming v2 密文分段上傳中", indeterminate: true });
     }
   });
+  videoAssertOperationCurrent(operation);
   const json = upload.json || {};
   if (!upload.ok || !json.ok) throw new Error(json.msg || `HTTP ${upload.status}`);
   setVideoUploadProgress({
@@ -1571,10 +1799,12 @@ async function uploadVideoE2eeStreamV2Package(fileId, artifacts) {
   return json.asset || null;
 }
 
-async function uploadVideoE2eeDerivativePackages(fileId, artifacts) {
+async function uploadVideoE2eeDerivativePackages(fileId, artifacts, operation = videoOperationContext()) {
+  videoAssertOperationCurrent(operation);
   const packages = Array.isArray(artifacts?.derivative_packages) ? artifacts.derivative_packages : [];
   const uploaded = [];
   for (const item of packages) {
+    videoAssertOperationCurrent(operation);
     if (!item?.name || !item?.stream_v2_manifest_json || !item?.stream_v2_bundle_blob) continue;
     const form = new FormData();
     form.append("manifest_json", item.stream_v2_manifest_json);
@@ -1611,10 +1841,12 @@ async function uploadVideoE2eeDerivativePackages(fileId, artifacts) {
           });
         }
       });
+      videoAssertOperationCurrent(operation);
       const json = upload.json || {};
       if (!upload.ok || !json.ok) throw new Error(json.msg || `HTTP ${upload.status}`);
       uploaded.push(json.variant);
     } catch (err) {
+      if (!videoOperationIsCurrent(operation) || err?.name === "AbortError") throw err;
       videoMsg(`E2EE ${item.label || item.name} 省流量版本未建立：${err.message || "請稍後重試"}`, false);
     }
   }
@@ -1632,15 +1864,17 @@ async function uploadVideoE2eeDerivativePackages(fileId, artifacts) {
   return uploaded;
 }
 
-async function buildVideoE2eeShareEnvelope(fileId) {
-  const artifacts = await prepareVideoE2eeShareArtifacts(fileId);
+async function buildVideoE2eeShareEnvelope(fileId, operation = videoOperationContext()) {
+  videoAssertOperationCurrent(operation);
+  const artifacts = await prepareVideoE2eeShareArtifacts(fileId, operation);
+  videoAssertOperationCurrent(operation);
   try {
     return {
       share_wrapped_file_key_envelope: artifacts.share_wrapped_file_key_envelope,
       share_fragment_key: artifacts.share_fragment_key,
     };
   } finally {
-    if (artifacts.local_job_id) {
+    if (artifacts.local_job_id && videoOperationIsCurrent(operation)) {
       updateVideoUploadLiveJob(artifacts.local_job_id, {
         status: "succeeded",
         progress_percent: 100,
@@ -1913,6 +2147,7 @@ function showVideoWatchView() {
 }
 
 function setVideoPublishPanelVisible(visible, options = {}) {
+  const operation = videoOperationContext();
   const panel = $("video-publish-panel");
   const toggle = $("video-publish-open-btn");
   const show = !!visible;
@@ -1929,7 +2164,9 @@ function setVideoPublishPanelVisible(visible, options = {}) {
   }
   if (show && options.focus !== false) {
     setTimeout(() => {
-      ($("video-upload-file") || $("video-publish-file") || $("video-publish-title"))?.focus?.();
+      if (videoOperationIsCurrent(operation)) {
+        ($("video-upload-file") || $("video-publish-file") || $("video-publish-title"))?.focus?.();
+      }
     }, 80);
   }
 }
@@ -1940,6 +2177,7 @@ function toggleVideoPublishPanel() {
 }
 
 async function loadVideoPublishFiles() {
+  const operation = videoOperationContext();
   const select = $("video-publish-file");
   if (!select) return;
   select.innerHTML = `<option value="">讀取影音檔...</option>`;
@@ -1948,6 +2186,7 @@ async function loadVideoPublishFiles() {
   try {
     const res = await apiFetch(API + "/cloud-drive/files", { credentials: "same-origin" });
     const json = await res.json().catch(() => ({}));
+    videoAssertOperationCurrent(operation);
     if (!res.ok || !json.ok) throw new Error(json.msg || `HTTP ${res.status}`);
     const files = (json.files || []).filter(isCloudMediaFile);
     videoPublishDriveFiles = files;
@@ -1960,6 +2199,7 @@ async function loadVideoPublishFiles() {
       if (applied) setVideoPublishPanelVisible(true, { focus: false });
     }
   } catch (err) {
+    if (!videoOperationIsCurrent(operation) || err?.name === "AbortError") return;
     videoPublishDriveFiles = [];
     select.innerHTML = `<option value="">影音檔讀取失敗</option>`;
     if (gallery) gallery.innerHTML = `<div class="drive-empty video-cloud-empty">影音檔讀取失敗</div>`;
@@ -1968,6 +2208,7 @@ async function loadVideoPublishFiles() {
 }
 
 async function openVideoPublishFromDrive(fileId, options = {}) {
+  const operation = videoOperationContext();
   const target = String(fileId || "").trim();
   if (!target) return false;
   videoPendingPublishSelection = {
@@ -1985,6 +2226,7 @@ async function openVideoPublishFromDrive(fileId, options = {}) {
   setVideoPublishPanelVisible(true, { focus: false });
   videoMsg("已帶入雲端硬碟影音，正在載入發布設定...", true);
   await loadVideoPublishFiles();
+  if (!videoOperationIsCurrent(operation)) return false;
   const applied = applyVideoPublishDriveSelection(target, options.title || "");
   if (!applied) {
     videoMsg("這個檔案不是可發布的影音檔，或目前帳號沒有檔案權限。", false);
@@ -1993,15 +2235,21 @@ async function openVideoPublishFromDrive(fileId, options = {}) {
   $("video-publish-panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
   const titleInput = $("video-publish-title");
   const visibilityInput = $("video-publish-visibility");
-  setTimeout(() => (titleInput || visibilityInput)?.focus?.(), 150);
   setTimeout(() => {
-    if (videoPendingPublishSelection?.fileId === target) videoPendingPublishSelection = null;
+    if (videoOperationIsCurrent(operation)) (titleInput || visibilityInput)?.focus?.();
+  }, 150);
+  setTimeout(() => {
+    if (videoOperationIsCurrent(operation) && videoPendingPublishSelection?.fileId === target) {
+      videoPendingPublishSelection = null;
+    }
   }, 8000);
   videoMsg("已選擇雲端硬碟影音，請完成標題、可見性、分享與封面設定後發布。", true);
   return true;
 }
 
 async function publishVideoFromDrive() {
+  const operation = videoOperationContext();
+  videoAssertOperationCurrent(operation);
   syncVideoPublishStreamingModeForPrivacy();
   const button = $("video-publish-btn");
   const directFile = $("video-upload-file")?.files?.[0] || null;
@@ -2035,9 +2283,11 @@ async function publishVideoFromDrive() {
   const publishNavigationGeneration = videoState.navigationGeneration;
   if (!directFile && selectedFile?.privacy_mode === "e2ee" && payload.visibility === "unlisted") {
     try {
-      e2eeShare = await prepareVideoE2eeShareArtifacts(selectedFile.id);
+      e2eeShare = await prepareVideoE2eeShareArtifacts(selectedFile.id, operation);
+      videoAssertOperationCurrent(operation);
       payload.share_wrapped_file_key_envelope = e2eeShare.share_wrapped_file_key_envelope;
     } catch (err) {
+      if (!videoOperationIsCurrent(operation) || err?.name === "AbortError") return;
       return videoMsg(err.message || "E2EE 影音分享授權建立失敗", false);
     }
   }
@@ -2101,6 +2351,7 @@ async function publishVideoFromDrive() {
           });
         }
       });
+      videoAssertOperationCurrent(operation);
       status = upload.status;
       json = upload.json || {};
     } else if (coverFile) {
@@ -2133,6 +2384,7 @@ async function publishVideoFromDrive() {
           setVideoUploadProgress({ visible: true, percent: 0, loaded: event.loaded || 0, total: 0, status: "封面上傳中", indeterminate: true });
         }
       });
+      videoAssertOperationCurrent(operation);
       status = upload.status;
       json = upload.json || {};
     } else {
@@ -2144,6 +2396,7 @@ async function publishVideoFromDrive() {
       });
       status = res.status;
       json = await res.json().catch(() => ({}));
+      videoAssertOperationCurrent(operation);
     }
     if (status < 200 || status >= 300 || !json.ok) throw new Error(json.msg || `HTTP ${status}`);
     publishedVideoId = Number(json.video?.id || 0);
@@ -2160,13 +2413,17 @@ async function publishVideoFromDrive() {
     else if (shareExpiresAt) shareExpiresAt.value = "";
     videoPendingPublishSelection = null;
     if (e2eeShare && json.video?.share_url) {
+      videoAssertOperationCurrent(operation);
       rememberVideoShareFragment(json.video.share_url, e2eeShare.share_fragment_key);
     }
     if (e2eeShare && selectedFile?.id) {
       try {
-        await uploadVideoE2eeStreamV2Package(selectedFile.id, e2eeShare);
-        await uploadVideoE2eeDerivativePackages(selectedFile.id, e2eeShare);
+        await uploadVideoE2eeStreamV2Package(selectedFile.id, e2eeShare, operation);
+        videoAssertOperationCurrent(operation);
+        await uploadVideoE2eeDerivativePackages(selectedFile.id, e2eeShare, operation);
+        videoAssertOperationCurrent(operation);
       } catch (err) {
+        if (!videoOperationIsCurrent(operation) || err?.name === "AbortError") throw err;
         if (e2eeShare.local_job_id) {
           updateVideoUploadLiveJob(e2eeShare.local_job_id, {
             status: "failed",
@@ -2188,9 +2445,12 @@ async function publishVideoFromDrive() {
     }
     setVideoPublishPanelVisible(false, { focus: false });
     await loadVideoPublishFiles();
-    await loadVideos(videoState.sort);
+    videoAssertOperationCurrent(operation);
+    await loadVideos(videoState.sort, { operation });
+    videoAssertOperationCurrent(operation);
     if (publishedVideoId && videoState.navigationGeneration === publishNavigationGeneration) {
       await openVideoDetail(publishedVideoId);
+      videoAssertOperationCurrent(operation);
     }
     if (directFile || coverFile) {
       const completedBytes = directFile?.size || coverFile?.size || 0;
@@ -2215,6 +2475,7 @@ async function publishVideoFromDrive() {
       videoMsg("影音已發布", true);
     }
   } catch (err) {
+    if (!videoOperationIsCurrent(operation) || err?.name === "AbortError") return;
     if (e2eeShare?.local_job_id) {
       updateVideoUploadLiveJob(e2eeShare.local_job_id, {
         status: "failed",
@@ -2252,7 +2513,7 @@ async function publishVideoFromDrive() {
     }
     if (!publishedVideoId) videoMsg(err.message || "影音發布失敗", false);
   } finally {
-    if (button) button.disabled = false;
+    if (button && videoOperationIsCurrent(operation)) button.disabled = false;
   }
 }
 
@@ -2280,6 +2541,8 @@ function renderVideoList() {
 }
 
 async function loadVideos(sort = "new", options = {}) {
+  const operation = options.operation || videoOperationContext();
+  videoAssertOperationCurrent(operation);
   videoState.sort = sort;
   if (Object.prototype.hasOwnProperty.call(options, "query")) {
     videoState.searchQuery = normalizeVideoSearchQuery(options.query);
@@ -2293,10 +2556,12 @@ async function loadVideos(sort = "new", options = {}) {
     if (videoState.searchQuery) params.set("q", videoState.searchQuery);
     const res = await apiFetch(API + `/videos?${params.toString()}`, { credentials: "same-origin" });
     const json = await res.json().catch(() => ({}));
+    videoAssertOperationCurrent(operation);
     if (!res.ok || !json.ok) throw new Error(json.msg || `HTTP ${res.status}`);
     videoState.videos = Array.isArray(json.videos) ? json.videos : [];
     renderVideoList();
   } catch (err) {
+    if (!videoOperationIsCurrent(operation) || err?.name === "AbortError") return;
     if (list) list.innerHTML = `<div class="drive-empty">${sanitize(err.message || "影音列表載入失敗")}</div>`;
   }
 }
@@ -2553,6 +2818,7 @@ function renderVideoStreamingModeSettings(video, playback = {}) {
 }
 
 async function updateVideoStreamingModes(videoId) {
+  const operation = videoOperationContext();
   const id = Number(videoId || videoState.current?.id || 0);
   if (!id) return;
   const modes = Array.from(document.querySelectorAll('input[name="video-streaming-mode-choice"]:checked'))
@@ -2572,6 +2838,7 @@ async function updateVideoStreamingModes(videoId) {
       body: JSON.stringify({ streaming_modes: modes }),
     });
     const json = await res.json().catch(() => ({}));
+    videoAssertOperationCurrent(operation);
     if (!res.ok || !json.ok) throw new Error(json.msg || `HTTP ${res.status}`);
     const currentMode = videoSelectedServiceMode(videoState.current || { id }, json.playback || {});
     if (!modes.includes(currentMode)) {
@@ -2580,9 +2847,10 @@ async function updateVideoStreamingModes(videoId) {
     videoMsg(json.stream_queued ? "串流方式已更新，HLS 已排程處理。" : "串流方式已更新。", true);
     await openVideoDetail(id);
   } catch (err) {
+    if (!videoOperationIsCurrent(operation) || err?.name === "AbortError") return;
     videoMsg(err.message || "串流方式更新失敗", false);
   } finally {
-    if (button) button.disabled = false;
+    if (button && videoOperationIsCurrent(operation)) button.disabled = false;
   }
 }
 
@@ -2665,6 +2933,7 @@ function humanVideoStreamStatus(playback) {
 }
 
 async function prepareVideoStream(fileId, videoId) {
+  const operation = videoOperationContext();
   if (!fileId) return videoMsg("找不到對應影音檔案", false);
   const button = document.querySelector(`[data-video-prepare-stream="${String(fileId)}"]`);
   if (button) button.disabled = true;
@@ -2674,17 +2943,20 @@ async function prepareVideoStream(fileId, videoId) {
       credentials: "same-origin",
     });
     const json = await res.json().catch(() => ({}));
+    videoAssertOperationCurrent(operation);
     if (!res.ok || !json.ok) throw new Error(json.msg || `HTTP ${res.status}`);
     videoMsg(json.msg || "HLS 串流已排入背景處理；你可以先做別的事，進度會顯示在任務中心，完成後會通知上傳者。", true);
     await openVideoDetail(videoId);
   } catch (err) {
+    if (!videoOperationIsCurrent(operation) || err?.name === "AbortError") return;
     videoMsg(err.message || "HLS 串流準備失敗", false);
   } finally {
-    if (button) button.disabled = false;
+    if (button && videoOperationIsCurrent(operation)) button.disabled = false;
   }
 }
 
-async function updateVideoShareLink(video, options = {}) {
+async function updateVideoShareLink(video, options = {}, operation = videoOperationContext()) {
+  videoAssertOperationCurrent(operation);
   const payload = {};
   if (Object.prototype.hasOwnProperty.call(options, "share_password")) payload.share_password = options.share_password;
   if (Object.prototype.hasOwnProperty.call(options, "share_wrapped_file_key_envelope")) payload.share_wrapped_file_key_envelope = options.share_wrapped_file_key_envelope;
@@ -2698,6 +2970,7 @@ async function updateVideoShareLink(video, options = {}) {
     body: JSON.stringify(payload),
   });
   const json = await res.json().catch(() => ({}));
+  videoAssertOperationCurrent(operation);
   if (!res.ok || !json.ok) throw new Error(json.msg || `HTTP ${res.status}`);
   return json;
 }
@@ -2732,6 +3005,7 @@ function videoNeedsE2eeShareEnvelope(video, options = {}) {
 }
 
 async function saveVideoShareSettings(video, { clearPassword = false, regenerate = false } = {}) {
+  const operation = videoOperationContext();
   if (!video?.id || video?.visibility !== "unlisted") return;
   const passwordInput = $("video-share-password-manage");
   const expiresInput = $("video-share-expires-at-manage");
@@ -2752,23 +3026,29 @@ async function saveVideoShareSettings(video, { clearPassword = false, regenerate
   let e2eeShare = null;
   if (videoNeedsE2eeShareEnvelope(video, { regenerate })) {
     try {
-      e2eeShare = await prepareVideoE2eeShareArtifacts(video.cloud_file_id);
+      e2eeShare = await prepareVideoE2eeShareArtifacts(video.cloud_file_id, operation);
+      videoAssertOperationCurrent(operation);
       payload.share_wrapped_file_key_envelope = e2eeShare.share_wrapped_file_key_envelope;
     } catch (err) {
+      if (!videoOperationIsCurrent(operation) || err?.name === "AbortError") return;
       return videoMsg(err.message || "E2EE 分享授權建立失敗", false);
     }
   }
   if (regenerate) payload.regenerate = true;
   if (button) button.disabled = true;
   try {
-    const json = await updateVideoShareLink(video, payload);
+    const json = await updateVideoShareLink(video, payload, operation);
+    videoAssertOperationCurrent(operation);
     if (video.share_url) forgetRememberedVideoShareFragment(video.share_url);
     if (e2eeShare && json.share_link?.url) {
       rememberVideoShareFragment(json.share_link.url, e2eeShare.share_fragment_key);
       try {
-        await uploadVideoE2eeStreamV2Package(video.cloud_file_id, e2eeShare);
-        await uploadVideoE2eeDerivativePackages(video.cloud_file_id, e2eeShare);
+        await uploadVideoE2eeStreamV2Package(video.cloud_file_id, e2eeShare, operation);
+        videoAssertOperationCurrent(operation);
+        await uploadVideoE2eeDerivativePackages(video.cloud_file_id, e2eeShare, operation);
+        videoAssertOperationCurrent(operation);
       } catch (err) {
+        if (!videoOperationIsCurrent(operation) || err?.name === "AbortError") throw err;
         if (e2eeShare.local_job_id) {
           updateVideoUploadLiveJob(e2eeShare.local_job_id, {
             status: "failed",
@@ -2784,12 +3064,15 @@ async function saveVideoShareSettings(video, { clearPassword = false, regenerate
     }
     if (passwordInput) passwordInput.value = "";
     videoMsg(regenerate ? "分享連結與設定已更新。" : "分享設定已儲存。", true);
-    await loadVideos(videoState.sort);
+    await loadVideos(videoState.sort, { operation });
+    videoAssertOperationCurrent(operation);
     await openVideoDetail(video.id);
+    videoAssertOperationCurrent(operation);
   } catch (err) {
+    if (!videoOperationIsCurrent(operation) || err?.name === "AbortError") return;
     videoMsg(err.message || "分享設定更新失敗", false);
   } finally {
-    if (button) button.disabled = false;
+    if (button && videoOperationIsCurrent(operation)) button.disabled = false;
   }
 }
 
@@ -2799,6 +3082,7 @@ async function regenerateVideoShareLink(video) {
 }
 
 async function revokeVideoShareLink(video) {
+  const operation = videoOperationContext();
   if (!video?.id || !video?.share_url) return;
   try {
     const res = await apiFetch(`/api/videos/${encodeURIComponent(video.id)}/share-link`, {
@@ -2806,28 +3090,35 @@ async function revokeVideoShareLink(video) {
       credentials: "same-origin",
     });
     const json = await res.json().catch(() => ({}));
+    videoAssertOperationCurrent(operation);
     if (!res.ok || !json.ok) throw new Error(json.msg || `HTTP ${res.status}`);
     forgetRememberedVideoShareFragment(video.share_url);
     videoMsg("分享連結已撤銷。", true);
-    await loadVideos(videoState.sort);
+    await loadVideos(videoState.sort, { operation });
+    videoAssertOperationCurrent(operation);
     await openVideoDetail(video.id);
   } catch (err) {
+    if (!videoOperationIsCurrent(operation) || err?.name === "AbortError") return;
     videoMsg(err.message || "撤銷分享連結失敗", false);
   }
 }
 
-async function hydrateVideoE2eePlayer(video, playback, sessionId) {
+async function hydrateVideoE2eePlayer(video, playback, sessionId, operation = videoOperationContext()) {
+  if (sessionId !== videoState.playbackSessionId) return;
+  videoAssertOperationCurrent(operation);
   const player = $("video-player");
   if (!player) return;
   if (!getCsrfToken()) {
     await fetchCsrfToken();
+    videoAssertOperationCurrent(operation);
   }
   const csrf = getCsrfToken() || "";
-  const decrypted = await decryptVideoE2eePlaybackBlob(video, playback, csrf);
+  const decrypted = await decryptVideoE2eePlaybackBlob(video, playback, csrf, operation);
+  videoAssertOperationCurrent(operation);
   if (!decrypted?.blob) {
     throw new Error("E2EE 影音解密播放失敗");
   }
-  if (sessionId !== videoState.playbackSessionId) return;
+  if (sessionId !== videoState.playbackSessionId || !videoOperationIsCurrent(operation)) return;
   destroyCurrentVideoPlaybackArtifacts();
   videoState.currentObjectUrl = URL.createObjectURL(decrypted.blob);
   player.src = videoState.currentObjectUrl;
@@ -2917,24 +3208,37 @@ function pruneVideoE2eeChunkCache(cache, keepAroundIndex) {
   const keys = Array.from(cache.keys()).sort((a, b) => Math.abs(a - keep) - Math.abs(b - keep));
   const keepSet = new Set(keys.slice(0, VIDEO_E2EE_STREAM_V2_CACHE_LIMIT));
   for (const key of cache.keys()) {
-    if (!keepSet.has(key)) cache.delete(key);
+    if (!keepSet.has(key)) {
+      const chunk = cache.get(key);
+      try {
+        if (typeof chunk?.fill === "function") chunk.fill(0);
+        else new Uint8Array(chunk).fill(0);
+      } catch (_) {}
+      cache.delete(key);
+    }
   }
 }
 
-async function fetchVideoE2eeChunkWithRetry(url, retries = VIDEO_E2EE_STREAM_V2_MAX_RETRIES) {
+async function fetchVideoE2eeChunkWithRetry(url, retries = VIDEO_E2EE_STREAM_V2_MAX_RETRIES, operation = videoOperationContext()) {
+  videoAssertOperationCurrent(operation);
   let lastError = null;
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     try {
       const chunkRes = await apiFetch(url, { credentials: "same-origin" });
+      videoAssertOperationCurrent(operation);
       if (!chunkRes.ok) {
         const payload = await chunkRes.json().catch(() => ({}));
         throw new Error(payload.msg || `HTTP ${chunkRes.status}`);
       }
-      return chunkRes.arrayBuffer();
+      const chunk = await chunkRes.arrayBuffer();
+      videoAssertOperationCurrent(operation);
+      return chunk;
     } catch (err) {
+      if (!videoOperationIsCurrent(operation) || err?.name === "AbortError") throw err;
       lastError = err;
       if (attempt >= retries) break;
       await new Promise((resolve) => setTimeout(resolve, 200 * (attempt + 1)));
+      videoAssertOperationCurrent(operation);
     }
   }
   throw lastError || new Error("E2EE Streaming v2 分段下載失敗");
@@ -2970,28 +3274,36 @@ async function fetchVideoPlaybackE2eeCiphertext(video, playback, csrf) {
   return fetchDriveE2eeCiphertext(video.cloud_file_id, csrf);
 }
 
-async function decryptVideoE2eePlaybackBlob(video, playback, csrf) {
+async function decryptVideoE2eePlaybackBlob(video, playback, csrf, operation = videoOperationContext()) {
+  videoAssertOperationCurrent(operation);
   const e2ee = await fetchVideoPlaybackE2eeKey(video, playback, csrf);
+  videoAssertOperationCurrent(operation);
   const ciphertext = await fetchVideoPlaybackE2eeCiphertext(video, playback, csrf);
+  videoAssertOperationCurrent(operation);
   const fileId = e2ee.file_id || video.cloud_file_id;
   const promptText = "請輸入此 E2EE 影音的原始加密密碼。公開影音仍只會在瀏覽器端解密，伺服器無法看到明文。";
   for (const passphrase of getDriveE2eeSessionPassphraseCandidates(fileId)) {
     try {
       const decrypted = await decryptDriveE2eeBlob(ciphertext, e2ee, passphrase);
+      videoAssertOperationCurrent(operation);
       rememberDriveE2eeSessionPassphrase(fileId, passphrase);
       return decrypted;
-    } catch (_) {
+    } catch (err) {
+      if (!videoOperationIsCurrent(operation) || err?.name === "AbortError") throw err;
       forgetDriveE2eeSessionPassphrase(fileId);
     }
   }
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const passphrase = await getDriveE2eeSessionPassphrase(fileId, promptText, { force: true, allowPrompt: true });
+    videoAssertOperationCurrent(operation);
     if (!passphrase) return null;
     try {
       const decrypted = await decryptDriveE2eeBlob(ciphertext, e2ee, passphrase);
+      videoAssertOperationCurrent(operation);
       rememberDriveE2eeSessionPassphrase(fileId, passphrase);
       return decrypted;
     } catch (err) {
+      if (!videoOperationIsCurrent(operation) || err?.name === "AbortError") throw err;
       forgetDriveE2eeSessionPassphrase(fileId);
       if (attempt > 0) throw err;
       alert("E2EE 密碼不正確或檔案已損壞，請重新輸入。");
@@ -3000,19 +3312,31 @@ async function decryptVideoE2eePlaybackBlob(video, playback, csrf) {
   return null;
 }
 
-async function resolveVideoE2eePlaybackKey(video, playback) {
+async function resolveVideoE2eePlaybackKey(video, playback, operation = videoOperationContext()) {
+  videoAssertOperationCurrent(operation);
   if (!getCsrfToken()) {
     await fetchCsrfToken();
+    videoAssertOperationCurrent(operation);
   }
   const csrf = getCsrfToken() || "";
   const e2ee = await fetchVideoPlaybackE2eeKey(video, playback, csrf);
+  videoAssertOperationCurrent(operation);
   const fileId = e2ee.file_id || video.cloud_file_id;
   for (const passphrase of getDriveE2eeSessionPassphraseCandidates(fileId)) {
     try {
       const fileKey = await unwrapDriveFileKey(e2ee.encrypted_file_key, passphrase);
+      videoAssertOperationCurrent(operation);
       rememberDriveE2eeSessionPassphrase(fileId, passphrase);
-      return new Uint8Array(await window.crypto.subtle.exportKey("raw", fileKey));
-    } catch (_) {
+      const rawKey = new Uint8Array(await window.crypto.subtle.exportKey("raw", fileKey));
+      try {
+        videoAssertOperationCurrent(operation);
+        return rawKey;
+      } catch (err) {
+        rawKey.fill(0);
+        throw err;
+      }
+    } catch (err) {
+      if (!videoOperationIsCurrent(operation) || err?.name === "AbortError") throw err;
       forgetDriveE2eeSessionPassphrase(fileId);
     }
   }
@@ -3021,18 +3345,30 @@ async function resolveVideoE2eePlaybackKey(video, playback) {
     "請輸入此 E2EE 影音的原始加密密碼。公開影音與 strict E2EE Streaming v2 都只在瀏覽器端解密，伺服器無法看到明文。",
     { force: true, allowPrompt: true }
   );
+  videoAssertOperationCurrent(operation);
   if (!passphrase) throw new Error("E2EE 影音播放需要原始加密密碼。");
   const fileKey = await unwrapDriveFileKey(e2ee.encrypted_file_key, passphrase);
+  videoAssertOperationCurrent(operation);
   rememberDriveE2eeSessionPassphrase(fileId, passphrase);
-  return new Uint8Array(await window.crypto.subtle.exportKey("raw", fileKey));
+  const rawKey = new Uint8Array(await window.crypto.subtle.exportKey("raw", fileKey));
+  try {
+    videoAssertOperationCurrent(operation);
+    return rawKey;
+  } catch (err) {
+    rawKey.fill(0);
+    throw err;
+  }
 }
 
 async function attachVideoE2eeStreamV2Player(video, playback, sessionId) {
+  const operation = videoOperationContext();
+  if (sessionId !== videoState.playbackSessionId) return;
+  videoAssertOperationCurrent(operation);
   const player = $("video-player");
   if (!player) return;
   if (!videoSupportsE2eeStreamV2()) {
     setVideoPlaybackStatus("目前裝置不支援 E2EE Streaming v2，已退回舊版完整解密播放。", false);
-    await hydrateVideoE2eePlayer(video, playback, sessionId);
+    await hydrateVideoE2eePlayer(video, playback, sessionId, operation);
     return;
   }
   let activeVariant = selectedVideoE2eeQualityVariant(playback);
@@ -3040,20 +3376,23 @@ async function attachVideoE2eeStreamV2Player(video, playback, sessionId) {
   let activeChunkUrlTemplate = activeVariant?.chunkUrlTemplate || playback.chunk_url_template || "";
   let manifestRes = activeManifestUrl ? await apiFetch(activeManifestUrl, { credentials: "same-origin" }) : null;
   let manifestJson = manifestRes ? await manifestRes.json().catch(() => ({})) : {};
+  videoAssertOperationCurrent(operation);
   if ((!manifestRes?.ok || manifestJson.available === false) && activeVariant?.name !== "original" && playback.manifest_url) {
     activeVariant = videoPlaybackQualityOptions(playback).find((variant) => variant.name === "original") || null;
     activeManifestUrl = activeVariant?.manifestUrl || playback.manifest_url || "";
     activeChunkUrlTemplate = activeVariant?.chunkUrlTemplate || playback.chunk_url_template || "";
     manifestRes = await apiFetch(activeManifestUrl, { credentials: "same-origin" });
     manifestJson = await manifestRes.json().catch(() => ({}));
+    videoAssertOperationCurrent(operation);
     setVideoPlaybackStatus("選擇的 E2EE 省流量畫質尚未建立，已回到原始加密串流。", false);
   }
   if (!manifestRes?.ok || manifestJson.available === false) {
     setVideoPlaybackStatus(manifestJson.msg || "此 strict E2EE 影音尚未建立 Streaming v2 manifest，已退回舊版完整解密播放。", false);
-    await hydrateVideoE2eePlayer(video, playback, sessionId);
+    await hydrateVideoE2eePlayer(video, playback, sessionId, operation);
     return;
   }
-  const rawKeyBytes = await resolveVideoE2eePlaybackKey(video, playback);
+  const rawKeyBytes = await resolveVideoE2eePlaybackKey(video, playback, operation);
+  videoAssertOperationCurrent(operation);
   destroyCurrentVideoPlaybackArtifacts();
   const mediaSource = new MediaSource();
   const objectUrl = URL.createObjectURL(mediaSource);
@@ -3070,11 +3409,24 @@ async function attachVideoE2eeStreamV2Player(video, playback, sessionId) {
     if (closed) return;
     closed = true;
     try { worker.terminate(); } catch (_) {}
+    rawKeyBytes.fill(0);
+    chunkCache.forEach((chunk) => {
+      try {
+        if (typeof chunk?.fill === "function") chunk.fill(0);
+        else new Uint8Array(chunk).fill(0);
+      } catch (_) {}
+    });
+    chunkCache.clear();
+    videoPendingAccountCancels.delete(cleanup);
+    if (videoState.currentE2eeCleanup === cleanup) videoState.currentE2eeCleanup = null;
   };
+  videoState.currentE2eeCleanup = cleanup;
+  videoPendingAccountCancels.add(cleanup);
   const fallbackToFull = async (reason, seekTarget = null) => {
     cleanup();
+    if (!videoOperationIsCurrent(operation) || sessionId !== videoState.playbackSessionId) return;
     setVideoPlaybackStatus(reason, false);
-    await hydrateVideoE2eePlayer(video, playback, sessionId);
+    await hydrateVideoE2eePlayer(video, playback, sessionId, operation);
     if (seekTarget !== null) {
       const onLoaded = () => {
         player.removeEventListener("loadedmetadata", onLoaded);
@@ -3084,7 +3436,7 @@ async function attachVideoE2eeStreamV2Player(video, playback, sessionId) {
     }
   };
   player.addEventListener("seeking", () => {
-    if (closed || !sourceBuffer) return;
+    if (closed || !videoOperationIsCurrent(operation) || !sourceBuffer) return;
     const target = Number(player.currentTime || 0);
     const targetChunk = videoE2eeChunkIndexForTime(manifestJson, target);
     if (!playerTimeBuffered(player, target) && targetChunk !== null && targetChunk >= nextChunk) {
@@ -3099,18 +3451,21 @@ async function attachVideoE2eeStreamV2Player(video, playback, sessionId) {
     }
   });
   mediaSource.addEventListener("sourceopen", () => {
-    if (closed || sessionId !== videoState.playbackSessionId) {
+    if (closed || !videoOperationIsCurrent(operation) || sessionId !== videoState.playbackSessionId) {
       cleanup();
       return;
     }
     try {
       sourceBuffer = mediaSource.addSourceBuffer(manifestJson.content_type || playback.status?.content_type || video.cloud_mime_type || "video/mp4");
     } catch (err) {
-      fallbackToFull("目前裝置無法以 MediaSource 播放此 strict E2EE 影音，已退回舊版完整解密播放。").catch(() => {});
+      fallbackToFull("目前裝置無法以 MediaSource 播放此 strict E2EE 影音，已退回舊版完整解密播放。").catch((fallbackErr) => {
+        reportFrontendFailure("video-e2ee-mediasource-fallback", fallbackErr);
+        setVideoPlaybackStatus(fallbackErr?.message || "E2EE 完整解密 fallback 失敗", true);
+      });
       return;
     }
     const pump = async () => {
-      if (closed || sessionId !== videoState.playbackSessionId || !sourceBuffer) return;
+      if (closed || !videoOperationIsCurrent(operation) || sessionId !== videoState.playbackSessionId || !sourceBuffer) return;
       if (nextChunk >= Number(manifestJson.chunk_count || 0)) {
         if (mediaSource.readyState === "open" && !sourceBuffer.updating) {
           try { mediaSource.endOfStream(); } catch (_) {}
@@ -3121,30 +3476,57 @@ async function attachVideoE2eeStreamV2Player(video, playback, sessionId) {
       }
       const chunkMeta = manifestJson.chunks?.[nextChunk];
       if (!chunkMeta) {
-        fallbackToFull("E2EE Streaming v2 chunk metadata 缺失，已退回舊版完整解密播放。").catch(() => {});
+        fallbackToFull("E2EE Streaming v2 chunk metadata 缺失，已退回舊版完整解密播放。").catch((fallbackErr) => {
+          reportFrontendFailure("video-e2ee-metadata-fallback", fallbackErr);
+          setVideoPlaybackStatus(fallbackErr?.message || "E2EE metadata fallback 失敗", true);
+        });
         return;
       }
       try {
         let plaintext = chunkCache.get(Number(chunkMeta.chunk_index));
         if (!plaintext) {
           const chunkUrl = activeChunkUrlTemplate.replace("__INDEX__", String(chunkMeta.chunk_index));
-          const cipher = await fetchVideoE2eeChunkWithRetry(chunkUrl);
+          const cipher = await fetchVideoE2eeChunkWithRetry(chunkUrl, VIDEO_E2EE_STREAM_V2_MAX_RETRIES, operation);
+          videoAssertOperationCurrent(operation);
           plaintext = await decryptVideoE2eeChunkWithWorker(worker, new Uint8Array(rawKeyBytes), chunkMeta.nonce, cipher);
+          videoAssertOperationCurrent(operation);
           chunkCache.set(Number(chunkMeta.chunk_index), plaintext);
           pruneVideoE2eeChunkCache(chunkCache, Number(chunkMeta.chunk_index));
         }
         await appendSourceBufferAsync(sourceBuffer, new Uint8Array(plaintext));
+        videoAssertOperationCurrent(operation);
         nextChunk += 1;
         if (pendingSeekChunk !== null && nextChunk > pendingSeekChunk) pendingSeekChunk = null;
         const seekNote = pendingSeekChunk !== null ? "，正在追上快轉目標" : "";
         setVideoPlaybackStatus(`正在使用 E2EE Streaming v2：已解密分段 ${nextChunk} / ${manifestJson.chunk_count}${seekNote}。`, false);
-        queueMicrotask(() => { pump().catch(() => {}); });
+        queueMicrotask(() => {
+          if (!videoOperationIsCurrent(operation)) return;
+          pump().catch((pumpErr) => {
+            if (!videoOperationIsCurrent(operation) || pumpErr?.name === "AbortError") return;
+            reportFrontendFailure("video-e2ee-pump", pumpErr);
+            fallbackToFull(pumpErr?.message || "E2EE Streaming v2 分段續播失敗").catch((fallbackErr) => {
+              reportFrontendFailure("video-e2ee-pump-fallback", fallbackErr);
+              setVideoPlaybackStatus(fallbackErr?.message || "E2EE 分段續播 fallback 失敗", true);
+            });
+          });
+        });
       } catch (err) {
-        fallbackToFull(`E2EE Streaming v2 分段播放失敗，已退回舊版完整解密播放。${err?.message ? ` (${err.message})` : ""}`).catch(() => {});
+        if (!videoOperationIsCurrent(operation) || err?.name === "AbortError") {
+          cleanup();
+          return;
+        }
+        fallbackToFull(`E2EE Streaming v2 分段播放失敗，已退回舊版完整解密播放。${err?.message ? ` (${err.message})` : ""}`).catch((fallbackErr) => {
+          reportFrontendFailure("video-e2ee-chunk-fallback", fallbackErr);
+          setVideoPlaybackStatus(fallbackErr?.message || "E2EE 分段播放 fallback 失敗", true);
+        });
       }
     };
     pump().catch((err) => {
-      fallbackToFull(err?.message || "E2EE Streaming v2 初始化失敗").catch(() => {});
+      if (!videoOperationIsCurrent(operation) || err?.name === "AbortError") return;
+      fallbackToFull(err?.message || "E2EE Streaming v2 初始化失敗").catch((fallbackErr) => {
+        reportFrontendFailure("video-e2ee-init-fallback", fallbackErr);
+        setVideoPlaybackStatus(fallbackErr?.message || "E2EE 初始化 fallback 失敗", true);
+      });
     });
   }, { once: true });
 }
@@ -4741,6 +5123,7 @@ async function sendVideoDanmaku(videoId) {
 }
 
 async function uploadVideoSubtitle(videoId) {
+  const operation = videoOperationContext();
   const input = $("video-subtitle-file");
   const file = input?.files?.[0] || null;
   if (!file) return videoMsg("請先選擇字幕檔", false);
@@ -4752,14 +5135,16 @@ async function uploadVideoSubtitle(videoId) {
   if (button) button.disabled = true;
   try {
     const upload = await videoUploadFormWithProgress(`/api/videos/${encodeURIComponent(videoId)}/subtitles`, form);
+    videoAssertOperationCurrent(operation);
     const json = upload.json || {};
     if (!upload.ok || !json.ok) throw new Error(json.msg || `HTTP ${upload.status}`);
     videoMsg("字幕已掛載到播放器。", true);
     await openVideoDetail(videoId);
   } catch (err) {
+    if (!videoOperationIsCurrent(operation) || err?.name === "AbortError") return;
     videoMsg(err.message || "字幕上傳失敗", false);
   } finally {
-    if (button) button.disabled = false;
+    if (button && videoOperationIsCurrent(operation)) button.disabled = false;
   }
 }
 
@@ -5229,8 +5614,15 @@ function bindVideoPlaybackPreferenceControls(video, playback = {}) {
 function bindVideoPlayerView(videoId) {
   const player = $("video-player");
   if (!player || !videoId) return;
+  if (typeof videoState.currentViewTrackingCleanup === "function") {
+    videoState.currentViewTrackingCleanup();
+  }
+  const operation = videoOperationContext();
   const key = String(videoId);
+  let disposed = false;
+  let timer = null;
   const submitView = async (completed = false) => {
+    if (disposed || !videoOperationIsCurrent(operation)) return;
     if (videoState.viewRecordedFor.has(key) && !completed) return;
     videoState.viewRecordedFor.add(key);
     try {
@@ -5240,16 +5632,33 @@ function bindVideoPlayerView(videoId) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ watch_seconds: Math.floor(player.currentTime || 0), completed }),
       });
-    } catch (_) {
+      videoAssertOperationCurrent(operation);
+    } catch (err) {
+      if (videoOperationIsCurrent(operation) && !completed) videoState.viewRecordedFor.delete(key);
       // View accounting must not interrupt playback.
     }
   };
-  let timer = null;
-  player.addEventListener("playing", () => {
+  const onPlaying = () => {
+    if (disposed || !videoOperationIsCurrent(operation)) return;
     if (timer || videoState.viewRecordedFor.has(key)) return;
-    timer = setTimeout(() => submitView(false), 6000);
-  });
-  player.addEventListener("ended", () => submitView(true));
+    timer = setTimeout(() => {
+      timer = null;
+      submitView(false);
+    }, 6000);
+  };
+  const onEnded = () => submitView(true);
+  const cleanup = () => {
+    if (disposed) return;
+    disposed = true;
+    if (timer) clearTimeout(timer);
+    timer = null;
+    player.removeEventListener("playing", onPlaying);
+    player.removeEventListener("ended", onEnded);
+    if (videoState.currentViewTrackingCleanup === cleanup) videoState.currentViewTrackingCleanup = null;
+  };
+  player.addEventListener("playing", onPlaying);
+  player.addEventListener("ended", onEnded);
+  videoState.currentViewTrackingCleanup = cleanup;
 }
 
 async function openVideoDetail(videoId) {
@@ -5492,6 +5901,62 @@ function handleVideoHashRoute() {
   }
 }
 
+function resetVideoAccountState() {
+  videoState.accountGeneration += 1;
+  videoPendingAccountCancels.forEach((cancel) => cancel());
+  videoPendingAccountCancels.clear();
+  clearAllVideoE2eeLocalTasks();
+  clearVideoShareFragments();
+  videoState.navigationGeneration += 1;
+  videoState.detailRequestGeneration += 1;
+  if (videoState.detailAbortController) videoState.detailAbortController.abort();
+  videoState.detailAbortController = null;
+  destroyCurrentVideoPlaybackArtifacts();
+  stopVideoDanmakuLoop();
+  clearVideoDanmakuLayer();
+  window.clearInterval(videoState.streamDebugInterval);
+  videoState.streamDebugInterval = 0;
+  videoState.videos = [];
+  videoState.current = null;
+  videoState.searchQuery = "";
+  videoState.currentPlaybackSource = null;
+  videoState.browseLoaded = false;
+  videoState.viewRecordedFor.clear();
+  videoState.danmakuItems = [];
+  videoState.danmakuShown.clear();
+  videoPublishDriveFiles = [];
+  videoPendingPublishSelection = null;
+  videoUploadLiveJobs.clear();
+  videoActiveXhrs.forEach((xhr) => {
+    try { xhr.abort(); } catch (_) {}
+  });
+  videoActiveXhrs.clear();
+  setVideoUploadProgress({ visible: false });
+  setVideoPublishPanelVisible(false, { focus: false });
+  const list = $("video-list");
+  const detail = $("video-detail-view");
+  if (list) list.innerHTML = '<div class="drive-empty">尚未載入影音</div>';
+  if (detail) detail.innerHTML = "";
+  [
+    "video-upload-file",
+    "video-cover-file",
+    "video-publish-title",
+    "video-publish-description",
+    "video-share-password",
+    "video-share-expires-at",
+    "video-share-max-views",
+    "video-search-input",
+  ].forEach((id) => {
+    const input = $(id);
+    if (input && "value" in input) input.value = "";
+  });
+  const publishSelect = $("video-publish-file");
+  if (publishSelect) publishSelect.replaceChildren();
+  const publishGallery = $("video-publish-file-gallery");
+  if (publishGallery) publishGallery.replaceChildren();
+}
+
+document.addEventListener("hackme:account-context-changed", resetVideoAccountState);
 window.addEventListener("hashchange", handleVideoHashRoute);
 
 document.addEventListener("submit", (event) => {

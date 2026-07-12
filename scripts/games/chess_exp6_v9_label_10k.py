@@ -29,9 +29,11 @@ if str(ROOT) not in sys.path:
 from services.games.chess_stockfish_teacher import (  # noqa: E402
     UciStockfish, analysis_limit, resolve_stockfish_path,
 )
+from scripts.games.common_paths import exp6_private_dir  # noqa: E402
 
-SOURCE_PATH = ROOT / "runtime/private/games/exp6/quality_10k_games.jsonl"
-OUT_PATH = ROOT / "runtime/private/games/exp6/curriculum_labels_10k.jsonl"
+EXP6_PRIVATE_DIR = exp6_private_dir()
+SOURCE_PATH = EXP6_PRIVATE_DIR / "quality_10k_games.jsonl"
+OUT_PATH = EXP6_PRIVATE_DIR / "curriculum_labels_10k.jsonl"
 SHUFFLE_SEED = 20260516              # must match curriculum's seed for game_idx consistency
 STOCKFISH_DEPTH = 4
 LATTER_HALF_FRACTION = 1.0           # match v4+ curriculum (all plies)

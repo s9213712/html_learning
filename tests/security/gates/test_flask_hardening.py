@@ -226,6 +226,10 @@ def test_backpressure_preserves_fast_lane_root_priority_and_heavy_limits():
     def normal_probe():
         return jsonify({"ok": True})
 
+    @app.route("/api/business-busy")
+    def business_busy_probe():
+        return jsonify({"ok": False, "error": "server_busy"}), 503
+
     @app.route("/api/root/points/report")
     def root_probe():
         return jsonify({"ok": True, "root": True})
@@ -242,10 +246,12 @@ def test_backpressure_preserves_fast_lane_root_priority_and_heavy_limits():
         blocked_normal = client.get("/api/normal")
         assert blocked_normal.status_code == 503
         assert blocked_normal.get_json()["error"] == "server_busy"
+        assert blocked_normal.headers["X-Hackme-Backpressure-Rejected"] == "1"
 
         fast_lane = client.get("/api/version")
         assert fast_lane.status_code == 200
         assert fast_lane.get_json()["ok"] is True
+        assert "X-Hackme-Backpressure-Rejected" not in fast_lane.headers
 
         csrf_lane = client.get("/api/csrf-token")
         assert csrf_lane.status_code == 200
@@ -287,8 +293,13 @@ def test_backpressure_preserves_fast_lane_root_priority_and_heavy_limits():
         assert blocked_heavy.status_code == 503
         assert blocked_heavy.get_json()["gate"] == "heavy"
         assert blocked_heavy.headers["Retry-After"] == "2"
+        assert blocked_heavy.headers["X-Hackme-Backpressure-Rejected"] == "1"
     finally:
         heavy_lease.release()
+    business_busy = client.get("/api/business-busy")
+    assert business_busy.status_code == 503
+    assert business_busy.headers["X-Hackme-Backpressure"] == "normal"
+    assert "X-Hackme-Backpressure-Rejected" not in business_busy.headers
     traffic = state["traffic"].snapshot()
     assert traffic["totals"]["upload_bytes"] >= 3
     assert traffic["totals"]["download_bytes"] > 0
@@ -337,6 +348,7 @@ def test_backpressure_qos_header_and_edge_burst_guard(monkeypatch):
     assert blocked.headers["X-Hackme-QoS-Class"] == "auth"
     assert blocked.headers["X-Hackme-Edge-Guard"] == "auth"
     assert blocked.headers["X-Hackme-Backpressure"] == "edge_guard"
+    assert "X-Hackme-Backpressure-Rejected" not in blocked.headers
     assert int(blocked.headers["Retry-After"]) >= 1
 
     status = backpressure_module.backpressure_status(app)
@@ -400,6 +412,8 @@ def test_backpressure_qos_classification_matches_route_planes():
     assert backpressure_module.classify_request_qos("/") == "bootstrap"
     assert backpressure_module.classify_request_qos("/styles.css") == "static"
     assert backpressure_module.classify_request_qos("/assets/logo.png") == "static"
+    assert backpressure_module.classify_request_qos("/comfyui-workflow-editor.css") == "static"
+    assert backpressure_module.classify_request_qos("/shared-video.html") == "static"
     assert backpressure_module.classify_request_qos("/api/login", "POST") == "auth"
     assert backpressure_module.classify_request_qos("/api/admin/health") == "management"
     assert backpressure_module.classify_request_qos("/api/files/upload", "POST") == "heavy"
@@ -411,6 +425,8 @@ def test_backpressure_keeps_lightweight_background_polls_in_fast_lane():
     assert backpressure_module.is_backpressure_fast_lane_path("/api/comfyui/resources")
     assert backpressure_module.is_backpressure_fast_lane_path("/api/notifications/unread-count")
     assert backpressure_module.is_backpressure_fast_lane_path("/api/games/multiplayer/invites/pending")
+    assert backpressure_module.is_backpressure_fast_lane_path("/comfyui-workflow-editor.css")
+    assert not backpressure_module.is_backpressure_fast_lane_path("/api/export.css")
 
 
 def test_backpressure_auto_uses_gunicorn_threads_from_argv(monkeypatch):

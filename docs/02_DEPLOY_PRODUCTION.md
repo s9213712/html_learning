@@ -12,7 +12,7 @@
 
 1. 先用 [01_DEPLOY_QUICKSTART.md](01_DEPLOY_QUICKSTART.md) 完成本機或 staging 驗證。
 2. 先建立部署用環境變數與 runtime 目錄，再執行 `python3 server.py --doctor`。
-3. 確認 runtime 根目錄集中在部署目錄的 `runtime/`，或明確用 `HACKME_RUNTIME_DIR` 指到隔離資料區。
+3. 明確用 `HACKME_RUNTIME_DIR` 把 runtime 指到 source checkout 以外的持久資料區。
 4. 套用 repo 內 [deploy/README.md](../deploy/README.md) 的 Nginx / systemd 範本，並依主機調整 domain、憑證、路徑與 secrets。
 5. 決定是否由反向代理處理 HTTPS。
 6. 建立上線前 snapshot。
@@ -24,15 +24,17 @@
 
 #### 1. Runtime 路徑
 
-預設 runtime 放在目前部署目錄的 `runtime/`：
+正式部署必須明確設定外部 runtime，例如：
 
 ```text
-./runtime
+/var/lib/hackme_web/runtime
 ```
 
-如果要在 `/tmp` 複製專案做隔離驗證，請在那份複製目錄內執行，或明確設定
-`HACKME_RUNTIME_DIR=/tmp/<run>/runtime`。不要讓測試流程回寫來源 repo 的
-`runtime/`。
+未設定 `HACKME_RUNTIME_DIR` 時，直接啟動只會回落到
+`$XDG_STATE_HOME/hackme_web`（若未設定 XDG，則為 `~/.local/state/hackme_web`），
+不會在 source checkout 建立 `runtime/`。這個 fallback 只適合單機開發；正式部署仍應明確
+設定 `/var/lib`、獨立 volume 或其他受備份管理的絕對路徑。隔離測試一律設定
+`HACKME_RUNTIME_DIR=/tmp/<run>/runtime`。
 
 所有 runtime 產物都應集中在：
 
@@ -82,6 +84,11 @@
 
 - root 後台的 `上線前檢查` 是 preflight gate，不要求你先把站切成
   `production`。
+- root AI Agent 的「上線前檢查」同樣預設為 dry-run；它會讀取 required report
+  狀態並列出可執行腳本，但不會自動切換。只有操作者明確要求立即切換，且提供精確
+  確認字串 `GO_LIVE`，後端才接受 `auto_switch=true`。
+- Agent 可以協助收集狀態與指出缺口，不能替代 report 驗簽、target commit 比對、
+  production gate 或操作者對殘餘風險的簽核。
 - production profile 的 HTTPS / audit chain / Integrity Guard /
   browser-only 等安全設定會在 `GO_LIVE` 切換成功時自動套用，不應被理解成
   「必須先手動打開才能過檢查」。
@@ -277,12 +284,33 @@ workers/threads 的方式處理 HLS、BT、direct link、local AI generation 或
 ### 上線前必跑
 
 ```bash
-python3 scripts/prepush/pre_push_checks.py
+python3 scripts/prepush/runner.py --full --ci
 scripts/testing/pytest_in_tmp.sh -q tests
 scripts/security/pentest/run_functional_smoke.sh --port 50741
 scripts/security/pentest/run_pentest.sh --target https://<host>
 python3 scripts/security/pentest/stress_test.py --target https://<host> --i-own-this-target
 ```
+
+在隔離 staging 完成至少 24 小時活動時間的雙目標營運 campaign；腳本會建立 primary
+與 recovery runtime、真實測試帳號，並執行長影音、交易、PointsChain 與備份/還原等
+破壞性流程，**不可直接對 production 執行**：
+
+```bash
+python3 scripts/testing/operational_campaign_24h.py \
+  --campaign-root /tmp/hackme_web_campaign_24h_YYYYMMDD_HHMM \
+  --duration-seconds 86400 \
+  --account-count 10 \
+  --round-ops 1000 \
+  --concurrency 32 \
+  --session-pool 20 \
+  --resource-interval 5
+```
+
+先取得本機 bind/process 授權再啟動；授權等待不算活動秒數。報告、fixture、HLS、DB、
+子程序與 browser evidence 全部位於指定 `/tmp` root。正式證據需
+`active_test_seconds >= 86400`、八個 mandatory scenario 全過且
+`production_signoff_eligible=true`；任何 `--allow-short-duration` 結果只供 harness smoke。
+操作與判讀見 [AGENTS/24H_OPERATIONAL_CAMPAIGN.md](AGENTS/24H_OPERATIONAL_CAMPAIGN.md)。
 
 如果本次要評估整站 production readiness：
 
@@ -295,11 +323,18 @@ PYTHONPATH=. scripts/security/pentest/run_pentest.sh \
 如果你要一次產出 production gate 要求的完整 required report set，可直接用：
 
 ```bash
-python3 scripts/security/gate/on_live_reports_make.py --base-url https://<host> --root-password '<ROOT_PASSWORD>'
+HACKME_RUNTIME_DIR=/var/lib/hackme_web/runtime \
+HACKME_OPERATIONAL_CAMPAIGN_REPORT=/tmp/hackme_web_campaign_24h_YYYYMMDD_HHMM/reports/operational_campaign_24h.json \
+ROOT_PASSWORD='<root-password>' \
+MANAGER_PASSWORD='<manager-password>' \
+TEST_PASSWORD='<test-user-password>' \
+python3 scripts/security/gate/on_live_reports_make.py --base-url https://<host>
 ```
 
-這會把 raw outputs 放進 `runtime/reports/security/production_gate/runs/<RUN_ID>/`，
-並把上傳用的穩定 payload 放在 `runtime/reports/security/production_gate/`。
+這會把 raw outputs 放進 `$HACKME_RUNTIME_DIR/reports/security/production_gate/runs/<RUN_ID>/`，
+並把上傳用的穩定 payload 放在 `$HACKME_RUNTIME_DIR/reports/security/production_gate/`。
+24 小時報告只能從 `/tmp` 匯入；orchestrator 會重新計算目前 source manifest，並拒絕
+短測、少於 86,400 活動秒、情境缺漏、finding、secret/source drift 或來源不相符的報告。
 
 production gate 報告對照表、固定 pytest 測項數與預設報告落點，統一放在
 [11_QA_TESTING.md](11_QA_TESTING.md) 的「Production Gate 報告對照表」。

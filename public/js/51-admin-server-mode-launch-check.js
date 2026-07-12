@@ -1006,3 +1006,43 @@ async function applyServerMode() {
     await loadSettings();
   }
 }
+
+function resetServerModeLaunchCheckAccountState() {
+  currentServerMode = "";
+  [
+    "server-mode-status", "server-mode-requirements", "server-mode-logs",
+    "launch-check-msg", "launch-check-release-sub", "launch-check-release-summary",
+    "launch-check-release-details", "launch-check-list", "launch-check-conditions",
+    "launch-check-overall", "launch-check-summary", "launch-check-upload-status",
+    "launch-check-doc-sub", "launch-check-doc-path", "launch-check-doc-content",
+    "internal-test-token-status", "internal-test-token-msg", "internal-test-token-output",
+    "tester-token-msg", "tester-token-list", "tester-token-created",
+  ].forEach((id) => {
+    const el = $(id);
+    if (el) el.replaceChildren();
+  });
+  [
+    "server-mode-confirm", "server-mode-notes", "launch-check-upload-json",
+    "internal-test-token-confirm", "internal-test-token-user-id", "internal-test-token-username",
+    "internal-test-token-output", "tester-token-user-id", "tester-token-expires-at",
+    "tester-token-routes", "tester-token-created",
+  ].forEach((id) => {
+    const control = $(id);
+    if (control) control.value = "";
+  });
+  ["launch-check-upload-file"].forEach((id) => {
+    const control = $(id);
+    if (control) control.value = "";
+  });
+  [
+    "launch-check-upload-panel", "launch-check-doc-panel", "launch-check-release-panel",
+    "internal-test-token-output-wrap", "internal-test-token-usage-wrap",
+    "tester-token-created-wrap", "tester-token-usage-wrap",
+  ].forEach((id) => {
+    const panel = $(id);
+    if (panel) panel.style.display = "none";
+  });
+}
+
+document.addEventListener("hackme:account-context-changed", resetServerModeLaunchCheckAccountState);
+window.resetServerModeLaunchCheckAccountState = resetServerModeLaunchCheckAccountState;

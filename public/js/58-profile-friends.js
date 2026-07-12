@@ -8,6 +8,7 @@ let profileFriendsLoaded = false;
 let profileQuickCustomizeOpen = false;
 let profileEditFormDirty = false;
 let profileAppearancePreviewTimer = 0;
+let profileAccountGeneration = 0;
 const targetOptionCache = new Map();
 const PROFILE_AVATAR_DEFAULT_ZOOM = 1;
 const PROFILE_AVATAR_MIN_ZOOM = 0.1;
@@ -91,6 +92,30 @@ const profileAvatarCropState = {
   startOffsetX: 0,
   startOffsetY: 0,
 };
+
+function profileOperationContext() {
+  return {
+    generation: profileAccountGeneration,
+    scope: typeof getCurrentAccountStorageScope === "function"
+      ? getCurrentAccountStorageScope()
+      : String(currentUserId || currentUser || "anonymous"),
+  };
+}
+
+function profileOperationIsCurrent(operation) {
+  if (!operation || Number(operation.generation) !== profileAccountGeneration) return false;
+  const scope = typeof getCurrentAccountStorageScope === "function"
+    ? getCurrentAccountStorageScope()
+    : String(currentUserId || currentUser || "anonymous");
+  return operation.scope === scope;
+}
+
+function profileAssertOperationCurrent(operation) {
+  if (profileOperationIsCurrent(operation)) return;
+  const err = new Error("Account context changed");
+  err.name = "AbortError";
+  throw err;
+}
 
 function profileSetMsg(text, bad = false) {
   const el = $("profile-msg");
@@ -393,7 +418,8 @@ function loadProfileAvatarFile(file) {
   loadProfileAvatarObjectUrl(nextUrl);
 }
 
-function loadProfileAvatarObjectUrl(nextUrl, cloudFile = null) {
+function loadProfileAvatarObjectUrl(nextUrl, cloudFile = null, operation = profileOperationContext()) {
+  profileAssertOperationCurrent(operation);
   const els = profileAvatarCropperElements();
   if (!els.cropper || !els.image || !nextUrl) return;
   if (profileAvatarCropState.objectUrl) URL.revokeObjectURL(profileAvatarCropState.objectUrl);
@@ -402,6 +428,10 @@ function loadProfileAvatarObjectUrl(nextUrl, cloudFile = null) {
   profileAvatarCropState.cloudFileName = cloudFile ? profileAvatarCloudFileName(cloudFile) : "";
   profileAvatarCropState.hasImage = false;
   els.image.onload = () => {
+    if (
+      !profileOperationIsCurrent(operation)
+      || profileAvatarCropState.objectUrl !== nextUrl
+    ) return;
     profileAvatarCropState.naturalWidth = els.image.naturalWidth || 1;
     profileAvatarCropState.naturalHeight = els.image.naturalHeight || 1;
     profileAvatarCropState.zoom = 1;
@@ -411,9 +441,18 @@ function loadProfileAvatarObjectUrl(nextUrl, cloudFile = null) {
     profileAvatarCropState.hasImage = true;
     syncProfileAvatarZoomControl(PROFILE_AVATAR_DEFAULT_ZOOM);
     els.cropper.hidden = false;
-    requestAnimationFrame(renderProfileAvatarCropper);
+    requestAnimationFrame(() => {
+      if (
+        profileOperationIsCurrent(operation)
+        && profileAvatarCropState.objectUrl === nextUrl
+      ) renderProfileAvatarCropper();
+    });
   };
   els.image.onerror = () => {
+    if (
+      !profileOperationIsCurrent(operation)
+      || profileAvatarCropState.objectUrl !== nextUrl
+    ) return;
     resetProfileAvatarCropper();
     const name = cloudFile ? profileAvatarCloudFileName(cloudFile) : ($("profile-avatar-file")?.files?.[0]?.name || "這張圖片");
     profileAvatarSetMsg(`無法讀取頭像預覽：${name}。請確認檔案未損壞，或改用 JPEG / PNG。`, true);
@@ -514,6 +553,7 @@ function renderProfileAvatarCloudOptions() {
 }
 
 async function loadProfileAvatarCloudFiles({ force = false } = {}) {
+  const operation = profileOperationContext();
   const { cloudSelect, cloudGallery } = profileAvatarCropperElements();
   if (!currentUserId) return [];
   const fresh = profileAvatarCloudFilesLoadedAt && Date.now() - profileAvatarCloudFilesLoadedAt < 30000;
@@ -525,18 +565,21 @@ async function loadProfileAvatarCloudFiles({ force = false } = {}) {
   if (cloudGallery) cloudGallery.innerHTML = `<div class="drive-empty profile-avatar-cloud-empty">讀取雲端圖片中...</div>`;
   try {
     await fetchCsrfToken({ force: true });
+    profileAssertOperationCurrent(operation);
     const csrf = getCsrfToken();
     const res = await apiFetch(API + `/cloud-drive/files?user_id=${encodeURIComponent(currentUserId)}`, {
       credentials: "same-origin",
       headers: { "X-CSRF-Token": csrf || "" },
     });
     const json = await res.json().catch(() => ({}));
+    profileAssertOperationCurrent(operation);
     if (!res.ok || !json.ok) throw new Error(json.msg || `HTTP ${res.status}`);
     profileAvatarCloudFiles = Array.isArray(json.files) ? json.files : [];
     profileAvatarCloudFilesLoadedAt = Date.now();
     renderProfileAvatarCloudOptions();
     return profileAvatarCloudFiles;
   } catch (err) {
+    if (!profileOperationIsCurrent(operation) || err?.name === "AbortError") return [];
     profileAvatarCloudFiles = [];
     profileAvatarCloudFilesLoadedAt = 0;
     if (cloudSelect) cloudSelect.innerHTML = `<option value="">雲端圖片讀取失敗</option>`;
@@ -547,6 +590,7 @@ async function loadProfileAvatarCloudFiles({ force = false } = {}) {
 }
 
 async function useSelectedProfileCloudAvatar() {
+  const operation = profileOperationContext();
   const { cloudSelect, file } = profileAvatarCropperElements();
   const selectedId = String(cloudSelect?.value || "");
   if (!selectedId) {
@@ -560,6 +604,7 @@ async function useSelectedProfileCloudAvatar() {
   }
   try {
     await fetchCsrfToken({ force: true });
+    profileAssertOperationCurrent(operation);
     const csrf = getCsrfToken();
     let blob = null;
     if (String(cloudFile.privacy_mode || "") === "e2ee") {
@@ -572,6 +617,7 @@ async function useSelectedProfileCloudAvatar() {
         "請輸入此 E2EE 圖片的加密密碼。密碼只在瀏覽器端用來解密頭像來源。",
         { promptOnMiss: true }
       );
+      profileAssertOperationCurrent(operation);
       if (!decrypted?.blob) return;
       blob = decrypted.blob;
     } else {
@@ -584,13 +630,16 @@ async function useSelectedProfileCloudAvatar() {
         throw new Error(json.msg || `HTTP ${res.status}`);
       }
       blob = await res.blob();
+      profileAssertOperationCurrent(operation);
     }
     const mime = String(blob.type || cloudFile.mime_type_plain_for_public || "").toLowerCase();
     if (!/^image\/(png|jpe?g|gif)$/i.test(mime)) throw new Error("雲端檔案不是可用的頭像圖片");
     if (file) file.value = "";
-    loadProfileAvatarObjectUrl(URL.createObjectURL(blob), cloudFile);
+    profileAssertOperationCurrent(operation);
+    loadProfileAvatarObjectUrl(URL.createObjectURL(blob), cloudFile, operation);
     profileAvatarSetMsg(`已載入雲端圖片：${profileAvatarCloudFileName(cloudFile)}`);
   } catch (err) {
+    if (!profileOperationIsCurrent(operation) || err?.name === "AbortError") return;
     profileAvatarSetMsg(err.message || "雲端圖片載入失敗", true);
   }
 }
@@ -613,7 +662,10 @@ function openProfileAvatarUploader({ pickFile = false } = {}) {
   profileAvatarSetMsg("");
   els.overlay.classList.add("show");
   els.overlay.setAttribute("aria-hidden", "false");
-  loadProfileAvatarCloudFiles().catch(() => {});
+  loadProfileAvatarCloudFiles().catch((err) => {
+    reportFrontendFailure("profile-avatar-cloud-files", err);
+    profileAvatarSetMsg(err.message || "雲端圖片讀取失敗", true);
+  });
   if (pickFile && els.file && typeof els.file.click === "function") {
     els.file.click();
   } else if (els.file) {
@@ -652,6 +704,8 @@ function handleProfileAvatarPointerEnd(event) {
 }
 
 async function uploadProfileAvatar() {
+  const operation = profileOperationContext();
+  const targetUserId = currentUserId;
   const file = $("profile-avatar-file")?.files?.[0] || null;
   const cloudFileId = profileAvatarCropState.cloudFileId || "";
   if (!currentUserId) {
@@ -682,6 +736,7 @@ async function uploadProfileAvatar() {
           rotation: profileAvatarCropState.rotation,
         })
       : null;
+    profileAssertOperationCurrent(operation);
     if (!cropped) {
       throw new Error("無法產生裁切後頭像，請重新選擇圖片");
     }
@@ -695,25 +750,29 @@ async function uploadProfileAvatar() {
       form.append("crop_json", JSON.stringify(crop));
     }
     await fetchCsrfToken({ force: true });
+    profileAssertOperationCurrent(operation);
     const csrf = getCsrfToken();
-    const res = await apiFetch(API + `/admin/users/${encodeURIComponent(currentUserId)}/avatar`, {
+    const res = await apiFetch(API + `/admin/users/${encodeURIComponent(targetUserId)}/avatar`, {
       method: "POST",
       credentials: "same-origin",
       headers: { "X-CSRF-Token": csrf || "" },
       body: form,
     });
     const json = await res.json().catch(() => ({}));
+    profileAssertOperationCurrent(operation);
     if (!res.ok || !json.ok) throw new Error(json.msg || `HTTP ${res.status}`);
     if (profilePanelCache) profilePanelCache.avatar_file_id = json.avatar_file_id || "";
-    if (typeof markUserAvatarUpdated === "function") markUserAvatarUpdated(currentUserId, json.avatar_file_id || "");
+    if (typeof markUserAvatarUpdated === "function") markUserAvatarUpdated(targetUserId, json.avatar_file_id || "");
     profileAvatarSetMsg("頭像已更新");
     await loadMyProfile({ quiet: true });
+    profileAssertOperationCurrent(operation);
     closeProfileAvatarUploader();
     profileSetMsg("頭像已更新");
   } catch (err) {
+    if (!profileOperationIsCurrent(operation) || err?.name === "AbortError") return;
     profileAvatarSetMsg(err.message || "頭像上傳失敗", true);
   } finally {
-    if (button) {
+    if (button && profileOperationIsCurrent(operation)) {
       button.disabled = false;
       button.textContent = previousText || "上傳頭像";
     }
@@ -1223,8 +1282,10 @@ function fillProfileEdit(profile, { force = false } = {}) {
 }
 
 async function loadMyProfile({ quiet = false } = {}) {
+  const operation = profileOperationContext();
   try {
     const json = await profileReadJson(API + "/users/me/profile");
+    profileAssertOperationCurrent(operation);
     const preserveDraft = profileEditFormDirty && currentProfileIsViewingSelf;
     profilePanelCache = json.profile || {};
     currentProfileViewedUserId = profilePanelCache.id || currentUserId || null;
@@ -1237,6 +1298,7 @@ async function loadMyProfile({ quiet = false } = {}) {
     if (!quiet) profileSetMsg("");
     return profilePanelCache;
   } catch (err) {
+    if (!profileOperationIsCurrent(operation) || err?.name === "AbortError") return null;
     profileSetMsg(err.message || "個人資料讀取失敗", true);
     return null;
   }
@@ -1247,19 +1309,23 @@ async function loadUserProfile(userId, { quiet = false } = {}) {
   if (!targetId || String(targetId) === String(currentUserId || "")) {
     return loadMyProfile({ quiet });
   }
+  const operation = profileOperationContext();
   try {
     const json = await profileReadJson(API + `/users/${encodeURIComponent(targetId)}/profile`);
+    profileAssertOperationCurrent(operation);
     profilePanelCache = json.profile || {};
     renderProfileHome(profilePanelCache);
     if (!quiet) profileSetMsg("");
     return profilePanelCache;
   } catch (err) {
+    if (!profileOperationIsCurrent(operation) || err?.name === "AbortError") return null;
     profileSetMsg(err.message || "個人主頁讀取失敗", true);
     return null;
   }
 }
 
 async function saveMyProfile() {
+  const operation = profileOperationContext();
   const payload = {
     display_name: $("profile-edit-display-name")?.value || "",
     location: $("profile-edit-location")?.value || "",
@@ -1281,6 +1347,7 @@ async function saveMyProfile() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
+    profileAssertOperationCurrent(operation);
     clearProfileEditFormDirty();
     profilePanelCache = json.profile || {};
     if (typeof setUserDisplayTimezone === "function") {
@@ -1295,6 +1362,7 @@ async function saveMyProfile() {
     }
     profileSetMsg(json.msg || "個人資料已更新");
   } catch (err) {
+    if (!profileOperationIsCurrent(operation) || err?.name === "AbortError") return;
     profileSetMsg(err.message || "個人資料更新失敗", true);
   }
 }
@@ -1356,8 +1424,10 @@ function renderProfileFriendRows(containerId, rows, mode) {
 }
 
 async function loadProfileFriends({ quiet = false } = {}) {
+  const operation = profileOperationContext();
   try {
     const json = await profileReadJson(API + "/friends");
+    profileAssertOperationCurrent(operation);
     profileFriendsLoaded = true;
     renderProfileFriendRows("profile-friend-list", json.friends || [], "friends");
     renderProfileFriendRows("profile-incoming-list", json.incoming || [], "incoming");
@@ -1365,11 +1435,13 @@ async function loadProfileFriends({ quiet = false } = {}) {
     renderProfileFriendRows("profile-blocked-list", json.blocked || [], "blocked");
     if (!quiet) profileSetMsg("");
   } catch (err) {
+    if (!profileOperationIsCurrent(operation) || err?.name === "AbortError") return;
     profileSetMsg(err.message || "好友資料讀取失敗", true);
   }
 }
 
 async function requestProfileFriend() {
+  const operation = profileOperationContext();
   const raw = ($("profile-request-user-input")?.value || "").trim();
   if (!raw) {
     profileSetMsg("請輸入帳號或 user id", true);
@@ -1382,16 +1454,20 @@ async function requestProfileFriend() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
+    profileAssertOperationCurrent(operation);
     profileSetMsg(json.msg || "好友邀請已送出");
     if ($("profile-request-user-input")) $("profile-request-user-input").value = "";
     await loadProfileFriends({ quiet: true });
+    profileAssertOperationCurrent(operation);
     if (typeof loadChatFriends === "function") loadChatFriends();
   } catch (err) {
+    if (!profileOperationIsCurrent(operation) || err?.name === "AbortError") return;
     profileSetMsg(err.message || "好友邀請失敗", true);
   }
 }
 
 async function requestProfileFriendForUser(userId) {
+  const operation = profileOperationContext();
   const targetId = Number(userId || 0);
   if (!targetId) return;
   try {
@@ -1400,55 +1476,75 @@ async function requestProfileFriendForUser(userId) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ user_id: targetId }),
     });
+    profileAssertOperationCurrent(operation);
     profileSetMsg(json.msg || "好友邀請已送出");
     await loadUserProfile(targetId, { quiet: true });
+    profileAssertOperationCurrent(operation);
     if (typeof loadChatFriends === "function") loadChatFriends();
   } catch (err) {
+    if (!profileOperationIsCurrent(operation) || err?.name === "AbortError") return;
     profileSetMsg(err.message || "好友邀請失敗", true);
   }
 }
 
 async function acceptProfileFriendRequest(requestId) {
+  const operation = profileOperationContext();
   if (!requestId) return;
   try {
     const json = await profileReadJson(API + `/friends/requests/${encodeURIComponent(requestId)}/accept`, {
       method: "POST",
     });
+    profileAssertOperationCurrent(operation);
     profileSetMsg(json.msg || "已接受好友邀請");
     await loadProfilePanel();
+    profileAssertOperationCurrent(operation);
     if (typeof loadChatFriends === "function") loadChatFriends();
   } catch (err) {
+    if (!profileOperationIsCurrent(operation) || err?.name === "AbortError") return;
     profileSetMsg(err.message || "好友申請處理失敗", true);
   }
 }
 
 async function followProfileUser(userId) {
+  const operation = profileOperationContext();
   const targetId = Number(userId || 0);
   if (!targetId) return;
   try {
     const json = await profileReadJson(API + `/users/${encodeURIComponent(targetId)}/follow`, { method: "POST" });
+    profileAssertOperationCurrent(operation);
     profileSetMsg(json.msg || "已追蹤");
     if (json.profile) renderProfileHome(json.profile);
-    else await loadUserProfile(targetId, { quiet: true });
+    else {
+      await loadUserProfile(targetId, { quiet: true });
+      profileAssertOperationCurrent(operation);
+    }
   } catch (err) {
+    if (!profileOperationIsCurrent(operation) || err?.name === "AbortError") return;
     profileSetMsg(err.message || "追蹤失敗", true);
   }
 }
 
 async function unfollowProfileUser(userId) {
+  const operation = profileOperationContext();
   const targetId = Number(userId || 0);
   if (!targetId) return;
   try {
     const json = await profileReadJson(API + `/users/${encodeURIComponent(targetId)}/follow`, { method: "DELETE" });
+    profileAssertOperationCurrent(operation);
     profileSetMsg(json.msg || "已取消追蹤");
     if (json.profile) renderProfileHome(json.profile);
-    else await loadUserProfile(targetId, { quiet: true });
+    else {
+      await loadUserProfile(targetId, { quiet: true });
+      profileAssertOperationCurrent(operation);
+    }
   } catch (err) {
+    if (!profileOperationIsCurrent(operation) || err?.name === "AbortError") return;
     profileSetMsg(err.message || "取消追蹤失敗", true);
   }
 }
 
 async function addProfileFriendByCode() {
+  const operation = profileOperationContext();
   const code = ($("profile-add-code-input")?.value || "").trim();
   if (!code) {
     profileSetMsg("請輸入好友代碼", true);
@@ -1460,89 +1556,116 @@ async function addProfileFriendByCode() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ friend_code: code }),
     });
+    profileAssertOperationCurrent(operation);
     profileSetMsg(json.msg || "已加入好友");
     if ($("profile-add-code-input")) $("profile-add-code-input").value = "";
     await loadProfileFriends({ quiet: true });
+    profileAssertOperationCurrent(operation);
     if (typeof loadChatFriends === "function") loadChatFriends();
   } catch (err) {
+    if (!profileOperationIsCurrent(operation) || err?.name === "AbortError") return;
     profileSetMsg(err.message || "加入好友失敗", true);
   }
 }
 
 async function reviewProfileFriend(requestId, decision) {
+  const operation = profileOperationContext();
   if (!requestId || !decision) return;
   try {
     const json = await profileReadJson(API + `/friends/requests/${encodeURIComponent(requestId)}/${encodeURIComponent(decision)}`, {
       method: "POST",
     });
+    profileAssertOperationCurrent(operation);
     profileSetMsg(json.msg || "好友申請已處理");
     await loadProfileFriends({ quiet: true });
+    profileAssertOperationCurrent(operation);
     if (typeof loadChatFriends === "function") loadChatFriends();
   } catch (err) {
+    if (!profileOperationIsCurrent(operation) || err?.name === "AbortError") return;
     profileSetMsg(err.message || "好友申請處理失敗", true);
   }
 }
 
 async function removeProfileFriend(friendUserId) {
+  const operation = profileOperationContext();
   if (!friendUserId) return;
   if (!(await profileConfirm("確定要解除這位好友嗎？解除後需要重新申請才能恢復好友互動。", {
     title: "解除好友",
     confirmLabel: "解除",
     danger: true,
   }))) return;
+  if (!profileOperationIsCurrent(operation)) return;
   try {
     const json = await profileReadJson(API + `/friends/${encodeURIComponent(friendUserId)}`, { method: "DELETE" });
+    profileAssertOperationCurrent(operation);
     profileSetMsg(json.msg || "已解除好友");
     await loadProfileFriends({ quiet: true });
+    profileAssertOperationCurrent(operation);
     if (typeof loadChatFriends === "function") loadChatFriends();
   } catch (err) {
+    if (!profileOperationIsCurrent(operation) || err?.name === "AbortError") return;
     profileSetMsg(err.message || "解除好友失敗", true);
   }
 }
 
 async function blockProfileUser(friendUserId) {
+  const operation = profileOperationContext();
   if (!friendUserId) return;
   if (!(await profileConfirm("確定要封鎖這位使用者？封鎖後對方不能再與你私訊、邀請遊戲或重新送出好友申請。", {
     title: "封鎖使用者",
     confirmLabel: "封鎖",
     danger: true,
   }))) return;
+  if (!profileOperationIsCurrent(operation)) return;
   try {
     const json = await profileReadJson(API + `/friends/${encodeURIComponent(friendUserId)}/block`, { method: "POST" });
+    profileAssertOperationCurrent(operation);
     profileSetMsg(json.msg || "已封鎖使用者");
     await loadProfileFriends({ quiet: true });
+    profileAssertOperationCurrent(operation);
     if (typeof loadChatFriends === "function") loadChatFriends();
   } catch (err) {
+    if (!profileOperationIsCurrent(operation) || err?.name === "AbortError") return;
     profileSetMsg(err.message || "封鎖失敗", true);
   }
 }
 
 async function unblockProfileUser(friendUserId) {
+  const operation = profileOperationContext();
   if (!friendUserId) return;
   if (!(await profileConfirm("確定要解除封鎖？解除後不會自動恢復好友關係。", {
     title: "解除封鎖",
     confirmLabel: "解除封鎖",
   }))) return;
+  if (!profileOperationIsCurrent(operation)) return;
   try {
     const json = await profileReadJson(API + `/friends/${encodeURIComponent(friendUserId)}/block`, { method: "DELETE" });
+    profileAssertOperationCurrent(operation);
     profileSetMsg(json.msg || "已解除封鎖");
     await loadProfileFriends({ quiet: true });
+    profileAssertOperationCurrent(operation);
     if (typeof loadChatFriends === "function") loadChatFriends();
   } catch (err) {
+    if (!profileOperationIsCurrent(operation) || err?.name === "AbortError") return;
     profileSetMsg(err.message || "解除封鎖失敗", true);
   }
 }
 
 async function rotateProfileFriendCode() {
+  const operation = profileOperationContext();
   if (!(await profileConfirm("重新產生好友代碼後，舊代碼會失效。確定要繼續嗎？", {
     title: "重新產生好友代碼",
     confirmLabel: "重新產生",
   }))) return;
+  if (!profileOperationIsCurrent(operation)) return;
   try {
     const json = await profileReadJson(API + "/users/me/friend-code/rotate", { method: "POST" });
+    profileAssertOperationCurrent(operation);
     profileSetMsg(json.msg || "好友代碼已重新產生");
     await loadMyProfile({ quiet: true });
+    profileAssertOperationCurrent(operation);
   } catch (err) {
+    if (!profileOperationIsCurrent(operation) || err?.name === "AbortError") return;
     profileSetMsg(err.message || "好友代碼更新失敗", true);
   }
 }
@@ -1585,6 +1708,7 @@ function setProfileCopyButtonFeedback(button) {
 }
 
 async function copyProfileFriendCode(event) {
+  const operation = profileOperationContext();
   const button = event?.currentTarget || $("profile-copy-code-btn");
   const code = $("profile-friend-code")?.value || profilePanelCache?.friend_code || "";
   if (!code) {
@@ -1593,10 +1717,12 @@ async function copyProfileFriendCode(event) {
   }
   try {
     const copied = await copyTextToClipboard(code);
+    profileAssertOperationCurrent(operation);
     if (!copied) throw new Error("copy failed");
     setProfileCopyButtonFeedback(button);
     showActionFeedback(button || document.activeElement, "好友代碼已複製", true, { skipToast: true });
   } catch (err) {
+    if (!profileOperationIsCurrent(operation) || err?.name === "AbortError") return;
     const input = $("profile-friend-code");
     if (input) {
       input.focus();
@@ -1940,6 +2066,7 @@ function renderTargetOptions(context, users) {
 }
 
 async function loadTargetUserOptions(context = "personal", { force = false } = {}) {
+  const operation = profileOperationContext();
   const key = String(context || "personal");
   if (!force && targetOptionCache.has(key)) {
     renderTargetOptions(key, targetOptionCache.get(key));
@@ -1947,11 +2074,13 @@ async function loadTargetUserOptions(context = "personal", { force = false } = {
   }
   try {
     const json = await profileReadJson(API + `/users/target-options?context=${encodeURIComponent(key)}&limit=160`);
+    profileAssertOperationCurrent(operation);
     const users = Array.isArray(json.users) ? json.users : [];
     targetOptionCache.set(key, users);
     renderTargetOptions(key, users);
     return users;
   } catch (err) {
+    if (!profileOperationIsCurrent(operation) || err?.name === "AbortError") return [];
     renderTargetOptions(key, []);
     return [];
   }
@@ -1972,6 +2101,80 @@ function bindTargetUserOptionInputs() {
     input.addEventListener("input", () => loadTargetUserOptions(context));
   });
 }
+
+function resetProfileAccountState() {
+  profileAccountGeneration += 1;
+  if (profileAppearancePreviewTimer) clearTimeout(profileAppearancePreviewTimer);
+  profileAppearancePreviewTimer = 0;
+  profilePanelCache = null;
+  currentProfileViewedUserId = null;
+  currentProfileIsViewingSelf = true;
+  profileFriendsLoaded = false;
+  profileQuickCustomizeOpen = false;
+  profileEditFormDirty = false;
+  profileAvatarCloudFiles = [];
+  profileAvatarCloudFilesLoadedAt = 0;
+  targetOptionCache.clear();
+  document.querySelectorAll('datalist[id^="target-options-"]').forEach((list) => list.replaceChildren());
+  closeProfileAvatarUploader();
+  closeProfileAvatarPreview();
+  resetProfileAvatarCropper();
+  [
+    "profile-edit-display-name",
+    "profile-edit-location",
+    "profile-edit-website",
+    "profile-edit-bio",
+    "profile-edit-signature",
+    "profile-friend-code",
+    "profile-add-code-input",
+    "profile-request-user-input",
+  ].forEach((id) => {
+    const input = $(id);
+    if (input) input.value = "";
+  });
+  [
+    "profile-public-account-nickname",
+    "profile-public-account-real_name",
+    "profile-public-account-birthdate",
+    "profile-public-account-phone",
+  ].forEach((id) => {
+    const input = $(id);
+    if (input) input.checked = false;
+  });
+  const placeholders = {
+    "profile-home-name": "-",
+    "profile-home-meta": "-",
+    "profile-home-bio": "尚未載入個人主頁",
+    "profile-home-signature": "",
+    "profile-home-friend-count": "0",
+    "profile-home-follower-count": "0",
+    "profile-home-following-count": "0",
+    "profile-home-friend-status": "-",
+    "profile-home-friend-code": "-",
+  };
+  Object.entries(placeholders).forEach(([id, value]) => {
+    const element = $(id);
+    if (element) element.textContent = value;
+  });
+  [
+    "profile-home-public-account-fields",
+    "profile-home-actions",
+    "profile-public-info-editor-list",
+    "profile-friend-list",
+    "profile-incoming-list",
+    "profile-outgoing-list",
+    "profile-blocked-list",
+    "profile-avatar-cloud-gallery",
+  ].forEach((id) => {
+    const element = $(id);
+    if (element) element.replaceChildren();
+  });
+  const cloudSelect = $("profile-avatar-cloud-file");
+  if (cloudSelect) cloudSelect.replaceChildren();
+}
+
+document.addEventListener("hackme:account-context-changed", resetProfileAccountState);
+
 (() => {
   const MIN_PROFILE_AVATAR_SIZE = PROFILE_AVATAR_MIN_DISPLAY_SIZE;
   const MAX_PROFILE_AVATAR_SIZE = PROFILE_AVATAR_MAX_DISPLAY_SIZE;

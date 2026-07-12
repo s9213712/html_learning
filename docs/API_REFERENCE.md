@@ -250,6 +250,7 @@ curl -k -sS https://127.0.0.1:5000/api/version
 | GET | `/api/storage/files/<storage_file_id>/download` | logged-in | 下載 |
 | GET/POST | `/api/storage/trash` | logged-in | 垃圾桶列表 / 操作 |
 | GET/POST | `/api/storage/albums` | logged-in | 相簿列表 / 建立相簿 |
+| POST | `/api/storage/albums/batch-share` | logged-in | 以 1-100 個 storage file ID 原子建立 unlisted 分享相簿；任一檔案失敗會整批回滾 |
 | POST | `/api/storage/albums/smart-organize` | logged-in | 智慧整理相簿 |
 | GET/PUT/DELETE | `/api/storage/albums/<album_id>` | logged-in | 單一相簿 |
 | GET/POST | `/api/storage/share-links` | logged-in | 建立分享 |
@@ -388,7 +389,7 @@ curl -k -sS https://127.0.0.1:5000/api/version
 | POST | `/api/games/<game_key>/solo-scores` | logged-in | 單機分數 |
 | POST | `/api/root/games/chess/weekly-rewards/award` | root | 發周獎勵 |
 
-`/api/games/<game_key>/ai-move` 目前只接受 `reversi`、`go`、`gomoku`。圍棋 `katago` 難度會使用本機 KataGo analysis engine；可先執行 `python3 scripts/games/setup_katago.py` 自動下載 binary、模型並產生 `runtime/katago/analysis.cfg`。
+`/api/games/<game_key>/ai-move` 目前只接受 `reversi`、`go`、`gomoku`。圍棋 `katago` 難度會使用本機 KataGo analysis engine；可先執行 `python3 scripts/games/setup_katago.py` 自動下載 binary、模型並在 `$HACKME_RUNTIME_DIR/katago/` 產生設定。
 完整 payload、response、前端調用地圖與 benchmark 教學見
 [games/references/BOARD_AI_BENCHMARK.md](games/references/BOARD_AI_BENCHMARK.md)。
 

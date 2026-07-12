@@ -18,6 +18,7 @@ operator guidance.
 | PointsChain | [07_POINTSCHAIN.md](07_POINTSCHAIN.md), [architecture/POINTSCHAIN_FINANCIAL_SETTLEMENT_NETWORK.md](architecture/POINTSCHAIN_FINANCIAL_SETTLEMENT_NETWORK.md), [architecture/BLOCKCHAIN_WALLET_IDENTITY_CONTRACT.md](architecture/BLOCKCHAIN_WALLET_IDENTITY_CONTRACT.md), [architecture/ECONOMY_LAYER_GUARDRAILS.md](architecture/ECONOMY_LAYER_GUARDRAILS.md) |
 | Trading engine | [08_TRADING_ENGINE.md](08_TRADING_ENGINE.md) |
 | Snapshot / reset / restore | [09_SNAPSHOT_RESET_RESTORE.md](09_SNAPSHOT_RESET_RESTORE.md) |
+| Remote download / Transmission | [13_REMOTE_DOWNLOAD_TRANSMISSION.md](13_REMOTE_DOWNLOAD_TRANSMISSION.md) |
 | Blockchain walletization prework | [10_BLOCKCHAIN_WALLETIZATION_PREWORK_PLAN.md](10_BLOCKCHAIN_WALLETIZATION_PREWORK_PLAN.md) |
 | QA and validation | [11_QA_TESTING.md](11_QA_TESTING.md) |
 | Troubleshooting | [12_TROUBLESHOOTING.md](12_TROUBLESHOOTING.md) |
@@ -41,6 +42,7 @@ operator guidance.
 | ComfyUI | [comfyui/README.md](comfyui/README.md) |
 | Games / board AI / chess experiments | [games/README.md](games/README.md) |
 | Runtime and encryption boundaries | [ops_boundaries/README.md](ops_boundaries/README.md) |
+| Remote download / Transmission | [13_REMOTE_DOWNLOAD_TRANSMISSION.md](13_REMOTE_DOWNLOAD_TRANSMISSION.md) |
 | Security runbooks | [security/QA_ARCHITECTURE.md](security/QA_ARCHITECTURE.md) |
 | Server Mode v2 | [server_mode_v2/README.md](server_mode_v2/README.md), [server_mode_v2/SERVER_MODE_V2_PROFILE_MATRIX.md](server_mode_v2/SERVER_MODE_V2_PROFILE_MATRIX.md) |
 | Social / profiles / friends | [social/USER_PROFILES_AND_FRIENDS.md](social/USER_PROFILES_AND_FRIENDS.md) |
@@ -93,5 +95,3 @@ operator guidance.
 - Treat `archive/`, `evidence/`, and one-off reports as history, not current operator guidance.
 - Treat `AGENTS/research/` as future-work specification unless the referenced feature also appears in the numbered guides or API reference as implemented.
 - When a feature document has both implemented and planned sections, deploy only the implemented surface and keep planned endpoints behind feature flags or release gates.
-
-- [13_REMOTE_DOWNLOAD_TRANSMISSION.md](13_REMOTE_DOWNLOAD_TRANSMISSION.md) - Transmission / aria2 remote-download deployment settings.

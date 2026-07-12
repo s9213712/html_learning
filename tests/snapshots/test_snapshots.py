@@ -190,6 +190,52 @@ def test_snapshot_covers_split_runtime_databases_and_portable_export(tmp_path):
     conn.close()
 
 
+def test_snapshot_archives_but_never_overwrites_append_only_financial_databases(tmp_path):
+    audit_log = []
+    base = tmp_path / "app"
+    finance_db = base / "runtime" / "database" / "finance.db"
+    points_db = base / "runtime" / "database" / "points_chain.db"
+    trading_db = base / "runtime" / "database" / "trading.db"
+    service, _db_path, _uploads = _service(
+        tmp_path,
+        audit_log,
+        additional_db_paths={
+            "finance": finance_db,
+            "points_chain": points_db,
+            "trading": trading_db,
+        },
+    )
+    for path, key in ((finance_db, "finance"), (points_db, "points"), (trading_db, "trading")):
+        _init_kv_db(path, key, f"{key}-snapshot")
+
+    snap = service.create_snapshot(snapshot_type="manual", actor={"id": 1, "username": "root"}, notes="protected finance")
+    assert snap.ok is True
+    snapshot = service.get_snapshot(snapshot_id=snap.snapshot_id, actor={"id": 1, "username": "root"})
+    database_files = {item["label"]: item for item in snapshot["metadata"]["database_files"]}
+    for label in ("finance", "points_chain", "trading"):
+        assert database_files[label]["exists"] is True
+        assert database_files[label]["restore_policy"] == "forensic_archive_only_append_only_recovery"
+
+    for path, key in ((finance_db, "finance"), (points_db, "points"), (trading_db, "trading")):
+        conn = sqlite3.connect(path)
+        conn.execute("UPDATE kv SET value=? WHERE key=?", (f"{key}-live-after-snapshot", key))
+        conn.commit()
+        conn.close()
+
+    restored = service.restore_snapshot(snapshot_id=snap.snapshot_id, actor={"id": 1, "username": "root"}, reason="must preserve live ledger")
+    assert restored["ok"] is True
+    skipped = {item["label"]: item["reason"] for item in restored["database_restore"]["skipped"]}
+    assert skipped == {
+        "finance": "append_only_financial_restore_disabled",
+        "points_chain": "append_only_financial_restore_disabled",
+        "trading": "append_only_financial_restore_disabled",
+    }
+    for path, key in ((finance_db, "finance"), (points_db, "points"), (trading_db, "trading")):
+        conn = sqlite3.connect(path)
+        assert conn.execute("SELECT value FROM kv WHERE key=?", (key,)).fetchone()[0] == f"{key}-live-after-snapshot"
+        conn.close()
+
+
 def test_snapshot_file_roots_exclude_and_preserve_snapshot_repository(tmp_path):
     audit_log = []
     base = tmp_path / "app"
@@ -366,11 +412,12 @@ def test_restore_with_runtime_storage_roots_does_not_recreate_legacy_repo_dirs(t
 
 def test_server_mode_hmac_key_defaults_to_runtime_subdir_without_snapshot_service(tmp_path, monkeypatch):
     monkeypatch.delenv("HACKME_RUNTIME_DIR", raising=False)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     mode = ServerModeService(snapshot_service=None, get_db=lambda: None, audit=lambda *args, **kwargs: None)
 
     path = mode._local_hmac_key_path("server_mode_log")
 
-    assert path == (Path(__file__).resolve().parents[2] / "runtime" / ".server_mode_log_hmac_key").resolve()
+    assert path == (tmp_path / "state" / "hackme_web" / ".server_mode_log_hmac_key").resolve()
 
 
 def test_server_mode_hmac_key_fails_closed_when_runtime_path_is_a_file(tmp_path, monkeypatch):

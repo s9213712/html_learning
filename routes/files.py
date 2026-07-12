@@ -77,6 +77,7 @@ from services.storage.storage_albums import (
     add_album_file,
     create_album,
     create_album_from_storage_folder,
+    create_album_with_files,
     create_share_link,
     create_storage_folder,
     create_storage_file_entry,
@@ -114,6 +115,7 @@ from services.storage.storage_albums import (
     mark_album_share_link_accessed,
     public_album_payload,
 )
+from services.users.friends import assert_can_target_user
 from services.storage.maintenance import run_storage_maintenance, storage_maintenance_status
 from services.storage.quota_overrides import (
     clear_storage_quota_override,
@@ -3946,6 +3948,43 @@ def register_file_routes(app, deps):
         finally:
             conn.close()
 
+    @app.route("/api/storage/albums/batch-share", methods=["POST"])
+    @require_csrf
+    def storage_albums_batch_share():
+        actor, err = _actor_or_401()
+        if err:
+            return err
+        try:
+            data = request.get_json(force=True)
+        except Exception:
+            return json_resp({"ok": False, "msg": "請求 JSON 格式錯誤"}), 400
+        if not isinstance(data, dict):
+            return json_resp({"ok": False, "msg": "請求 JSON 格式錯誤"}), 400
+        conn = get_db()
+        try:
+            album, msg = create_album_with_files(
+                conn,
+                actor=actor,
+                title=data.get("title"),
+                description=data.get("description") or "",
+                storage_file_ids=data.get("storage_file_ids"),
+            )
+            if msg:
+                conn.rollback()
+                return json_resp({"ok": False, "msg": msg}), 400
+            conn.commit()
+            audit(
+                "STORAGE_ALBUM_BATCH_SHARE",
+                get_client_ip(),
+                user=actor["username"],
+                success=True,
+                ua=get_ua(),
+                detail=f"album_id={album['id']}, file_count={len(album.get('files') or [])}",
+            )
+            return json_resp({"ok": True, "album": album})
+        finally:
+            conn.close()
+
     @app.route("/api/storage/albums/<album_id>", methods=["GET", "PUT", "DELETE"])
     @require_csrf_safe
     def storage_album_detail(album_id):
@@ -5171,11 +5210,32 @@ def register_file_routes(app, deps):
         conn = get_db()
         try:
             ensure_cloud_drive_attachment_schema(conn)
+            try:
+                recipient_user_id = int(data.get("recipient_user_id"))
+            except Exception:
+                return json_resp({"ok": False, "msg": "recipient_user_id 錯誤"}), 400
+            allowed, target_msg = assert_can_target_user(
+                conn,
+                actor,
+                recipient_user_id,
+                context="cloud_drive_share",
+            )
+            if not allowed:
+                conn.rollback()
+                audit(
+                    "FILE_E2EE_SHARE",
+                    get_client_ip(),
+                    user=actor["username"],
+                    success=False,
+                    ua=get_ua(),
+                    detail=f"file_id={file_id}, recipient_user_id={recipient_user_id}, reason=friend_required",
+                )
+                return json_resp({"ok": False, "error": "friend_required", "msg": target_msg}), 403
             result, msg = share_e2ee_file(
                 conn,
                 actor=actor,
                 file_id=file_id,
-                recipient_user_id=data.get("recipient_user_id"),
+                recipient_user_id=recipient_user_id,
                 encrypted_file_key=data.get("encrypted_file_key"),
                 wrapped_by=data.get("wrapped_by") or "recipient_public_key",
                 context_type=data.get("context_type") or "dm",

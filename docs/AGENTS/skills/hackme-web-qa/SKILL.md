@@ -49,12 +49,15 @@ Use [references/coverage-checklist.md](references/coverage-checklist.md) as a co
 Run the bundled probe against a live isolated server:
 
 ```bash
+export HACKME_QA_ROOT_PASSWORD
+export HACKME_QA_TEST_PASSWORD
 python3 /home/s92137/.codex/skills/hackme-web-qa/scripts/member_probe.py \
   --base-url https://127.0.0.1:PORT \
-  --root-password RootQa123! \
-  --test-password TestQa123! \
   --out /tmp/hackme_web_qa_RUN/member_probe/member_probe.json
 ```
+
+Set both password variables from the isolated server launcher or a secret store.
+Do not place live credentials in command arguments or checked-in reports.
 
 The probe creates small fixture files, uploads multiple file types, tests previews, exercises E2EE success/failure cases, share links, album password sharing, remote download SSRF guards, real MP4 upload/HLS/password playback, unsupported video privacy mode, grid fee math, and reserve allocation.
 

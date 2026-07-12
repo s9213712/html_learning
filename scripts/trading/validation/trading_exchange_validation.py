@@ -31,9 +31,10 @@ from services.trading.trading_engine import (
     units_to_quantity,
 )
 from services.points_chain.wallet_identity import official_hot_wallet_address
+from scripts.test_artifacts import test_artifact_path
 
 
-REPORT_DIR = REPO_ROOT / "runtime" / "reports" / "trading_validation"
+REPORT_DIR = test_artifact_path("trading_validation")
 VALIDATION_MODE_READER = lambda: "production"
 
 

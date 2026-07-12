@@ -74,6 +74,9 @@ def test_dev_launcher_copies_repo_to_tmp_and_bootstraps_dev_friendly_runtime():
     assert "application_limit" in capacity_probe
     assert "server_instability" in capacity_probe
     assert "rc1_capacity_gate" in capacity_probe
+    assert "--tmp-parent must stay outside the source checkout" in capacity_probe
+    assert "--output must stay outside the source checkout" in capacity_probe
+    assert "top_root.mkdir(parents=False, exist_ok=False)" in capacity_probe
     release_gate = (ROOT / "scripts" / "qa" / "points_chain_release_gate.py").read_text(encoding="utf-8")
     assert '"--no-sync-defaults"' in release_gate
     assert 'export HACKME_DEV_GUNICORN_MAX_REQUESTS="$GUNICORN_MAX_REQUESTS"' in script
@@ -98,7 +101,7 @@ def test_dev_launcher_copies_repo_to_tmp_and_bootstraps_dev_friendly_runtime():
     assert 'setsid "$PYTHON_BIN" server.py >"$LOG_CAPTURE" 2>&1 < /dev/null &' in script
 
 
-def test_dev_launcher_prints_transmission_access_credentials():
+def test_dev_launcher_prints_access_location_but_redacts_credentials():
     script = (ROOT / "test_for_develop.sh").read_text(encoding="utf-8")
 
     assert "transmission_rpc_web_url()" in script
@@ -106,9 +109,14 @@ def test_dev_launcher_prints_transmission_access_credentials():
     assert '[dev-tmp] transmission_rpc:      ${TRANSMISSION_RPC_URL:-<blank>}' in script
     assert "[dev-tmp] transmission_web:      $(transmission_rpc_web_url)" in script
     assert '[dev-tmp] transmission_user:     ${TRANSMISSION_RPC_USERNAME:-<blank>}' in script
-    assert '[dev-tmp] transmission_password: ${TRANSMISSION_RPC_PASSWORD:-<blank>}' in script
-    assert 'say "[dev-tmp] bootstrap defaults: root/${ROOT_PASSWORD} admin/${MANAGER_PASSWORD} test/${TEST_PASSWORD}"\nprint_transmission_access_summary' in script
-    assert script.count('say "[dev-tmp] bootstrap defaults: root/${ROOT_PASSWORD} admin/${MANAGER_PASSWORD} test/${TEST_PASSWORD}"') == 2
+    assert '[dev-tmp] transmission_password: configured (not printed)' in script
+    assert '${TRANSMISSION_RPC_PASSWORD:-<blank>}' not in script
+    assert 'say "[dev-tmp] bootstrap accounts: root, admin, test (passwords are not printed)"\n  print_transmission_access_summary' in script
+    assert script.count('say "[dev-tmp] bootstrap accounts: root, admin, test (passwords are not printed)"') == 2
+    assert '--root-password "$ROOT_PASSWORD"' not in script
+    assert '--manager-password "$MANAGER_PASSWORD"' not in script
+    assert '--test-password "$TEST_PASSWORD"' not in script
+    assert 'chmod 600 "$secret_env_path"' in script
 
 
 def test_dev_launcher_shutdown_recognizes_custom_tmp_run_roots():
@@ -226,6 +234,8 @@ def test_ci_workflows_call_current_script_paths():
 
     assert "python scripts/prepush/pre_push_checks.py --ci" in ci
     assert "scripts/pre_push_checks.py" not in ci
+    assert "scripts.prepush.checks.secrets_check" in secrets
+    assert "--mode full" in secrets
     assert "python scripts/security/gate/scan_plaintext_secrets.py" in secrets
     assert "scripts/security/scan_plaintext_secrets.py" not in secrets
 

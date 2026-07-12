@@ -470,7 +470,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Live probe hackme_web ComfyUI features against a running server.")
     parser.add_argument("--base-url", required=True, help="hackme_web base URL, e.g. https://127.0.0.1:5014")
     parser.add_argument("--username", default="root")
-    parser.add_argument("--password", default="root")
+    from scripts.testing.probe_credentials import add_root_password_argument
+    add_root_password_argument(parser, "--password")
     parser.add_argument("--timeout", type=int, default=180, help="Per async job wait timeout in seconds")
     parser.add_argument("--controlnet-type", default="canny", help="ControlNet type to probe when available")
     parser.add_argument("--insecure", action="store_true", help="Disable TLS verification for local/self-signed servers")

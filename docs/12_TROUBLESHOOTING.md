@@ -85,10 +85,12 @@ proxy_set_header Host $host;
 不要走登入頁的 `忘記密碼`。正式補救方式是到站台實體 runtime 上執行：
 
 ```bash
+export HACKME_RUNTIME_DIR=/srv/hackme-web/runtime
 python3 scripts/admin/root_recovery.py --prompt-password
 ```
 
 這會撤銷 root 既有 session，並要求下次登入立刻改密碼。
+工具不會自動使用 checkout 內的 `runtime/`。
 
 ### TRB-AUTH-002 改完 bootstrap 密碼後被登出
 

@@ -25,6 +25,7 @@ def test_qa_governance_docs_register_gate_scripts_and_validation_vocabulary():
         "pytest",
         "points_chain_consistency",
         "ai_agent_boundary",
+        "operational_campaign_24h",
         "on_live_reports_make",
     ):
         assert f"`{report_type}`" in index
@@ -70,3 +71,20 @@ def test_active_docs_do_not_point_to_missing_deployment_scripts():
     assert "scripts/admin/root_recovery.py" in updates
 
     assert "## 管理順序" in comfy_canonical
+
+
+def test_log_chain_probe_prefers_environment_credentials():
+    script = (ROOT / "scripts" / "on_live_reports" / "log_chain_verify.py").read_text(encoding="utf-8")
+
+    assert "add_root_password_argument(p)" in script
+    assert "export HACKME_PROBE_ROOT_PASSWORD" in script
+    assert '--root-password "$ROOT_PASSWORD"' not in script
+
+
+def test_required_report_runbooks_require_formal_operational_campaign_evidence():
+    for relative_path in (
+        "docs/11_QA_TESTING.md",
+        "docs/server_mode_v2/03_production_gate_playbook.md",
+    ):
+        document = (ROOT / relative_path).read_text(encoding="utf-8")
+        assert "HACKME_OPERATIONAL_CAMPAIGN_REPORT=/tmp/<campaign>/reports/operational_campaign_24h.json" in document

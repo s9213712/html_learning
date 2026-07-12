@@ -201,8 +201,8 @@ def test_diffusers_text_only_repo_hides_image_cards_and_omits_image_payloads():
 
 def test_diffusers_cache_busts_preflight_ui_assets():
     html = _read("public/index.html")
-    assert "/js/36-comfyui.js?v=20260621-comfyui-draft-restore" in html
-    assert "/js/36-comfyui-workflows.js?v=20260614-comfyui-embedding-commas" in html
+    assert "/js/36-comfyui.js?v=__ASSET_VERSION__" in html
+    assert "/js/36-comfyui-workflows.js?v=__ASSET_VERSION__" in html
 
 
 
@@ -270,7 +270,7 @@ def test_comfyui_history_lists_and_reruns_workflow_runs():
     assert 'applyComfyuiTemplateHistorySnapshotToForm(item.workflow_json || {}, payload);' in comfyui_js
     assert 'API + `/comfyui/workflow-runs/${encodeURIComponent(workflowRunId)}/rerun`' in comfyui_js
     assert "function comfyuiHistoryPreviewMarkup" in comfyui_js
-    assert "hydrateComfyuiHistoryPreviews().catch(() => {});" in comfyui_js
+    assert 'hydrateComfyuiHistoryPreviews().catch((err) => handleComfyuiActionError(err, "ComfyUI 歷史預覽讀取失敗", { report: "comfyui-history-previews" }));' in comfyui_js
     assert "data-comfyui-history-preview" in comfyui_js
     assert 'can_rerun = int(row["actor_user_id"] or 0) == actor_id' in runtime_routes
     assert 'or int(row["is_official"] or 0) == 1' not in runtime_routes

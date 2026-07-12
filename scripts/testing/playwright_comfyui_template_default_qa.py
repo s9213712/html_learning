@@ -161,7 +161,8 @@ def build_contact_sheets(image_items: list[dict[str, Any]], out_dir: Path) -> li
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Playwright full QA for official ComfyUI templates.")
     parser.add_argument("--base-url", default=os.environ.get("QA_BASE_URL", "https://127.0.0.1:5007"))
-    parser.add_argument("--root-password", default=os.environ.get("HTML_LEARNING_ROOT_PASSWORD", "root"))
+    from scripts.testing.probe_credentials import add_root_password_argument
+    add_root_password_argument(parser)
     parser.add_argument("--comfyui-api-url", default=os.environ.get("PLAYWRIGHT_COMFYUI_API_URL", "http://192.168.18.19:8188"))
     parser.add_argument("--out-dir", default=f"/tmp/hackme_comfyui_template_default_qa_{now_tag()}")
     parser.add_argument("--only", default="", help="Comma-separated system_bundle_id or preset id list.")

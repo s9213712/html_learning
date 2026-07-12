@@ -33,6 +33,7 @@ from services.games.chess_exp6 import (  # noqa: E402
 from services.games.chess_neural import NeuralEvaluator, load_weights  # noqa: E402
 from services.games.chess_search import ZobristHasher, opening_sanity_filter, search_best_move  # noqa: E402
 from services.games.chess_stockfish_teacher import UciStockfish, analysis_limit, resolve_stockfish_path  # noqa: E402
+from scripts.games.common_paths import exp6_artifacts_root, exp6_private_dir  # noqa: E402
 
 sys.path.insert(0, str(ROOT / "scripts/games"))
 import chess_exp6_curriculum as cc  # noqa: E402
@@ -46,12 +47,13 @@ from chess_exp6_halfkp_value_candidate import (  # noqa: E402
 
 
 DEFAULT_MODEL = Path("/tmp/exp6_halfkp_v1_600.pt")
-DEFAULT_JSONL = ROOT / "runtime/private/games/exp6/halfkp_v1_failure_taxonomy.jsonl"
-DEFAULT_TAXONOMY_MD = ROOT / "docs/games/chess_debug/exp6/halfkp_v1_failure_taxonomy.md"
-DEFAULT_SEARCH_TAXONOMY_MD = ROOT / "docs/games/chess_debug/exp6/search_failure_taxonomy.md"
-DEFAULT_ABLATION_MD = ROOT / "docs/games/chess_debug/exp6/search_ablation_report.md"
-DEFAULT_NEXT_PLAN_MD = ROOT / "docs/games/chess_debug/exp6/next_evaluator_candidate_plan.md"
-DEFAULT_ABLATION_JSON = ROOT / "runtime/private/games/exp6/search_failure_ablation.json"
+DEFAULT_JSONL = exp6_private_dir() / "halfkp_v1_failure_taxonomy.jsonl"
+DEFAULT_REPORT_DIR = exp6_artifacts_root() / "search_failure_diagnostics"
+DEFAULT_TAXONOMY_MD = DEFAULT_REPORT_DIR / "halfkp_v1_failure_taxonomy.md"
+DEFAULT_SEARCH_TAXONOMY_MD = DEFAULT_REPORT_DIR / "search_failure_taxonomy.md"
+DEFAULT_ABLATION_MD = DEFAULT_REPORT_DIR / "search_ablation_report.md"
+DEFAULT_NEXT_PLAN_MD = DEFAULT_REPORT_DIR / "next_evaluator_candidate_plan.md"
+DEFAULT_ABLATION_JSON = exp6_private_dir() / "search_failure_ablation.json"
 
 PIECE_VALUES = {
     chess.PAWN: 100,

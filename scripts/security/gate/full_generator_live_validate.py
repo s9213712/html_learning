@@ -92,6 +92,7 @@ def _report_label(report_type: str) -> str:
         "points_chain_consistency": "points-chain consistency",
         "cloud_drive_quota_permission": "cloud-drive quota/permission",
         "ai_agent_boundary": "AI Agent boundary",
+        "operational_campaign_24h": "24-hour operational campaign",
     }
     return labels.get(report_type, report_type.replace("_", " "))
 
@@ -331,7 +332,9 @@ def _now_stamp() -> str:
 
 
 def _derive_rotated_password(current_password: str, label: str) -> str:
-    base = str(current_password or "RootSmoke123!")
+    base = str(current_password or "")
+    if not base:
+        raise ValueError("current password is required before deriving a rotated password")
     safe_label = "".join(ch for ch in str(label or "rotate") if ch.isalnum()) or "rotate"
     candidate = f"{base}.{safe_label}.Aa1!"
     if candidate == base:
@@ -721,6 +724,12 @@ def _generator_map():
             signer=signer,
             meta=meta,
         ),
+        "operational_campaign_24h": lambda payload_root, raw_root, args, signer, meta, client: gate_helpers._operational_campaign_report(  # noqa: SLF001
+            payload_root,
+            args.operational_campaign_report,
+            signer=signer,
+            meta=meta,
+        ),
     }
 
 
@@ -730,10 +739,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--runtime-dir", required=True)
     parser.add_argument("--git-repo-dir", required=True, help="Real git repo used by the live server for current target detection.")
     parser.add_argument("--root-username", default="root")
-    parser.add_argument("--root-password", default=os.environ.get("ROOT_PASSWORD", ""))
-    parser.add_argument("--manager-password", default="ManagerSmoke123!")
-    parser.add_argument("--test-password", default="TestSmoke123!")
+    from scripts.testing.probe_credentials import (
+        add_manager_password_argument,
+        add_root_password_argument,
+        add_user_password_argument,
+    )
+    add_root_password_argument(parser)
+    add_manager_password_argument(parser)
+    add_user_password_argument(parser)
     parser.add_argument("--root-new-password", default="")
+    parser.add_argument(
+        "--operational-campaign-report",
+        default=os.environ.get("HACKME_OPERATIONAL_CAMPAIGN_REPORT", ""),
+        help="Formal operational_campaign_24h.json below /tmp.",
+    )
     parser.add_argument("--functional-port", type=int, default=50741)
     parser.add_argument("--server-mode-timeout", type=int, default=1800)
     parser.add_argument("--functional-timeout", type=int, default=1800)

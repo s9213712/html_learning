@@ -8,6 +8,7 @@ from cryptography.fernet import InvalidToken
 
 from services.storage.paths import resolve_storage_path
 from services.storage.storage_albums import ensure_storage_album_schema
+from services.users.friends import assert_can_target_user
 from services.security.upload_security import (
     create_uploaded_file_record,
     ensure_upload_security_schema,
@@ -767,6 +768,14 @@ def share_e2ee_file(
     recipient = conn.execute("SELECT id FROM users WHERE id=?", (recipient_user_id,)).fetchone()
     if not recipient:
         return None, "找不到分享對象"
+    allowed, target_msg = assert_can_target_user(
+        conn,
+        actor,
+        recipient_user_id,
+        context="cloud_drive_share",
+    )
+    if not allowed:
+        return None, target_msg
     context_type = validate_context_type(context_type)
     context_id = _context_id(context_id or f"file-share:{file_id}")
     now = _now()

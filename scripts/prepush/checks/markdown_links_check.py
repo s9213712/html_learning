@@ -12,7 +12,13 @@ LINK_RE = re.compile(r'!?\[[^\]]*\]\(([^)]+)\)')
 IGNORE_PREFIXES = ("http://", "https://", "mailto:", "app://", "tel:")
 EXCLUDED_PREFIXES = (
     "docs/archive/",
-    "docs/research/",
+    "docs/AGENTS/research/",
+    "docs/AGENTS/reports/",
+    "docs/games/archive/",
+    "docs/games/chess_debug/",
+    "docs/games/evidence/",
+    "docs/games/experiments/",
+    "docs/games/reports/",
 )
 
 
@@ -22,15 +28,8 @@ def _iter_targets(ctx: PrepushContext) -> list[str]:
     if docs_root.exists():
         targets.extend(
             path.relative_to(ctx.repo_root).as_posix()
-            for path in docs_root.glob("*.md")
+            for path in docs_root.rglob("*.md")
         )
-        for subdir in ("AGENTS", "security"):
-            root = docs_root / subdir
-            if root.exists():
-                targets.extend(
-                    path.relative_to(ctx.repo_root).as_posix()
-                    for path in root.glob("*.md")
-                )
     return sorted(set(targets))
 
 

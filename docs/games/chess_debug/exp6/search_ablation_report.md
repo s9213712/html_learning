@@ -2,7 +2,7 @@
 
 Exact FENs and moves are redacted. Ablations use the current locked evaluator on the same redacted failure-position set.
 
-- JSON report: `/home/s92137/hackme_web/runtime/private/games/exp6/search_failure_ablation.json`
+- JSON report: `$HACKME_RUNTIME_DIR/private/games/exp6/search_failure_ablation.json`
 - Positions: `64`
 
 | Patch | Top3 Rate | Mean Delta CP | Max Delta CP | Mean ms |

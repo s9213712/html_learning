@@ -5,8 +5,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import time
 from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 
 def run(base_url: str, username: str, password: str) -> dict:
@@ -108,7 +114,8 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", default="https://127.0.0.1:54347")
     parser.add_argument("--username", default="root")
-    parser.add_argument("--password", default="root")
+    from scripts.testing.probe_credentials import add_root_password_argument
+    add_root_password_argument(parser, "--password")
     parser.add_argument("--out", default="")
     args = parser.parse_args()
     result = run(args.base_url, args.username, args.password)

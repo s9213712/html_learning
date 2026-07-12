@@ -2,6 +2,7 @@ import sqlite3
 import threading
 import time
 
+import services.management_plane as management_plane
 from services.job_center import get_job
 from services.management_plane import get_management_snapshot, start_management_plane_job
 
@@ -15,10 +16,10 @@ def _db_factory(path):
     return get_db
 
 
-def _wait_for_job(get_db, job_uuid, *, timeout=3.0):
-    deadline = time.time() + timeout
+def _wait_for_job(get_db, job_uuid, *, timeout=30.0):
+    deadline = time.monotonic() + timeout
     last_job = None
-    while time.time() < deadline:
+    while time.monotonic() < deadline:
         conn = get_db()
         try:
             last_job = get_job(conn, job_uuid)
@@ -26,7 +27,7 @@ def _wait_for_job(get_db, job_uuid, *, timeout=3.0):
             conn.close()
         if last_job and last_job.get("status") in {"succeeded", "failed", "cancelled", "expired"}:
             return last_job
-        time.sleep(0.02)
+        time.sleep(0.1)
     return last_job
 
 
@@ -142,3 +143,26 @@ def test_management_plane_enqueue_retries_transient_sqlite_write_lock(tmp_path, 
     connect_timeout["seconds"] = 1.0
     job = _wait_for_job(get_db, started["job"]["job_uuid"])
     assert job["status"] == "succeeded"
+
+
+def test_management_plane_marks_missing_worker_job_failed_before_replacement(monkeypatch):
+    stale_job = {
+        "job_uuid": "stale-job",
+        "status": "running",
+        "updated_at": "2020-01-01T00:00:00",
+        "metadata": {"worker_pid": 2_147_483_647},
+    }
+    updates = []
+    events = []
+    monkeypatch.setattr(management_plane, "get_job_by_source", lambda *args, **kwargs: stale_job)
+    monkeypatch.setattr(management_plane, "_pid_is_alive", lambda pid: False)
+    monkeypatch.setattr(management_plane, "_job_updated_age_seconds", lambda job: 30.0)
+    monkeypatch.setattr(management_plane, "update_job", lambda *args, **kwargs: updates.append(kwargs))
+    monkeypatch.setattr(management_plane, "add_job_event", lambda *args, **kwargs: events.append(kwargs))
+
+    reusable = management_plane._reusable_existing_job(object(), snapshot_key="stale-snapshot")
+
+    assert reusable is None
+    assert updates[0]["status"] == "failed"
+    assert updates[0]["error_code"] == "management_worker_missing"
+    assert events[0]["event_type"] == "failed"

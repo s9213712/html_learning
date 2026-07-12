@@ -5,11 +5,19 @@ import argparse
 import json
 import re
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
 
 from playwright.sync_api import sync_playwright
+
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.testing.probe_credentials import add_root_password_argument, add_user_password_argument  # noqa: E402
 
 
 TOOL_CANDIDATES = [
@@ -287,8 +295,8 @@ def record_request(request_log: list[dict[str, Any]], request) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", required=True)
-    parser.add_argument("--root-password", required=True)
-    parser.add_argument("--test-password", required=True)
+    add_root_password_argument(parser)
+    add_user_password_argument(parser)
     parser.add_argument("--out", required=True)
     parser.add_argument("--fixture", default="/tmp/hackme_ai_agent_media_probe/ai_agent_media_probe.mp4")
     args = parser.parse_args()

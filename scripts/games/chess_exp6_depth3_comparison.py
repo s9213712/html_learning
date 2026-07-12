@@ -8,11 +8,11 @@ eval more material to act on.
 
 Usage:
     python scripts/games/chess_exp6_depth3_comparison.py \\
-        --weights ~/exp6_output/snapshots/chess_experiment_6_neural_stage10.npz \\
-        --baseline-weights ~/exp6_output/snapshots/chess_experiment_6_neural_stage00_init.npz \\
+        --weights /tmp/hackme_web_test_artifacts/games/exp6/curriculum/snapshots/chess_experiment_6_neural_stage10.npz \\
+        --baseline-weights /tmp/hackme_web_test_artifacts/games/exp6/curriculum/snapshots/chess_experiment_6_neural_stage00_init.npz \\
         --games-per-depth 10
 
-Outputs JSON to ~/exp6_output/v5_depth3_comparison.json and a log.
+Outputs JSON under the external Exp6 artifact root and writes progress to stdout.
 """
 from __future__ import annotations
 
@@ -26,6 +26,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+from scripts.games.common_paths import exp6_artifacts_root  # noqa: E402
 
 sys.path.insert(0, str(ROOT / "scripts/games"))
 import chess_exp6_curriculum as cc  # noqa: E402
@@ -76,7 +78,7 @@ def main() -> int:
     ap.add_argument("--weights", required=True, type=Path, help="Trained snapshot to test")
     ap.add_argument("--baseline-weights", required=True, type=Path, help="Random-init baseline snapshot")
     ap.add_argument("--games-per-depth", type=int, default=10, help="Games per Stockfish depth (default 10 = 50 total)")
-    ap.add_argument("--out", type=Path, default=Path.home() / "exp6_output/v5_depth3_comparison.json")
+    ap.add_argument("--out", type=Path, default=exp6_artifacts_root() / "v5_depth3_comparison.json")
     args = ap.parse_args()
 
     out: dict = {"games_per_depth": args.games_per_depth, "total_games": args.games_per_depth * len(cc.STAGED_DEPTHS), "results": {}}

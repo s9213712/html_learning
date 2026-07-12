@@ -2,7 +2,7 @@
 
 This project uses two layers of plaintext secret detection before code is merged:
 
-- `gitleaks detect --source "$(git rev-parse --show-toplevel)" --no-git --redact --config "$(git rev-parse --show-toplevel)/.gitleaks.toml"`
+- `python3 scripts/prepush/runner.py --quick --ci` (custom scanner plus gitleaks)
 - `python3 scripts/security/gate/scan_plaintext_secrets.py --fail-on high`
 
 The custom scanner checks project-specific plaintext patterns such as credential
@@ -45,14 +45,23 @@ If a new shell cannot find a user-local `gitleaks` install, add this line to
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-The gitleaks run uses `.gitleaks.toml` to exclude runtime/generated paths such
-as local DB files, private runtime keys, snapshots, cache directories, and
-generated reports.
+The pre-push gitleaks check materializes its candidate files below `/tmp` and
+removes that tree when the check ends. Quick and pre-commit runs scan staged,
+unstaged, untracked, and canonical deployment documentation. Full runs scan all
+tracked product files. The dedicated CI secrets workflow uses full strict mode.
+Unchanged bulk historical evidence below
+`docs/AGENTS/reports/` and generated `output/` assets are omitted from repeated
+full scans; a staged, unstaged, or untracked change in either path is still
+included. `.gitleaks.toml` handles remaining runtime/generated exclusions.
 
 Run the checks manually:
 
 ```bash
-pre-commit run --all-files
+pre-commit run
+python3 -m scripts.prepush.checks.secrets_check \
+  --mode full \
+  --strict \
+  --report-json /tmp/hackme_web_gitleaks_report.json
 python3 scripts/security/gate/scan_plaintext_secrets.py --fail-on high
 ```
 
@@ -60,10 +69,10 @@ python3 scripts/security/gate/scan_plaintext_secrets.py --fail-on high
 
 The custom scanner writes masked reports to:
 
-- `runtime/reports/security/secrets_scan_report.json`
-- `runtime/reports/security/secrets_scan_report.md`
+- `/tmp/hackme_web_test_artifacts/reports/security/secrets_scan_report.json`
+- `/tmp/hackme_web_test_artifacts/reports/security/secrets_scan_report.md`
 
-CI also uploads `runtime/reports/security/gitleaks_report.json` as an artifact. Reports
+CI also uploads its generated `gitleaks_report.json` as an artifact. Reports
 must not include complete secret values. Evidence is masked, for example:
 
 - `token field -> <masked>`

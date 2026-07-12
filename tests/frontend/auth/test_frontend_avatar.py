@@ -42,9 +42,9 @@ def test_avatar_upload_ui_is_wired():
     assert 'form.append("avatar_client_cropped", "1")' in auth_js
     assert "const avatarFile = selectedUserAvatarFile();" in auth_js
     assert "if (!Object.keys(payload).length && !avatarFile && !appearanceChanged && !timezoneChanged)" in auth_js
-    assert "submitUserAvatarUpload({ reloadUsers: false })" in auth_js
-    assert 'apiFetch(API + `/admin/users/${editingUserId}/avatar`' in auth_js
-    assert "markUserAvatarUpdated(editingUserId, json.avatar_file_id || \"\")" in auth_js
+    assert "submitUserAvatarUpload({ reloadUsers: false, operation })" in auth_js
+    assert 'apiFetch(API + `/admin/users/${targetUserId}/avatar`' in auth_js
+    assert "markUserAvatarUpdated(targetUserId, json.avatar_file_id || \"\")" in auth_js
     assert "if (typeof bindProfileFriendsControls === \"function\") bindProfileFriendsControls();" in bootstrap_js
     assert "function bindProfileAvatarUploaderControls()" in profile_js
     assert "bindProfileAvatarUploaderControls();" in profile_js

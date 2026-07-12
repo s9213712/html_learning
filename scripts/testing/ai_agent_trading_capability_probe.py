@@ -4,11 +4,19 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 import time
 from pathlib import Path
 from typing import Any
 
 from playwright.sync_api import sync_playwright
+
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.testing.probe_credentials import add_root_password_argument, add_user_password_argument  # noqa: E402
 
 
 AI_AGENT_NON_TRADING_TOOLS = [
@@ -201,8 +209,8 @@ def execute_ai_tool(page, tool: str, arguments: dict[str, Any] | None = None) ->
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", required=True)
-    parser.add_argument("--root-password", required=True)
-    parser.add_argument("--test-password", required=True)
+    add_root_password_argument(parser)
+    add_user_password_argument(parser)
     parser.add_argument("--out", required=True)
     args = parser.parse_args()
 
@@ -230,7 +238,7 @@ def main() -> int:
                 "module_ai_agent_min_role": "user",
                 "ai_agent_provider": "openai_compatible",
                 "ai_agent_api_base_url": "http://127.0.0.1:9",
-                "ai_agent_api_key": "sk-trading-probe",
+                "ai_agent_api_key": "sk-fake-trading-probe",
                 "ai_agent_model": "qa-router",
                 "ai_agent_allowed_models": "qa-router",
                 "ai_agent_allowed_tools": ",".join(AI_AGENT_NON_TRADING_TOOLS),

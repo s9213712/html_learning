@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -22,10 +23,12 @@ from services.server.domain_databases import (  # noqa: E402
     analyze_database,
     export_domain_tables,
 )
+from services.server.runtime import default_runtime_root_path  # noqa: E402
 
 
 def _default_db_path() -> Path:
-    return Path.cwd() / "runtime" / "database" / "database.db"
+    runtime_root = Path(os.environ.get("HACKME_RUNTIME_DIR") or default_runtime_root_path())
+    return runtime_root.expanduser().resolve() / "database" / "database.db"
 
 
 def _parse_domains(raw: str) -> set[str] | None:
@@ -44,7 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--source",
         default=str(_default_db_path()),
-        help="Source database.db path. Defaults to ./runtime/database/database.db",
+        help="Source database.db path. Defaults to $HACKME_RUNTIME_DIR/database/database.db or external XDG state.",
     )
     parser.add_argument(
         "--out-dir",
@@ -123,4 +126,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

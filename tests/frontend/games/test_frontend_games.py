@@ -129,8 +129,8 @@ def test_game_zone_frontend_assets_are_wired():
     assert 'const THREE_JS_SRC = "/js/three.min.js?v=0.160.0";' in core_js
     assert "async function ensureThreeJsLoaded()" in core_js
     assert re.search(r"/js/41-game-modules\.js\?v=", index_html)
-    assert "/js/games/game-view-registry.js?v=20260513-legacy-modules" in index_html
-    assert "/js/games/chess.js?v=20260525-move-history-ply" in index_html
+    assert "/js/games/game-view-registry.js?v=__ASSET_VERSION__" in index_html
+    assert "/js/games/chess.js?v=__ASSET_VERSION__" in index_html
     lazy_game_script_paths = [
         "/js/games/snake.js",
         "/js/games/game-2048.js",
@@ -157,7 +157,8 @@ def test_game_zone_frontend_assets_are_wired():
     for script_path in lazy_game_script_paths:
         versioned_script_pattern = rf"{re.escape(script_path)}\?v="
         assert not re.search(versioned_script_pattern, index_html)
-        assert re.search(versioned_script_pattern, games_js)
+        assert f'"{script_path}"' in games_js
+    assert "`${src}?v=${encodeURIComponent(GAME_ASSET_VERSION)}`" in games_js
     assert "async function ensureGameRuntimeScriptsLoaded()" in games_js
     assert "await runtimeReady" in games_js
     assert '/solo-scores?compact=1`' in games_js
@@ -273,7 +274,7 @@ def test_game_zone_frontend_assets_are_wired():
     assert 'data-hold="throttle"' in local_racing_js
     assert 'data-hold="nitro"' in local_racing_js
     assert 'data-action="item"' in local_racing_js
-    assert "20260520-racing-physics" in games_js
+    assert "const GAME_ASSET_VERSION = document.documentElement?.dataset?.assetVersion" in games_js
     assert "煞車+方向可甩尾" in games_js
     assert "OPEN_WORLD_PLAYER_START" in local_open_world_js
     assert "OPEN_WORLD_MISSIONS" in local_open_world_js

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import os
 import subprocess
 import time
 import zipfile
@@ -116,10 +117,14 @@ def upload_storage(client, path, privacy_mode, virtual_path, extra_data=None):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", required=True)
-    parser.add_argument("--root-password", required=True)
-    parser.add_argument("--test-password", required=True)
+    parser.add_argument("--root-password", default=os.environ.get("HACKME_QA_ROOT_PASSWORD", ""), help=argparse.SUPPRESS)
+    parser.add_argument("--test-password", default=os.environ.get("HACKME_QA_TEST_PASSWORD", ""), help=argparse.SUPPRESS)
     parser.add_argument("--out", required=True)
     args = parser.parse_args()
+    if not str(args.root_password or "").strip():
+        parser.error("root password is required through HACKME_QA_ROOT_PASSWORD")
+    if not str(args.test_password or "").strip():
+        parser.error("test password is required through HACKME_QA_TEST_PASSWORD")
     requests.packages.urllib3.disable_warnings()
 
     out = {"base_url": args.base_url, "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "checks": [], "findings": []}

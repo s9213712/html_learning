@@ -10,8 +10,8 @@ accepted V28e baseline without leaking private validation material.
 | Accepted profile | `fixed_depth_fianchetto_tail_castle_guard_v28e_depth3_no_null_mate_net30_fast_king_mobility4` |
 | Accepted commit | `5414b21` |
 | Accepted staged result | `0W/4D/1L`, score `40%` |
-| Private data root | `/home/s92137/hackme_web_private/runtime/private/games/exp5/` |
-| Local Stockfish path | `/home/s92137/reference_repos/Stockfish/src/stockfish` |
+| Private data root | `$EXP5_PRIVATE_ROOT` (deployment-local, outside the public repo) |
+| Local Stockfish path | `$STOCKFISH_PATH` |
 
 Stockfish/Blockfish is a local teacher and sparring opponent only. It is not a
 runtime dependency for production users and must not be bundled into the repo.
@@ -19,10 +19,11 @@ runtime dependency for production users and must not be bundled into the repo.
 ## Environment
 
 ```bash
-cd /home/s92137/hackme_web
-export PYTHONPATH=/home/s92137/hackme_web
-export STOCKFISH_PATH=/home/s92137/reference_repos/Stockfish/src/stockfish
-export EXP5_PRIVATE_ROOT=/home/s92137/hackme_web_private/runtime/private/games/exp5
+cd /path/to/hackme_web
+export PROJECT_ROOT="$PWD"
+export PYTHONPATH="$PROJECT_ROOT"
+export STOCKFISH_PATH=/path/to/stockfish
+export EXP5_PRIVATE_ROOT=/path/to/private-exp5-data
 export EXP5_BASELINE_PROFILE=fixed_depth_fianchetto_tail_castle_guard_v28e_depth3_no_null_mate_net30_fast_king_mobility4
 ```
 

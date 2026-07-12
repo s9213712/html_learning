@@ -48,6 +48,40 @@ const tradingGridExpandedBots = new Set();
 const TRADING_WORKFLOW_STORAGE_KEY = "hackme_trading_workflow_json";
 const TRADING_PERSONAL_FORM_STORAGE_KEY = "hackme_trading_personal_form_v1";
 let tradingAccountScope = "";
+let tradingAccountGeneration = 0;
+let tradingDashboardLoadGeneration = 0;
+
+function tradingOperationContext() {
+  return {
+    generation: tradingAccountGeneration,
+    scope: typeof getCurrentAccountStorageScope === "function"
+      ? getCurrentAccountStorageScope()
+      : String(currentUserId || currentUser || "anonymous"),
+  };
+}
+
+function tradingOperationIsCurrent(operation) {
+  if (!operation || operation.generation !== tradingAccountGeneration) return false;
+  const scope = typeof getCurrentAccountStorageScope === "function"
+    ? getCurrentAccountStorageScope()
+    : String(currentUserId || currentUser || "anonymous");
+  return operation.scope === scope;
+}
+
+function tradingAccountAbortError() {
+  if (typeof accountRequestAbortError === "function") return accountRequestAbortError();
+  return new DOMException("Account context changed", "AbortError");
+}
+
+function tradingAssertOperationCurrent(operation) {
+  if (tradingOperationIsCurrent(operation)) return;
+  throw tradingAccountAbortError();
+}
+
+function tradingAssertDashboardLoadCurrent(operation, loadGeneration) {
+  tradingAssertOperationCurrent(operation);
+  if (loadGeneration !== tradingDashboardLoadGeneration) throw tradingAccountAbortError();
+}
 
 function tradingRefreshMs(key, fallbackSeconds, minSeconds = 1, maxSeconds = 300) {
   const seconds = Number(siteConfig?.[key] || fallbackSeconds);
@@ -409,6 +443,65 @@ function ensureTradingAccountScope(options = {}) {
   return true;
 }
 
+function resetTradingAccountState() {
+  tradingAccountGeneration += 1;
+  tradingDashboardLoadGeneration += 1;
+  stopTradingModuleTimers();
+  if (tradingReferencePriceAbort) tradingReferencePriceAbort.abort();
+  if (tradingReferenceChartAbort) tradingReferenceChartAbort.abort();
+  tradingReferencePriceAbort = null;
+  tradingReferenceChartAbort = null;
+  if (tradingBotCountdownTimer) clearInterval(tradingBotCountdownTimer);
+  tradingBotCountdownTimer = null;
+  tradingReferenceAutoBusy = false;
+  tradingReferenceChartAutoBusy = false;
+  tradingDashboardAutoBusy = false;
+  tradingMutationRefreshBusy = false;
+  tradingLivePriceBusy = false;
+  tradingReferenceChartModel = null;
+  tradingReferenceHoverIndex = null;
+  tradingGridExpandedBots.clear();
+  tradingState = {
+    markets: [],
+    positions: [],
+    orders: [],
+    fills: [],
+    bots: [],
+    botRuns: [],
+    rootReport: null,
+    fundingPool: null,
+    spotSummary: null,
+    marginSummary: null,
+    futuresPositions: [],
+    state: null,
+    referencePrices: null,
+    btcSignal: null,
+    workflowTemplates: [],
+    botCompetition: null,
+    wallets: [],
+  };
+  if (typeof window.resetTradingBotsAccountState === "function") window.resetTradingBotsAccountState();
+  [
+    "trading-order-list",
+    "trading-fill-list",
+    "trading-position-list",
+    "trading-spot-position-detail-list",
+    "trading-portfolio-asset-list",
+    "trading-margin-position-list",
+    "trading-contract-position-list",
+    "trading-my-bots-list",
+    "trading-bot-competition-list",
+    "trading-root-spot-position-list",
+    "trading-root-margin-position-list",
+    "trading-root-bot-position-list",
+    "trading-root-lending-pool-list",
+    "trading-root-reserve-events-list",
+  ].forEach((id) => {
+    const element = $(id);
+    if (element) element.replaceChildren();
+  });
+}
+
 function bindTradingPersonalFormPersistence() {
   TRADING_PERSONAL_FORM_FIELDS.forEach((field) => {
     const el = $(field.id);
@@ -667,12 +760,15 @@ async function fetchTradingJson(url, options = {}) {
   return json;
 }
 
-function scheduleTradingMutationRefresh(delayMs = 120) {
+function scheduleTradingMutationRefresh(delayMs = 120, operation = null) {
+  const operationContext = operation || tradingOperationContext();
+  if (!tradingOperationIsCurrent(operationContext)) return;
   if (tradingMutationRefreshTimer) clearTimeout(tradingMutationRefreshTimer);
   tradingMutationRefreshTimer = setTimeout(async () => {
     tradingMutationRefreshTimer = null;
+    if (!tradingOperationIsCurrent(operationContext)) return;
     if (tradingMutationRefreshBusy) {
-      scheduleTradingMutationRefresh(300);
+      scheduleTradingMutationRefresh(300, operationContext);
       return;
     }
     tradingMutationRefreshBusy = true;
@@ -681,7 +777,7 @@ function scheduleTradingMutationRefresh(delayMs = 120) {
     } catch (_) {
       // The order already succeeded; the next scheduled refresh will retry state sync.
     } finally {
-      tradingMutationRefreshBusy = false;
+      if (tradingOperationIsCurrent(operationContext)) tradingMutationRefreshBusy = false;
     }
   }, Math.max(0, Number(delayMs) || 0));
 }
@@ -4378,6 +4474,8 @@ function populateTradingRootMarketForm() {
 }
 
 async function loadTradingDashboard() {
+  const operation = tradingOperationContext();
+  const loadGeneration = ++tradingDashboardLoadGeneration;
   if (!currentUser || !canAccessModule("economy")) return;
   ensureTradingAccountScope();
   const tradingEnabled = !siteConfig || siteConfig.feature_trading_enabled !== false;
@@ -4391,7 +4489,9 @@ async function loadTradingDashboard() {
   if (card) card.style.display = "";
   try {
     await loadTradingWorkflowTemplates();
+    tradingAssertDashboardLoadCurrent(operation, loadGeneration);
     const json = await fetchTradingJson(`/trading/dashboard${tradingSourceWalletQuery()}`);
+    tradingAssertDashboardLoadCurrent(operation, loadGeneration);
     const payload = json.trading || {};
     tradingState.funding = payload.funding || null;
     tradingState.fundingPool = payload.funding_pool || null;
@@ -4420,7 +4520,7 @@ async function loadTradingDashboard() {
     renderTradingSummary();
     syncTradingSubpages();
     loadTradingLivePrice().catch((err) => {
-      if (!tradingIsAbortError(err)) {
+      if (tradingOperationIsCurrent(operation) && loadGeneration === tradingDashboardLoadGeneration && !tradingIsAbortError(err)) {
         tradingSetBackgroundStatus(tradingFriendlyErrorText(err?.message || "即時價格讀取失敗"), false);
       }
     });
@@ -4428,22 +4528,31 @@ async function loadTradingDashboard() {
 	    renderTradingFills(tradingState.fills);
 	    renderTradingBots(tradingState.bots, tradingState.botRuns);
 	    renderTradingBotPositionCard();
-	    loadGridBots().catch((err) => tradingSetMsg(tradingFriendlyErrorText(err?.message || "網格機器人讀取失敗"), false));
-	    loadTradingBotCompetition().catch((err) => tradingSetMsg(tradingFriendlyErrorText(err?.message || "競賽排行讀取失敗"), false));
+	    loadGridBots().catch((err) => {
+	      if (tradingOperationIsCurrent(operation) && loadGeneration === tradingDashboardLoadGeneration && !tradingIsAbortError(err)) tradingSetMsg(tradingFriendlyErrorText(err?.message || "網格機器人讀取失敗"), false);
+	    });
+	    loadTradingBotCompetition().catch((err) => {
+	      if (tradingOperationIsCurrent(operation) && loadGeneration === tradingDashboardLoadGeneration && !tradingIsAbortError(err)) tradingSetMsg(tradingFriendlyErrorText(err?.message || "競賽排行讀取失敗"), false);
+	    });
 	    renderTradingContracts(tradingState.futuresPositions);
     renderTradingMarginPositions(tradingState.marginPositions);
     const displayedMarginSummary = tradingDisplayedMarginSummary(tradingState.marginSummary);
     renderTradingMarginAccountSummary(displayedMarginSummary);
     if (typeof loadTradingAssetOverview === "function") {
       loadTradingAssetOverview({ quiet: true }).catch((err) => {
-        tradingSetBackgroundStatus(tradingFriendlyErrorText(err?.message || "交易資產總覽讀取失敗"), false);
+        if (tradingOperationIsCurrent(operation) && loadGeneration === tradingDashboardLoadGeneration && !tradingIsAbortError(err)) {
+          tradingSetBackgroundStatus(tradingFriendlyErrorText(err?.message || "交易資產總覽讀取失敗"), false);
+        }
       });
     }
     if (currentUser === "root") {
       await loadTradingRootReport();
+      tradingAssertDashboardLoadCurrent(operation, loadGeneration);
       await loadTradingRootSitewide({ silent: true });
+      tradingAssertDashboardLoadCurrent(operation, loadGeneration);
     }
   } catch (err) {
+    if (!tradingOperationIsCurrent(operation) || loadGeneration !== tradingDashboardLoadGeneration || tradingIsAbortError(err)) return;
     const status = $("trading-safe-mode");
     if (status) {
       status.textContent = err.message || "交易狀態讀取失敗";
@@ -4453,14 +4562,15 @@ async function loadTradingDashboard() {
 }
 
 async function loadTradingLivePrice() {
+  const operation = tradingOperationContext();
   if (!shouldRunTradingPolling()) return;
   const targets = tradingLivePriceTargetSymbols();
   if (!targets.length) return;
   if (tradingLivePriceInFlight) return;
-  tradingLivePriceInFlight = true;
   if (tradingLivePriceAbort) tradingLivePriceAbort.abort();
   const controller = new AbortController();
   tradingLivePriceAbort = controller;
+  tradingLivePriceInFlight = controller;
   try {
     const liveMeta = tradingState.livePriceMeta || (tradingState.livePriceMeta = {});
     let selectedMeta = null;
@@ -4475,6 +4585,7 @@ async function loadTradingLivePrice() {
           forceCsrf: false,
           signal: controller.signal,
         });
+        tradingAssertOperationCurrent(operation);
         if (controller.signal.aborted || !shouldRunTradingPolling()) return;
         const nextMarket = json.market || null;
         if (!nextMarket?.symbol) continue;
@@ -4553,12 +4664,12 @@ async function loadTradingLivePrice() {
     }
     refreshTradingWalletLiveMetrics();
   } catch (err) {
-    if (!tradingIsAbortError(err) && !controller.signal.aborted && shouldRunTradingPolling()) {
+    if (tradingOperationIsCurrent(operation) && !tradingIsAbortError(err) && !controller.signal.aborted && shouldRunTradingPolling()) {
       tradingSetBackgroundStatus(tradingFriendlyErrorText(err?.message || "即時價格讀取失敗"), false);
     }
   } finally {
     if (tradingLivePriceAbort === controller) tradingLivePriceAbort = null;
-    tradingLivePriceInFlight = false;
+    if (tradingLivePriceInFlight === controller) tradingLivePriceInFlight = false;
   }
 }
 
@@ -4930,6 +5041,7 @@ function bindTradingEvents() {
   ensureTradingAccountScope({ force: true });
   bindTradingPersonalFormPersistence();
   document.addEventListener("hackme:account-context-changed", () => {
+    resetTradingAccountState();
     ensureTradingAccountScope({ force: true });
   });
   window.addEventListener("economy:default-spend-wallet-changed", () => {

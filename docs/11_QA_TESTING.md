@@ -35,6 +35,10 @@ python3 scripts/prepush/pre_push_checks.py
 scripts/testing/pytest_in_tmp.sh -q tests
 ```
 
+Wrapper 會把 source copy 與 runtime/test artifacts 分放在同一個 `/tmp`
+run root 的不同子目錄，避免測試誤把 `runtime/` 寫回原始 repo 或測試中的
+copied checkout。
+
 #### 3. 功能 smoke
 
 ```bash
@@ -42,8 +46,8 @@ scripts/security/pentest/run_functional_smoke.sh --qa-full --port 50741
 ```
 
 `tests/security/smoke/smoke_suite.py`、`scripts/security/pentest/run_functional_smoke.sh`、`scripts/security/pentest/run_pentest.sh`
-的 smoke 預設帳密現在已對齊為
-`RootSmoke123! / ManagerSmoke123! / TestSmoke123!`。
+只在各自的 `/tmp` 隔離 runtime 使用測試帳號。對既有 target 的 probe 必須從環境變數
+讀取密碼，不把密碼放進 argv、教學命令或報告；launcher/restart log 也只顯示帳號名稱。
 
 `--qa-full` 是既有 QA 腳本的完整產品回歸模式，包含 community/chat/storage/video/
 ComfyUI/reports/moderation 等較廣的功能 bug 類檢查。上線前 production gate
@@ -68,7 +72,7 @@ python3 scripts/games/board_ai_benchmark.py \
   --rounds 1
 ```
 
-報告會輸出到 `runtime/reports/games/board_ai_benchmark_*.json`，內容包含
+報告會輸出到 `/tmp/hackme_web_test_artifacts/games/board_ai_benchmark/`，內容包含
 round-robin standings、head-to-head matrix、Elo estimate、非法步統計與
 deterministic skill suite。教學與欄位解讀見
 [games/references/BOARD_AI_BENCHMARK.md](games/references/BOARD_AI_BENCHMARK.md)。
@@ -130,7 +134,9 @@ curl -ksS https://<host>/readyz
 ```
 
 若只跑 `whole-site-production-gate`，wrapper 會自動把 timeout floor 拉高到
-`900s`，避免舊版預設 `180s` 永遠先把 gate timeout 掉。
+`10800s`，避免舊版預設 `180s` 永遠先把 gate timeout 掉。gate 內的完整 pytest
+另有 `7200s` 預算，可用 `--full-pytest-timeout` 或
+`WHOLE_SITE_FULL_PYTEST_TIMEOUT` 調整；一般子檢查仍使用較短的 `--timeout`。
 
 #### 6. 角色 / 權限專測
 
@@ -155,8 +161,47 @@ python3 scripts/trading/validation/trading_exchange_validation.py --out /tmp/tra
 
 ```bash
 PYTHONPATH=. python3 scripts/trading/validation/trading_workflow_template_validation.py --no-download --limit 200 --out /tmp/trading_workflow_validation_followup
-PYTHONPATH=. python3 scripts/trading/probes/backtest_20000_probe.py --include-route --json-out /tmp/trading_backtest_20000_followup.json
+python3 scripts/trading/probes/backtest_20000_probe.py --include-route --json-out /tmp/trading_backtest_20000_followup.json
 ```
+
+#### 8. 二十四小時雙目標營運 campaign
+
+最終 production sign-off 使用一個全新 `/tmp` campaign root；腳本自行管理 primary 與
+recovery target，並在取得本機 bind/process 授權、兩站 readiness 與帳號預檢完成後才
+開始活動時鐘：
+
+```bash
+python3 scripts/testing/operational_campaign_24h.py \
+  --campaign-root /tmp/hackme_web_campaign_24h_YYYYMMDD_HHMM \
+  --duration-seconds 86400 \
+  --account-count 10 \
+  --round-ops 1000 \
+  --concurrency 32 \
+  --session-pool 20 \
+  --resource-interval 5
+```
+
+它不是把同一個 cookie 複製成多個假帳號，也不把 sleep 算成測試。primary 持續執行
+`operational_soak_probe.py`；recovery target 同步執行破壞性演練。強制範圍包含：
+
+- member 全功能 API rotation 與併發壓力
+- root readiness / Security Center / server-mode requirements / log chain / AI Agent sentinel
+- manager users / reports / community / notifications sentinel
+- 一小時以上雙音軌/字幕影音、多帳戶上傳、HLS、seek、密碼分享與撤銷
+- 交易/背景交易與 PointsChain 高頻、攻擊、錢包事故、治理與 recovery branch
+- server snapshot、CLI runtime archive、storage preserve、restore、SQLite check 與 restart
+- AI Agent Drive/share、server ops、治理、交易、媒體與上線前 dry-run；外部 ComfyUI 有設定時補真實生圖
+- Standard realtime proxy、prepared HLS、跨瀏覽器與手機播放
+- 360x800、390x844、768x1024 與桌面真實 Chromium 全模組巡覽
+- frontend caught-failure buffer、瀏覽器 console/page error 與最後控制面查核
+- 原子 checkpoint、來源 SHA-256 防漂移、PID/RSS/CPU/DB/WAL/disk、DB lock 與 secret scan
+
+production sign-off 必須同時滿足 `active_test_seconds >= 86400`、八個 mandatory scenario
+全過、所有帳號/必要 positive path 至少一次 `2xx`、沒有 hard failure/DB lock/來源漂移/
+秘密洩漏或靜默前端失敗，且 final control plane 全過。預期拒絕案例只算 attempted
+coverage，不拿 `4xx` 冒充成功。`--allow-short-duration` 永遠不具簽核資格。詳細矩陣、
+artifact 與失敗判讀見
+[AGENTS/24H_OPERATIONAL_CAMPAIGN.md](AGENTS/24H_OPERATIONAL_CAMPAIGN.md)。
 
 ### 腳本關係
 
@@ -171,6 +216,17 @@ PYTHONPATH=. python3 scripts/trading/probes/backtest_20000_probe.py --include-ro
   是外層 orchestrator，會呼叫多種檢查，包含 `functional-permissions`、
   server-mode-v2、whole-site-production-gate 等子檢查；whole-site gate 會套
   額外 timeout floor。
+- `scripts/testing/system_stress_probe.py`
+  是單輪混合負載引擎；`operation-mode=rotation` 搭配
+  `require-all-accounts/require-operation-coverage` 才能作為功能輪訓證據。
+- `scripts/testing/long_needle_simulation_probe.py`
+  是較短的 economy + 全功能潛在問題探針，會建立真實帳號，但不是長時簽核。
+- `scripts/testing/operational_soak_probe.py`
+  是可設定時長的單 target core soak；八小時基線可用來找趨勢，但最終上線簽核由
+  `operational_campaign_24h.py` 管理雙 target 與完整複雜場景。
+- `scripts/testing/operational_campaign_24h.py`
+  是最終雙 target orchestrator，至少 24 小時活動時間，並統一判定長影音、AI Agent、
+  交易、PointsChain、事故、備份/還原/重啟與桌機/手機 UX。
 - `scripts/security/server_mode/server_mode_v2_full_smoke.py`
   是 Server Mode v2 教學腳本 bundle 的隔離 runtime smoke harness；它會依序跑
   `docs/server_mode_v2/01、02、04、05、06、07`，最後確認 shadow
@@ -180,6 +236,9 @@ PYTHONPATH=. python3 scripts/trading/probes/backtest_20000_probe.py --include-ro
   - 站內文件檢視（playbook / tests 捷徑不再跳 `NOT FOUND`）
   - per-report JSON upload 入口（可直接貼上或上傳 `.json`）
   - upload 後自動重整 B 區 report 狀態
+- root AI Agent 的普通「上線前檢查」只回傳 dry-run、缺口與 `next_actions`；只有
+  明確要求切換且提供 `GO_LIVE` 才能進 production，後端不接受缺少確認字串的
+  `auto_switch=true`。
 - `scripts/security/pentest/functional_permission_pentest.py`
   是權限濫用 / 角色矩陣專測，不是一般 port scanner。
 - `scripts/security/pentest/video_module_pentest.py`
@@ -206,7 +265,10 @@ PYTHONPATH=. python3 scripts/trading/probes/backtest_20000_probe.py --include-ro
 - `測試筆數`：
   - `動態` 代表腳本執行時計算 `total/passed/failed`，不是固定 pytest case 數。
   - `固定 N` 代表目前 repo 內對應 pytest 檔的 collected case 數。
-- `預設放置位置`：指生成腳本的預設輸出落點；若是站內手動匯出 / 上傳型報告，則列 canonical staging 路徑。
+- `Production staging / expected path`：列出有明確 `HACKME_RUNTIME_DIR` 時的
+  canonical staging 路徑。獨立執行安全/QA 腳本而未選 live runtime 時，輸出預設在
+  `/tmp/hackme_web_test_artifacts/reports/security/`，不會建立 source checkout
+  `runtime/`。
 
 另外要注意：
 
@@ -224,7 +286,12 @@ PYTHONPATH=. python3 scripts/trading/probes/backtest_20000_probe.py --include-ro
 若要一次生成完整 required report set，使用：
 
 ```bash
-python3 scripts/security/gate/on_live_reports_make.py --base-url https://127.0.0.1:5000 --root-password '<ROOT_PASSWORD>'
+HACKME_RUNTIME_DIR=/absolute/external/runtime \
+HACKME_OPERATIONAL_CAMPAIGN_REPORT=/tmp/<campaign>/reports/operational_campaign_24h.json \
+ROOT_PASSWORD='<root-password>' \
+MANAGER_PASSWORD='<manager-password>' \
+TEST_PASSWORD='<test-user-password>' \
+python3 scripts/security/gate/on_live_reports_make.py --base-url https://127.0.0.1:5000
 ```
 
 或從 `scripts/on_live_reports/` 的捷徑執行（每個 report type 一個 `.py` 入口；
@@ -232,7 +299,10 @@ python3 scripts/security/gate/on_live_reports_make.py --base-url https://127.0.0
 
 ```bash
 # orchestrator (= 上面那行的 alias)
-python3 scripts/on_live_reports/on_live_reports_make.py --base-url ... --root-password ...
+HACKME_RUNTIME_DIR=/absolute/external/runtime \
+HACKME_OPERATIONAL_CAMPAIGN_REPORT=/tmp/<campaign>/reports/operational_campaign_24h.json \
+ROOT_PASSWORD='...' MANAGER_PASSWORD='...' TEST_PASSWORD='...' \
+  python3 scripts/on_live_reports/on_live_reports_make.py --base-url ...
 # 單一 report type
 python3 scripts/on_live_reports/clean_smoke.py
 python3 scripts/on_live_reports/permission.py
@@ -242,11 +312,11 @@ python3 scripts/on_live_reports/snapshot_restore.py
 
 它會把 raw artifacts 放到：
 
-- `runtime/reports/security/production_gate/runs/<RUN_ID>/`
+- `$HACKME_RUNTIME_DIR/reports/security/production_gate/runs/<RUN_ID>/`
 
 並把上傳前的穩定 payload staging 到：
 
-- `runtime/reports/security/production_gate/<report_type>_report.json`
+- `$HACKME_RUNTIME_DIR/reports/security/production_gate/<report_type>_report.json`
 
 若要做 live target-commit regression，建議另外保留一份驗收證據目錄，例如：
 
@@ -312,7 +382,7 @@ python3 scripts/on_live_reports/snapshot_restore.py
 換句話說，full-generator 驗收不是只看 raw reports，有改過隔離副本本身時，
 `integrity_guard` 的 finding review 也是正式流程的一部分。
 
-| report_type | 使用腳本 / 驗證面 | 測試筆數 | 預設放置位置 |
+| report_type | 使用腳本 / 驗證面 | 測試筆數 | Production staging / expected path |
 |---|---|---:|---|
 | `clean_smoke` | `python3 scripts/security/server_mode/server_mode_v2_clean_smoke.py` | 動態 | `runtime/reports/security/server_mode_v2_clean_smoke_<timestamp>.json|.md` |
 | `adversarial` | `python3 scripts/security/server_mode/server_mode_v2_adversarial.py` | 動態 | `runtime/reports/security/server_mode_v2_adversarial_<timestamp>.json|.md` |
@@ -328,10 +398,11 @@ python3 scripts/on_live_reports/snapshot_restore.py
 | `points_chain_consistency` | `scripts/testing/pytest_in_tmp.sh -q tests/points/test_points_chain.py` + `services/points_chain.verify_chain()` | 固定 27 | `runtime/reports/security/production_gate/points_chain_consistency_report.json` |
 | `cloud_drive_quota_permission` | `scripts/testing/pytest_in_tmp.sh -q tests/storage/test_cloud_drive_attachments.py tests/storage/test_storage_albums_schema.py` | 固定 55 | `runtime/reports/security/production_gate/cloud_drive_quota_permission_report.json` |
 | `ai_agent_boundary` | `scripts/on_live_reports/ai_agent_boundary.py`，跑 deterministic AI Agent write-tool / lockdown / server-filesystem boundary pytest；不呼叫 LLM | 固定 7 | `runtime/reports/security/production_gate/ai_agent_boundary_report.json` |
+| `operational_campaign_24h` | 匯入 `operational_campaign_24h.py` 正式報告並重驗 86,400 秒、八個 mandatory scenario、source manifest、secret/control checks | 動態 | `runtime/reports/security/production_gate/operational_campaign_24h_report.json` |
 
 補充：
 
-- `pytest` / `log_chain_verify` / `snapshot_restore` / `points_chain_consistency` / `cloud_drive_quota_permission` / `ai_agent_boundary`
+- `pytest` / `log_chain_verify` / `snapshot_restore` / `points_chain_consistency` / `cloud_drive_quota_permission` / `ai_agent_boundary` / `operational_campaign_24h`
   這幾類若不是由單一腳本直接產生檔案，仍應把最後簽署/上傳前的 raw report staging 到
   `runtime/reports/security/production_gate/`，不要散落在 repo root。
 - `artifacts/` 與 `runtime/reports/` 都是可再生測試輸出，預設不進 git；需要長期保留的結論請整理到
@@ -393,7 +464,7 @@ python3 scripts/on_live_reports/snapshot_restore.py
   - 透過好友代碼加入是否直接 accepted，錯誤代碼 / 已是好友 / 加自己都有明確訊息
   - 一般帳號的 PM / private group 指定對象只列好友，直接打 API 邀請非好友仍被拒絕
   - root / manager 為管理目的可 PM 非好友，但這個例外不應自動套到雲端硬碟分享或遊戲邀請
-  - 目前仍待補的遊戲邀請與直接 strict-E2EE 檔案金鑰分享 friend-gate 必須列為缺口追蹤，不可在報告寫成已完成
+  - 遊戲邀請與直接 strict-E2EE 檔案金鑰分享需驗證非好友直接 API 呼叫為 403、好友路徑成功，且 service 層仍有 defense-in-depth
 - 若本次改到聊天室匿名，至少補：
   - 官方聊天室對一般帳號是否匿名、不顯示人數；root 顯示 `root`、manager 顯示編號管理員且標示官方
   - root / manager 是否能看到原發言者，一般帳號是否看不到

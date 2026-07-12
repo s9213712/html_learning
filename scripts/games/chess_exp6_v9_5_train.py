@@ -40,6 +40,7 @@ from services.games.chess_neural import (  # noqa: E402
     load_weights, make_initial_weights, save_weights,
     static_baseline_cp_white,
 )
+from scripts.games.common_paths import exp6_artifacts_root, exp6_private_dir  # noqa: E402
 
 sys.path.insert(0, str(ROOT / "scripts/games"))
 import chess_exp6_curriculum as cc  # noqa: E402
@@ -68,12 +69,14 @@ FAILURE_RANK_WEIGHT = 0.15        # v9.5a used 0.30 and failed staged-10
 BASE_RANK_WEIGHT = 0.15           # ranking loss weight on base rows
 OUTCOME_WEIGHT = 0.04
 
-LABELS_10K_PATH = ROOT / "runtime/private/games/exp6/curriculum_labels_10k.jsonl"
-PLAYED_10K_PATH = ROOT / "runtime/private/games/exp6/played_moves_10k.jsonl"
-FAILURE_PATH = ROOT / "runtime/private/games/exp6/v9_5_failure_positions.jsonl"
+EXP6_PRIVATE_DIR = exp6_private_dir()
+LABELS_10K_PATH = EXP6_PRIVATE_DIR / "curriculum_labels_10k.jsonl"
+PLAYED_10K_PATH = EXP6_PRIVATE_DIR / "played_moves_10k.jsonl"
+FAILURE_PATH = EXP6_PRIVATE_DIR / "v9_5_failure_positions.jsonl"
 
-SNAPSHOTS_DIR = Path.home() / "exp6_output/v9_5_snapshots"
-REPORT_JSON = Path.home() / "exp6_output/v9_5_report.json"
+EXP6_ARTIFACTS = exp6_artifacts_root() / "v9_5"
+SNAPSHOTS_DIR = EXP6_ARTIFACTS / "snapshots"
+REPORT_JSON = EXP6_ARTIFACTS / "report.json"
 
 
 def _value_target_from_cp_white(cp_white: float, stm_is_white: bool) -> float:

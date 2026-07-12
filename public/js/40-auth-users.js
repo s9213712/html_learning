@@ -27,6 +27,26 @@ function redirectToLoginReturnToIfNeeded(loginJson = {}) {
 }
 
 let loginRequestBusy = false;
+let authUsersAccountGeneration = 0;
+
+function authUsersOperationContext(targetUserId = null) {
+  return {
+    generation: authUsersAccountGeneration,
+    targetUserId: targetUserId === null ? null : String(targetUserId || ""),
+  };
+}
+
+function authUsersOperationIsCurrent(operation) {
+  if (!operation || Number(operation.generation) !== authUsersAccountGeneration) return false;
+  return operation.targetUserId === null || operation.targetUserId === String(editingUserId || "");
+}
+
+function authUsersAssertOperationCurrent(operation) {
+  if (authUsersOperationIsCurrent(operation)) return;
+  const err = new Error("Account context changed");
+  err.name = "AbortError";
+  throw err;
+}
 
 async function doLogin() {
   if (loginRequestBusy) return;
@@ -66,6 +86,8 @@ async function doLogin() {
       flash($("li-msg"), json.msg || "登入失敗", false);
       return;
     }
+    $("li-pw").value = "";
+    if ($("li-internal-test-token")) $("li-internal-test-token").value = "";
     clearIdleTimeoutLogoutPending();
     setCsrfToken(null);
     if (redirectToLoginReturnToIfNeeded(json)) return;
@@ -613,11 +635,16 @@ function loadAvatarCropperFromFile(file) {
   }
   const els = avatarCropperElements();
   if (!els.cropper || !els.image) return;
+  const accountGeneration = authUsersAccountGeneration;
   const nextUrl = URL.createObjectURL(file);
   if (avatarCropState.objectUrl) URL.revokeObjectURL(avatarCropState.objectUrl);
   avatarCropState.objectUrl = nextUrl;
   avatarCropState.hasImage = false;
   els.image.onload = () => {
+    if (
+      accountGeneration !== authUsersAccountGeneration
+      || avatarCropState.objectUrl !== nextUrl
+    ) return;
     avatarCropState.naturalWidth = els.image.naturalWidth || 1;
     avatarCropState.naturalHeight = els.image.naturalHeight || 1;
     avatarCropState.zoom = 1;
@@ -627,9 +654,18 @@ function loadAvatarCropperFromFile(file) {
     avatarCropState.hasImage = true;
     if (els.zoom) els.zoom.value = "1";
     els.cropper.hidden = false;
-    requestAnimationFrame(renderAvatarCropper);
+    requestAnimationFrame(() => {
+      if (
+        accountGeneration === authUsersAccountGeneration
+        && avatarCropState.objectUrl === nextUrl
+      ) renderAvatarCropper();
+    });
   };
   els.image.onerror = () => {
+    if (
+      accountGeneration !== authUsersAccountGeneration
+      || avatarCropState.objectUrl !== nextUrl
+    ) return;
     resetAvatarCropper();
     const name = file?.name || "這張圖片";
     setUserEditMsg(`無法讀取頭像預覽：${name}。請確認檔案未損壞，或改用 JPEG / PNG。`, false);
@@ -926,7 +962,8 @@ function resetUserAppearanceEditorToGlobal() {
   setUserEditMsg("已切回全站預設外觀；按視窗底部的「儲存」後才會寫入帳號。", true);
 }
 
-async function saveUserAppearanceSettings() {
+async function saveUserAppearanceSettings(operation = authUsersOperationContext(editingUserId)) {
+  authUsersAssertOperationCurrent(operation);
   if (!userAppearanceEditorVisible()) return { ok: true, changed: false };
   if (!userAppearanceFeatureEnabled()) {
     return { ok: false, msg: "此功能目前已由 root 關閉：允許使用者覆寫個人外觀" };
@@ -936,6 +973,7 @@ async function saveUserAppearanceSettings() {
   const nextSignature = userAppearanceSignature(nextAppearance);
   if (originalSignature === nextSignature) return { ok: true, changed: false };
   await fetchCsrfToken({ force: true });
+  authUsersAssertOperationCurrent(operation);
   const csrf = getCsrfToken();
   const res = await apiFetch(API + "/me/appearance", {
     method: userAppearanceResetPending ? "DELETE" : "PUT",
@@ -947,6 +985,7 @@ async function saveUserAppearanceSettings() {
     body: userAppearanceResetPending ? undefined : JSON.stringify(nextAppearance)
   });
   const json = await res.json().catch(() => ({}));
+  authUsersAssertOperationCurrent(operation);
   if (!json.ok) return { ok: false, msg: json.msg || "個人外觀儲存失敗" };
   editingUserOriginalAppearance = json.appearance_settings || {};
   userAppearanceResetPending = false;
@@ -985,7 +1024,8 @@ function updateUserPreferencesEditorVisibility() {
   if (editingUserIsSelf) section.open = true;
 }
 
-async function saveUserDisplayTimezoneSetting(nextTimezone) {
+async function saveUserDisplayTimezoneSetting(nextTimezone, operation = authUsersOperationContext(editingUserId)) {
+  authUsersAssertOperationCurrent(operation);
   if (!editingUserIsSelf) return { ok: true, changed: false };
   const timezone = typeof normalizeUserDisplayTimezone === "function"
     ? normalizeUserDisplayTimezone(nextTimezone)
@@ -995,6 +1035,7 @@ async function saveUserDisplayTimezoneSetting(nextTimezone) {
     : (editingUserOriginal.display_timezone || "auto");
   if (timezone === original) return { ok: true, changed: false };
   await fetchCsrfToken({ force: true });
+  authUsersAssertOperationCurrent(operation);
   const csrf = getCsrfToken();
   const res = await apiFetch(API + "/users/me/profile", {
     method: "PUT",
@@ -1003,6 +1044,7 @@ async function saveUserDisplayTimezoneSetting(nextTimezone) {
     body: JSON.stringify({ display_timezone: timezone }),
   });
   const json = await res.json().catch(() => ({}));
+  authUsersAssertOperationCurrent(operation);
   if (!res.ok || !json.ok) return { ok: false, msg: json.msg || "顯示時區儲存失敗" };
   const savedTimezone = json.profile?.display_timezone || timezone;
   editingUserOriginal.display_timezone = savedTimezone;
@@ -1133,12 +1175,10 @@ async function doRegister() {
       setCsrfToken(null);
       clearRegisterFieldErrors();
       flash($("reg-msg"), "✓ " + sanitize(json.msg), true, { persistent: true });
-      setTimeout(() => {
-        $("reg-pw").value = "";
-        $("reg-pw-confirm").value = "";
-        $("reg-pw-hint").textContent = "";
-        $("reg-pw-confirm-hint").textContent = "";
-      }, 1500);
+      $("reg-pw").value = "";
+      $("reg-pw-confirm").value = "";
+      $("reg-pw-hint").textContent = "";
+      $("reg-pw-confirm-hint").textContent = "";
     } else {
       setCsrfToken(null);
       showRegisterError(json.msg || "註冊失敗", json.field || "");
@@ -1338,12 +1378,16 @@ bindAuthRecoveryControls();
 
 async function doLogout(options = {}) {
   const immediate = !!(options && options.immediate === true);
+  let logoutWarning = "";
   if (!immediate && typeof hasActiveDriveUploads === "function" && hasActiveDriveUploads()) {
     const ok = confirm("目前仍有檔案上傳中。瀏覽器限制導致登出後上傳無法可靠完成，確定要登出嗎？");
     if (!ok) return;
   }
   if (immediate) showLoginScreen();
   try {
+    if (typeof window.flushAiAgentConversationBeforeLogout === "function") {
+      await window.flushAiAgentConversationBeforeLogout({ timeoutMs: immediate ? 750 : 2500 });
+    }
     await fetchCsrfToken({ force: true });
     const csrf = getCsrfToken();
     const res = await apiFetch(API + "/logout", {
@@ -1351,19 +1395,25 @@ async function doLogout(options = {}) {
       credentials: "same-origin",
       headers: { "X-CSRF-Token": csrf || "" }
     });
-    if (!res.ok && !immediate) {
-      flash($("li-msg"), "登出失敗，請稍後再試", false);
-    }
-  } catch (_) {}
+    if (!res.ok) logoutWarning = "伺服器未確認登出；重新連線後請再登出一次，並避免在此頁沿用舊工作階段。";
+  } catch (err) {
+    logoutWarning = "網路中斷，伺服器未確認登出；重新連線後請再登出一次，並避免在此頁沿用舊工作階段。";
+    if (typeof reportFrontendFailure === "function") reportFrontendFailure("logout-unconfirmed", err);
+  }
   setCsrfToken(null);
   if (typeof clearDriveE2eeSessionPassphrases === "function") clearDriveE2eeSessionPassphrases();
   resetAuthState();
+  if (logoutWarning) flash($("li-msg"), logoutWarning, false, { persistent: true });
 }
 
 async function forceIdleTimeoutLogout() {
+  let logoutWarning = "";
   markIdleTimeoutLogoutPending();
   showLoginScreen();
   try {
+    if (typeof window.flushAiAgentConversationBeforeLogout === "function") {
+      await window.flushAiAgentConversationBeforeLogout({ timeoutMs: 500 });
+    }
     await fetchCsrfToken({ force: true });
     const res = await apiFetch(API + "/session/idle-timeout", {
       method: "POST",
@@ -1375,9 +1425,14 @@ async function forceIdleTimeoutLogout() {
       }
     });
     if (res.ok) clearIdleTimeoutLogoutPending();
-  } catch (_) {}
+    else logoutWarning = "閒置登出尚未獲伺服器確認；系統會在下次連線時重試。請關閉此頁避免沿用舊工作階段。";
+  } catch (err) {
+    logoutWarning = "網路中斷，閒置登出尚未獲伺服器確認；系統會在下次連線時重試。請關閉此頁避免沿用舊工作階段。";
+    if (typeof reportFrontendFailure === "function") reportFrontendFailure("idle-timeout-logout-unconfirmed", err);
+  }
   setCsrfToken(null);
   resetAuthState();
+  if (logoutWarning) flash($("li-msg"), logoutWarning, false, { persistent: true });
 }
 
 async function toggleBlock(userId, isBlocked) {
@@ -1532,8 +1587,22 @@ function currentAvatarCropPayload() {
   return avatarCropState.hasImage ? syncAvatarCropPayloadFromVisual() : currentAvatarCropPayloadFromFields();
 }
 
-async function submitUserAvatarUpload({ reloadUsers = true } = {}) {
+async function submitUserAvatarUpload(options = {}) {
+  const operation = options.operation || authUsersOperationContext(editingUserId);
+  try {
+    return await submitUserAvatarUploadForOperation(operation, options);
+  } catch (err) {
+    if (!authUsersOperationIsCurrent(operation) || err?.name === "AbortError") {
+      return { ok: false, aborted: true };
+    }
+    throw err;
+  }
+}
+
+async function submitUserAvatarUploadForOperation(operation, { reloadUsers = true } = {}) {
+  authUsersAssertOperationCurrent(operation);
   if (!editingUserId) return;
+  const targetUserId = editingUserId;
   const input = $("edit-user-avatar-file");
   const file = selectedUserAvatarFile();
   if (!file) {
@@ -1549,6 +1618,7 @@ async function submitUserAvatarUpload({ reloadUsers = true } = {}) {
   const cropped = avatarCropState.hasImage
     ? await buildCroppedAvatarUpload(image, crop, { sourceName: file.name || "avatar.png", rotation: avatarCropState.rotation })
     : null;
+  authUsersAssertOperationCurrent(operation);
   if (avatarCropState.hasImage && !cropped) {
     setUserEditMsg("無法產生裁切後頭像，請重新選擇圖片", false);
     return { ok: false, msg: "無法產生裁切後頭像" };
@@ -1563,20 +1633,22 @@ async function submitUserAvatarUpload({ reloadUsers = true } = {}) {
     form.append("crop_json", JSON.stringify(crop));
   }
   await fetchCsrfToken({ force: true });
+  authUsersAssertOperationCurrent(operation);
   const csrf = getCsrfToken();
-  const res = await apiFetch(API + `/admin/users/${editingUserId}/avatar`, {
+  const res = await apiFetch(API + `/admin/users/${targetUserId}/avatar`, {
     method: "POST",
     credentials: "same-origin",
     headers: { "X-CSRF-Token": csrf || "" },
     body: form
   });
   const json = await res.json().catch(() => ({}));
+  authUsersAssertOperationCurrent(operation);
   const status = $("edit-user-avatar-status");
   if (json && json.ok) {
     if (status) status.textContent = `頭像已更新 file_id: ${json.avatar_file_id}`;
     if (input) input.value = "";
     resetAvatarCropper();
-    markUserAvatarUpdated(editingUserId, json.avatar_file_id || "");
+    markUserAvatarUpdated(targetUserId, json.avatar_file_id || "");
     setUserEditMsg("頭像已更新", true);
     if (reloadUsers && ["manager", "super_admin"].includes(currentRole)) loadUsers();
   } else {
@@ -1586,11 +1658,29 @@ async function submitUserAvatarUpload({ reloadUsers = true } = {}) {
 }
 
 async function uploadUserAvatar() {
-  await submitUserAvatarUpload({ reloadUsers: true });
+  try {
+    await submitUserAvatarUpload({ reloadUsers: true });
+  } catch (err) {
+    reportFrontendFailure("user-avatar-upload", err);
+    setUserEditMsg(err?.message || "頭像上傳失敗", false);
+  }
 }
 
 async function submitEditUser() {
+  const operation = authUsersOperationContext(editingUserId);
+  try {
+    return await submitEditUserForOperation(operation);
+  } catch (err) {
+    if (!authUsersOperationIsCurrent(operation) || err?.name === "AbortError") return;
+    reportFrontendFailure("user-edit-submit", err);
+    setUserEditMsg(err?.message || "修改失敗", false);
+  }
+}
+
+async function submitEditUserForOperation(operation) {
+  authUsersAssertOperationCurrent(operation);
   if (!editingUserId) return;
+  const targetUserId = editingUserId;
 
   const payload = {};
   const nickname = $("edit-user-nickname")?.value.trim() || "";
@@ -1688,14 +1778,16 @@ async function submitEditUser() {
 
   if (Object.keys(payload).length) {
     await fetchCsrfToken({ force: true });
+    authUsersAssertOperationCurrent(operation);
     const csrf = getCsrfToken();
-    const res = await apiFetch(API + `/admin/users/${editingUserId}`, {
+    const res = await apiFetch(API + `/admin/users/${targetUserId}`, {
       method: "PUT",
       credentials: "same-origin",
       headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf || "" },
       body: JSON.stringify(payload)
     });
     const json = await res.json().catch(() => ({}));
+    authUsersAssertOperationCurrent(operation);
     if (!json || !json.ok) {
       setUserEditMsg(json.msg || "修改失敗", false);
       return;
@@ -1709,7 +1801,8 @@ async function submitEditUser() {
   }
 
   if (appearanceChanged) {
-    const appearanceJson = await saveUserAppearanceSettings();
+    const appearanceJson = await saveUserAppearanceSettings(operation);
+    authUsersAssertOperationCurrent(operation);
     if (!appearanceJson.ok) {
       setUserEditMsg(appearanceJson.msg || "個人外觀儲存失敗", false);
       return;
@@ -1717,7 +1810,8 @@ async function submitEditUser() {
   }
 
   if (timezoneChanged) {
-    const timezoneJson = await saveUserDisplayTimezoneSetting(displayTimezone);
+    const timezoneJson = await saveUserDisplayTimezoneSetting(displayTimezone, operation);
+    authUsersAssertOperationCurrent(operation);
     if (!timezoneJson.ok) {
       setUserEditMsg(timezoneJson.msg || "顯示時區儲存失敗", false);
       return;
@@ -1725,10 +1819,12 @@ async function submitEditUser() {
   }
 
   if (avatarFile) {
-    const avatarJson = await submitUserAvatarUpload({ reloadUsers: false });
+    const avatarJson = await submitUserAvatarUpload({ reloadUsers: false, operation });
+    authUsersAssertOperationCurrent(operation);
     if (!avatarJson || !avatarJson.ok) return;
   }
 
+  authUsersAssertOperationCurrent(operation);
   hideUserEditDialog();
   if (["manager", "super_admin"].includes(currentRole)) loadUsers();
 }
@@ -1974,3 +2070,36 @@ async function demoteUser(userId, username, currentRole) {
 
 // ── Module / admin tab switching ─────────────────────────────────────
 let currentAdminTab = "users";
+
+function resetAuthUsersAccountState() {
+  authUsersAccountGeneration += 1;
+  loginRequestBusy = false;
+  editingUserOriginalAppearance = {};
+  userAppearanceResetPending = false;
+  editingUserId = null;
+  editingUserIsSelf = false;
+  Object.keys(editingUserOriginal).forEach((key) => delete editingUserOriginal[key]);
+  resetAvatarCropper();
+  const editOverlay = $("user-edit-overlay");
+  const addOverlay = $("admin-add-overlay");
+  if (editOverlay) editOverlay.classList.remove("show");
+  if (addOverlay) addOverlay.classList.remove("show");
+  document.querySelectorAll("#user-edit-overlay input, #user-edit-overlay textarea").forEach((control) => {
+    if (control.type === "checkbox" || control.type === "radio") control.checked = false;
+    else control.value = "";
+  });
+  [
+    "li-pw", "li-internal-test-token", "reg-pw", "reg-pw-confirm",
+    "admin-add-pw", "admin-add-pw-confirm",
+  ].forEach((id) => {
+    const input = $(id);
+    if (input) input.value = "";
+  });
+  ["user-edit-username", "user-edit-msg", "admin-add-msg"].forEach((id) => {
+    const el = $(id);
+    if (el) el.textContent = "";
+  });
+  currentAdminTab = "users";
+}
+
+document.addEventListener("hackme:account-context-changed", resetAuthUsersAccountState);

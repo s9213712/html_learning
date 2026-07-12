@@ -98,7 +98,7 @@
 
 - [ ] 所有阻擋項目已完成。
 - [ ] 所有 high / critical issue 已關閉或有 root 風險接受紀錄。
-- [ ] 滲透測試報告與全功能測試報告已保存於 `runtime/reports/security/` 或外部 release artifact。
+- [ ] 滲透測試與全功能測試報告已從 `/tmp/hackme_web_test_artifacts/` 保存到受控 release artifact；未提交 raw cookie/token。
 - [ ] README / WEB / For_developer 與實際功能一致。
 - [ ] 若本次有新功能，最終交付說明已列出功能、文件、測試、錯誤提醒、手機版檢查、伺服器端運算與未完成項。
 - [ ] 已記錄最終 commit SHA。

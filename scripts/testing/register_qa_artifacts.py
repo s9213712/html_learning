@@ -13,17 +13,18 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from services.system.release_artifacts import register_qa_run  # noqa: E402
+from scripts.test_artifacts import test_artifact_path  # noqa: E402
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Register hackme_web QA artifacts under runtime/reports/qa_runs.")
+    parser = argparse.ArgumentParser(description="Register hackme_web QA artifacts outside the source checkout.")
     parser.add_argument("--suite", required=True, help="QA suite name, for example playwright_deep_site_check.")
     parser.add_argument("--status", required=True, choices=["pass", "fail", "unknown"], help="QA result status.")
     parser.add_argument("--artifact", action="append", default=[], help="File or directory to archive. Can be repeated.")
     parser.add_argument("--command", default="", help="Command that produced the artifacts.")
     parser.add_argument("--run-id", default="", help="Stable run id. Defaults to timestamp plus suite.")
     parser.add_argument("--summary-json", default="", help="Small JSON object with extra counters or notes.")
-    parser.add_argument("--reports-dir", default=str(ROOT / "runtime" / "reports"))
+    parser.add_argument("--reports-dir", default=str(test_artifact_path("reports")))
     args = parser.parse_args()
 
     summary = {}

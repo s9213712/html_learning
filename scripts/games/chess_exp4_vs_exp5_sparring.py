@@ -20,7 +20,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import sys
 import traceback
 from datetime import datetime, timezone
@@ -33,7 +32,10 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-DEFAULT_RESULTS_ROOT = Path(os.environ.get("HACKME_CHESS_RESULTS_DIR", str(ROOT / "runtime" / "reports" / "games" / "chess_results")))
+from scripts.games.common_paths import chess_results_root, runtime_model_path  # noqa: E402
+
+
+DEFAULT_RESULTS_ROOT = chess_results_root()
 
 from services.games.chess_sparring_adapter import (  # noqa: E402
     compute_model_hash,
@@ -331,7 +333,7 @@ EXP4_KNOWN_CANDIDATES: list[tuple[str, str]] = [
 EXP5_KNOWN_CANDIDATES: list[tuple[str, str]] = [
     (
         "source_base_with_runtime_experience_delta",
-        str(ROOT / "runtime" / "games" / "models" / "chess_experiment_5_nnue_experience.json"),
+        str(runtime_model_path("chess_experiment_5_nnue_experience.json")),
     ),
     (
         "exp5_08_stage_candidate",

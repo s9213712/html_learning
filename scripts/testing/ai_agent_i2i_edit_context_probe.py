@@ -135,7 +135,8 @@ def _last_write(records: dict[str, Any], case_id: str) -> dict[str, Any]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", default="https://127.0.0.1:5000")
-    parser.add_argument("--root-password", default="root")
+    from scripts.testing.probe_credentials import add_root_password_argument
+    add_root_password_argument(parser)
     parser.add_argument("--out-dir", default="")
     args = parser.parse_args()
 

@@ -50,6 +50,7 @@ from services.games.chess_neural import (  # noqa: E402
     save_weights, static_baseline_cp_white,
 )
 from services.games.chess_exp6 import choose_experiment_neural_move  # noqa: E402
+from scripts.games.common_paths import exp6_artifacts_root  # noqa: E402
 
 # Reuse the curriculum's staged-10 test harness + training mechanics.
 sys.path.insert(0, str(ROOT / "scripts/games"))
@@ -81,10 +82,10 @@ EPOCHS_PER_ITER = 20
 OUTCOME_AMPLITUDE = 400.0        # outcome ±1 → ±400 cp target
 SELFPLAY_LOSS_WEIGHT = 1.0       # α — primary self-play signal
 STOCKFISH_AUX_LOSS_WEIGHT = 0.3  # β — Stockfish cp anchor
-PERSISTENT_DIR = Path.home() / "exp6_output"
-SNAPSHOTS_DIR = PERSISTENT_DIR / "v7_snapshots"
-LOG_PATH = PERSISTENT_DIR / "v7_selfplay_log.txt"
-REPORT_JSON = PERSISTENT_DIR / "v7_selfplay_report.json"
+PERSISTENT_DIR = exp6_artifacts_root() / "selfplay_curriculum"
+SNAPSHOTS_DIR = PERSISTENT_DIR / "snapshots"
+LOG_PATH = PERSISTENT_DIR / "selfplay.log"
+REPORT_JSON = PERSISTENT_DIR / "report.json"
 STOCKFISH_LABELS_PATH = cc.LABELS_PATH  # 97k cached labels from v3-v6
 
 
@@ -330,7 +331,7 @@ def train_on_selfplay(rows, weights, *, epochs):
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed-weights", type=Path,
-                        default=Path.home() / "exp6_output/snapshots/chess_experiment_6_neural_stage02.npz",
+                        default=exp6_artifacts_root() / "curriculum" / "snapshots" / "chess_experiment_6_neural_stage02.npz",
                         help="Starting weights file. Default: v6.2 best stage (S2).")
     parser.add_argument("--iterations", type=int, default=N_ITERATIONS)
     parser.add_argument("--games-per-iter", type=int, default=N_SELFPLAY_GAMES_PER_ITER)

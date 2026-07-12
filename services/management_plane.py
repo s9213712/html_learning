@@ -30,6 +30,7 @@ from services.core.sqlite_hardening import (
 
 
 MANAGEMENT_PLANE_SOURCE_MODULE = "management_plane"
+MANAGEMENT_WORKER_MISSING_GRACE_SECONDS = 10
 _LOGGER = logging.getLogger(__name__)
 _LOCK_NAME_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 
@@ -276,6 +277,58 @@ def _job_updated_age_seconds(job: dict[str, Any]) -> float | None:
         return None
 
 
+def _pid_is_alive(pid: int) -> bool:
+    if int(pid or 0) <= 0:
+        return False
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _mark_abandoned_management_job(conn, job: dict[str, Any], *, worker_pid: int) -> None:
+    job_uuid = str(job.get("job_uuid") or "")
+    if not job_uuid:
+        return
+    metadata = job.get("metadata") if isinstance(job.get("metadata"), dict) else {}
+    metadata = dict(metadata)
+    metadata.update({
+        "abandoned_worker_pid": int(worker_pid or 0),
+        "abandoned_detected_at": utc_now(),
+    })
+    message = "management-plane worker process disappeared before completion"
+    update_job(
+        conn,
+        job_uuid,
+        status="failed",
+        progress_percent=100,
+        stage="failed",
+        stage_detail=message,
+        error_code="management_worker_missing",
+        error_message=message,
+        error_stage="management_plane_recovery",
+        metadata_json=metadata,
+        finished_at=utc_now(),
+        flush=True,
+    )
+    add_job_event(
+        conn,
+        job_uuid,
+        event_type="failed",
+        stage="failed",
+        message=message,
+        progress_percent=100,
+        payload={"worker_pid": int(worker_pid or 0)},
+        flush=True,
+    )
+    _LOGGER.warning("marked abandoned management-plane job failed: %s pid=%s", job_uuid, worker_pid)
+
+
 def _reusable_existing_job(
     conn,
     *,
@@ -293,11 +346,12 @@ def _reusable_existing_job(
             pid = int(metadata.get("worker_pid") or metadata.get("starter_pid") or 0)
         except Exception:
             pid = 0
-        if pid > 0 and os.path.exists(f"/proc/{pid}"):
+        if _pid_is_alive(pid):
             return job
         age = _job_updated_age_seconds(job)
-        if age is not None and age <= 10:
+        if age is None or age <= MANAGEMENT_WORKER_MISSING_GRACE_SECONDS:
             return job
+        _mark_abandoned_management_job(conn, job, worker_pid=pid)
     if status == "succeeded" and int(reuse_recent_success_seconds or 0) > 0:
         age = _job_updated_age_seconds(job)
         if age is not None and age <= int(reuse_recent_success_seconds or 0):

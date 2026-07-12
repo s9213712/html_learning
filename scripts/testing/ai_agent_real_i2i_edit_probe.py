@@ -137,7 +137,8 @@ def thread_job_id(text: str) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", default="https://127.0.0.1:5000")
-    parser.add_argument("--root-password", default="root")
+    from scripts.testing.probe_credentials import add_root_password_argument
+    add_root_password_argument(parser)
     parser.add_argument("--out-dir", default="")
     parser.add_argument("--timeout-seconds", type=int, default=900)
     args = parser.parse_args()

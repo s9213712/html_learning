@@ -49,10 +49,10 @@ def test_comfyui_generation_results_lazy_load_output_previews():
     assert "const src = item.preview_url || item.data_url || \"\";" in js
     assert '<video controls preload="metadata" playsinline><source src="${sanitize(src)}"' in js
     assert 'type="${sanitize(item.mime_type || "video/mp4")}"' in js
-    assert "const runImages = await hydrateComfyuiGeneratedImages(rawRunImages);" in js
-    assert "const runMedia = await hydrateComfyuiGeneratedMedia(Array.isArray(json.media) ? json.media : [], jobId);" in js
-    assert "const images = await hydrateComfyuiGeneratedImages(rawImages);" in workflow_js
-    assert "const media = await hydrateComfyuiGeneratedMedia(Array.isArray(result.media) ? result.media : [], jobId);" in workflow_js
+    assert "const runImages = await hydrateComfyuiGeneratedImages(rawRunImages, operation);" in js
+    assert "const runMedia = await hydrateComfyuiGeneratedMedia(Array.isArray(json.media) ? json.media : [], jobId, operation);" in js
+    assert "const images = await hydrateComfyuiGeneratedImages(rawImages, operation);" in workflow_js
+    assert "const media = await hydrateComfyuiGeneratedMedia(Array.isArray(result.media) ? result.media : [], jobId, operation);" in workflow_js
     assert "updateComfyuiResultButtons(!!comfyuiGeneratedImages.length);" in workflow_js
     assert 'throw new Error("ComfyUI 未回傳圖片");' in js
     assert 'if (!comfyuiCurrentImage?.data_url) throw new Error("ComfyUI 未回傳圖片");' not in js

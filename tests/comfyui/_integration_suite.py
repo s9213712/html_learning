@@ -6844,8 +6844,8 @@ def test_comfyui_frontend_is_wired():
     assert "if (modelsTab) modelsTab.hidden = false;" in comfyui_js
     assert 'if (accessNote) accessNote.style.display = showLocalModels ? "none" : "";' in comfyui_js
     assert '目前是雲端 / 遠端模式；Civitai 匯入區仍可使用' in comfyui_js
-    assert "/js/36-comfyui.js?v=20260621-comfyui-draft-restore" in index_html
-    assert "/styles.css?v=20260623-account-actions-mobile-v2" in index_html
+    assert "/js/36-comfyui.js?v=__ASSET_VERSION__" in index_html
+    assert "/styles.css?v=__ASSET_VERSION__" in index_html
     assert "width: min(420px, 100%);" in css
     assert "max-height: 320px;" in css
     assert ".comfyui-root-details" in css
@@ -6892,7 +6892,7 @@ def test_comfyui_frontend_is_wired():
     assert "function uploadComfyuiModelFile()" in comfyui_js
     assert "function updateComfyuiModeVisibility()" in comfyui_js
     assert "function comfyuiBuildGenerateRequest(payload)" in comfyui_js
-    assert "function loadComfyuiHistory()" in comfyui_js
+    assert "function loadComfyuiHistory(operation = null)" in comfyui_js
     assert "function applyComfyuiHistoryToForm(historyId)" in comfyui_js
     assert "function rerunComfyuiHistory(historyId)" in comfyui_js
     assert "ComfyUI Workflow Layout Builder" in index_html
@@ -6913,11 +6913,11 @@ def test_comfyui_frontend_is_wired():
     assert 'id="comfyui-workflow-my-list"' in index_html
     assert 'id="comfyui-workflow-official-list"' in index_html
     assert 'id="comfyui-workflow-shared-list"' in index_html
-    assert "function loadComfyuiWorkflowPresets()" in comfyui_js
+    assert "function loadComfyuiWorkflowPresets(options = {})" in comfyui_js
     assert "function exportCurrentComfyuiWorkflow()" in comfyui_js
     assert "function importComfyuiWorkflowPreset()" in comfyui_js
     assert "function updateComfyuiWorkflowPreset()" in comfyui_js
-    assert "function runComfyuiWorkflowPreset(presetId)" in comfyui_js
+    assert "function runComfyuiWorkflowPreset(presetId, options = {})" in comfyui_js
     assert "function duplicateComfyuiWorkflowPreset(presetId)" in comfyui_js
     assert "function setDefaultComfyuiWorkflowPreset(presetId)" in comfyui_js
     assert "function publishComfyuiWorkflowPresetOfficial(presetId)" in comfyui_js
@@ -6984,7 +6984,7 @@ def test_comfyui_frontend_is_wired():
     assert '目前是雲端 / 遠端模式：此頁會直接呼叫遠端 ComfyUI API 生圖' in comfyui_js
     assert '目前是 Diffusers 模式：後端會直接載入 Hugging Face repo 生圖' in comfyui_js
     assert "function pollComfyuiJobUntilDone(jobId, controller, timeoutSeconds, options = {})" in comfyui_js
-    assert "function pollComfyuiModelDownloadJob(jobId)" in comfyui_js
+    assert "function pollComfyuiModelDownloadJob(jobId, operation = null, existingPollToken = null)" in comfyui_js
     assert "function comfyuiStorageWarningText(payload = {})" in comfyui_js
     assert "const COMFYUI_GENERATION_TIMEOUT_SECONDS = 0;" in comfyui_js
     assert "不設最長等待上限" in comfyui_js
@@ -7064,7 +7064,7 @@ def test_comfyui_frontend_is_wired():
     assert "inspectComfyuiCivitaiModel" in bootstrap_js
     assert "stopLocalComfyui" in bootstrap_js
     assert "json.starting" in admin_js
-    assert "scheduleComfyuiLocalStartPolling({ attemptsLeft = 120, delayMs = 5000 }" in comfyui_js
+    assert "scheduleComfyuiLocalStartPolling({ attemptsLeft = 120, delayMs = 5000, operation = null }" in comfyui_js
     assert 'apiFetch(API + "/comfyui/interrupt"' in comfyui_js
     assert 'apiFetch(API + "/comfyui/save"' in comfyui_js
     assert 'apiFetch(API + "/comfyui/discard"' in comfyui_js
@@ -7126,7 +7126,7 @@ def test_comfyui_frontend_is_wired():
     assert "communityPreviewContentUrl" in community_js
     assert "csrf_token=${encodeURIComponent(token)}" not in community_js
     assert "/cloud-drive/files/${encodeURIComponent(fileId)}/preview/content" in community_js
-    assert "/js/25-community.js?v=20260518-inline-media" in index_html
+    assert "/js/25-community.js?v=__ASSET_VERSION__" in index_html
     assert 'isComfyuiAvailableForNavigation' in admin_js
     assert '"feature_comfyui_enabled": False' in platform_settings_py
     assert 'DEFAULT_COMFYUI_REMOTE_API_URL = os.environ.get("COMFYUI_API_URL", "http://127.0.0.1:8188").rstrip("/")' in comfyui_settings_py

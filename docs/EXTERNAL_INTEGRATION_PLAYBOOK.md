@@ -30,7 +30,7 @@ fully owned by this repository.
 | `BTC_trade` | External git repo | No unless BTC_trade signal feature is enabled | `services/trading/btc_bridge.py`, `scripts/trading/bridges/btc_signal_bridge.py`, root BTC_trade APIs | `external/BTC_trade/` by default |
 | ComfyUI | External API service / local process | Only when ComfyUI feature is enabled | `routes/comfyui.py`, `services/comfyui/*`, `public/js/36-comfyui.js` | Local/remote ComfyUI install and model directories |
 | Civitai | External model API | Only for root model import | `routes/comfyui.py`, `services/comfyui/*` | ComfyUI model directories plus `.civitai.json` sidecars |
-| KataGo | External Go engine binary/model | Only for Go `katago` difficulty | `scripts/games/setup_katago.py`, `services/games/board_ai.py` | `runtime/katago/` by default |
+| KataGo | External Go engine binary/model | Only for Go `katago` difficulty | `scripts/games/setup_katago.py`, `services/games/board_ai.py` | `$HACKME_RUNTIME_DIR/katago/` or external XDG state fallback |
 
 ## Blockfish / Stockfish
 

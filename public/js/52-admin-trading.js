@@ -16,6 +16,77 @@ let rootTradingMarketRegistryAuditCache = [];
 let rootTradingMarketProviderCache = [];
 let rootTradingMarketRegistrySelectedId = null;
 let rootTradingMarketProviderSelectedId = null;
+let rootTradingAdminAccountGeneration = 0;
+
+function rootTradingAdminOperationContext() {
+  return {
+    generation: rootTradingAdminAccountGeneration,
+    scope: typeof getCurrentAccountStorageScope === "function"
+      ? getCurrentAccountStorageScope()
+      : String(currentUserId || currentUser || "anonymous"),
+  };
+}
+
+function rootTradingAdminOperationIsCurrent(operation) {
+  if (!operation || operation.generation !== rootTradingAdminAccountGeneration) return false;
+  const scope = typeof getCurrentAccountStorageScope === "function"
+    ? getCurrentAccountStorageScope()
+    : String(currentUserId || currentUser || "anonymous");
+  return operation.scope === scope;
+}
+
+function rootTradingAdminAssertOperationCurrent(operation) {
+  if (rootTradingAdminOperationIsCurrent(operation)) return;
+  if (typeof accountRequestAbortError === "function") throw accountRequestAbortError();
+  throw new DOMException("Account context changed", "AbortError");
+}
+
+function resetRootTradingAdminAccountState() {
+  rootTradingAdminAccountGeneration += 1;
+  rootTradingSettingsCache = { settings: {}, markets: [] };
+  rootTradingPriceFusionStatusCache = null;
+  rootTradingBotAuditCache = null;
+  rootTradingBackgroundStatusCache = null;
+  rootTradingMarketRegistryCache = [];
+  rootTradingMarketRegistryAuditCache = [];
+  rootTradingMarketProviderCache = [];
+  rootTradingMarketRegistrySelectedId = null;
+  rootTradingMarketProviderSelectedId = null;
+  const btcStartButton = $("root-trading-btc-trade-start-btn");
+  if (btcStartButton) {
+    btcStartButton.disabled = currentUser !== "root";
+    btcStartButton.textContent = "一鍵啟動預測";
+  }
+
+  document.querySelectorAll('input[id^="root-trading-"], textarea[id^="root-trading-"], select[id^="root-trading-"]').forEach((control) => {
+    if (control.type === "checkbox" || control.type === "radio") control.checked = false;
+    else if (control.tagName === "SELECT") control.selectedIndex = -1;
+    else control.value = "";
+  });
+  [
+    "root-trading-background-summary", "root-trading-background-jobs", "root-trading-background-runs",
+    "root-trading-market-registry-audit", "root-trading-market-provider-list",
+    "root-trading-market-provider-selected", "root-trading-market-registry-list",
+    "root-trading-price-fusion-summary", "root-trading-price-fusion-provider-list",
+    "root-trading-price-fusion-excluded-list", "root-trading-bot-audit-summary",
+    "root-trading-bot-audit-bots", "root-trading-bot-audit-bug-reports",
+  ].forEach((id) => {
+    const el = $(id);
+    if (el) el.replaceChildren();
+  });
+  [
+    "root-trading-settings-msg", "root-trading-price-fusion-msg", "root-trading-bot-audit-msg",
+    "root-trading-background-msg", "root-trading-market-registry-msg",
+    "root-trading-market-registry-editor-status", "root-trading-market-provider-status",
+    "root-trading-btc-trade-status",
+  ].forEach((id) => {
+    const el = $(id);
+    if (el) el.textContent = "";
+  });
+}
+
+document.addEventListener("hackme:account-context-changed", resetRootTradingAdminAccountState);
+window.resetRootTradingAdminAccountState = resetRootTradingAdminAccountState;
 
 function rootTradingSettingsMsg(text, ok = true) {
   const msg = $("root-trading-settings-msg");
@@ -1662,6 +1733,7 @@ async function setupRootBtcTrade(options = {}) {
 
 async function startRootBtcTradePrediction() {
   if (currentUser !== "root") return;
+  const operation = rootTradingAdminOperationContext();
   const status = $("root-trading-btc-trade-status");
   const button = $("root-trading-btc-trade-start-btn");
   const projectDir = ($("root-trading-btc-trade-path")?.value || "").trim();
@@ -1681,6 +1753,7 @@ async function startRootBtcTradePrediction() {
       body: JSON.stringify({ project_dir: projectDir, repo_url: repoUrl, branch, timeframe: "4h" }),
     });
     const json = await parseRootTradingSettingsResponse(res);
+    rootTradingAdminAssertOperationCurrent(operation);
     const job = json.job || {};
     if (json.project_dir && $("root-trading-btc-trade-path") && !$("root-trading-btc-trade-path").value.trim()) {
       $("root-trading-btc-trade-path").value = json.project_dir;
@@ -1695,31 +1768,37 @@ async function startRootBtcTradePrediction() {
       status.style.color = res.ok && json.ok && json.start_ok ? "#4caf50" : "#ffb74d";
     }
     if (res.ok && json.start_ok && job.job_id && job.status !== "completed" && job.status !== "error") {
-      await pollRootBtcTradeStartJob(job.job_id);
+      await pollRootBtcTradeStartJob(job.job_id, operation);
     }
     if (res.ok && json.ok && json.start_ok && typeof loadTradingDashboard === "function") {
       loadTradingDashboard();
     }
   } catch (err) {
+    if (!rootTradingAdminOperationIsCurrent(operation) || err?.name === "AbortError") return;
     if (status) {
       status.textContent = err.message || "BTC_trade 一鍵啟動失敗";
       status.style.color = "#ff4f6d";
     }
   } finally {
-    if (button) button.disabled = false;
+    if (rootTradingAdminOperationIsCurrent(operation) && button) button.disabled = false;
   }
 }
 
-async function pollRootBtcTradeStartJob(jobId) {
+async function pollRootBtcTradeStartJob(jobId, operation = null) {
+  const operationContext = operation || rootTradingAdminOperationContext();
+  rootTradingAdminAssertOperationCurrent(operationContext);
   if (!jobId || currentUser !== "root") return;
   const status = $("root-trading-btc-trade-status");
   while (true) {
+    rootTradingAdminAssertOperationCurrent(operationContext);
     await fetchCsrfToken({ force: true });
+    rootTradingAdminAssertOperationCurrent(operationContext);
     const res = await apiFetch(API + `/root/trading/btc-trade/start-status?job_id=${encodeURIComponent(jobId)}`, {
       credentials: "same-origin",
       headers: { "X-CSRF-Token": getCsrfToken() || "" }
     });
     const json = await parseRootTradingSettingsResponse(res);
+    rootTradingAdminAssertOperationCurrent(operationContext);
     const job = json.job || {};
     const result = job.result || {};
     if (status) {
@@ -1736,5 +1815,6 @@ async function pollRootBtcTradeStartJob(jobId) {
     }
     if (!res.ok || job.status === "completed" || job.status === "error") return;
     await new Promise((resolve) => setTimeout(resolve, 1500));
+    rootTradingAdminAssertOperationCurrent(operationContext);
   }
 }

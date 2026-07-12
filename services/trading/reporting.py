@@ -39,6 +39,33 @@ def _asset_overview_price(market, snapshot):
     return float(_to_decimal((market or {}).get("manual_price_points") or 0, name="manual_price_points", minimum=0))
 
 
+def _legacy_wallet_funding(conn, user_id):
+    columns = {
+        str(row[1] if not hasattr(row, "keys") else row["name"])
+        for row in conn.execute("PRAGMA table_info(points_wallets)").fetchall()
+    }
+    if {"soft_balance", "hard_balance", "soft_frozen", "hard_frozen"}.issubset(columns):
+        row = conn.execute(
+            """
+            SELECT COALESCE(soft_balance, 0) + COALESCE(hard_balance, 0) AS available_points,
+                   COALESCE(soft_frozen, 0) + COALESCE(hard_frozen, 0) AS frozen_points
+            FROM points_wallets WHERE user_id=?
+            """,
+            (int(user_id),),
+        ).fetchone()
+    elif {"points_balance", "points_frozen"}.issubset(columns):
+        row = conn.execute(
+            "SELECT points_balance AS available_points, points_frozen AS frozen_points FROM points_wallets WHERE user_id=?",
+            (int(user_id),),
+        ).fetchone()
+    else:
+        row = None
+    return {
+        "available_points": int(row["available_points"] or 0) if row else 0,
+        "frozen_points": int(row["frozen_points"] or 0) if row else 0,
+    }
+
+
 def _asset_overview_user_funding(service, conn, user_id):
     user_id = int(user_id)
     user = conn.execute("SELECT username FROM users WHERE id=?", (user_id,)).fetchone()
@@ -67,15 +94,13 @@ def _asset_overview_user_funding(service, conn, user_id):
         wallet_available = int(balance_rows["available_points"] or 0) if balance_rows else 0
         wallet_locked = int(balance_rows["frozen_points"] or 0) if balance_rows else 0
         if wallet_available == 0 and wallet_locked == 0:
-            legacy = conn.execute("SELECT points_balance, points_frozen FROM points_wallets WHERE user_id=?", (user_id,)).fetchone()
-            if legacy:
-                wallet_available = int(legacy["points_balance"] or 0)
-                wallet_locked = int(legacy["points_frozen"] or 0)
+            legacy = _legacy_wallet_funding(conn, user_id)
+            wallet_available = legacy["available_points"]
+            wallet_locked = legacy["frozen_points"]
     except Exception:
-        legacy = conn.execute("SELECT points_balance, points_frozen FROM points_wallets WHERE user_id=?", (user_id,)).fetchone()
-        if legacy:
-            wallet_available = int(legacy["points_balance"] or 0)
-            wallet_locked = int(legacy["points_frozen"] or 0)
+        legacy = _legacy_wallet_funding(conn, user_id)
+        wallet_available = legacy["available_points"]
+        wallet_locked = legacy["frozen_points"]
 
     trial_available = 0
     trial_locked = 0

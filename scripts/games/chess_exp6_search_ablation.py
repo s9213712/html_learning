@@ -41,6 +41,7 @@ from services.games.chess_pv import (  # noqa: E402
     choose_experiment_pv_move,
     default_chess_pv_model_path,
 )
+from scripts.games.common_paths import exp6_artifacts_root  # noqa: E402
 
 sys.path.insert(0, str(ROOT / "scripts/games"))
 import chess_exp6_curriculum as cc  # noqa: E402
@@ -791,7 +792,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--weights", type=Path, required=True)
     ap.add_argument("--variants", default="baseline,qchecks,order,qchecks_order,qchecks_ext,full")
-    ap.add_argument("--out", type=Path, default=Path.home() / "exp6_output/v10_search_ablation.json")
+    ap.add_argument("--out", type=Path, default=exp6_artifacts_root() / "v10_search_ablation.json")
     ap.add_argument(
         "--include-traces",
         action="store_true",

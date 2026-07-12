@@ -18,8 +18,15 @@ from cryptography.x509.oid import NameOID
 
 
 def default_runtime_root_path(app_name="hackme_web"):
-    del app_name  # Kept for backward-compatible callers.
-    return (Path(__file__).resolve().parents[2] / "runtime").resolve()
+    name = Path(str(app_name or "hackme_web")).name or "hackme_web"
+    configured_state_home = os.environ.get("XDG_STATE_HOME", "").strip()
+    if configured_state_home:
+        state_home = Path(configured_state_home).expanduser()
+        if not state_home.is_absolute():
+            state_home = Path.home() / ".local" / "state"
+    else:
+        state_home = Path.home() / ".local" / "state"
+    return (state_home / name).resolve()
 
 
 def default_runtime_root(app_name="hackme_web"):

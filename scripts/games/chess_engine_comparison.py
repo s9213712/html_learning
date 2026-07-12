@@ -9,10 +9,8 @@ Each engine plays 10 games against Stockfish:
 
 Per-game records: result, reason, plies, wall-clock, per-side
 decision time statistics, per-process CPU/RSS deltas. Aggregate
-per-engine score and per-depth W/D/L are written to:
-
-- ``~/exp6_output/engine_comparison.json``
-- ``~/exp6_output/engine_comparison.md``
+per-engine score and per-depth W/D/L are written under the external Exp6
+artifact root and mirrored to the configured external runtime.
 
 Engines dispatched via ``routes.games.choose_computer_move`` so each
 gets the same configuration the live web app uses. The Exp6 entry
@@ -40,14 +38,15 @@ from services.games.chess_stockfish_teacher import (  # noqa: E402
     UciStockfish, analysis_limit, resolve_stockfish_path,
 )
 from routes import games as games_routes  # noqa: E402
+from scripts.games.common_paths import exp6_artifacts_root, exp6_private_dir  # noqa: E402
 
 
 STOCKFISH_BIN = resolve_stockfish_path(os.environ.get("STOCKFISH_PATH", ""))
-OUT_DIR = Path.home() / "exp6_output"
+OUT_DIR = exp6_artifacts_root() / "engine_comparison"
 REPORT_JSON = OUT_DIR / "engine_comparison.json"
 REPORT_MD = OUT_DIR / "engine_comparison.md"
-REPORT_JSON_REPO = REPO / "runtime/private/games/exp6/engine_comparison.json"
-REPORT_MD_REPO = REPO / "runtime/private/games/exp6/engine_comparison.md"
+REPORT_JSON_RUNTIME = exp6_private_dir() / "engine_comparison.json"
+REPORT_MD_RUNTIME = exp6_private_dir() / "engine_comparison.md"
 
 STAGED_OPENINGS = [
     ("start", []),
@@ -243,7 +242,7 @@ def score_summary(rows):
 
 def main():
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    REPORT_JSON_REPO.parent.mkdir(parents=True, exist_ok=True)
+    REPORT_JSON_RUNTIME.parent.mkdir(parents=True, exist_ok=True)
     engine_records = []
     for diff in ENGINE_DIFFICULTIES:
         print(f"\n=== {diff} ===", flush=True)
@@ -274,12 +273,12 @@ def main():
         # Incremental write so partial progress is visible.
         body = json.dumps({"engines": engine_records, "complete": False}, indent=2, default=str)
         REPORT_JSON.write_text(body)
-        REPORT_JSON_REPO.write_text(body)
+        REPORT_JSON_RUNTIME.write_text(body)
 
     final = {"engines": engine_records, "complete": True}
     body = json.dumps(final, indent=2, default=str)
     REPORT_JSON.write_text(body)
-    REPORT_JSON_REPO.write_text(body)
+    REPORT_JSON_RUNTIME.write_text(body)
 
     md = []
     md.append("# Chess Engine Horizontal Comparison\n\n")
@@ -324,8 +323,8 @@ def main():
             )
     body_md = "".join(md)
     REPORT_MD.write_text(body_md)
-    REPORT_MD_REPO.write_text(body_md)
-    print(f"\nreports: {REPORT_MD} (mirror: {REPORT_MD_REPO})", flush=True)
+    REPORT_MD_RUNTIME.write_text(body_md)
+    print(f"\nreports: {REPORT_MD} (runtime mirror: {REPORT_MD_RUNTIME})", flush=True)
     return 0
 
 

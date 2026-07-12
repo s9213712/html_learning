@@ -16,7 +16,14 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_OUT = ROOT / "artifacts" / "qa" / "pointschain_real_incident_attack_probe.json"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.test_artifacts import test_artifact_path  # noqa: E402
+
+
+DEFAULT_OUT = test_artifact_path("qa", "pointschain_real_incident_attack_probe.json")
+PYTEST_WRAPPER = ROOT / "scripts" / "testing" / "pytest_in_tmp.sh"
 
 
 def utc_now() -> str:
@@ -25,24 +32,33 @@ def utc_now() -> str:
 
 def run_step(name: str, priority: str, incident: str, command: list[str], *, timeout: int = 240) -> dict:
     started_at = utc_now()
-    proc = subprocess.run(
-        command,
-        cwd=ROOT,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        timeout=timeout,
-    )
+    try:
+        proc = subprocess.run(
+            command,
+            cwd=ROOT,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=timeout,
+        )
+        returncode = proc.returncode
+        output = proc.stdout or ""
+    except subprocess.TimeoutExpired as exc:
+        returncode = 124
+        output = f"step timed out after {timeout}s\n{exc.stdout or ''}"
+    except OSError as exc:
+        returncode = 127
+        output = f"step could not start: {exc}"
     return {
         "name": name,
         "priority": priority,
         "incident": incident,
-        "ok": proc.returncode == 0,
-        "returncode": proc.returncode,
+        "ok": returncode == 0,
+        "returncode": returncode,
         "command": command,
         "started_at": started_at,
         "finished_at": utc_now(),
-        "output_tail": (proc.stdout or "")[-5000:],
+        "output_tail": output[-5000:],
     }
 
 
@@ -79,16 +95,13 @@ def main() -> int:
     args = build_parser().parse_args()
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    py = sys.executable
     steps = [
         run_step(
             "p0_multisig_masked_payload",
             "P0",
             "Bybit/Safe-style signer UI payload masking",
             [
-                py,
-                "-m",
-                "pytest",
+                str(PYTEST_WRAPPER),
                 "-q",
                 "tests/points/test_governance_branch.py::test_official_treasury_signer_center_exposes_offline_payload_verifier",
                 "tests/points/test_governance_branch.py::test_governance_execute_rejects_payload_tamper_and_active_timelock",
@@ -99,9 +112,7 @@ def main() -> int:
             "P0",
             "Beanstalk-style fast governance capture",
             [
-                py,
-                "-m",
-                "pytest",
+                str(PYTEST_WRAPPER),
                 "-q",
                 "tests/points/test_governance_branch.py::test_public_governance_root_has_no_veto_and_user_proposal_requires_sponsor",
                 "tests/points/test_governance_branch.py::test_public_governance_proposal_requires_trusted_member_level",
@@ -114,9 +125,7 @@ def main() -> int:
             "P0",
             "Genesis/migration/fork replay and fund zeroing without ledger backup restore",
             [
-                py,
-                "-m",
-                "pytest",
+                str(PYTEST_WRAPPER),
                 "-q",
                 "tests/points/test_governance_branch.py::test_official_funds_are_branch_scoped_after_recovery_branch",
                 "tests/points/test_governance_branch.py::test_multiple_recovery_forks_preserve_canonical_ledger_and_do_not_zero_funds",
@@ -127,9 +136,7 @@ def main() -> int:
             "P0",
             "Mango-style oracle/price manipulation",
             [
-                py,
-                "-m",
-                "pytest",
+                str(PYTEST_WRAPPER),
                 "-q",
                 "tests/trading/core/test_trading_engine.py::test_test_live_price_provider_is_marked_synthetic_and_not_risk_grade_usable",
                 "tests/trading/core/test_trading_engine.py::test_manual_root_price_is_not_risk_grade_usable",
@@ -142,9 +149,7 @@ def main() -> int:
             "P0",
             "Mt. Gox/FTX-style asset and liability opacity",
             [
-                py,
-                "-m",
-                "pytest",
+                str(PYTEST_WRAPPER),
                 "-q",
                 "tests/trading/core/test_trading_engine.py::test_spot_cfd_principal_payout_and_fee_flow_through_exchange_fund",
                 "tests/trading/core/test_trading_engine.py::test_margin_cfd_price_loss_is_collected_by_exchange_reserve_pool",
@@ -157,9 +162,7 @@ def main() -> int:
             "P1",
             "USDC/SVB and Terra-style external reserve/depeg risk",
             [
-                py,
-                "-m",
-                "pytest",
+                str(PYTEST_WRAPPER),
                 "-q",
                 "tests/platform/test_feature_flags.py::test_external_chain_features_remain_disabled_by_rc1_scope",
             ],
@@ -169,9 +172,7 @@ def main() -> int:
             "P1",
             "Curve DNS / fake frontend / blind signing",
             [
-                py,
-                "-m",
-                "pytest",
+                str(PYTEST_WRAPPER),
                 "-q",
                 "tests/frontend/trading/test_frontend_economy.py::test_root_points_page_is_chain_operations_console",
                 "tests/points/test_governance_branch.py::test_cold_wallet_signatures_are_branch_action_and_signer_bound",
@@ -182,9 +183,7 @@ def main() -> int:
             "P1",
             "transaction malleability / idempotency mismatch",
             [
-                py,
-                "-m",
-                "pytest",
+                str(PYTEST_WRAPPER),
                 "-q",
                 "tests/points/test_points_explorer.py::test_points_explorer_acceleration_is_append_only_and_idempotent",
                 "tests/points/test_points_explorer.py::test_wallet_transfer_pending_does_not_credit_chain_address_until_proved",
@@ -196,9 +195,7 @@ def main() -> int:
             "P1",
             "MEV / front-running / priority-fee abuse",
             [
-                py,
-                "-m",
-                "pytest",
+                str(PYTEST_WRAPPER),
                 "-q",
                 "tests/points/test_governance_branch.py::test_acceleration_cannot_bypass_pending_freeze_or_cross_branch",
                 "tests/trading/core/test_trading_engine.py::test_limit_order_matcher_executes_when_price_reaches_limit",
@@ -209,9 +206,7 @@ def main() -> int:
             "P1",
             "server-time / timelock deadline tampering",
             [
-                py,
-                "-m",
-                "pytest",
+                str(PYTEST_WRAPPER),
                 "-q",
                 "tests/points/test_governance_branch.py::test_governance_deadline_guard_rejects_timelock_row_tamper",
                 "tests/points/test_governance_branch.py::test_governance_clock_fast_forward_enters_safe_mode",
@@ -222,9 +217,7 @@ def main() -> int:
             "P2",
             "dust attack / address identity inference",
             [
-                py,
-                "-m",
-                "pytest",
+                str(PYTEST_WRAPPER),
                 "-q",
                 "tests/points/test_governance_branch.py::test_account_bound_official_hot_wallet_can_open_and_reply_to_dispute_without_private_key",
                 "tests/points/test_governance_branch.py::test_address_signed_dispute_hides_reporter_identity_and_freezes_to_for_one_hour",

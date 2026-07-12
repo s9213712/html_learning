@@ -274,7 +274,8 @@ RC1 must provide:
 
 - `scripts/qa/points_chain_release_gate.py`
 - `docs/qa/POINTSCHAIN_RELEASE_GATE.md`
-- `artifacts/qa/pointschain_rc1_release_gate.json`
+- `/tmp/hackme_web_test_artifacts/qa/pointschain_rc1_release_gate.json` by
+  default, or an explicit external CI artifact path
 
 The release gate must cover:
 

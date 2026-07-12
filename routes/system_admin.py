@@ -251,8 +251,8 @@ def register_system_admin_routes(app, deps):
     SERVER_LOG_PATH = deps["SERVER_LOG_PATH"]
     STORAGE_DIR = deps.get("STORAGE_DIR")
     CURRENT_SERVER_BIND_STATE = deps.get("CURRENT_SERVER_BIND_STATE") or {}
-    CERT_FILE = deps.get("CERT_FILE") or os.path.join(BASE_DIR, "runtime", "cert.pem")
-    KEY_FILE = deps.get("KEY_FILE") or os.path.join(BASE_DIR, "runtime", "key.pem")
+    CERT_FILE = deps.get("CERT_FILE") or os.path.join(default_runtime_root(), "cert.pem")
+    KEY_FILE = deps.get("KEY_FILE") or os.path.join(default_runtime_root(), "key.pem")
     activate_emergency_lockdown = deps["activate_emergency_lockdown"]
     audit = deps["audit"]
     get_client_ip = deps["get_client_ip"]

@@ -12,11 +12,15 @@ python3 scripts/qa/points_chain_release_gate.py --skip-live
 Live isolated command:
 
 ```bash
+export HACKME_ROOT_PASSWORD='<root-password-from-secret-manager>'
 python3 scripts/qa/points_chain_release_gate.py \
   --base-url https://127.0.0.1:54343 \
-  --runtime-root /tmp/hackme_web_isolated_54343/hackme_web/runtime \
-  --root-password root
+  --runtime-root /tmp/hackme_web_isolated_54343/hackme_web/runtime
 ```
+
+The default report root is `/tmp/hackme_web_test_artifacts`. CI may set an
+absolute `HACKME_TEST_OUTPUT_ROOT` to a retained artifact mount. Do not place
+credentials in command arguments or committed report files.
 
 The gate must print:
 

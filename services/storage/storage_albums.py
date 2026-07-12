@@ -34,6 +34,7 @@ from services.storage.albums import (
     add_album_file,
     create_album,
     create_album_from_storage_folder,
+    create_album_with_files,
     delete_album,
     ensure_album_share_link,
     ensure_output_album,

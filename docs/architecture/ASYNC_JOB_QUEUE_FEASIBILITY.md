@@ -442,12 +442,10 @@ permission 與 audit 的 source of truth。
 
 ### Phase 2：Redis + RQ worker
 
-新增：
+規劃新增（目前尚未實作，不能當成可執行入口）：
 
-```text
-services/experiments/jobs.py
-scripts/workers/experiment_worker.py
-```
+- `services/experiments/jobs.py`
+- `scripts/workers/experiment_worker.py`
 
 worker 負責：
 

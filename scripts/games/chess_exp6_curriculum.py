@@ -43,27 +43,27 @@ from services.games.chess_exp6 import (  # noqa: E402
     EXP6_DEFAULT_SEARCH_PROFILE,
     choose_experiment_neural_move,
 )
+from scripts.games.common_paths import exp6_artifacts_root, exp6_private_dir, runtime_model_path  # noqa: E402
 
 
 STOCKFISH_BIN = resolve_stockfish_path(os.environ.get("STOCKFISH_PATH", ""))
 # Quality games come from ``chess_exp6_download_quality.py``. The script
 # produces ``quality_1000_games.jsonl`` after filtering multi-source
 # downloads through the elite gate.
-SOURCE_GAMES_JSONL = REPO / "runtime/private/games/exp6/quality_1000_games.jsonl"
-OUT_DIR = REPO / "runtime/private/games/exp6"
+OUT_DIR = exp6_private_dir()
+SOURCE_GAMES_JSONL = OUT_DIR / "quality_1000_games.jsonl"
 LABELS_PATH = OUT_DIR / "curriculum_labels.jsonl"
 # Per user spec: snapshots + reports live outside the repo tree so a
 # /tmp wipe or repo cleanup can't take them out. Includes the stage 00
 # random-init snapshot for full reproducibility of the curriculum.
-PERSISTENT_DIR = Path.home() / "exp6_output"
+PERSISTENT_DIR = exp6_artifacts_root() / "curriculum"
 SNAPSHOTS_DIR = PERSISTENT_DIR / "snapshots"
 REPORT_JSON = PERSISTENT_DIR / "curriculum_report.json"
 REPORT_MD = PERSISTENT_DIR / "curriculum_report.md"
-# Mirror the report inside the gitignored runtime tree too, so a repo
-# checkout shows it via the established `runtime/private` evidence
-# convention. The persistent copy is the source of truth.
-REPORT_JSON_REPO = OUT_DIR / "curriculum_report.json"
-REPORT_MD_REPO = OUT_DIR / "curriculum_report.md"
+# Mirror the report into the configured external runtime for operators. The
+# standalone artifact copy is the source of truth for this run.
+REPORT_JSON_RUNTIME = OUT_DIR / "curriculum_report.json"
+REPORT_MD_RUNTIME = OUT_DIR / "curriculum_report.md"
 
 # 1000 games × ~50 latter-half plies ≈ 50000 positions. We label every
 # latter-50% position with Stockfish but split the GAMES into 10
@@ -766,8 +766,10 @@ def main() -> int:
             f"score={best['score_total']:+d}/{best['score_max']})",
             flush=True,
         )
-        shutil.copy(best["snapshot_path"], REPO / "runtime/games/models/chess_experiment_6_neural.npz")
-        print(f"promoted to runtime: {REPO / 'runtime/games/models/chess_experiment_6_neural.npz'}", flush=True)
+        production_model = runtime_model_path("chess_experiment_6_neural.npz")
+        production_model.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(best["snapshot_path"], production_model)
+        print(f"promoted to runtime: {production_model}", flush=True)
     _write_markdown_report(stage_records, best=best, complete=True)
     print(f"\nreport -> {REPORT_MD}", flush=True)
     return 0
@@ -775,13 +777,13 @@ def main() -> int:
 
 def _write_report_json(stage_records: list[dict], *, complete: bool, baseline_only: bool) -> None:
     """Dual-write the curriculum report JSON: persistent copy under
-    ``~/exp6_output`` + mirror inside the repo's runtime tree."""
+    the standalone artifact root plus the configured external runtime."""
     payload = {"stages": stage_records, "complete": complete, "baseline_only": baseline_only}
     body = json.dumps(payload, indent=2, default=str)
     REPORT_JSON.parent.mkdir(parents=True, exist_ok=True)
     REPORT_JSON.write_text(body)
-    REPORT_JSON_REPO.parent.mkdir(parents=True, exist_ok=True)
-    REPORT_JSON_REPO.write_text(body)
+    REPORT_JSON_RUNTIME.parent.mkdir(parents=True, exist_ok=True)
+    REPORT_JSON_RUNTIME.write_text(body)
 
 
 def _sha256_file(path: Path, *, head_bytes: int = 0) -> str:
@@ -803,7 +805,7 @@ def _sha256_file(path: Path, *, head_bytes: int = 0) -> str:
 
 
 def _load_quality_summary() -> dict:
-    summary_path = REPO / "runtime/private/games/exp6/quality_1000_summary.json"
+    summary_path = OUT_DIR / "quality_1000_summary.json"
     if not summary_path.exists():
         return {}
     try:
@@ -983,10 +985,9 @@ def _write_markdown_report(stage_records: list[dict], *, best, complete: bool) -
     body = "".join(md)
     REPORT_MD.parent.mkdir(parents=True, exist_ok=True)
     REPORT_MD.write_text(body)
-    # Mirror inside the repo's runtime tree for convenience; the
-    # persistent copy is the source of truth.
-    REPORT_MD_REPO.parent.mkdir(parents=True, exist_ok=True)
-    REPORT_MD_REPO.write_text(body)
+    # Mirror into the configured external runtime for operator visibility.
+    REPORT_MD_RUNTIME.parent.mkdir(parents=True, exist_ok=True)
+    REPORT_MD_RUNTIME.write_text(body)
 
 
 if __name__ == "__main__":

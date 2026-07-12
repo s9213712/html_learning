@@ -78,6 +78,42 @@ let rootBugReportSelectedId = "";
 let backpressureTrafficRefreshSeconds = 4;
 let serverOutputRefreshSeconds = 3;
 let securityTestJobPollSeconds = 3;
+let adminAccountGeneration = 0;
+
+function adminOperationContext() {
+  return {
+    generation: adminAccountGeneration,
+    requestGeneration: accountRequestGeneration,
+    scope: typeof getCurrentAccountStorageScope === "function"
+      ? getCurrentAccountStorageScope()
+      : String(currentUserId || currentUser || "anonymous"),
+  };
+}
+
+function adminOperationIsCurrent(operation) {
+  if (
+    !operation
+    || operation.generation !== adminAccountGeneration
+    || operation.requestGeneration !== accountRequestGeneration
+  ) return false;
+  const scope = typeof getCurrentAccountStorageScope === "function"
+    ? getCurrentAccountStorageScope()
+    : String(currentUserId || currentUser || "anonymous");
+  return operation.scope === scope;
+}
+
+function adminAssertOperationCurrent(operation) {
+  if (adminOperationIsCurrent(operation)) return;
+  if (typeof accountRequestAbortError === "function") throw accountRequestAbortError();
+  throw new DOMException("Account context changed", "AbortError");
+}
+
+function scheduleAdminAccountReload(delayMs) {
+  const operation = adminOperationContext();
+  setTimeout(() => {
+    if (adminOperationIsCurrent(operation)) location.reload();
+  }, delayMs);
+}
 
 const ROOT_ADMIN_TIMING_META = {
   "first-summary": {
@@ -294,12 +330,17 @@ function canRunRootManagementPoll(isActive) {
 
 function scheduleRootManagementIdleTask(callback, timeout = 900) {
   if (typeof callback !== "function") return;
+  const operation = adminOperationContext();
   const run = () => {
-    if (document.hidden) return;
+    if (document.hidden || !adminOperationIsCurrent(operation) || !canRunRootManagementPoll()) return;
     try {
       const result = callback();
-      if (result && typeof result.catch === "function") result.catch(() => {});
-    } catch (_) {}
+      if (result && typeof result.catch === "function") {
+        result.catch((err) => reportFrontendFailure("root-management-idle-task", err));
+      }
+    } catch (err) {
+      reportFrontendFailure("root-management-idle-task", err);
+    }
   };
   if (typeof window !== "undefined" && typeof window.requestIdleCallback === "function") {
     window.requestIdleCallback(run, { timeout });
@@ -1321,7 +1362,7 @@ async function loadViolations(page, username) {
   const url = selectedUsername
     ? API + "/admin/violations?page=" + page + "&username=" + encodeURIComponent(selectedUsername)
     : API + "/admin/violations?page=0&summary_only=1";
-  const res = await fetch(url, {
+  const res = await apiFetch(url, {
     credentials: "same-origin",
     headers: { "X-CSRF-Token": csrf || "" }
   });
@@ -1759,7 +1800,7 @@ async function loadGovernanceProposals() {
   const csrf = getCsrfToken();
   const status = $("governance-proposal-status")?.value || "";
   const url = API + "/admin/moderation/proposals" + (status ? "?status=" + encodeURIComponent(status) : "");
-  const res = await fetch(url, {
+  const res = await apiFetch(url, {
     credentials: "same-origin",
     headers: { "X-CSRF-Token": csrf || "" }
   });
@@ -2506,7 +2547,9 @@ async function refreshBackpressureTraffic() {
     });
     const json = await res.json().catch(() => ({}));
     if (json.ok) renderBackpressureStatus(json.backpressure);
-  } catch (_) {}
+  } catch (err) {
+    reportFrontendFailure("root-backpressure-traffic-poll", err);
+  }
 }
 
 async function loadSettings() {
@@ -3902,10 +3945,15 @@ function renderSecurityTestJobs(jobs) {
   });
 }
 
-async function loadSecurityTestJobs() {
+async function loadSecurityTestJobs(operation = null) {
+  const operationContext = operation?.generation !== undefined && operation?.requestGeneration !== undefined
+    ? operation
+    : adminOperationContext();
+  if (!adminOperationIsCurrent(operationContext)) return;
   if (currentUser !== "root") return;
   try {
     const csrf = await fetchCsrfToken();
+    adminAssertOperationCurrent(operationContext);
     const target = $("security-pentest-target");
     if (target && !target.value) target.value = window.location.origin;
     const stressTarget = $("security-stress-target");
@@ -3917,6 +3965,7 @@ async function loadSecurityTestJobs() {
       headers: { "X-CSRF-Token": csrf || "" }
     });
     const json = await res.json().catch(() => ({}));
+    adminAssertOperationCurrent(operationContext);
     if (!res.ok || !json.ok) {
       securityTestMsg(json.msg || `測試任務讀取失敗（HTTP ${res.status}）`, false);
       return;
@@ -3924,9 +3973,13 @@ async function loadSecurityTestJobs() {
     renderSecurityTestJobs(json.jobs || []);
     if ((json.jobs || []).some((job) => job.status === "running")) {
       clearTimeout(window.securityTestPollTimer);
-      window.securityTestPollTimer = setTimeout(loadSecurityTestJobs, securityTestJobPollSeconds * 1000);
+      window.securityTestPollTimer = setTimeout(() => {
+        window.securityTestPollTimer = null;
+        if (adminOperationIsCurrent(operationContext)) loadSecurityTestJobs(operationContext);
+      }, securityTestJobPollSeconds * 1000);
     }
   } catch (err) {
+    if (!adminOperationIsCurrent(operationContext) || err?.name === "AbortError") return;
     securityTestMsg(`測試任務讀取失敗：${err.message || "請檢查伺服器連線"}`, false);
   }
 }
@@ -4624,7 +4677,10 @@ async function startPointsFinalitySweep() {
       return;
     }
     if (typeof startJobCenterPolling === "function") startJobCenterPolling({ immediate: true, force: true });
-    setTimeout(() => loadServerHealth(), 1200);
+    const operation = adminOperationContext();
+    setTimeout(() => {
+      if (adminOperationIsCurrent(operation)) loadServerHealth();
+    }, 1200);
   } catch (err) {
     alert(err && err.message ? err.message : "Finality sweep 排入失敗");
   } finally {
@@ -5095,10 +5151,14 @@ async function saveSettings() {
     const activeSystemTab = currentSystemTab;
     const activeSettingsSection = currentSettingsSection;
     applySiteConfig(payload);
+    let authUiRefreshFailed = false;
     if (typeof updateAuthUI === "function") {
       try {
         await updateAuthUI();
-      } catch (_) {}
+      } catch (err) {
+        authUiRefreshFailed = true;
+        reportFrontendFailure("admin-settings-auth-ui-refresh", err);
+      }
     }
     if (typeof stopTradingModuleTimers === "function" && typeof startTradingModuleTimers === "function") {
       stopTradingModuleTimers();
@@ -5128,6 +5188,7 @@ async function saveSettings() {
     }
     const warnings = buildFeatureAdvisories().filter((item) => item.missingRequired.length);
     const warningHint = warnings.length ? `；仍有父功能未齊：${warnings.map(formatFeatureAdvisoryLine).join("、")}` : "";
+    const uiRefreshHint = authUiRefreshFailed ? "；權限介面更新失敗，請重新整理後確認" : "";
     const trafficChanged = payload.server_backpressure_traffic_refresh_seconds !== backpressureTrafficRefreshSeconds;
     const outputChanged = payload.server_output_refresh_seconds !== serverOutputRefreshSeconds;
     backpressureTrafficRefreshSeconds = adminRefreshSeconds(payload.server_backpressure_traffic_refresh_seconds, 4, 1, 300);
@@ -5140,9 +5201,9 @@ async function saveSettings() {
     }
     applySystemResourceRefreshSeconds(payload.system_resource_board_refresh_seconds, { restart: true });
     setSettingsStatus(
-      `${warnings.length ? "設定已儲存，但功能組合仍未完整" : "✅ 設定已儲存"}${restartHint}${warningHint}`,
-      warnings.length ? null : true,
-      { autoClearMs: warnings.length ? 0 : 4000 }
+      `${warnings.length || authUiRefreshFailed ? "設定已儲存，但仍有項目需確認" : "✅ 設定已儲存"}${restartHint}${warningHint}${uiRefreshHint}`,
+      warnings.length || authUiRefreshFailed ? null : true,
+      { autoClearMs: warnings.length || authUiRefreshFailed ? 0 : 4000 }
     );
     renderFeatureAdvisories();
     const idleMinutes = Number(payload.session_idle_timeout_minutes ?? 10);
@@ -5592,14 +5653,18 @@ function startSystemResourcePoll() {
 
 async function refreshSystemResourceBoard() {
   if (systemResourceRefreshInFlight || !canRunRootManagementPoll(isSystemEnvActive)) return;
-  systemResourceRefreshInFlight = true;
+  const operation = adminOperationContext();
+  const requestToken = {};
+  systemResourceRefreshInFlight = requestToken;
   try {
     const csrf = await fetchCsrfToken();
+    adminAssertOperationCurrent(operation);
     const res = await apiFetch(API + "/admin/environment/resources", {
       credentials: "same-origin",
       headers: { "X-CSRF-Token": csrf || "" }
     });
     const json = await res.json().catch(() => ({}));
+    adminAssertOperationCurrent(operation);
     if (!res.ok || !json.ok) throw new Error(json.msg || "系統資源讀取失敗");
     applySystemResourceRefreshSeconds(json.resource_refresh_seconds, { restart: true });
     renderSystemResourceBoard(json.resource_usage || {});
@@ -5610,10 +5675,11 @@ async function refreshSystemResourceBoard() {
       database: json.database_usage || {},
     });
   } catch (err) {
+    if (!adminOperationIsCurrent(operation) || err?.name === "AbortError") return;
     const sampled = $("system-resource-sampled-at");
     if (sampled) sampled.textContent = `資源看板更新失敗：${err.message || "請求失敗"}`;
   } finally {
-    systemResourceRefreshInFlight = false;
+    if (systemResourceRefreshInFlight === requestToken) systemResourceRefreshInFlight = false;
   }
 }
 
@@ -5649,6 +5715,7 @@ async function loadServerEnv() {
 async function restartServer(event) {
   if (event && typeof event.preventDefault === "function") event.preventDefault();
   if (!confirm("⚠️ 確定要重啟伺服器？所有連線將中斷。")) return;
+  const operation = adminOperationContext();
   const status = $("restart-server-status");
   const button = $("restart-server-btn");
   const previousStartedAt = serverMeta?.started_at || "";
@@ -5660,6 +5727,7 @@ async function restartServer(event) {
   try {
     if (status) status.textContent = "正在驗證操作權限...";
     const csrf = await fetchCsrfToken({ force: true });
+    adminAssertOperationCurrent(operation);
     if (!csrf) throw new Error("安全驗證狀態失效，請重新整理頁面後再試。");
     if (status) status.textContent = "已送出重啟指令，等待伺服器離線...";
     const res = await apiFetch(API + "/admin/restart", {
@@ -5668,19 +5736,22 @@ async function restartServer(event) {
       headers: { "X-CSRF-Token": csrf || "" }
     });
     const json = await res.json().catch(() => ({}));
+    adminAssertOperationCurrent(operation);
     if (!json.ok) throw new Error(json.msg || "重啟失敗");
-    const wentOffline = await waitForRestartOffline(25000);
+    const wentOffline = await waitForRestartOffline(25000, operation);
     if (!wentOffline) throw new Error("25 秒內沒有偵測到伺服器離線，重啟流程可能沒有真正執行。");
     if (status) status.textContent = "已偵測到離線，等待伺服器恢復...";
-    const onlineMeta = await waitForRestartOnline(previousStartedAt, 180000);
+    const onlineMeta = await waitForRestartOnline(previousStartedAt, 180000, operation);
+    adminAssertOperationCurrent(operation);
     if (!onlineMeta) throw new Error("3 分鐘內未重新連線，請檢查 server log。");
     renderServerVersion(onlineMeta);
     if (status) {
       status.textContent = "伺服器已重啟完成，正在重新載入頁面...";
       status.className = "msg show ok";
     }
-    setTimeout(() => location.reload(), 900);
+    scheduleAdminAccountReload(900);
   } catch (err) {
+    if (!adminOperationIsCurrent(operation) || err?.name === "AbortError") return;
     if (status) {
       status.textContent = err.message || "重啟失敗";
       status.className = "msg show err";
@@ -5691,7 +5762,9 @@ async function restartServer(event) {
   }
 }
 
-async function probeRestartVersion(timeoutMs = 1500) {
+async function probeRestartVersion(timeoutMs = 1500, operation = null) {
+  const operationContext = operation || adminOperationContext();
+  adminAssertOperationCurrent(operationContext);
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
@@ -5699,33 +5772,41 @@ async function probeRestartVersion(timeoutMs = 1500) {
       credentials: "same-origin",
       cache: "no-store",
       signal: ctrl.signal,
-    });
+    }, true, operationContext.requestGeneration);
     clearTimeout(timer);
+    adminAssertOperationCurrent(operationContext);
     if (!res.ok) return null;
     const json = await res.json().catch(() => ({}));
     return json && json.ok ? json : null;
-  } catch (_) {
+  } catch (err) {
     clearTimeout(timer);
+    if (!adminOperationIsCurrent(operationContext) || err?.name === "AbortError") throw err;
     return null;
   }
 }
 
-async function waitForRestartOffline(timeoutMs) {
+async function waitForRestartOffline(timeoutMs, operation = null) {
+  const operationContext = operation || adminOperationContext();
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const meta = await probeRestartVersion(1200);
+    adminAssertOperationCurrent(operationContext);
+    const meta = await probeRestartVersion(1200, operationContext);
     if (!meta) return true;
     await new Promise((resolve) => setTimeout(resolve, 650));
+    adminAssertOperationCurrent(operationContext);
   }
   return false;
 }
 
-async function waitForRestartOnline(previousStartedAt, timeoutMs) {
+async function waitForRestartOnline(previousStartedAt, timeoutMs, operation = null) {
+  const operationContext = operation || adminOperationContext();
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const meta = await probeRestartVersion(1800);
+    adminAssertOperationCurrent(operationContext);
+    const meta = await probeRestartVersion(1800, operationContext);
     if (meta && (!previousStartedAt || meta.started_at !== previousStartedAt)) return meta;
     await new Promise((resolve) => setTimeout(resolve, 1200));
+    adminAssertOperationCurrent(operationContext);
   }
   return null;
 }
@@ -5865,7 +5946,7 @@ async function performRestore(snapshotId, reason) {
   });
   const json = await res.json().catch(() => ({}));
   alert(json.msg || (json.ok ? "Restore 請求已提交，系統將重啟" : "Restore 請求失敗"));
-  if (json.ok) setTimeout(() => location.reload(), 3000);
+  if (json.ok) scheduleAdminAccountReload(3000);
 }
 
 async function uploadSnapshotRestore() {
@@ -5889,7 +5970,7 @@ async function uploadSnapshotRestore() {
   });
   const json = await res.json().catch(() => ({}));
   alert(json.msg || (json.ok ? "Upload restore 已完成" : "Upload restore 失敗"));
-  if (json.ok) setTimeout(() => location.reload(), 3000);
+  if (json.ok) scheduleAdminAccountReload(3000);
 }
 
 async function createSnapshot() {
@@ -5928,7 +6009,7 @@ async function resetServer() {
     status.textContent = json.msg || (json.ok ? "Reset 請求已提交，系統將重啟" : "Reset 失敗");
     status.style.color = json.ok ? "#4caf50" : "#ff4f6d";
   }
-  if (json.ok) setTimeout(() => location.reload(), 4500);
+  if (json.ok) scheduleAdminAccountReload(4500);
 }
 
 // ── Integrity Guard quick-button handlers ──────────────────────
@@ -6071,6 +6152,73 @@ async function loadPlatformStats() {
     ${renderPlatformSupplyChart(stats)}
   `;
 }
+
+function resetAdminAccountState() {
+  adminAccountGeneration += 1;
+  stopRootManagementPolls();
+  if (window.securityTestPollTimer) {
+    clearTimeout(window.securityTestPollTimer);
+    window.securityTestPollTimer = null;
+  }
+  if (settingsStatusAutoClearTimer) clearTimeout(settingsStatusAutoClearTimer);
+  settingsStatusAutoClearTimer = null;
+  systemResourceRefreshInFlight = false;
+  lastServerEnvironment = {};
+  lastServerDatabaseUsage = {};
+  lastServerTransferUsage = {};
+  lastServerResourceUsage = {};
+  rootBugReportsCache = [];
+  rootBugReportSelectedId = "";
+  editableMemberLevelRules = [];
+  rootStorageUsersCache = [];
+  securityProfiles = [];
+  violationTargetUser = null;
+  governancePendingTargetUserId = "";
+  auditPage = 0;
+  violationsPage = 0;
+  const restartButton = $("restart-server-btn");
+  if (restartButton) {
+    restartButton.disabled = currentUser !== "root";
+    restartButton.textContent = "重啟服務器";
+  }
+  const restartStatus = $("restart-server-status");
+  if (restartStatus) {
+    restartStatus.textContent = "";
+    restartStatus.className = "msg";
+  }
+  [
+    "audit-entries",
+    "violation-entries",
+    "violation-fine-list",
+    "violation-fine-appeal-list",
+    "security-audit-entries",
+    "security-server-log",
+    "security-server-output",
+    "security-test-jobs",
+    "server-env-summary",
+    "server-env-details",
+    "server-env-db-details",
+    "server-env-transfer-details",
+    "server-env-process-list",
+    "server-health-summary",
+    "server-health-details",
+    "server-health-audit",
+    "server-health-storage",
+    "server-health-workqueue",
+    "server-health-frontend-observability",
+    "root-bug-report-summary",
+    "root-bug-report-list",
+    "root-bug-report-detail",
+    "system-resource-gauges",
+    "server-backpressure-status",
+    "server-backpressure-chart",
+  ].forEach((id) => {
+    const element = $(id);
+    if (element) element.replaceChildren();
+  });
+}
+
+document.addEventListener("hackme:account-context-changed", resetAdminAccountState);
 
  // ── Bind all UI events ───────────────────────────────────────
 (function setupUIBindings() {

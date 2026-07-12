@@ -233,17 +233,21 @@ curl -sk -b jar -H "Content-Type: application/json" -H "X-CSRF-Token: $csrf" \
 建議使用真實 orchestrator，而不是手抄舊骨架：
 
 ```bash
+HACKME_RUNTIME_DIR=/absolute/external/runtime \
+HACKME_OPERATIONAL_CAMPAIGN_REPORT=/tmp/<campaign>/reports/operational_campaign_24h.json \
+ROOT_PASSWORD='<root-password>' MANAGER_PASSWORD='<manager-password>' TEST_PASSWORD='<test-user-password>' \
 python3 scripts/security/gate/on_live_reports_make.py \
-  --base-url https://127.0.0.1:5000 \
-  --root-password "$ROOT_PASSWORD"
+  --base-url https://127.0.0.1:5000
 ```
 
 穩定捷徑是：
 
 ```bash
+HACKME_RUNTIME_DIR=/absolute/external/runtime \
+HACKME_OPERATIONAL_CAMPAIGN_REPORT=/tmp/<campaign>/reports/operational_campaign_24h.json \
+ROOT_PASSWORD='<root-password>' MANAGER_PASSWORD='<manager-password>' TEST_PASSWORD='<test-user-password>' \
 python3 scripts/on_live_reports/on_live_reports_make.py \
-  --base-url https://127.0.0.1:5000 \
-  --root-password "$ROOT_PASSWORD"
+  --base-url https://127.0.0.1:5000
 ```
 
 所有單項 wrapper 登錄在 `scripts/INDEX.md`，列表在 `scripts/on_live_reports/README.md`。需要單獨重跑某份時，用：

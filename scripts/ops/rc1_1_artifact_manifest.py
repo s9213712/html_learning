@@ -7,18 +7,25 @@ import argparse
 import json
 import re
 import subprocess
+import sys
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_OUT = ROOT / "artifacts" / "qa" / "rc1_1_a_artifact_manifest.json"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.test_artifacts import test_artifact_path  # noqa: E402
+
+
+DEFAULT_OUT = test_artifact_path("qa", "rc1_1_a_artifact_manifest.json")
 DEFAULT_ARTIFACTS = [
-    ROOT / "artifacts" / "qa" / "pointschain_rc1_1_gate.json",
-    ROOT / "artifacts" / "ops" / "restore_drill_rc1_1_gate.json",
-    ROOT / "artifacts" / "anchors" / "pointschain_rc1_1_54343_anchor.json",
-    ROOT / "artifacts" / "anchors" / "pointschain_rc1_1_54344_anchor.json",
+    test_artifact_path("qa", "pointschain_rc1_1_gate.json"),
+    test_artifact_path("ops", "restore_drill_rc1_1_gate.json"),
+    test_artifact_path("anchors", "pointschain_rc1_1_54343_anchor.json"),
+    test_artifact_path("anchors", "pointschain_rc1_1_54344_anchor.json"),
 ]
 
 SECRET_PATTERNS = [

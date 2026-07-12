@@ -127,7 +127,8 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", default="https://127.0.0.1:5000")
     parser.add_argument("--username", default="root")
-    parser.add_argument("--root-password", default="RootSmoke123!")
+    from scripts.testing.probe_credentials import add_root_password_argument
+    add_root_password_argument(parser)
     parser.add_argument("--source-image", required=True)
     parser.add_argument("--out-dir", required=True)
     parser.add_argument("--job-timeout-seconds", type=int, default=1800)

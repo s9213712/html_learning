@@ -1527,7 +1527,10 @@ function renderFpsArenaBoard() {
     if (typeof ensureThreeJsLoaded === "function") {
       ensureThreeJsLoaded()
         .then(() => renderFpsArenaBoard())
-        .catch(() => { if (hud) hud.textContent = "Three.js 載入失敗，無法啟動 3D 模式"; });
+        .catch((err) => {
+          reportFrontendFailure("fps-arena-three-load", err);
+          if (hud) hud.textContent = "Three.js 載入失敗，無法啟動 3D 模式";
+        });
     } else if (hud) {
       hud.textContent = "Three.js 載入失敗，無法啟動 3D 模式";
     }
@@ -1583,7 +1586,10 @@ async function startFpsArenaGame() {
       lastSyncAt: 0,
       lastError: "",
     };
-    window.hackmeGameMultiplayer?.start?.(multiplayerRoom.id).catch(() => {});
+    window.hackmeGameMultiplayer?.start?.(multiplayerRoom.id).catch((err) => {
+      window.reportFrontendFailure?.("fps-multiplayer-start", err);
+      updateFpsArenaStatus(err?.message || "多人連線啟動失敗。", false);
+    });
     syncFpsArenaMultiplayer(state, performance.now(), { force: true });
   }
   updateFpsArenaStatus("任務開始。");

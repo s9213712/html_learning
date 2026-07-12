@@ -150,6 +150,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     out_dir = Path(args.out_dir)
     env = os.environ.copy()
     env["PYTHONPATH"] = str(repo_root)
+    env["PYTHONPYCACHEPREFIX"] = str(out_dir / "pycache")
 
     _phase("Exp5 Restart Smoke Configuration")
     print(f"repo_root: {repo_root}", flush=True)
@@ -172,7 +173,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     if not args.skip_pytest:
         _phase("Focused Chess Architecture Tests")
         _run(
-            [sys.executable, "-m", "pytest", "-q", "tests/games/test_chess_exp5_architecture.py"],
+            [str(repo_root / "scripts/testing/pytest_in_tmp.sh"), "-q", "tests/games/test_chess_exp5_architecture.py"],
             repo_root=repo_root,
             env=env,
             dry_run=args.dry_run,

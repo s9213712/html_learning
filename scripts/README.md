@@ -15,7 +15,23 @@ for one-off experiments.
   Canonical daily development launcher. It copies the repo to `/tmp` and
   starts the copied `server.py` there with development-friendly defaults.
 - [testing/pytest_in_tmp.sh](testing/pytest_in_tmp.sh)
-  Canonical pytest entrypoint. Tests must run against a `/tmp` repo copy.
+  Canonical pytest entrypoint. Tests run against a `/tmp` repo copy while
+  runtime, pytest cache, bytecode, temporary files, and test artifacts stay in
+  sibling directories outside that copied checkout.
+- [testing/operational_soak_probe.py](testing/operational_soak_probe.py)
+  Eight-hour minimum, true multi-account full-function operational simulation.
+  It is destructive, requires an owned isolated target, and forces artifacts
+  under the selected `/tmp` runtime. Credentials come from
+  `HACKME_SOAK_ROOT_PASSWORD`, `HACKME_SOAK_MANAGER_PASSWORD`,
+  `HACKME_SOAK_ACCOUNT_PASSWORD`, and `HACKME_SOAK_TEST_PASSWORD`; pass
+  `HACKME_SERVER_PIDS` for production-signoff RSS evidence.
+- [testing/operational_campaign_24h.py](testing/operational_campaign_24h.py)
+  Canonical final operational sign-off: a primary target under continuous
+  synchronized load plus a recovery target for destructive backup, restore,
+  restart, wallet-incident, and governed-branch drills. Formal runs require at
+  least 86,400 active seconds and write every artifact below one new `/tmp`
+  campaign root. See
+  [24H_OPERATIONAL_CAMPAIGN.md](../docs/AGENTS/24H_OPERATIONAL_CAMPAIGN.md).
 - [security/gate/on_live_reports_make.py](security/gate/on_live_reports_make.py)
   Canonical production-gate required-report orchestrator.
 - [prepush/pre_push_checks.py](prepush/pre_push_checks.py)
@@ -30,6 +46,18 @@ for one-off experiments.
   smoke, and production-gate scripts.
 - [CALL_MAP.md](CALL_MAP.md)
   Operator-to-module call map for maintained script entrypoints.
+
+## Test Artifact Policy
+
+Repository QA, stress, release-gate, and synthetic drill outputs default to
+`/tmp/hackme_web_test_artifacts`. Override that location only with an absolute
+`HACKME_TEST_OUTPUT_ROOT` or an explicit script output argument. Tests must not
+create `runtime/`, `artifacts/`, pytest caches, or bytecode caches in the source
+checkout. Use `scripts/testing/pytest_in_tmp.sh` for every pytest invocation.
+
+Operational scripts that read a real runtime require an explicit runtime path
+or `HACKME_RUNTIME_DIR`; choosing a test artifact directory does not choose a
+production runtime.
 
 ## User-Facing Progress Contract
 
@@ -58,10 +86,22 @@ full validation and should still show which scope they covered.
 - `scripts/games/`
   Chess experiment training plus non-chess board-game AI benchmarking. See
   [games/README.md](games/README.md) for the current Exp5 restart workflow.
+- `scripts/media/`
+  Video/HLS worker entrypoints for an explicitly selected runtime.
+- `scripts/on_live_reports/`
+  Stable production-report wrappers.
+- `scripts/ops/`
+  Runtime-explicit operational drills, exports, and tunnel helpers.
 - `scripts/prepush/`
   Pre-push framework internals and checks.
+- `scripts/qa/`
+  Release-gate orchestration that writes evidence outside the checkout.
 - `scripts/security/`
   Security gate, pentest, dependency, and server-mode validation tooling.
+- `scripts/storage/`
+  Remote-download and Transmission operator tooling.
+- `scripts/testing/`
+  Isolated pytest, Playwright, stress, capacity, and operational simulations.
 - `scripts/trading/`
   Trading probes, benchmarks, validation, and integration bridges.
 

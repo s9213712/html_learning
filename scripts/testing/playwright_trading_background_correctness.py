@@ -14,6 +14,8 @@ from __future__ import annotations
 import argparse
 import atexit
 import json
+import os
+import secrets
 import sqlite3
 import sys
 import time
@@ -32,7 +34,7 @@ if str(ROOT) not in sys.path:
 from services.points_chain import BURN_WALLET_ADDRESS, PointsLedgerService, create_official_hot_wallet
 
 
-DEFAULT_USER_PASSWORD = "TradeQa123!"
+DEFAULT_USER_PASSWORD = os.environ.get("HACKME_TRADING_PROBE_USER_PASSWORD") or secrets.token_urlsafe(24)
 
 
 @dataclass
@@ -761,7 +763,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Playwright trading background correctness QA")
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--runtime-dir", required=True)
-    parser.add_argument("--root-password", default="root")
+    from scripts.testing.probe_credentials import add_root_password_argument
+    add_root_password_argument(parser)
     parser.add_argument("--user-password", default=DEFAULT_USER_PASSWORD)
     parser.add_argument("--out", default="")
     parser.add_argument("--stress-orders", type=int, default=30)

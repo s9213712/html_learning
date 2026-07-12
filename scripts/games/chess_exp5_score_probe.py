@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -38,7 +37,10 @@ from scripts.games.game_ai_strength_eval import (  # noqa: E402
 
 
 EXP5 = "experiment 5:nnue"
-DEFAULT_RESULTS_ROOT = Path(os.environ.get("HACKME_CHESS_RESULTS_DIR", str(ROOT / "runtime" / "reports" / "games" / "chess_results")))
+from scripts.games.common_paths import chess_results_root  # noqa: E402
+
+
+DEFAULT_RESULTS_ROOT = chess_results_root()
 DEFAULT_REPLAY = DEFAULT_RESULTS_ROOT / "retrain_redo_20260512T224634Z" / "replays" / "carlsen_25_game_level.jsonl"
 
 

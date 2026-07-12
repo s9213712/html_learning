@@ -2,13 +2,13 @@
 # Dependency CVE and conflict audit for hackme_web.
 #
 # Tries in order: pip-audit (preferred), safety, then pip check for conflicts.
-# Writes a Markdown report to runtime/reports/security/RUNID/dep_audit.md.
+# Writes a Markdown report outside the source checkout.
 #
 # Usage:
 #   scripts/security/dependency/dep_audit.sh [--out DIR] [--fail-on-vuln]
 #
 # Options:
-#   --out DIR          Output directory for reports (default: runtime/reports/security)
+#   --out DIR          Output directory for reports (default: /tmp/hackme_web_test_artifacts/reports/security)
 #   --fail-on-vuln     Exit 1 if vulnerabilities found (default: exit 0, just report)
 #   --pip-audit-args   Extra args forwarded to pip-audit
 #   --safety-args      Extra args forwarded to safety
@@ -24,7 +24,7 @@ Usage:
   scripts/security/dependency/dep_audit.sh [--out DIR] [--fail-on-vuln]
 
 Options:
-  --out DIR          Write reports under DIR (default: runtime/reports/security)
+  --out DIR          Write reports under DIR (default: /tmp/hackme_web_test_artifacts/reports/security)
   --fail-on-vuln     Exit 1 if vulnerabilities or conflicts found
   --pip-audit-args   Quoted extra args for pip-audit (e.g. "--ignore-vuln PYSEC-2024-XXX")
   --safety-args      Quoted extra args for safety
@@ -59,12 +59,19 @@ default_report_root() {
     printf '%s/reports/security' "${HACKME_RUNTIME_DIR%/}"
     return
   fi
-  printf '%s/runtime/reports/security' "$REPO_ROOT"
+  printf '%s/reports/security' "${HACKME_TEST_OUTPUT_ROOT:-/tmp/hackme_web_test_artifacts}"
 }
 
 REPORT_ROOT="${REPORT_ROOT:-$(default_report_root)}"
+REPORT_ROOT="$(readlink -m -- "$REPORT_ROOT")"
+case "$REPORT_ROOT" in
+  "$REPO_ROOT"|"$REPO_ROOT"/*)
+    echo "ERROR: dependency audit reports must stay outside the source checkout" >&2
+    exit 2
+    ;;
+esac
 
-RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)_${BASHPID}"
 OUT_DIR="$REPORT_ROOT/dep_audit_${RUN_ID}"
 mkdir -p "$OUT_DIR"
 

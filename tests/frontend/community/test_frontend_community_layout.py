@@ -36,7 +36,7 @@ def test_community_composers_are_button_opened_not_permanent():
     assert 'id="community-thread-creator" style="display:none;"' in index_html
     assert 'id="community-mod-can-pin-threads"' in index_html
     assert 'id="community-thread-sticky-toggle"' in index_html
-    assert "/js/25-community.js?v=20260518-inline-media" in index_html
+    assert "/js/25-community.js?v=__ASSET_VERSION__" in index_html
 
     assert "communityAnnouncementEditorOpen = false" in community_js
     assert "communityAnnouncementEditingId = null" in community_js

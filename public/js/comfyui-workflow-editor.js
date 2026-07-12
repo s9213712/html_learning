@@ -20,9 +20,67 @@
     }
   }
 
-  function editorScopedStorageKey(key) {
-    return `hackme_web:${editorAccountStorageScope()}:${String(key || "state")}`;
+  const EDITOR_INITIAL_ACCOUNT_SCOPE = editorAccountStorageScope();
+  const editorAccountAbortController = typeof AbortController === "function" ? new AbortController() : null;
+  let editorAccountInvalidated = false;
+
+  function invalidateEditorAccountScope() {
+    if (editorAccountInvalidated) return;
+    editorAccountInvalidated = true;
+    editorAccountAbortController?.abort();
+    const clearEditor = () => {
+      if (!document.body) return;
+      document.body.replaceChildren();
+      const notice = document.createElement("main");
+      notice.className = "workflow-editor-session-ended";
+      notice.setAttribute("role", "alert");
+      notice.textContent = "帳戶已切換，這個 Workflow 編輯器已關閉。";
+      document.body.appendChild(notice);
+    };
+    clearEditor();
+    try { window.close(); } catch (_) {}
   }
+
+  function assertEditorAccountScope() {
+    if (!editorAccountInvalidated && editorAccountStorageScope() === EDITOR_INITIAL_ACCOUNT_SCOPE) return;
+    invalidateEditorAccountScope();
+    const err = new Error("Account context changed");
+    err.name = "AbortError";
+    throw err;
+  }
+
+  async function editorFetch(input, options = {}) {
+    assertEditorAccountScope();
+    const requestOptions = { ...options };
+    if (editorAccountAbortController) {
+      const signals = [requestOptions.signal, editorAccountAbortController.signal].filter(Boolean);
+      requestOptions.signal = signals.length > 1 && typeof AbortSignal !== "undefined" && typeof AbortSignal.any === "function"
+        ? AbortSignal.any(signals)
+        : editorAccountAbortController.signal;
+    }
+    const response = await fetch(input, requestOptions);
+    assertEditorAccountScope();
+    return response;
+  }
+
+  function editorScopedStorageKey(key) {
+    assertEditorAccountScope();
+    return `hackme_web:${EDITOR_INITIAL_ACCOUNT_SCOPE}:${String(key || "state")}`;
+  }
+
+  window.addEventListener("storage", (event) => {
+    if (event.key === ACCOUNT_SCOPE_STORAGE_KEY) {
+      try { assertEditorAccountScope(); } catch (_) {}
+    }
+  });
+  window.addEventListener("focus", () => {
+    try { assertEditorAccountScope(); } catch (_) {}
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) {
+      try { assertEditorAccountScope(); } catch (_) {}
+    }
+  });
 
   const NODE_DEFS = {
     CheckpointLoaderSimple: {
@@ -1816,6 +1874,8 @@
     if (!file) return;
     try {
       const text = await file.text();
+      assertEditorAccountScope();
+      if (event.target?.files?.[0] !== file) return;
       const payload = JSON.parse(text);
       const imported = stateFromPackage(payload);
       if (!imported.state.nodes.length) {
@@ -1828,6 +1888,7 @@
       render();
       setStatus(imported.warnings.length ? `已匯入 JSON，但有 ${imported.warnings.length} 個提醒。` : "已匯入 JSON 並轉成節點圖。", !imported.warnings.length);
     } catch (err) {
+      if (editorAccountInvalidated || editorAccountStorageScope() !== EDITOR_INITIAL_ACCOUNT_SCOPE) return;
       setStatus(`匯入失敗：${err.message || err}`, false);
     } finally {
       if (event.target) event.target.value = "";
@@ -1881,8 +1942,9 @@
     const status = $("nodeCatalogStatus");
     if (status) status.textContent = "正在連線 ComfyUI /object_info...";
     try {
-      const res = await fetch("/api/comfyui/node-catalog", { credentials: "same-origin" });
+      const res = await editorFetch("/api/comfyui/node-catalog", { credentials: "same-origin" });
       const json = await res.json().catch(() => ({}));
+      assertEditorAccountScope();
       if (!res.ok || !json.ok) {
         const msg = json.msg || `節點目錄載入失敗（HTTP ${res.status}）`;
         if (status) status.textContent = msg;
@@ -1896,6 +1958,7 @@
       if (status) status.textContent = text;
       setStatus(text, true);
     } catch (err) {
+      if (err?.name === "AbortError") return;
       const msg = `節點目錄載入失敗：${err.message || err}`;
       if (status) status.textContent = msg;
       setStatus(msg, false);

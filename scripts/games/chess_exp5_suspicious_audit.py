@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 from datetime import datetime
 from pathlib import Path
 
@@ -18,7 +17,10 @@ import chess
 
 
 ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_RESULTS_ROOT = Path(os.environ.get("HACKME_CHESS_RESULTS_DIR", str(ROOT / "runtime" / "reports" / "games" / "chess_results")))
+from scripts.games.common_paths import chess_results_root  # noqa: E402
+
+
+DEFAULT_RESULTS_ROOT = chess_results_root()
 DEFAULT_SUMMARY = DEFAULT_RESULTS_ROOT / "exp5_10_production_readiness" / "summary.json"
 DEFAULT_CASES = DEFAULT_RESULTS_ROOT / "exp5_10_production_readiness" / "exp5_10_benchmark_cases.jsonl"
 DEFAULT_OUTPUT_DIR = DEFAULT_RESULTS_ROOT / "exp5_11a_suspicious_audit"

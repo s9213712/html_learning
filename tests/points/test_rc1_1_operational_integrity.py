@@ -36,6 +36,26 @@ def test_rc1_1_restore_drill_cli_proves_snapshot_boundary_invariants(tmp_path):
     assert payload["counts"]["restored"]["ledger"] == payload["counts"]["baseline"]["ledger"]
 
 
+def test_rc1_1_restore_drill_refuses_existing_workdir(tmp_path):
+    sentinel = tmp_path / "do-not-delete.txt"
+    sentinel.write_text("keep", encoding="utf-8")
+    out = tmp_path / "restore_drill.json"
+
+    proc = _run([
+        sys.executable,
+        "scripts/ops/rc1_restore_drill.py",
+        "--workdir",
+        str(tmp_path),
+        "--out",
+        str(out),
+    ])
+
+    assert proc.returncode != 0
+    assert "--workdir must not already exist" in proc.stdout
+    assert sentinel.read_text(encoding="utf-8") == "keep"
+    assert not out.exists()
+
+
 def test_export_chain_anchor_cli_signs_checkpoint(tmp_path):
     db_path = tmp_path / "database.db"
     conn = sqlite3.connect(db_path)

@@ -26,7 +26,7 @@ Per user spec (revised again after v7.3 reject):
   Each iteration generates N self-play games, computes TD(λ)
   targets per position, trains NN, evaluates.
 
-  Seed: v6.2 S2. Snapshots written to ~/exp6_output/v8_snapshots/.
+  Seed: v6.2 S2. Snapshots are written under the external Exp6 artifact root.
   No auto-promotion — match-gate against v6.2 S2 manually.
 
   Sanity check loop:
@@ -57,6 +57,7 @@ from services.games.chess_neural import (  # noqa: E402
 )
 from services.games.chess_search import ZobristHasher, search_best_move  # noqa: E402
 from services.games.chess_exp6 import _move_order_score, _resolve_search_profile  # noqa: E402
+from scripts.games.common_paths import exp6_artifacts_root  # noqa: E402
 
 sys.path.insert(0, str(ROOT / "scripts/games"))
 import chess_exp6_curriculum as cc  # noqa: E402
@@ -89,8 +90,9 @@ GRAD_CLIP = 1.0
 EPOCHS_PER_ITER = 12
 SEED = 20260519
 
-SNAPSHOTS_DIR = Path.home() / "exp6_output/v8_snapshots"
-REPORT_JSON = Path.home() / "exp6_output/v8_report.json"
+EXP6_ARTIFACTS = exp6_artifacts_root()
+SNAPSHOTS_DIR = EXP6_ARTIFACTS / "v8" / "snapshots"
+REPORT_JSON = EXP6_ARTIFACTS / "v8" / "report.json"
 
 
 def _board_features_idx(board: chess.Board) -> np.ndarray:
@@ -382,7 +384,7 @@ def train_iter(weights: NeuralWeights, td_data: dict, anchor_data: dict, *,
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--seed-weights", type=Path,
-                    default=Path.home() / "exp6_output/v6_2_snapshots/chess_experiment_6_neural_stage02.npz")
+                    default=EXP6_ARTIFACTS / "curriculum" / "snapshots" / "chess_experiment_6_neural_stage02.npz")
     ap.add_argument("--iterations", type=int, default=N_ITERATIONS)
     ap.add_argument("--games-per-iter", type=int, default=N_SELFPLAY_GAMES_PER_ITER)
     ap.add_argument("--epochs-per-iter", type=int, default=EPOCHS_PER_ITER)

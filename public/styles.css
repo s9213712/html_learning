@@ -13637,11 +13637,17 @@
       }
 
       #module-drive .drive-breadcrumb {
-        flex-wrap: nowrap;
-        overflow-x: auto;
-        white-space: nowrap;
-        scrollbar-width: thin;
-        -webkit-overflow-scrolling: touch;
+        flex-wrap: wrap;
+        overflow-x: visible;
+        white-space: normal;
+      }
+
+      #module-drive .drive-breadcrumb button {
+        flex: 0 1 auto;
+        min-width: 0;
+        max-width: 100%;
+        white-space: normal;
+        overflow-wrap: anywhere;
       }
 
       #module-drive .drive-file-list {

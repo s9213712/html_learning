@@ -299,8 +299,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--repo-root", default=str(ROOT), help="Repository root to scan.")
     parser.add_argument("--include-tests", action="store_true", help="Include tests/ in addition to runtime and script paths.")
     parser.add_argument("--root", action="append", dest="roots", help="Relative path root to scan; may be repeated.")
-    parser.add_argument("--json-out", default="", help="Write JSON report to this path. Defaults to runtime/reports/security.")
-    parser.add_argument("--md-out", default="", help="Write Markdown report to this path. Defaults to runtime/reports/security.")
+    parser.add_argument("--json-out", default="", help="Write JSON report to this path. Defaults to the external security report root.")
+    parser.add_argument("--md-out", default="", help="Write Markdown report to this path. Defaults to the external security report root.")
     parser.add_argument("--fail-on-blocker", action="store_true", help="Exit non-zero if blocker findings exist.")
     return parser
 

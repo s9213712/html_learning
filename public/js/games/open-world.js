@@ -2137,7 +2137,11 @@
       api.status("3D 引擎載入中。");
       ensureThreeJsLoaded()
         .then(() => startOpenWorld(api))
-        .catch(() => showOpenWorldReady(api));
+        .catch((err) => {
+          reportFrontendFailure("open-world-three-load", err);
+          showOpenWorldReady(api);
+          api.status("3D 引擎載入失敗，請重新整理後再試。", false);
+        });
       return;
     }
     if (!window.THREE) {

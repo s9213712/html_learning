@@ -56,14 +56,15 @@ from services.games.chess_exp6 import (  # noqa: E402
 )
 from services.games.chess_search import ZobristHasher, opening_sanity_filter, search_best_move  # noqa: E402
 from services.games.chess_stockfish_teacher import UciStockfish, analysis_limit, resolve_stockfish_path  # noqa: E402
+from scripts.games.common_paths import exp6_artifacts_root, exp6_private_dir, runtime_model_path  # noqa: E402
 
 sys.path.insert(0, str(ROOT / "scripts/games"))
 import chess_exp6_curriculum as cc  # noqa: E402
 
 
-DEFAULT_WEIGHTS = ROOT / "runtime/games/models/chess_experiment_6_neural.npz"
-DEFAULT_LABELS = ROOT / "runtime/private/games/exp6/curriculum_labels_10k.jsonl"
-DEFAULT_OUT = Path.home() / "exp6_output/joint_policy_rerank_probe.json"
+DEFAULT_WEIGHTS = runtime_model_path("chess_experiment_6_neural.npz")
+DEFAULT_LABELS = exp6_private_dir() / "curriculum_labels_10k.jsonl"
+DEFAULT_OUT = exp6_artifacts_root() / "joint_policy_rerank_probe.json"
 SEED = 20260520
 MOVE_DIM = len(
     _candidate_features(

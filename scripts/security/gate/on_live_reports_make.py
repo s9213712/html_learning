@@ -14,6 +14,7 @@ manually or pass `--upload` to let this script submit them after generation.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -78,6 +79,18 @@ AI_AGENT_BOUNDARY_PYTEST_TARGETS = [
     "tests/ai_agent/test_ai_agent_routes.py::test_ai_agent_chat_blocks_server_filesystem_mutation_before_llm",
     "tests/ai_agent/test_ai_agent_routes.py::test_ai_agent_write_tool_blocks_server_filesystem_path_args",
 ]
+
+OPERATIONAL_CAMPAIGN_MIN_SECONDS = 86_400
+OPERATIONAL_CAMPAIGN_SCENARIOS = {
+    "media_long_hls_share",
+    "ai_agent_operations",
+    "trading_background_and_abuse",
+    "pointschain_hft_invariants",
+    "pointschain_incident_governance",
+    "recovery_backup_restart",
+    "media_proxy_cross_browser",
+    "final_ui_mobile_prelaunch",
+}
 
 GO_LIVE_CORE_PENTEST_CHECKS = ",".join(
     [
@@ -445,6 +458,138 @@ def _make_payload(report_type: str, raw_report: dict, *, passed: bool, tester: s
 
 def _report_paths(out_root: Path, report_type: str) -> tuple[Path, Path]:
     return out_root / f"{report_type}_report.json", out_root / f"{report_type}_report.md"
+
+
+def _operational_campaign_report(
+    out_root: Path,
+    campaign_report: str,
+    *,
+    signer: PayloadSigner,
+    meta: dict,
+) -> dict:
+    path = Path(str(campaign_report or "")).expanduser().resolve(strict=False) if campaign_report else None
+    tmp_root = Path("/tmp").resolve()
+    payload: dict = {}
+    report_bytes = b""
+    errors: list[str] = []
+    if path is None:
+        errors.append("operational campaign report path is required")
+    elif path != tmp_root and tmp_root not in path.parents:
+        errors.append("operational campaign report must remain below /tmp")
+    elif not path.is_file():
+        errors.append("operational campaign report does not exist")
+    else:
+        try:
+            report_bytes = path.read_bytes()
+            loaded = json.loads(report_bytes.decode("utf-8"))
+            if isinstance(loaded, dict):
+                payload = loaded
+            else:
+                errors.append("campaign report root must be a JSON object")
+        except Exception as exc:
+            errors.append(f"campaign report is not valid JSON: {exc.__class__.__name__}")
+
+    raw_scenarios = payload.get("scenarios")
+    scenarios = raw_scenarios if isinstance(raw_scenarios, dict) else {}
+    findings = payload.get("findings")
+    source_drift = payload.get("source_drift")
+    secret_scan = payload.get("secret_scan")
+    control_checks = payload.get("control_checks")
+    source_digest = str(payload.get("source_manifest_digest") or "")
+
+    def number(value, default: float = -1.0) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def scenario_passed(name: str) -> bool:
+        scenario = scenarios.get(name)
+        return isinstance(scenario, dict) and scenario.get("ok") is True
+
+    active_seconds = number(payload.get("active_test_seconds"))
+    required_seconds = number(payload.get("required_active_test_seconds"))
+    authorization_wait = number(payload.get("authorization_wait_seconds_included"))
+    try:
+        from scripts.testing.operational_campaign_24h import manifest_digest, source_manifest
+
+        current_source_digest = manifest_digest(source_manifest())
+    except Exception as exc:
+        current_source_digest = ""
+        errors.append(f"current source manifest could not be calculated: {exc.__class__.__name__}")
+
+    checks = {
+        "report_ok": payload.get("ok") is True and str(payload.get("verdict") or "").upper() == "PASS",
+        "formal_campaign": payload.get("formal_campaign") is True,
+        "production_signoff_eligible": payload.get("production_signoff_eligible") is True,
+        "active_duration": active_seconds >= OPERATIONAL_CAMPAIGN_MIN_SECONDS,
+        "required_duration": required_seconds >= OPERATIONAL_CAMPAIGN_MIN_SECONDS,
+        "authorization_wait_excluded": authorization_wait == 0,
+        "findings_shape": isinstance(findings, list),
+        "no_findings": isinstance(findings, list) and not findings,
+        "source_drift_shape": isinstance(source_drift, dict),
+        "no_source_drift": isinstance(source_drift, dict) and not source_drift,
+        "scenario_shape": isinstance(raw_scenarios, dict)
+        and all(isinstance(scenarios.get(name), dict) for name in OPERATIONAL_CAMPAIGN_SCENARIOS),
+        "mandatory_scenarios_present": OPERATIONAL_CAMPAIGN_SCENARIOS.issubset(set(scenarios)),
+        "mandatory_scenarios_passed": all(scenario_passed(name) for name in OPERATIONAL_CAMPAIGN_SCENARIOS),
+        "secret_scan_shape": isinstance(secret_scan, dict),
+        "secret_scan_passed": isinstance(secret_scan, dict) and secret_scan.get("ok") is True,
+        "control_checks_shape": isinstance(control_checks, dict)
+        and bool(control_checks)
+        and all(isinstance(item, dict) for item in control_checks.values()),
+        "control_checks_passed": isinstance(control_checks, dict)
+        and bool(control_checks)
+        and all(isinstance(item, dict) and item.get("ok") is True for item in control_checks.values()),
+        "source_manifest_matches": bool(source_digest) and source_digest == current_source_digest,
+    }
+    errors.extend(name for name, passed in checks.items() if not passed)
+    errors = list(dict.fromkeys(errors))
+    passed = not errors
+    report_sha256 = hashlib.sha256(report_bytes).hexdigest() if report_bytes else ""
+    raw_report = {
+        "report_type": "operational_campaign_24h",
+        "status": "pass" if passed else "fail",
+        "summary": (
+            f"active={active_seconds:.3f}s, "
+            f"scenarios={sum(1 for name in OPERATIONAL_CAMPAIGN_SCENARIOS if scenario_passed(name))}/"
+            f"{len(OPERATIONAL_CAMPAIGN_SCENARIOS)}, source_match={checks['source_manifest_matches']}"
+        ),
+        "generator": "scripts/testing/operational_campaign_24h.py",
+        "artifacts": {
+            "campaign_report": str(path) if path else "",
+            "campaign_report_sha256": report_sha256,
+        },
+        "campaign": {
+            "started_at": payload.get("started_at"),
+            "finished_at": payload.get("finished_at"),
+            "active_test_seconds": payload.get("active_test_seconds"),
+            "required_active_test_seconds": payload.get("required_active_test_seconds"),
+            "source_manifest_digest": source_digest,
+            "current_source_manifest_digest": current_source_digest,
+            "source_git": payload.get("source_git") or {},
+            "scenario_status": {
+                name: scenario_passed(name)
+                for name in sorted(OPERATIONAL_CAMPAIGN_SCENARIOS)
+            },
+            "checks": checks,
+        },
+        "errors": errors,
+    }
+    canonical_json, canonical_md = _report_paths(out_root, "operational_campaign_24h")
+    return _make_payload(
+        "operational_campaign_24h",
+        raw_report,
+        passed=passed,
+        tester="scripts/security/gate/on_live_reports_make.py",
+        report_source="scripts/security/gate/on_live_reports_make.py",
+        meta=meta,
+        canonical_json=canonical_json,
+        canonical_md=canonical_md,
+        signer=signer,
+        high=0 if passed else 1,
+        unresolved=errors,
+    )
 
 
 def _pick_available_port(preferred: int, *, host: str = "127.0.0.1") -> int:
@@ -886,12 +1031,22 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate all production-gate reports and stage upload-ready payloads under runtime/reports/security/production_gate.")
     parser.add_argument("--base-url", default="", help="Live base URL for root-only and live-target checks. Default: auto-detect 127.0.0.1:5000 via https/http.")
     parser.add_argument("--root-username", default=os.environ.get("ROOT_USERNAME", "root"))
-    parser.add_argument("--root-password", default=os.environ.get("ROOT_PASSWORD", ""))
-    parser.add_argument("--manager-password", default=os.environ.get("MANAGER_PASSWORD", "ManagerSmoke123!"))
-    parser.add_argument("--test-password", default=os.environ.get("TEST_PASSWORD", "TestSmoke123!"))
+    from scripts.testing.probe_credentials import (
+        add_manager_password_argument,
+        add_root_password_argument,
+        add_user_password_argument,
+    )
+    add_root_password_argument(parser)
+    add_manager_password_argument(parser)
+    add_user_password_argument(parser)
     parser.add_argument("--root-new-password", default=os.environ.get("PENTEST_ROOT_NEW_PASSWORD", ""))
     parser.add_argument("--runtime-dir", default=os.environ.get("HACKME_RUNTIME_DIR", ""), help="Runtime root used by report signing and default output paths.")
     parser.add_argument("--out", default="", help="Output root for stable production-gate payloads. Default: <runtime>/reports/security/production_gate.")
+    parser.add_argument(
+        "--operational-campaign-report",
+        default=os.environ.get("HACKME_OPERATIONAL_CAMPAIGN_REPORT", ""),
+        help="Formal operational_campaign_24h.json below /tmp. Required for a passing production report set.",
+    )
     parser.add_argument("--functional-port", type=int, default=50741)
     parser.add_argument("--server-mode-timeout", type=int, default=1800)
     parser.add_argument("--functional-timeout", type=int, default=900)
@@ -964,6 +1119,12 @@ def main() -> int:
     payloads["points_chain_consistency"] = _pytest_report(out_root, raw_dir, "points_chain_consistency", ["tests/points/test_points_chain.py"], timeout=args.pytest_timeout, signer=signer, meta=meta)
     payloads["cloud_drive_quota_permission"] = _pytest_report(out_root, raw_dir, "cloud_drive_quota_permission", ["tests/storage/test_cloud_drive_attachments.py", "tests/storage/test_storage_albums_schema.py"], timeout=args.pytest_timeout, signer=signer, meta=meta)
     payloads["ai_agent_boundary"] = _pytest_report(out_root, raw_dir, "ai_agent_boundary", AI_AGENT_BOUNDARY_PYTEST_TARGETS, timeout=args.pytest_timeout, signer=signer, meta=meta)
+    payloads["operational_campaign_24h"] = _operational_campaign_report(
+        out_root,
+        args.operational_campaign_report,
+        signer=signer,
+        meta=meta,
+    )
 
     missing = [name for name in PRODUCTION_REQUIRED_REPORT_TYPES if name not in payloads]
     if missing:

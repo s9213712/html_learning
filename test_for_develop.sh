@@ -326,6 +326,7 @@ normalize_runtime_maintenance_options() {
 
 write_restart_shortcut_script() {
   local shortcut_path="${RESTART_SCRIPT_FILE:-$RUNTIME_ROOT/restart_develop_server.sh}"
+  local secret_env_path="$RUNTIME_ROOT/restart_develop_server.env"
   [[ -n "$shortcut_path" ]] || return 0
   local launcher="$SOURCE_ROOT/test_for_develop.sh"
   [[ -f "$launcher" ]] || return 0
@@ -346,9 +347,6 @@ write_restart_shortcut_script() {
     --token-user "$DEV_TOKEN_USER"
     --token-role "$DEV_TOKEN_ROLE"
     --requirements-file "$REQUIREMENTS_FILE"
-    --root-password "$ROOT_PASSWORD"
-    --manager-password "$MANAGER_PASSWORD"
-    --test-password "$TEST_PASSWORD"
   )
 
   append_arg_if_value restart_args --trusted-hosts "$TRUSTED_HOSTS"
@@ -357,8 +355,6 @@ write_restart_shortcut_script() {
   append_arg_if_value restart_args --features "$FEATURE_LIST"
   append_arg_if_value restart_args --session-idle-timeout-minutes "$SESSION_IDLE_TIMEOUT_MINUTES"
   append_arg_if_value restart_args --token-features "$DEV_TOKEN_FEATURES"
-  append_arg_if_value restart_args --token-password "$DEV_TOKEN_PASSWORD"
-  append_arg_if_value restart_args --accounts "$EXTRA_ACCOUNTS"
   append_arg_if_value restart_args --capacity-defaults-file "$CAPACITY_DEFAULTS_FILE"
   append_arg_if_value restart_args --capacity-report-file "$CAPACITY_REPORT_DEFAULTS_FILE"
   append_arg_if_value restart_args --cloud-drive-storage-root "$CLOUD_DRIVE_STORAGE_ROOT"
@@ -366,7 +362,6 @@ write_restart_shortcut_script() {
   append_arg_if_value restart_args --max-content-mb "$MAX_CONTENT_MB"
   append_arg_if_value restart_args --runtime-root "$RUNTIME_ROOT"
   append_arg_if_value restart_args --transmission-rpc-username "$TRANSMISSION_RPC_USERNAME"
-  append_arg_if_value restart_args --transmission-rpc-password "$TRANSMISSION_RPC_PASSWORD"
   append_arg_if_value restart_args --transmission-setup-script "$TRANSMISSION_SETUP_SCRIPT"
   append_arg_if_value restart_args --transmission-settings-file "$TRANSMISSION_SETUP_SETTINGS_FILE"
   append_arg_if_value restart_args --transmission-service "$TRANSMISSION_SETUP_SERVICE"
@@ -449,9 +444,32 @@ write_restart_shortcut_script() {
   fi
 
   mkdir -p "$(dirname "$shortcut_path")"
+  (
+    umask 077
+    {
+      printf 'export ROOT_PASSWORD=%s\n' "$(shell_quote "$ROOT_PASSWORD")"
+      printf 'export MANAGER_PASSWORD=%s\n' "$(shell_quote "$MANAGER_PASSWORD")"
+      printf 'export TEST_PASSWORD=%s\n' "$(shell_quote "$TEST_PASSWORD")"
+      if [[ -n "$DEV_TOKEN_PASSWORD" ]]; then
+        printf 'export HACKME_DEV_TOKEN_PASSWORD=%s\n' "$(shell_quote "$DEV_TOKEN_PASSWORD")"
+      fi
+      if [[ -n "$EXTRA_ACCOUNTS" ]]; then
+        printf 'export HACKME_DEV_EXTRA_ACCOUNTS=%s\n' "$(shell_quote "$EXTRA_ACCOUNTS")"
+      fi
+      if [[ -n "$TRANSMISSION_RPC_PASSWORD" ]]; then
+        printf 'export HACKME_TRANSMISSION_RPC_PASSWORD=%s\n' "$(shell_quote "$TRANSMISSION_RPC_PASSWORD")"
+      fi
+    } > "$secret_env_path"
+    chmod 600 "$secret_env_path"
+  )
   {
     printf '%s\n' '#!/usr/bin/env bash'
     printf '%s\n' 'set -Eeuo pipefail'
+    printf 'SECRET_ENV=%s\n' "$(shell_quote "$secret_env_path")"
+    printf '%s\n' '[[ -r "$SECRET_ENV" ]] || { echo "missing restart credential environment: $SECRET_ENV" >&2; exit 1; }'
+    printf '%s\n' 'set -a'
+    printf '%s\n' 'source "$SECRET_ENV"'
+    printf '%s\n' 'set +a'
     local env_name env_value
     local restart_env_names=(
       HTML_LEARNING_BACKPRESSURE_THREAD_CAPACITY
@@ -817,9 +835,9 @@ Purpose:
   development-friendly runtime, and launch server.py from the copied workspace
   so the repo never accumulates runtime or cache pollution. Pass --in-place /
   --no-copy when you explicitly want to launch from the current repo without
-  copying source files while still keeping runtime under --run-root. Pass
-  --runtime-in-source / --deploy-in-place when you intentionally want the
-  current repo to own ./runtime directly.
+  copying source files while still keeping runtime under --run-root. Source-
+  checkout runtime layouts are refused; use an external --runtime-root or the
+  production server.py/systemd deployment flow instead.
 
 Important:
   Without --cli, the script asks for workspace, host, port, server runner,
@@ -1035,8 +1053,7 @@ Options:
   --in-place, --no-copy    Launch from the current repo; runtime still uses run-root
   --runtime-in-source,
   --source-runtime,
-  --deploy-in-place        Launch from the current repo and write runtime/ there.
-                           This is the local deployment layout, not isolated QA.
+  --deploy-in-place        Retired unsafe aliases; source checkout runtime is refused.
   --tmp-runtime            With --in-place, keep runtime under --run-root
   --copy                   Force the default /tmp copied source workspace
   --skip-install           Reuse runtime/venv or current Python environment
@@ -1307,6 +1324,9 @@ if path == source:
     raise SystemExit(2)
 if path == source.parent:
     print("runtime root must not be the repository parent directory", file=sys.stderr)
+    raise SystemExit(2)
+if source in path.parents:
+    print("runtime root must stay outside the source checkout", file=sys.stderr)
     raise SystemExit(2)
 print(str(path))
 INNERPY
@@ -2376,7 +2396,11 @@ print_transmission_access_summary() {
   say "[dev-tmp] transmission_rpc:      ${TRANSMISSION_RPC_URL:-<blank>}"
   say "[dev-tmp] transmission_web:      $(transmission_rpc_web_url)"
   say "[dev-tmp] transmission_user:     ${TRANSMISSION_RPC_USERNAME:-<blank>}"
-  say "[dev-tmp] transmission_password: ${TRANSMISSION_RPC_PASSWORD:-<blank>}"
+  if [[ -n "$TRANSMISSION_RPC_PASSWORD" ]]; then
+    say "[dev-tmp] transmission_password: configured (not printed)"
+  else
+    say "[dev-tmp] transmission_password: not configured"
+  fi
 }
 
 run_transmission_backend_setup_if_requested() {
@@ -3283,17 +3307,14 @@ prompt_launch_layout() {
   IN_PLACE="$NORMALIZED_YES_NO"
   normalize_yes_no_value "$RUNTIME_IN_SOURCE" "runtime in source"
   RUNTIME_IN_SOURCE="$NORMALIZED_YES_NO"
-  if [[ "$RUNTIME_IN_SOURCE" == "1" ]]; then
-    default_choice="3"
-  elif [[ "$IN_PLACE" == "1" ]]; then
+  if [[ "$IN_PLACE" == "1" ]]; then
     default_choice="2"
   fi
 
   say "Launch layout:"
   say "  1) isolated tmp copy + tmp runtime (best for QA; no repo runtime changes)"
   say "  2) current repo + tmp runtime (no source copy; runtime stays under --run-root)"
-  say "  3) current repo + ./runtime (local deployment layout)"
-  say "  4) current repo + custom runtime directory/path"
+  say "  3) current repo + custom external runtime directory/path"
   while true; do
     printf 'Choose launch layout [default %s]: ' "$default_choice"
     if ! read -r answer; then
@@ -3311,21 +3332,16 @@ prompt_launch_layout() {
         RUNTIME_IN_SOURCE=0
         return 0
         ;;
-      3|deploy|deployment|source|source-runtime|runtime-in-source|formal)
-        IN_PLACE=1
-        RUNTIME_IN_SOURCE=1
-        return 0
-        ;;
-      4|custom|custom-runtime|runtime-root|runtime-dir|runtime-directory)
+      3|custom|custom-runtime|runtime-root|runtime-dir|runtime-directory)
         IN_PLACE=1
         RUNTIME_IN_SOURCE=0
         prompt_value "Custom runtime directory/path" "$CUSTOM_RUNTIME_ROOT" CUSTOM_RUNTIME_ROOT
-        [[ -n "$CUSTOM_RUNTIME_ROOT" ]] || die "custom runtime directory/path cannot be blank when launch layout 4 is selected"
+        [[ -n "$CUSTOM_RUNTIME_ROOT" ]] || die "custom runtime directory/path cannot be blank when launch layout 3 is selected"
         CUSTOM_RUNTIME_ROOT_PROMPTED=1
         return 0
         ;;
       *)
-        say "Please choose 1, 2, 3, or 4."
+        say "Please choose 1, 2, or 3."
         ;;
     esac
   done
@@ -3462,9 +3478,9 @@ prompt_runtime_config() {
   fi
   prompt_yes_no "Use default dev account passwords (root/root admin/admin test/test)" "$use_default_passwords" use_default_passwords
   if [[ "$use_default_passwords" == "1" ]]; then
-    ROOT_PASSWORD="root"
-    MANAGER_PASSWORD="admin"
-    TEST_PASSWORD="test"
+    ROOT_PASSWORD="root" # test-only insecure opt-in
+    MANAGER_PASSWORD="admin" # test-only insecure opt-in
+    TEST_PASSWORD="test" # test-only insecure opt-in
   else
     prompt_value "Root password" "$ROOT_PASSWORD" ROOT_PASSWORD
     prompt_value "Manager password" "$MANAGER_PASSWORD" MANAGER_PASSWORD
@@ -3731,7 +3747,7 @@ if isinstance(token_user, dict) and token_user.get("username"):
     created_text = "created" if token_user.get("created") else "existing"
     print(f"[dev-tmp] token user: {token_user.get('username')} ({created_text}, role={token_user.get('role') or 'user'})")
     if token_user.get("password"):
-        print(f"[dev-tmp]   password={token_user.get('password')}")
+        print("[dev-tmp]   generated password is stored in dev_tokens.json and is not printed")
 feature_scope = payload.get("token_feature_scope") or "unknown"
 allowed_keys = payload.get("allowed_feature_keys") or []
 print(f"[dev-tmp] token feature scope: {feature_scope}")
@@ -3760,7 +3776,7 @@ for name, info in tokens.items():
     expires_at = info.get("expires_at") or ""
     features = info.get("allowed_features") or []
     feature_text = "unrestricted" if not features else ",".join(str(item) for item in features)
-    print(f"[dev-tmp] {name}: {token}")
+    print(f"[dev-tmp] {name}: generated (stored in dev_tokens.json; not printed)")
     print(f"[dev-tmp]   user={username} expires_at={expires_at} features={feature_text}")
 for warning in payload.get("warnings") or []:
     print(f"[dev-tmp] token warning: {warning}")
@@ -3867,6 +3883,7 @@ backup_runtime_state() {
   say "[dev-tmp] backup:   runtime=$RUNTIME_ROOT"
   say "[dev-tmp] backup:   archive=$archive"
   say "[dev-tmp] backup:   excluding storage/, venv/, pycache/, logs/, pid/cache/temp files"
+  say "[dev-tmp] backup:   finance/PointsChain DB copies are forensic-only and never overwrite live ledger state on restore"
   tar -C "$RUNTIME_ROOT" \
     --exclude='./storage' \
     --exclude='./venv' \
@@ -3896,6 +3913,16 @@ restore_runtime_state() {
   local stamp backup_existing
   stamp="$(date +%Y%m%d_%H%M%S)"
   backup_existing="${RUNTIME_ROOT}.pre-restore-${stamp}"
+  local protected_archive_members protected_live_count
+  protected_archive_members="$(tar -tzf "$archive" 2>/dev/null | sed 's#^\./##' | grep -E '^database/(finance|points_chain|trading)\.db$' || true)"
+  protected_live_count=0
+  local protected_name
+  for protected_name in finance.db points_chain.db trading.db; do
+    [[ -f "$RUNTIME_ROOT/database/$protected_name" ]] && protected_live_count=$((protected_live_count + 1))
+  done
+  if [[ -n "$protected_archive_members" && "$protected_live_count" == "0" ]]; then
+    die "restore archive contains append-only financial databases but target has no live ledger to preserve; initialize/recover PointsChain through governed recovery, then restore ordinary runtime state"
+  fi
   say "[dev-tmp] restore:  runtime=$RUNTIME_ROOT"
   say "[dev-tmp] restore:  archive=$archive"
   say "[dev-tmp] restore:  storage/ is not restored by this archive format"
@@ -3907,6 +3934,40 @@ restore_runtime_state() {
   mkdir -p "$RUNTIME_ROOT"
   tar -C "$RUNTIME_ROOT" -xzf "$archive"
   mkdir -p "$RUNTIME_ROOT/database" "$RUNTIME_ROOT/logs" "$RUNTIME_ROOT/chats" "$RUNTIME_ROOT/anchors" "$RUNTIME_ROOT/reports"
+  if [[ -d "$backup_existing/storage" ]]; then
+    rm -rf "$RUNTIME_ROOT/storage"
+    mv "$backup_existing/storage" "$RUNTIME_ROOT/storage"
+    say "[dev-tmp] restore:  preserved live storage/ because runtime archives intentionally exclude payload files"
+  fi
+  local protected_preserved=()
+  for protected_name in finance.db points_chain.db trading.db; do
+    if [[ -f "$backup_existing/database/$protected_name" ]]; then
+      rm -f \
+        "$RUNTIME_ROOT/database/$protected_name" \
+        "$RUNTIME_ROOT/database/$protected_name-wal" \
+        "$RUNTIME_ROOT/database/$protected_name-shm" \
+        "$RUNTIME_ROOT/database/$protected_name-journal"
+      cp -a "$backup_existing/database/$protected_name" "$RUNTIME_ROOT/database/$protected_name"
+      for suffix in -wal -shm -journal; do
+        if [[ -f "$backup_existing/database/$protected_name$suffix" ]]; then
+          cp -a "$backup_existing/database/$protected_name$suffix" "$RUNTIME_ROOT/database/$protected_name$suffix"
+        fi
+      done
+      protected_preserved+=("$protected_name")
+    fi
+  done
+  if [[ " ${protected_preserved[*]:-} " == *" finance.db "* && -f "$backup_existing/.chain_seed" ]]; then
+    cp -a "$backup_existing/.chain_seed" "$RUNTIME_ROOT/.chain_seed"
+  fi
+  printf '%s\n' \
+    '{' \
+    '  "policy": "append_only_financial_restore_disabled",' \
+    "  \"restored_at\": \"$(date -Is)\"," \
+    "  \"preserved_databases\": \"${protected_preserved[*]:-}\"," \
+    "  \"pre_restore_runtime\": \"$backup_existing\"" \
+    '}' > "$RUNTIME_ROOT/logs/runtime_restore_policy.json"
+  say "[dev-tmp] restore:  preserved append-only live DBs: ${protected_preserved[*]:-none}"
+  say "[dev-tmp] restore:  PointsChain changes must use governed branch/append-only correction, never archive overwrite"
   say "[dev-tmp] restore:  restored runtime state"
 }
 
@@ -5202,10 +5263,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --runtime-in-source|--source-runtime|--deploy-in-place)
-      IN_PLACE=1
-      RUNTIME_IN_SOURCE=1
-      RUNTIME_LAYOUT_SET=1
-      shift
+      die "$1 is retired because test_for_develop.sh may not create source-checkout runtime; use --in-place with an external --runtime-root"
       ;;
     --tmp-runtime)
       RUNTIME_IN_SOURCE=0
@@ -5305,6 +5363,14 @@ fi
 apply_comfyui_dev_gunicorn_timeout_floor
 
 RUN_ROOT="${RUN_ROOT:-/tmp/hackme_web_dev_${RUN_ID}_$$}"
+RUN_ROOT="$(readlink -m -- "$RUN_ROOT")"
+case "$RUN_ROOT" in
+  /tmp/*) ;;
+  *) die "run root must resolve below /tmp: $RUN_ROOT" ;;
+esac
+if [[ "$RUNTIME_IN_SOURCE" == "1" ]]; then
+  die "source-checkout runtime is disabled; use an external --runtime-root or the production deployment flow"
+fi
 if runtime_maintenance_action_requested; then
   ensure_single_runtime_maintenance_action
 fi
@@ -6099,7 +6165,7 @@ if [[ "$FOREGROUND" == "1" ]]; then
   if [[ "$SERVER_RUNNER" == "flask" ]]; then
     say "[dev-tmp] warning:   Flask/Werkzeug direct server is debug-only; use gunicorn for uploads/HLS/load."
   fi
-  say "[dev-tmp] bootstrap defaults: root/${ROOT_PASSWORD} admin/${MANAGER_PASSWORD} test/${TEST_PASSWORD}"
+  say "[dev-tmp] bootstrap accounts: root, admin, test (passwords are not printed)"
   print_transmission_access_summary
   print_generated_dev_tokens
   write_restart_shortcut_script
@@ -6195,7 +6261,7 @@ if [[ -n "$PUBLIC_HOST" ]]; then
       ;;
   esac
 fi
-say "[dev-tmp] bootstrap defaults: root/${ROOT_PASSWORD} admin/${MANAGER_PASSWORD} test/${TEST_PASSWORD}"
+say "[dev-tmp] bootstrap accounts: root, admin, test (passwords are not printed)"
 print_transmission_access_summary
 if [[ "$FOREGROUND" == "1" ]]; then
   say "[dev-tmp] log:       foreground mode uses stdout/stderr"

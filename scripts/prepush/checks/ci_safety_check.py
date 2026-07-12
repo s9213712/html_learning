@@ -38,6 +38,8 @@ def run(ctx: PrepushContext) -> CheckResult:
             continue
         for line_no, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1):
             lowered = line.lower()
+            if "ci-safety: fixture-only" in lowered:
+                continue
             if "localhost:5000" in line or "127.0.0.1:5000" in line:
                 if (
                     "example" not in lowered

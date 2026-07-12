@@ -875,7 +875,7 @@ def register_system_admin_security_routes(app, ctx):
         _, error = require_super_admin_actor()
         if error:
             return error
-        summary = readiness_summary()
+        summary = readiness_summary(db=db_schema_summary())
         return json_resp({"ok": True, "readiness": summary})
 
     @app.route("/api/admin/health/anomaly", methods=["GET"])

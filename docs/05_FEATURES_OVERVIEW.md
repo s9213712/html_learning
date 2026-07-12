@@ -52,9 +52,9 @@
 - 一句話說明：主側欄已有「個人面板」，使用者可管理個人主頁、公開資料、好友申請與隨機好友代碼。
 - 設計目的：讓使用者不必只從聊天頁管理好友；指定對象的功能也要有同一套後端目標選擇與好友關係邊界。
 - 使用方法：一般使用者可在個人面板送出 / 接受好友申請，也可輸入對方好友代碼直接建立好友。root / manager 可因站務查看全站使用者；若對方也是自己的好友，候選清單需置頂並標示管理者 / 好友狀態。
-- 原理：`user_profiles` 保存公開資料與不可預測的唯一 `friend_code`；`user_friends` 是全站好友關係 source of truth；`/api/users/target-options` 依 context 回傳可指定對象。PM / private group 已走後端好友或 root / manager 例外檢查；遊戲邀請與直接 E2EE 檔案金鑰分享仍是待補後端 friend-gated enforcement 的缺口，不可在部署判讀時視為完成。
+- 原理：`user_profiles` 保存公開資料與不可預測的唯一 `friend_code`；`user_friends` 是全站好友關係 source of truth；`/api/users/target-options` 依 context 回傳可指定對象。PM / private group、遊戲邀請與直接 E2EE 檔案金鑰分享都走後端好友檢查；root / manager 的管理例外只適用 PM / private chat，不延伸到遊戲邀請或私人物件分享。
 - 失敗情境與提示：不可加自己、不可重複申請、已是好友不可再次申請、好友代碼錯誤需提示查無使用者、被封鎖者不可申請 / PM / 邀請遊戲，所有拒絕都不可靜默失敗。
-- 測試方式：個人面板、好友代碼顯示 / 複製 / 重新產生、申請 / 同意 / 拒絕、好友代碼直加、root / manager 置頂、一般使用者指定對象只看到好友、PM / private group API 後端拒絕非好友、尚未完成的遊戲邀請與直接 E2EE 分享缺口回歸追蹤。
+- 測試方式：個人面板、好友代碼顯示 / 複製 / 重新產生、申請 / 同意 / 拒絕、好友代碼直加、root / manager 置頂，以及 PM / private group、遊戲邀請、直接 E2EE 分享對非好友的後端拒絕與好友成功路徑。
 - 相關文件連結：[USER_PROFILES_AND_FRIENDS.md](social/USER_PROFILES_AND_FRIENDS.md), [WEB.md](WEB.md), [API_REFERENCE.md](API_REFERENCE.md), [11_QA_TESTING.md](11_QA_TESTING.md)
 
 ### 社群 / Chat / 論壇 / 公告
@@ -149,8 +149,8 @@
 
 - 一句話說明：遊戲區提供西洋棋、數獨、踩地雷、1A2B、俄羅斯方塊、真實版俄羅斯方塊、宇宙戰機、3D 射擊場，以及同頁本機模組遊戲；黑白棋、圍棋、五子棋已接上基礎 AI 與獨立棋力量化 benchmark。
 - 設計目的：讓使用者能在同一遊戲頁切換遊戲，同時讓非西洋棋 AI 的強化有獨立可量化證據，不污染西洋棋 exp3/exp4/exp5 pipeline。
-- 使用方法：使用者在遊戲區下拉選遊戲；西洋棋選 `Stockfish（本機）` 難度時才顯示 depth 欄位，後端會把深度限制在 `1` 到 `20`。黑白棋 / 圍棋 / 五子棋可切換 `對電腦` 與 AI 難度。維護者用 `python3 scripts/games/board_ai_benchmark.py` 產生 `runtime/reports/games/board_ai_benchmark_*.json`。圍棋 `katago` 難度可先執行 `python3 scripts/games/setup_katago.py` 自動下載 KataGo、模型並產生 config。
-- 原理：三棋前端共用 `public/js/games/board-game-shared.js`，對電腦時呼叫 `POST /api/games/<game_key>/ai-move`，後端由 `services/games/board_ai.py` 回傳 `move/pass/finish`。圍棋 `katago` 先讀環境變數，沒有時自動找 `runtime/katago`。棋力量化由 `services/games/board_arena.py` 執行 round-robin、skill suite、Elo estimate 與非法步統計。
+- 使用方法：使用者在遊戲區下拉選遊戲；西洋棋選 `Stockfish（本機）` 難度時才顯示 depth 欄位，後端會把深度限制在 `1` 到 `20`。黑白棋 / 圍棋 / 五子棋可切換 `對電腦` 與 AI 難度。維護者用 `python3 scripts/games/board_ai_benchmark.py` 產生外部 runtime 的 `reports/games/board_ai_benchmark_*.json`。圍棋 `katago` 難度可先執行 `python3 scripts/games/setup_katago.py` 自動下載 KataGo、模型並產生 config。
+- 原理：三棋前端共用 `public/js/games/board-game-shared.js`，對電腦時呼叫 `POST /api/games/<game_key>/ai-move`，後端由 `services/games/board_ai.py` 回傳 `move/pass/finish`。圍棋 `katago` 先讀環境變數，沒有時自動找外部 runtime 的 `katago/`。棋力量化由 `services/games/board_arena.py` 執行 round-robin、skill suite、Elo estimate 與非法步統計。
 - 失敗情境與提示：若刪除某個本機遊戲模組，該遊戲會從前端 catalog 消失，不影響其他遊戲；若三棋 AI API 回 `不支援的棋類 AI`，先確認 `game_key` 是否為 `reversi/go/gomoku`；若 benchmark 出現 `illegal_moves > 0`，不可把該 candidate 視為可 promotion。
 - 測試方式：`pytest -q tests/games/test_board_ai.py tests/games/test_board_arena.py tests/frontend/games/test_frontend_games.py`，再跑 `python3 scripts/games/board_ai_benchmark.py --games gomoku --engines random,easy --rounds 1 --max-plies 6 --output-dir /tmp/hackme_board_ai_benchmark_smoke` 做 CLI smoke；另測 Stockfish unavailable 時不顯示該難度、選到 Stockfish 時才顯示 depth，且 practice payload 正確保存深度。
 - 相關文件連結：[games/README.md](games/README.md), [games/references/BOARD_AI_BENCHMARK.md](games/references/BOARD_AI_BENCHMARK.md), [API_REFERENCE.md](API_REFERENCE.md), [11_QA_TESTING.md](11_QA_TESTING.md)

@@ -598,3 +598,35 @@ async function bulkReviewMessageReports(action) {
   await Promise.all([loadAdminReports(adminReportPage, adminReportStatus), loadUsers()]);
   flash($("li-msg"), failed === 0 ? `${label}完成，共 ${success} 筆` : `${label}完成 ${success} 筆，失敗 ${failed} 筆`, failed === 0);
 }
+
+function resetAppealsAccountState() {
+  userAppeals = [];
+  userViolationFines = [];
+  userFeatureRestrictions = [];
+  adminAppeals = [];
+  adminAppealPage = 1;
+  adminAppealStatus = "pending";
+  adminReports = [];
+  adminReportPage = 0;
+  adminReportStatus = "pending";
+  selectedAppealIds.clear();
+  selectedReportIds.clear();
+  [
+    "appeal-fines", "appeal-restrictions", "appeal-summary", "appeal-entries",
+    "admin-appeal-list", "admin-report-list", "appeal-selection-info", "report-selection-info",
+  ].forEach((id) => {
+    const el = $(id);
+    if (el) el.replaceChildren();
+  });
+  ["admin-appeals-total", "admin-reports-total"].forEach((id) => {
+    const el = $(id);
+    if (el) el.textContent = "0";
+  });
+  const msg = $("appeal-msg");
+  if (msg) {
+    msg.textContent = "";
+    msg.className = "msg";
+  }
+}
+
+document.addEventListener("hackme:account-context-changed", resetAppealsAccountState);

@@ -48,7 +48,7 @@ def test_admin_user_delete_shows_visible_account_page_feedback():
     assert "function buildAdminUserActionMenu(actionButtons, user)" in users_js
     assert "admin-user-action-toggle" in users_js
     assert "admin-user-action-menu" in users_js
-    assert "/js/10-users.js?v=20260623-account-actions-mobile-v2" in index_html
+    assert "/js/10-users.js?v=__ASSET_VERSION__" in index_html
     assert "#sec-users .user-table .admin-user-action-toggle" in styles_css
     assert "#sec-users .user-table .admin-user-action-menu" in styles_css
 

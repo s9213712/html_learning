@@ -18,6 +18,7 @@ import json
 import os
 import random
 import re
+import secrets
 import shutil
 import signal
 import socket
@@ -42,10 +43,10 @@ if not (REPO_ROOT / "test_for_develop.sh").exists():
         f"Could not locate repo root from {__file__}; expected test_for_develop.sh at {REPO_ROOT}"
     )
 DEFAULT_CAPACITY_DEFAULTS_FILE = REPO_ROOT / ".hackme_capacity_defaults.env"
-DEFAULT_ROOT_PASSWORD = "RootCapacity123!"
-DEFAULT_MANAGER_PASSWORD = "ManagerCapacity123!"
-DEFAULT_TEST_PASSWORD = "TestCapacity123!"
-USER_PASSWORD = "CapacityUser123!"
+DEFAULT_ROOT_PASSWORD = os.environ.get("HACKME_CAPACITY_ROOT_PASSWORD") or f"Capacity-root-{secrets.token_urlsafe(18)}"
+DEFAULT_MANAGER_PASSWORD = os.environ.get("HACKME_CAPACITY_MANAGER_PASSWORD") or f"Capacity-manager-{secrets.token_urlsafe(18)}"
+DEFAULT_TEST_PASSWORD = os.environ.get("HACKME_CAPACITY_TEST_PASSWORD") or f"Capacity-test-{secrets.token_urlsafe(18)}"
+USER_PASSWORD = os.environ.get("HACKME_CAPACITY_USER_PASSWORD") or f"Capacity-user-{secrets.token_urlsafe(18)}"
 requests.packages.urllib3.disable_warnings()
 
 BASE_FLOW_LABELS = [
@@ -665,6 +666,7 @@ class Client:
                 "ok": ok,
                 "elapsed_ms": elapsed_ms,
                 "body": body,
+                "backpressure_rejected": response.headers.get("X-Hackme-Backpressure-Rejected") == "1",
             }
             if accepted_business_error:
                 result["accepted_business_error"] = accepted_business_error
@@ -980,12 +982,6 @@ def start_isolated_server(args: argparse.Namespace, profile: Profile, run_root: 
         str(max(0, int(args.gunicorn_max_requests))),
         "--gunicorn-max-requests-jitter",
         str(max(0, int(args.gunicorn_max_requests_jitter))),
-        "--root-password",
-        args.root_password,
-        "--manager-password",
-        args.manager_password,
-        "--test-password",
-        args.test_password,
     ]
     if not args.install:
         command.append("--skip-install")
@@ -993,6 +989,9 @@ def start_isolated_server(args: argparse.Namespace, profile: Profile, run_root: 
     env["HTML_LEARNING_HOST"] = "0.0.0.0"
     env["HTML_LEARNING_DISABLE_TRUSTED_HOSTS"] = "1"
     env["HTML_LEARNING_PORT"] = str(port)
+    env["ROOT_PASSWORD"] = args.root_password
+    env["MANAGER_PASSWORD"] = args.manager_password
+    env["TEST_PASSWORD"] = args.test_password
     if not args.keep_app_limits:
         env["HACKME_CAPACITY_PROBE_UNLIMITED"] = "1"
     if args.disable_backpressure:
@@ -2103,7 +2102,11 @@ def summarize_samples(samples: list[dict[str, Any]], elapsed_seconds: float) -> 
         latencies.append(int(sample.get("elapsed_ms") or 0))
         body = sample.get("body") or {}
         sample_ok = bool(sample.get("ok"))
-        server_busy = status == 503 and (body.get("code") == "server_busy" or body.get("error") == "server_busy")
+        server_busy = (
+            status == 503
+            and bool(sample.get("backpressure_rejected"))
+            and body.get("error") == "server_busy"
+        )
         app_limited = status == 429
         server_failed = (not sample_ok) and (status == 0 or server_busy or status >= 500)
         unexpected_failed = (not sample_ok) and not app_limited and not server_failed
@@ -2235,7 +2238,8 @@ def profile_failed(round_summary: dict[str, Any], args: argparse.Namespace) -> t
         reasons.append("connection_errors")
     if any(
         int(sample.get("status") or 0) == 503
-        and ((sample.get("body") or {}).get("code") == "server_busy" or (sample.get("body") or {}).get("error") == "server_busy")
+        and bool(sample.get("backpressure_rejected"))
+        and (sample.get("body") or {}).get("error") == "server_busy"
         for sample in server_failures
     ):
         reasons.append("server_busy")
@@ -2704,13 +2708,20 @@ def main() -> int:
     profiles = parse_profiles(args.profiles) if args.profiles else default_profiles()
     account_ladder_label = AccountLadder(args).label()
     stamp = utc_stamp()
-    top_root = Path(args.tmp_parent).resolve() / f"hackme_predeploy_capacity_{stamp}_{os.getpid()}"
-    top_root.mkdir(parents=True, exist_ok=True)
+    tmp_parent = Path(args.tmp_parent).expanduser().resolve()
+    if tmp_parent == REPO_ROOT or REPO_ROOT in tmp_parent.parents:
+        raise SystemExit("--tmp-parent must stay outside the source checkout")
+    tmp_parent.mkdir(parents=True, exist_ok=True)
+    top_root = tmp_parent / f"hackme_predeploy_capacity_{stamp}_{os.getpid()}"
+    top_root.mkdir(parents=False, exist_ok=False)
     output_path = (
         Path(args.output).resolve()
         if args.output
-        else Path(args.tmp_parent).resolve() / f"hackme_predeploy_capacity_report_{stamp}_{os.getpid()}.json"
+        else tmp_parent / f"hackme_predeploy_capacity_report_{stamp}_{os.getpid()}.json"
     )
+    if output_path == REPO_ROOT or REPO_ROOT in output_path.parents:
+        shutil.rmtree(top_root, ignore_errors=True)
+        raise SystemExit("--output must stay outside the source checkout")
 
     results: list[dict[str, Any]] = []
     started_at = datetime.now(timezone.utc).isoformat()

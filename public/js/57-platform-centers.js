@@ -55,6 +55,7 @@ let shareCenterLatestShares = [];
 let jobCenterActiveView = "general";
 let jobCenterPollTimer = null;
 let jobCenterLoadPromise = null;
+let platformCenterAccountGeneration = 0;
 const JOB_CENTER_POLL_INTERVAL_MS = 3000;
 const JOB_CENTER_LIVE_SYNC_LIMIT = 12;
 const JOB_CENTER_ACTIVE_STATUSES = new Set(["queued", "running", "waiting_external", "paused", "retry_wait"]);
@@ -456,10 +457,12 @@ async function loadJobCenter(options = {}) {
   const quiet = Boolean(options.quiet);
   if (!currentUser) return;
   if (jobCenterLoadPromise) return jobCenterLoadPromise;
+  const accountGeneration = platformCenterAccountGeneration;
   if (!quiet) platformCenterSetMsg("job-center-msg", "正在同步任務實際進度...", true);
-  await fetchCsrfToken({ force: !quiet });
-  const csrf = getCsrfToken();
-  jobCenterLoadPromise = (async () => {
+  const loadPromise = (async () => {
+    await fetchCsrfToken({ force: !quiet });
+    if (accountGeneration !== platformCenterAccountGeneration) return null;
+    const csrf = getCsrfToken();
     const endpoint = currentUser === "root"
       ? API + "/admin/jobs?limit=80&sync=1"
       : API + "/jobs?limit=80&sync=1";
@@ -468,6 +471,7 @@ async function loadJobCenter(options = {}) {
       headers: { "X-CSRF-Token": csrf || "" }
     });
     const json = await res.json().catch(() => ({}));
+    if (accountGeneration !== platformCenterAccountGeneration) return null;
     if (!json.ok) {
       platformCenterSetMsg("job-center-msg", json.msg || "任務中心讀取失敗", false);
       renderJobCenterJobs([]);
@@ -485,6 +489,7 @@ async function loadJobCenter(options = {}) {
     }
     jobs = markMissingLiveSourceJobs(jobs, liveDriveKeys);
     jobs = mergePlatformJobCenterJobs(await hydrateJobCenterLiveProgress(jobs, { csrf }));
+    if (accountGeneration !== platformCenterAccountGeneration) return null;
     const summary = summarizeJobCenterJobs(jobs);
     renderJobCenterJobs(summary.visible, { hiddenCount: summary.hiddenCount });
     const time = new Date().toLocaleTimeString("zh-TW", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -497,13 +502,16 @@ async function loadJobCenter(options = {}) {
     }
     return summary;
   })();
+  jobCenterLoadPromise = loadPromise;
   try {
-    return await jobCenterLoadPromise;
-  } catch (_) {
-    if (!quiet) platformCenterSetMsg("job-center-msg", "任務中心讀取失敗，請稍後再試。", false);
+    return await loadPromise;
+  } catch (err) {
+    if (accountGeneration === platformCenterAccountGeneration && err?.name !== "AbortError" && !quiet) {
+      platformCenterSetMsg("job-center-msg", "任務中心讀取失敗，請稍後再試。", false);
+    }
     return null;
   } finally {
-    jobCenterLoadPromise = null;
+    if (jobCenterLoadPromise === loadPromise) jobCenterLoadPromise = null;
   }
 }
 
@@ -512,6 +520,61 @@ function stopJobCenterPolling() {
   clearInterval(jobCenterPollTimer);
   jobCenterPollTimer = null;
 }
+
+function resetPlatformCentersAccountState() {
+  platformCenterAccountGeneration += 1;
+  stopJobCenterPolling();
+  jobCenterLoadPromise = null;
+  if (shareCenterCountdownTimer) clearInterval(shareCenterCountdownTimer);
+  shareCenterCountdownTimer = null;
+  shareCenterActiveTab = "links";
+  shareCenterEditingKey = "";
+  shareCenterLatestShares = [];
+  jobCenterActiveView = "general";
+  closeShareCenterEvents();
+
+  ["job-center-list", "share-center-list", "video-manage-list"].forEach((id) => {
+    const el = $(id);
+    if (el) el.innerHTML = "";
+  });
+  [
+    "job-center-running-count", "job-center-failed-count", "job-center-done-count",
+    "job-center-general-count", "job-center-trading-count",
+    "share-center-active-count", "share-center-ended-count", "share-center-access-count",
+    "video-manage-count", "video-manage-views", "video-manage-likes",
+    "video-manage-revenue", "video-manage-platform-fee", "video-manage-boost",
+  ].forEach((id) => {
+    const el = $(id);
+    if (el) el.textContent = "0";
+  });
+  ["job-center-msg", "share-center-msg", "video-manage-msg"].forEach((id) => {
+    platformCenterSetMsg(id, "", true);
+  });
+  document.querySelectorAll("[data-job-center-view]").forEach((btn) => {
+    const active = btn.dataset.jobCenterView === "general";
+    btn.classList.toggle("active", active);
+    btn.setAttribute("aria-selected", active ? "true" : "false");
+  });
+  document.querySelectorAll("[data-share-center-tab]").forEach((btn) => {
+    const active = btn.dataset.shareCenterTab === "links";
+    btn.classList.toggle("btn-primary", active);
+    btn.setAttribute("aria-selected", active ? "true" : "false");
+  });
+  const linksPanel = $("share-center-links-panel");
+  const videosPanel = $("share-center-videos-panel");
+  if (linksPanel) linksPanel.style.display = "";
+  if (videosPanel) videosPanel.style.display = "none";
+  renderTradingAssetOverview({});
+  const confidence = $("trading-asset-confidence");
+  if (confidence) confidence.textContent = "";
+  const adminRisk = $("trading-asset-admin-risk");
+  if (adminRisk) {
+    adminRisk.style.display = "none";
+    adminRisk.textContent = "";
+  }
+}
+
+document.addEventListener("hackme:account-context-changed", resetPlatformCentersAccountState);
 
 function startJobCenterPolling({ immediate = true, force = false } = {}) {
   if (!currentUser || !isJobCenterActive()) {
@@ -997,15 +1060,18 @@ async function loadShareCenter() {
 
 async function loadShareCenterLinks() {
   if (!currentUser) return [];
+  const accountGeneration = platformCenterAccountGeneration;
   platformCenterSetMsg("share-center-msg", "正在讀取分享連結...", true);
-  await fetchCsrfToken({ force: true });
-  const csrf = getCsrfToken();
   try {
+    await fetchCsrfToken({ force: true });
+    if (accountGeneration !== platformCenterAccountGeneration) return [];
+    const csrf = getCsrfToken();
     const res = await apiFetch(API + "/shares?limit=120", {
       credentials: "same-origin",
       headers: { "X-CSRF-Token": csrf || "" }
     });
     const json = await res.json().catch(() => ({}));
+    if (accountGeneration !== platformCenterAccountGeneration) return [];
     if (!json.ok) {
       platformCenterSetMsg("share-center-msg", json.msg || "分享連結讀取失敗", false);
       renderShareCenter([]);
@@ -1014,8 +1080,10 @@ async function loadShareCenterLinks() {
     renderShareCenter(json.shares || []);
     platformCenterSetMsg("share-center-msg", `已載入 ${(json.shares || []).length} 個分享連結`, true);
     return json.shares || [];
-  } catch (_) {
-    platformCenterSetMsg("share-center-msg", "分享連結讀取失敗，請稍後再試。", false);
+  } catch (err) {
+    if (accountGeneration === platformCenterAccountGeneration && err?.name !== "AbortError") {
+      platformCenterSetMsg("share-center-msg", "分享連結讀取失敗，請稍後再試。", false);
+    }
     return [];
   }
 }
@@ -1056,15 +1124,18 @@ async function revokeShareCenterLink(type, id) {
 
 async function loadShareCenterEvents(type, id) {
   if (!type || !id) return;
-  await fetchCsrfToken({ force: true });
-  const csrf = getCsrfToken();
+  const accountGeneration = platformCenterAccountGeneration;
   renderShareCenterEventsPanel("<div>正在讀取分享紀錄...</div>");
   try {
+    await fetchCsrfToken({ force: true });
+    if (accountGeneration !== platformCenterAccountGeneration) return;
+    const csrf = getCsrfToken();
     const res = await apiFetch(API + `/shares/${encodeURIComponent(type)}/${encodeURIComponent(id)}/access-events`, {
       credentials: "same-origin",
       headers: { "X-CSRF-Token": csrf || "" }
     });
     const json = await res.json().catch(() => ({}));
+    if (accountGeneration !== platformCenterAccountGeneration) return;
     if (!json.ok) {
       renderShareCenterEventsPanel(`<div>${sanitize(json.msg || "分享紀錄讀取失敗")}</div>`, { bad: true });
       return;
@@ -1090,8 +1161,10 @@ async function loadShareCenterEvents(type, id) {
         ${userAgent ? `<div class="share-center-event-detail">${sanitize(userAgent)}</div>` : ""}
       </div>`;
     }).join("")}</div>`);
-  } catch (_) {
-    renderShareCenterEventsPanel("<div>分享紀錄讀取失敗，請稍後再試。</div>", { bad: true });
+  } catch (err) {
+    if (accountGeneration === platformCenterAccountGeneration && err?.name !== "AbortError") {
+      renderShareCenterEventsPanel("<div>分享紀錄讀取失敗，請稍後再試。</div>", { bad: true });
+    }
   }
 }
 
@@ -1257,15 +1330,18 @@ function renderVideoManageCenter(payload = {}) {
 
 async function loadVideoManageCenter() {
   if (!currentUser) return;
+  const accountGeneration = platformCenterAccountGeneration;
   platformCenterSetMsg("video-manage-msg", "正在讀取自己的影音...", true);
-  await fetchCsrfToken({ force: true });
-  const csrf = getCsrfToken();
   try {
+    await fetchCsrfToken({ force: true });
+    if (accountGeneration !== platformCenterAccountGeneration) return;
+    const csrf = getCsrfToken();
     const res = await apiFetch(API + "/videos/manage?limit=120", {
       credentials: "same-origin",
       headers: { "X-CSRF-Token": csrf || "" }
     });
     const json = await res.json().catch(() => ({}));
+    if (accountGeneration !== platformCenterAccountGeneration) return;
     if (!json.ok) {
       platformCenterSetMsg("video-manage-msg", json.msg || "我的影音讀取失敗", false);
       renderVideoManageCenter({ videos: [] });
@@ -1273,8 +1349,10 @@ async function loadVideoManageCenter() {
     }
     renderVideoManageCenter(json);
     platformCenterSetMsg("video-manage-msg", `已載入 ${(json.videos || []).length} 支影音`, true);
-  } catch (_) {
-    platformCenterSetMsg("video-manage-msg", "我的影音讀取失敗，請稍後再試。", false);
+  } catch (err) {
+    if (accountGeneration === platformCenterAccountGeneration && err?.name !== "AbortError") {
+      platformCenterSetMsg("video-manage-msg", "我的影音讀取失敗，請稍後再試。", false);
+    }
   }
 }
 
@@ -1554,14 +1632,17 @@ function renderTradingAdminAssetOverview(risk = {}) {
 
 async function loadTradingAssetOverview({ quiet = false } = {}) {
   if (!currentUser || !canAccessModule("trading")) return;
-  await fetchCsrfToken({ force: true });
-  const csrf = getCsrfToken();
+  const accountGeneration = platformCenterAccountGeneration;
   try {
+    await fetchCsrfToken({ force: true });
+    if (accountGeneration !== platformCenterAccountGeneration) return;
+    const csrf = getCsrfToken();
     const res = await apiFetch(API + "/trading/asset-overview", {
       credentials: "same-origin",
       headers: { "X-CSRF-Token": csrf || "" }
     });
     const json = await res.json().catch(() => ({}));
+    if (accountGeneration !== platformCenterAccountGeneration) return;
     if (!json.ok) {
       if (!quiet) platformCenterSetMsg("trading-inline-msg", json.msg || "交易資產總覽讀取失敗", false);
       return;
@@ -1573,6 +1654,7 @@ async function loadTradingAssetOverview({ quiet = false } = {}) {
         headers: { "X-CSRF-Token": csrf || "" }
       });
       const adminJson = await adminRes.json().catch(() => ({}));
+      if (accountGeneration !== platformCenterAccountGeneration) return;
       if (!adminJson.ok) {
         if (!quiet) platformCenterSetMsg("trading-inline-msg", adminJson.msg || "交易所風險摘要讀取失敗", false);
         return;
@@ -1580,7 +1662,9 @@ async function loadTradingAssetOverview({ quiet = false } = {}) {
       renderTradingAdminAssetOverview(adminJson.risk || {});
     }
   } catch (err) {
-    if (!quiet) platformCenterSetMsg("trading-inline-msg", err?.message || "交易資產總覽讀取失敗", false);
+    if (accountGeneration === platformCenterAccountGeneration && err?.name !== "AbortError" && !quiet) {
+      platformCenterSetMsg("trading-inline-msg", err?.message || "交易資產總覽讀取失敗", false);
+    }
   }
 }
 

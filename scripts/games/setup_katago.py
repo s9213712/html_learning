@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Download and configure KataGo for the Go neural-network difficulty.
 
-The script installs into runtime/katago by default. The game backend also
+The script installs into the configured external runtime's ``katago/`` by default. The game backend also
 auto-detects that directory, so exporting the generated env file is optional
 unless a custom install path is used.
 """
@@ -23,7 +23,13 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_INSTALL_DIR = ROOT / "runtime" / "katago"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from services.server.runtime import default_runtime_root_path  # noqa: E402
+
+
+DEFAULT_INSTALL_DIR = Path(os.environ.get("HACKME_RUNTIME_DIR") or default_runtime_root_path()) / "katago"
 DEFAULT_KATAGO_VERSION = "1.16.4"
 DEFAULT_MODEL_NAME = "kata1-zhizi-b40c768nbt-fdx6d"
 DEFAULT_MODEL_URL = (

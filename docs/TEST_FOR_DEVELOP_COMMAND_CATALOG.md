@@ -37,7 +37,10 @@ mode, BTC_trade autostart, account passwords, and extra accounts.
 
 Generated restart shortcuts are written under the active runtime root by default
 as `restart_develop_server.sh`. Set `HACKME_DEV_RESTART_SCRIPT_FILE` only when a
-specific alternate shortcut path is needed.
+specific alternate shortcut path is needed. The shortcut reads credentials from
+the adjacent mode-`0600` `restart_develop_server.env`; it does not print them or
+place them in the process argument list. Keep both files together and restrict
+access to the runtime root.
 
 ### Cloudflare Quick Tunnel
 
@@ -187,9 +190,9 @@ and intentionally excludes git metadata.
 | `--runtime-root PATH` | Runtime directory instead of layout default. |
 | `--runtime-dir PATH`, `--runtime-directory PATH` | Alias for `--runtime-root`. |
 | `--in-place`, `--no-copy` | Launch from current repo; runtime still uses run-root. |
-| `--runtime-in-source` | Launch from current repo and write `runtime/` there. |
-| `--source-runtime` | Alias for `--runtime-in-source`. |
-| `--deploy-in-place` | Alias for `--runtime-in-source`; local deployment layout. |
+| `--runtime-in-source` | Retired and refused; tests may not create source-checkout runtime. |
+| `--source-runtime` | Retired alias; exits with migration guidance. |
+| `--deploy-in-place` | Retired alias; use production `server.py --doctor` + systemd/Nginx or an external `--runtime-root`. |
 | `--tmp-runtime` | With `--in-place`, keep runtime under `--run-root`. |
 | `--copy` | Force default `/tmp` copied source workspace. |
 
@@ -275,13 +278,13 @@ Stop a server started by the launcher:
 Use a specific runtime root:
 
 ```bash
-./test_for_develop.sh --runtime-root /home/s92137/USB
+./test_for_develop.sh --runtime-root /path/to/hackme-runtime
 ```
 
 Use a cloud-drive storage root outside the runtime root:
 
 ```bash
-./test_for_develop.sh --runtime-root /home/s92137/USB --cloud-drive-storage-root /mnt/storage/hackme
+./test_for_develop.sh --runtime-root /path/to/hackme-runtime --cloud-drive-storage-root /path/to/hackme-storage
 ```
 
 The cloud-drive storage root is where user files live. It is intentionally
@@ -292,7 +295,7 @@ treated differently from transient runtime state.
 Create a runtime-state backup archive and exit:
 
 ```bash
-./test_for_develop.sh --backup /tmp/hackme_runtime_backup.tar.gz --runtime-root /home/s92137/USB
+./test_for_develop.sh --backup /tmp/hackme_runtime_backup.tar.gz --runtime-root /path/to/hackme-runtime
 ```
 
 If the backup path is a directory, the script writes a timestamped archive
@@ -319,7 +322,7 @@ It is a runtime-state backup, not a complete cloud-drive file backup.
 Restore a backup archive and exit:
 
 ```bash
-./test_for_develop.sh --restore /tmp/hackme_runtime_backup.tar.gz --runtime-root /home/s92137/USB
+./test_for_develop.sh --restore /tmp/hackme_runtime_backup.tar.gz --runtime-root /path/to/hackme-runtime
 ```
 
 `--restore` refuses unsafe archive paths, requires the active runtime to be
@@ -336,7 +339,7 @@ The archive format does not restore `storage/`.
 Reset selected runtime state and exit:
 
 ```bash
-./test_for_develop.sh --reset --runtime-root /home/s92137/USB
+./test_for_develop.sh --reset --runtime-root /path/to/hackme-runtime
 ```
 
 `--reset` refuses to run while that runtime is active. Stop the server first.
@@ -409,7 +412,7 @@ use the pre-reset DB/catalog metadata in the recovery bundle.
 Use the bundle wrapper so the recovery action is locked as soon as the action starts:
 
 ```bash
-/home/s92137/USB/storage/.reset_orphan_recovery/reset_<timestamp>/export_server_encrypted_plaintext.sh \
+/path/to/hackme-runtime/storage/.reset_orphan_recovery/reset_<timestamp>/export_server_encrypted_plaintext.sh \
   /tmp/hackme_server_encrypted_plaintext_export
 ```
 
@@ -419,11 +422,11 @@ Strict E2EE files cannot be decrypted with `.filekey`; they require the user's
 E2EE passphrase/key material. After choosing plaintext export, keep the bundle and run the included script when the user passphrase is available:
 
 ```bash
-PYTHONPATH=/home/s92137/hackme_web \
-  /home/s92137/USB/venv/bin/python3 \
-  /home/s92137/USB/storage/.reset_orphan_recovery/reset_<timestamp>/scripts/admin/decrypt_server_files.py \
-  --db /home/s92137/USB/storage/.reset_orphan_recovery/reset_<timestamp>/database/database.db \
-  --storage-root /home/s92137/USB/storage/.reset_orphan_recovery/reset_<timestamp>/orphaned_storage \
+PYTHONPATH=/path/to/hackme_web \
+  /path/to/hackme-runtime/venv/bin/python3 \
+  /path/to/hackme-runtime/storage/.reset_orphan_recovery/reset_<timestamp>/scripts/admin/decrypt_server_files.py \
+  --db /path/to/hackme-runtime/storage/.reset_orphan_recovery/reset_<timestamp>/database/database.db \
+  --storage-root /path/to/hackme-runtime/storage/.reset_orphan_recovery/reset_<timestamp>/orphaned_storage \
   --privacy-mode e2ee \
   --prompt-e2ee-passphrase \
   --output-dir /tmp/hackme_e2ee_plaintext_export \
@@ -436,7 +439,7 @@ To undo the orphaning and make the old storage files visible to the app again,
 stop the server and run the bundle helper:
 
 ```bash
-/home/s92137/USB/storage/.reset_orphan_recovery/reset_<timestamp>/restore_database_catalog_from_bundle.sh
+/path/to/hackme-runtime/storage/.reset_orphan_recovery/reset_<timestamp>/restore_database_catalog_from_bundle.sh
 ```
 
 The helper:
@@ -463,7 +466,7 @@ Verify the app and cloud-drive catalog before deleting the backup folders.
 Delete the selected runtime root and exit:
 
 ```bash
-./test_for_develop.sh --delete --runtime-root /home/s92137/USB
+./test_for_develop.sh --delete --runtime-root /path/to/hackme-runtime
 ```
 
 `--delete` refuses to run while that runtime is active. If storage is inside the
@@ -499,5 +502,5 @@ permission:
 Print resolved configuration without starting or modifying runtime state:
 
 ```bash
-./test_for_develop.sh --cli --dry-run --runtime-root /home/s92137/USB
+./test_for_develop.sh --cli --dry-run --runtime-root /path/to/hackme-runtime
 ```

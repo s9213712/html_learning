@@ -95,7 +95,7 @@ python3 scripts/games/board_ai_benchmark.py
 - games: `reversi,go,gomoku`
 - engines: `random,easy,normal,hard`
 - rounds: `1`
-- report: `runtime/reports/games/board_ai_benchmark_*.json`
+- report: `/tmp/hackme_web_test_artifacts/games/board_ai_benchmark/board_ai_benchmark_*.json`
 
 常用參數：
 
@@ -136,10 +136,10 @@ python3 scripts/games/setup_katago.py
 
 - 下載 KataGo v1.16.4 OpenCL Linux x64 release asset。
 - 下載 `kata1-zhizi-b40c768nbt-fdx6d.bin.gz` 模型。
-- 執行 `katago genconfig` 產生 `runtime/katago/analysis.cfg`。
-- 寫出 `runtime/katago/hackme_katago.env`，包含 `HACKME_KATAGO_BIN`、`HACKME_KATAGO_CONFIG`、`HACKME_KATAGO_MODEL`、visits 與 timeout。
+- 執行 `katago genconfig` 產生 `$HACKME_RUNTIME_DIR/katago/analysis.cfg`。
+- 寫出 `$HACKME_RUNTIME_DIR/katago/hackme_katago.env`，包含 `HACKME_KATAGO_BIN`、`HACKME_KATAGO_CONFIG`、`HACKME_KATAGO_MODEL`、visits 與 timeout。
 
-後端會自動偵測 `runtime/katago`，所以使用預設路徑時不需要 source env file。自訂路徑時可用：
+後端會自動偵測外部 runtime 的 `katago/`，所以使用預設路徑時不需要 source env file。自訂路徑時可用：
 
 ```bash
 python3 scripts/games/setup_katago.py --install-dir /opt/hackme-katago
@@ -171,7 +171,7 @@ python3 scripts/games/setup_katago.py \
 |---|---|---|
 | CLI | `scripts/games/board_ai_benchmark.py` | 解析參數、顯示進度、執行 benchmark、寫 report |
 | KataGo setup | `scripts/games/setup_katago.py` | 下載 KataGo binary / 模型、解壓、產生 `analysis.cfg`、寫 env file |
-| 報告路徑 | `default_board_reports_dir()` | 決定預設輸出到 `runtime/reports/games` |
+| 報告路徑 | `test_artifact_path()` | standalone benchmark 預設輸出到 `/tmp/hackme_web_test_artifacts/games/board_ai_benchmark` |
 | Benchmark | `run_board_ai_benchmark(...)` | 依 game/engine/rounds 產生 round-robin matches |
 | 單場對局 | `play_board_ai_match(...)` | 執行單局、處理 pass/finish/illegal、記錄 final board |
 | 規則共用 | `initial_board(...)`、`legal_moves(...)`、`apply_board_move(...)`、`score_board(...)` | 三棋規則與評分的 benchmark 版本 |

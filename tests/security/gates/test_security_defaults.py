@@ -65,7 +65,7 @@ def test_server_upload_request_limit_is_env_driven_and_has_413_handler():
     assert '"max_request_mb": limit_mb' in server_py
 
 
-def test_runtime_artifacts_default_to_repo_runtime_root_and_not_repo_root():
+def test_runtime_artifacts_share_external_runtime_root_and_not_legacy_repo_folders():
     server_py = (ROOT / "server.py").read_text(encoding="utf-8")
     assert 'default_runtime_root,' in server_py
     assert 'RUNTIME_DIR = _env_path("HACKME_RUNTIME_DIR", default_runtime_root())' in server_py

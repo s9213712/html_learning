@@ -1,12 +1,16 @@
 import os
 import re
+import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 
-from scripts.prepush import utils
+from scripts.prepush import runner, utils
 from scripts.prepush.checks import (
     cleanup_check,
+    config_safety_check,
+    docs_command_targets_check,
     forbidden_paths_check,
     frontend_check,
     local_path_check,
@@ -18,10 +22,35 @@ from scripts.prepush.checks import (
     secrets_check,
 )
 from scripts.prepush.context import PrepushContext
-from scripts.prepush.result import FAIL, SKIP
+from scripts.prepush.result import FAIL, SKIP, CheckResult
 
 
 ROOT = Path(__file__).resolve().parents[3]
+
+
+def test_runner_help_works_outside_repository(tmp_path):
+    cache_dirs = (
+        ROOT / "scripts" / "__pycache__",
+        ROOT / "scripts" / "prepush" / "__pycache__",
+        ROOT / "scripts" / "prepush" / "checks" / "__pycache__",
+    )
+    for cache_dir in cache_dirs:
+        shutil.rmtree(cache_dir, ignore_errors=True)
+    env = os.environ.copy()
+    env.pop("PYTHONDONTWRITEBYTECODE", None)
+    env.pop("PYTHONPYCACHEPREFIX", None)
+    completed = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "prepush" / "runner.py"), "--help"],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "--full" in completed.stdout
+    assert all(not cache_dir.exists() for cache_dir in cache_dirs)
 
 
 def make_ctx(tmp_path, **kwargs):
@@ -33,6 +62,35 @@ def test_path_sanitizer_does_not_output_local_home():
     sanitized = utils.sanitize_path(f"{home}/hackme_web/runtime/database.db")
     assert home not in sanitized
     assert "<LOCAL_HOME_PATH>" in sanitized
+
+
+def test_run_command_timeout_terminates_the_entire_process_group(tmp_path):
+    command = [
+        sys.executable,
+        "-c",
+        (
+            "import subprocess,sys,time; "
+            "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)']); "
+            "print(child.pid, flush=True); time.sleep(30)"
+        ),
+    ]
+
+    try:
+        utils.run_command(command, cwd=tmp_path, timeout=1)
+    except subprocess.TimeoutExpired as exc:
+        child_pid = int(str(exc.stdout or "").strip().splitlines()[0])
+    else:
+        raise AssertionError("timeout was expected")
+
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            os.kill(child_pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        raise AssertionError("timed-out command left a child process running")
 
 
 def test_local_path_leak_reports_pattern_not_raw_line(tmp_path):
@@ -84,6 +142,19 @@ def test_markdown_link_check_accepts_correct_relative_links_and_ignores_code(tmp
     assert result.status != FAIL
 
 
+def test_markdown_link_check_scans_nested_canonical_docs(tmp_path):
+    nested = tmp_path / "docs" / "ops" / "runbooks"
+    nested.mkdir(parents=True)
+    (tmp_path / "README.md").write_text("# root\n", encoding="utf-8")
+    (tmp_path / "SECURITY.md").write_text("# security\n", encoding="utf-8")
+    (nested / "deploy.md").write_text("[missing](../MISSING.md)\n", encoding="utf-8")
+
+    result = markdown_links_check.run(make_ctx(tmp_path))
+
+    assert result.status == FAIL
+    assert result.details == [{"file": "docs/ops/runbooks/deploy.md", "line": 1, "link": "../MISSING.md"}]
+
+
 def test_scripts_index_check_requires_registered_security_scripts(tmp_path):
     script_dir = tmp_path / "scripts" / "security" / "pentest"
     script_dir.mkdir(parents=True)
@@ -129,6 +200,146 @@ def test_scripts_index_check_requires_registered_user_facing_game_and_trading_sc
         encoding="utf-8",
     )
     assert scripts_index_check.run(ctx).status != FAIL
+
+
+def test_scripts_index_check_covers_ops_qa_media_and_storage(tmp_path):
+    paths = [
+        "scripts/ops/restore.py",
+        "scripts/qa/release_gate.py",
+        "scripts/media/worker.py",
+        "scripts/storage/backend.sh",
+    ]
+    for rel in paths:
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("print('run')\n", encoding="utf-8")
+    index = tmp_path / "scripts" / "INDEX.md"
+    index.write_text("# Scripts Index\n", encoding="utf-8")
+
+    result = scripts_index_check.run(make_ctx(tmp_path))
+
+    assert result.status == FAIL
+    assert result.details == [
+        {"script": "scripts/media/worker.py"},
+        {"script": "scripts/ops/restore.py"},
+        {"script": "scripts/qa/release_gate.py"},
+        {"script": "scripts/storage/backend.sh"},
+    ]
+
+    index.write_text("\n".join(f"`{rel}` | maintained" for rel in paths), encoding="utf-8")
+    assert scripts_index_check.run(make_ctx(tmp_path)).status != FAIL
+
+
+def test_scripts_index_check_skips_non_cli_credential_helper():
+    assert "probe_credentials.py" in scripts_index_check.HELPER_NAMES
+    assert "operation_coverage.py" in scripts_index_check.HELPER_NAMES
+
+
+def test_scripts_index_check_rejects_stale_registered_target(tmp_path):
+    index = tmp_path / "scripts" / "INDEX.md"
+    index.parent.mkdir(parents=True)
+    index.write_text("`scripts/testing/deleted_probe.py` | QA | stale\n", encoding="utf-8")
+
+    result = scripts_index_check.run(make_ctx(tmp_path))
+
+    assert result.status == FAIL
+    assert result.details == [{"script": "scripts/testing/deleted_probe.py", "reason": "index_target_missing"}]
+
+
+def test_scripts_index_check_reports_broken_symlink_target(tmp_path):
+    index = tmp_path / "scripts" / "INDEX.md"
+    target = tmp_path / "scripts" / "testing" / "wrapper.py"
+    target.parent.mkdir(parents=True)
+    target.symlink_to("missing_impl.py")
+    index.write_text("`scripts/testing/wrapper.py` | QA | wrapper\n", encoding="utf-8")
+
+    result = scripts_index_check.run(make_ctx(tmp_path))
+
+    assert result.status == FAIL
+    assert result.details == [{"script": "scripts/testing/wrapper.py", "reason": "broken_symlink_target"}]
+
+
+def test_docs_command_targets_check_rejects_stale_canonical_command(tmp_path):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (tmp_path / "README.md").write_text(
+        "## Run\n\n```bash\npython3 scripts/testing/missing_probe.py\n```\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "SECURITY.md").write_text("# Security\n", encoding="utf-8")
+
+    result = docs_command_targets_check.run(make_ctx(tmp_path))
+
+    assert result.status == FAIL
+    assert result.details == [{
+        "file": "README.md",
+        "line": 4,
+        "target": "scripts/testing/missing_probe.py",
+        "reason": "command_target_missing",
+    }]
+
+
+def test_docs_command_targets_check_ignores_prose_and_resolves_fenced_command(tmp_path):
+    script = tmp_path / "scripts" / "testing" / "live_probe.py"
+    script.parent.mkdir(parents=True)
+    script.write_text("print('ok')\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text(
+        "Historical prose: scripts/testing/removed_probe.py\n\n"
+        "```bash\npython3 scripts/testing/live_probe.py\n```\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "SECURITY.md").write_text("# Security\n", encoding="utf-8")
+
+    assert docs_command_targets_check.run(make_ctx(tmp_path)).status != FAIL
+
+
+def test_docs_command_targets_require_repo_bootstrap_before_project_import(tmp_path):
+    script = tmp_path / "scripts" / "testing" / "live_probe.py"
+    script.parent.mkdir(parents=True)
+    script.write_text("from services.job_center import get_job\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text(
+        "```bash\npython3 scripts/testing/live_probe.py\n```\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "SECURITY.md").write_text("# Security\n", encoding="utf-8")
+
+    result = docs_command_targets_check.run(make_ctx(tmp_path))
+
+    assert result.status == FAIL
+    assert result.details == [{
+        "file": "README.md",
+        "line": 2,
+        "target": "scripts/testing/live_probe.py",
+        "reason": "project_import_before_repo_bootstrap",
+    }]
+
+    script.write_text(
+        "import sys\nfrom pathlib import Path\n"
+        "ROOT = Path(__file__).resolve().parents[2]\n"
+        "sys.path.insert(0, str(ROOT))\n"
+        "from services.job_center import get_job\n",
+        encoding="utf-8",
+    )
+    assert docs_command_targets_check.run(make_ctx(tmp_path)).status != FAIL
+
+
+def test_docs_command_targets_check_covers_root_commands_and_agent_docs(tmp_path):
+    agents = tmp_path / "docs" / "AGENTS"
+    agents.mkdir(parents=True)
+    (tmp_path / "README.md").write_text("# Root\n", encoding="utf-8")
+    (tmp_path / "SECURITY.md").write_text("# Security\n", encoding="utf-8")
+    (agents / "RUNBOOK.md").write_text(
+        "```bash\npython3 server.py\n./test_for_develop.sh --port 5010\n```\n",
+        encoding="utf-8",
+    )
+
+    result = docs_command_targets_check.run(make_ctx(tmp_path))
+
+    assert result.status == FAIL
+    assert result.details == [
+        {"file": "docs/AGENTS/RUNBOOK.md", "line": 2, "target": "server.py", "reason": "command_target_missing"},
+        {"file": "docs/AGENTS/RUNBOOK.md", "line": 3, "target": "test_for_develop.sh", "reason": "command_target_missing"},
+    ]
 
 
 def test_git_clean_check_allows_decorative_separator_comments(monkeypatch, tmp_path):
@@ -199,6 +410,105 @@ def test_secret_scanner_allows_fake_examples_and_redacts_real_secret():
     assert "abcdefghijklmnopqrstuvwxyz" not in evidence
 
 
+def test_secret_scanner_ignores_runtime_values_and_key_identifiers():
+    safe_lines = (
+        "self.password = password",
+        'password = data.get("password", "")',
+        'data-password="${video.id}"',
+        "private_key = ec.generate_private_key(ec.SECP256R1())",
+    )
+
+    assert all(not secrets_check.scan_text("routes/example.py", line) for line in safe_lines)
+    assert secrets_check.scan_text("config.py", 'ROOT_PASSWORD="unsafe-hardcoded-value"')
+    assert secrets_check.scan_text("key.pem", "-----BEGIN PRIVATE KEY-----")
+
+
+def test_gitleaks_candidates_skip_unchanged_bulk_evidence_but_include_delta(tmp_path):
+    product = tmp_path / "routes" / "app.py"
+    historical = tmp_path / "docs" / "AGENTS" / "reports" / "historical.md"
+    product.parent.mkdir(parents=True)
+    historical.parent.mkdir(parents=True)
+    product.write_text("value = 1\n", encoding="utf-8")
+    historical.write_text("historical evidence\n", encoding="utf-8")
+    ctx = PrepushContext(
+        repo_root=tmp_path,
+        mode="full",
+        is_ci=True,
+        tracked_files=["routes/app.py", "docs/AGENTS/reports/historical.md"],
+    )
+
+    assert secrets_check.gitleaks_candidate_paths(ctx) == ["routes/app.py"]
+
+    ctx.changed_files = ["docs/AGENTS/reports/historical.md"]
+    assert secrets_check.gitleaks_candidate_paths(ctx) == [
+        "docs/AGENTS/reports/historical.md",
+        "routes/app.py",
+    ]
+
+
+def test_gitleaks_materializes_candidate_tree_below_tmp(tmp_path, monkeypatch):
+    product = tmp_path / "routes" / "app.py"
+    product.parent.mkdir(parents=True)
+    product.write_text("value = 1\n", encoding="utf-8")
+    ctx = PrepushContext(
+        repo_root=tmp_path,
+        mode="quick",
+        is_ci=True,
+        tracked_files=["routes/app.py"],
+        changed_files=["routes/app.py"],
+    )
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        scan_root = Path(command[command.index("--source") + 1])
+        captured["scan_root"] = scan_root
+        assert scan_root.is_relative_to("/tmp")
+        assert (scan_root / "routes" / "app.py").read_text(encoding="utf-8") == "value = 1\n"
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(utils, "tool_exists", lambda name: name == "gitleaks")
+    monkeypatch.setattr(utils, "run_command", fake_run)
+    result = secrets_check.run(ctx)
+
+    assert result.status == "PASS"
+    assert "1 candidate file(s)" in result.message
+    assert not captured["scan_root"].exists()
+
+
+def test_runner_records_check_elapsed_time(monkeypatch):
+    ticks = iter((10.0, 12.3456))
+    monkeypatch.setattr(runner.time, "perf_counter", lambda: next(ticks))
+
+    result = runner.run_check(lambda _ctx: CheckResult.pass_("probe"), object())
+
+    assert result.elapsed_seconds == 2.346
+    assert result.to_json()["elapsed_seconds"] == 2.346
+
+
+def test_precommit_secret_hooks_use_current_bounded_scanners():
+    config = (ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8")
+
+    assert "scripts.prepush.checks.secrets_check --mode quick --strict" in config
+    assert "scripts/security/gate/scan_plaintext_secrets.py --fail-on high" in config
+    assert "scripts/security/scan_plaintext_secrets.py" not in config
+
+
+def test_config_safety_scans_canonical_docs_but_skips_historical_reports(tmp_path):
+    (tmp_path / "README.md").write_text("# root\n", encoding="utf-8")
+    (tmp_path / "SECURITY.md").write_text("# security\n", encoding="utf-8")
+    reports = tmp_path / "docs" / "AGENTS" / "reports"
+    reports.mkdir(parents=True)
+    (reports / "historical.md").write_text("DEBUG=True\n", encoding="utf-8")
+    ctx = make_ctx(tmp_path)
+
+    assert config_safety_check.run(ctx).status != FAIL
+
+    active = tmp_path / "docs" / "ops" / "deploy.md"
+    active.parent.mkdir(parents=True)
+    active.write_text("DEBUG=True\n", encoding="utf-8")
+    assert config_safety_check.run(ctx).status == FAIL
+
+
 def test_release_id_missing_from_docs_fails(tmp_path):
     service = tmp_path / "services"
     docs = tmp_path / "docs"
@@ -225,15 +535,58 @@ def test_quick_pytest_targets_cover_new_feature_regressions():
         "tests/frontend/admin/test_frontend_account_admin.py",
         "tests/account/sessions/test_account_sessions.py",
         "tests/users/test_sanction_notices.py",
-        "tests/trading/core/test_trading_engine.py",
         "tests/services/test_management_plane.py",
         "tests/regressions/test_security_issue_regressions.py",
     }
     assert expected.issubset(set(pytest_quick_check.QUICK_TESTS))
+    assert any(
+        target.startswith("tests/trading/core/test_trading_engine.py::test_trading_asset_overview")
+        for target in pytest_quick_check.QUICK_TESTS
+    )
 
 
 def test_quick_pytest_timeout_budget_matches_current_hook_scope():
     assert pytest_quick_check.QUICK_PYTEST_TIMEOUT_SECONDS >= 180
+    assert pytest_quick_check.QUICK_PYTEST_TIMEOUT_SECONDS <= 900
+    assert pytest_quick_check.FULL_PYTEST_TIMEOUT_SECONDS >= pytest_quick_check.QUICK_PYTEST_TIMEOUT_SECONDS
+
+
+def test_full_prepush_keeps_heavy_product_integrations_out_of_quick_scope():
+    assert "tests/video/api/test_video_publish.py" not in pytest_quick_check.QUICK_TESTS
+    assert "tests/video/api/test_video_publish.py" in pytest_quick_check.FULL_EXTRA_TESTS
+    assert "tests/storage/test_remote_downloads.py" in pytest_quick_check.FULL_EXTRA_TESTS
+    assert "tests/trading/core/test_trading_engine.py" in pytest_quick_check.FULL_EXTRA_TESTS
+    assert "tests/scripts/testing/test_operational_campaign_24h.py" in pytest_quick_check.FULL_EXTRA_TESTS
+    assert "tests/scripts/testing/test_video_hls_quality_stress.py" in pytest_quick_check.FULL_EXTRA_TESTS
+
+
+def test_quick_pytest_uses_isolated_wrapper(tmp_path, monkeypatch):
+    test_path = tmp_path / "tests" / "security" / "auth" / "test_auth_csrf_safe.py"
+    test_path.parent.mkdir(parents=True)
+    test_path.write_text("def test_ok(): assert True\n", encoding="utf-8")
+    wrapper = tmp_path / "scripts" / "testing" / "pytest_in_tmp.sh"
+    wrapper.parent.mkdir(parents=True)
+    wrapper.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    captured = {}
+
+    class Passed:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        captured["cwd"] = kwargs.get("cwd")
+        return Passed()
+
+    monkeypatch.setattr(utils, "tool_exists", lambda name: name == "pytest")
+    monkeypatch.setattr(utils, "run_command", fake_run)
+
+    result = pytest_quick_check.run(make_ctx(tmp_path))
+
+    assert result.status != FAIL
+    assert captured["command"] == [str(wrapper), "-q", "tests/security/auth/test_auth_csrf_safe.py"]
+    assert captured["cwd"] == tmp_path
 
 
 def test_ci_job_timeout_covers_quick_pytest_and_gate_overhead():
@@ -389,6 +742,47 @@ def test_frontend_node_missing_local_skip(monkeypatch):
     ctx = PrepushContext.build(repo_root=ROOT, mode="quick", is_ci=False)
     result = frontend_check.run(ctx)
     assert result.status == SKIP
+
+
+def test_frontend_node_batch_checks_nested_scripts(tmp_path, monkeypatch):
+    nested = tmp_path / "public" / "js" / "games" / "game.js"
+    nested.parent.mkdir(parents=True)
+    nested.write_text("const ok = true;\n", encoding="utf-8")
+    ctx = make_ctx(tmp_path, is_ci=True)
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        captured["timeout"] = kwargs["timeout"]
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(utils, "tool_exists", lambda name: name == "node")
+    monkeypatch.setattr(utils, "run_command", fake_run)
+    result = frontend_check.run(ctx)
+
+    assert result.status == "PASS"
+    assert str(nested) in captured["command"]
+    assert captured["command"][:2] == ["node", "-e"]
+    assert captured["timeout"] == frontend_check.DEFAULT_NODE_CHECK_TIMEOUT_SECONDS
+
+
+def test_frontend_node_timeout_is_actionable(tmp_path, monkeypatch):
+    script = tmp_path / "public" / "js" / "app.js"
+    script.parent.mkdir(parents=True)
+    script.write_text("const ok = true;\n", encoding="utf-8")
+    ctx = make_ctx(tmp_path, is_ci=True)
+    monkeypatch.setattr(utils, "tool_exists", lambda name: name == "node")
+    monkeypatch.setattr(
+        utils,
+        "run_command",
+        lambda *args, **kwargs: (_ for _ in ()).throw(subprocess.TimeoutExpired(args[0], kwargs["timeout"])),
+    )
+
+    result = frontend_check.run(ctx)
+
+    assert result.status == FAIL
+    assert result.name == "frontend JS syntax"
+    assert "exceeded 120 seconds" in result.message
 
 
 def test_gitleaks_missing_ci_fails(monkeypatch):

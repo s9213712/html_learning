@@ -44,6 +44,7 @@ from services.games.chess_neural import (  # noqa: E402
     load_weights, make_initial_weights, save_weights,
     static_baseline_cp_white,
 )
+from scripts.games.common_paths import exp6_artifacts_root  # noqa: E402
 
 sys.path.insert(0, str(ROOT / "scripts/games"))
 import chess_exp6_curriculum as cc  # noqa: E402
@@ -64,9 +65,9 @@ EPOCHS = 80                         # single-stage training; user's spec doesn't
 EARLY_STOP_PATIENCE = 10            # epochs without dev improvement
 SEED = 20260517
 
-PERSISTENT_DIR = Path.home() / "exp6_output"
-SNAPSHOTS_DIR = PERSISTENT_DIR / "v7_1_snapshots"
-REPORT_JSON = PERSISTENT_DIR / "v7_1_report.json"
+PERSISTENT_DIR = exp6_artifacts_root() / "v7_1"
+SNAPSHOTS_DIR = PERSISTENT_DIR / "snapshots"
+REPORT_JSON = PERSISTENT_DIR / "report.json"
 
 
 def _value_target_from_cp_white(cp_white: float, side_to_move_is_white: bool) -> float:
@@ -296,7 +297,7 @@ def train_loop(weights: NeuralWeights,
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--seed-weights", type=Path,
-                    default=Path.home() / "exp6_output/v6_2_snapshots/chess_experiment_6_neural_stage02.npz",
+                    default=exp6_artifacts_root() / "curriculum" / "snapshots" / "chess_experiment_6_neural_stage02.npz",
                     help="Optional seed weights to warm-start. Default v6.2 S2.")
     ap.add_argument("--epochs", type=int, default=EPOCHS)
     ap.add_argument("--lr", type=float, default=LR)

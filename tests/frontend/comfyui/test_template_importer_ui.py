@@ -55,8 +55,10 @@ def test_36_comfyui_js_renders_panels_in_order():
 def test_36_comfyui_js_blocks_import_until_token_obtained():
     js = _read("public/js/36-comfyui.js")
     assert "尚未取得 preview_token" in js or "preview_token" in js
-    # Disabled by default; only enabled after preview returns capability != UNSUPPORTED
-    assert 'importBtn.disabled = true' not in js  # we don't hard-disable; we set after capability check
+    # Active imports are disabled against double submission, then restored to
+    # the capability-derived state once the request settles.
+    assert 'if (importBtn) importBtn.disabled = true;' in js
+    assert 'importBtn.disabled = currentCapability?.overall === "UNSUPPORTED";' in js
     assert 'currentToken = null' in js
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 
 from scripts.prepush import utils
+from scripts.prepush.checks.docs_command_targets_check import canonical_docs
 from scripts.prepush.context import PrepushContext
 from scripts.prepush.result import CheckResult
 
@@ -19,7 +20,7 @@ UNSAFE = {
     "COOKIE_SECURE=False": re.compile(r"\bCOOKIE_SECURE\s*=\s*False\b"),
     "SESSION_COOKIE_SECURE=False": re.compile(r"\bSESSION_COOKIE_SECURE\s*=\s*False\b"),
 }
-TARGETS = ("server.py", "routes", "services", "config", ".env.example", ".env.production.example", "docs")
+TARGETS = ("server.py", "routes", "services", "config", ".env.example", ".env.production.example")
 
 
 def run(ctx: PrepushContext) -> CheckResult:
@@ -30,6 +31,7 @@ def run(ctx: PrepushContext) -> CheckResult:
             paths.append(target)
         elif path.is_dir():
             paths.extend(item.relative_to(ctx.repo_root).as_posix() for item in path.rglob("*") if item.is_file())
+    paths.extend(path.relative_to(ctx.repo_root).as_posix() for path in canonical_docs(ctx.repo_root))
     findings = []
     for path in utils.iter_repo_text_files(ctx.repo_root, paths):
         rel = ctx.relpath(path)

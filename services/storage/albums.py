@@ -843,6 +843,59 @@ def add_album_file(conn, *, actor, album_id, storage_file_id=None, file_id=None,
     return get_album(conn, actor=actor, album_id=album_id, include_files=True), None
 
 
+def create_album_with_files(conn, *, actor, title, storage_file_ids, description=""):
+    """Create an unlisted album and all memberships as one database transaction."""
+    ensure_storage_album_schema(conn)
+    if not isinstance(storage_file_ids, (list, tuple)):
+        return None, "storage_file_ids 必須是陣列"
+    if not 1 <= len(storage_file_ids) <= 100:
+        return None, "批次分享一次只能包含 1 到 100 個檔案"
+    normalized_ids = []
+    seen = set()
+    for raw_id in storage_file_ids:
+        storage_file_id = str(raw_id or "").strip()
+        if not storage_file_id:
+            return None, "storage_file_ids 包含空白檔案 ID"
+        if storage_file_id in seen:
+            return None, "storage_file_ids 不可包含重複檔案"
+        seen.add(storage_file_id)
+        normalized_ids.append(storage_file_id)
+
+    savepoint = f"album_batch_{uuid.uuid4().hex}"
+    conn.execute(f"SAVEPOINT {savepoint}")
+    try:
+        album, msg = create_album(
+            conn,
+            actor=actor,
+            title=title,
+            description=description,
+            visibility="unlisted",
+        )
+        if msg:
+            conn.execute(f"ROLLBACK TO {savepoint}")
+            conn.execute(f"RELEASE {savepoint}")
+            return None, msg
+        for sort_order, storage_file_id in enumerate(normalized_ids, start=1):
+            _, msg = add_album_file(
+                conn,
+                actor=actor,
+                album_id=album["id"],
+                storage_file_id=storage_file_id,
+                sort_order=sort_order,
+            )
+            if msg:
+                conn.execute(f"ROLLBACK TO {savepoint}")
+                conn.execute(f"RELEASE {savepoint}")
+                return None, msg
+        result = get_album(conn, actor=actor, album_id=album["id"], include_files=True)
+        conn.execute(f"RELEASE {savepoint}")
+        return result, None
+    except Exception:
+        conn.execute(f"ROLLBACK TO {savepoint}")
+        conn.execute(f"RELEASE {savepoint}")
+        raise
+
+
 def remove_album_file(conn, *, actor, album_id, album_file_id):
     album = get_album(conn, actor=actor, album_id=album_id)
     if not album:

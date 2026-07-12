@@ -29,6 +29,10 @@
 在重新啟動實驗前，先依 playbook 做快篩。不要把 private validation 題目、FEN、走法、
 teacher PV、source game id、chosen/source move 或逐題答案寫入公開 docs/evidence。
 
+本文件以下的 `runtime/...` 都是 `$HACKME_RUNTIME_DIR/...` 的簡寫，不是
+source checkout 內的目錄。離線驗證應明確把 `HACKME_RUNTIME_DIR` 指到 `/tmp`；
+正式 promotion 則指到受備份管理的外部 runtime。
+
 Auto-retrain 目前仍視為斷開：線上可以繼續記錄 replay 與篩選優質棋局，但不得直接改
 production model。任何 replay learning 都必須先經過離線 candidate、teacher audit、
 Blockfish staged match、percent-tail/expanded validation 與 promotion gate。

@@ -4,16 +4,34 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 export PYTHONPATH="${ROOT_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
 RUNTIME_BASE="${PLAYWRIGHT_RUNTIME_BASE:-}"
+AUTO_RUNTIME_BASE=0
 KEEP_RUNTIME="${KEEP_PLAYWRIGHT_RUNTIME:-0}"
 ACCEPTANCE_RETRIES="${PLAYWRIGHT_ACCEPTANCE_RETRIES:-1}"
 
 if [[ -z "${RUNTIME_BASE}" ]]; then
   RUNTIME_BASE="$(mktemp -d /tmp/hackme_web_playwright_acceptance_XXXXXX)"
+  AUTO_RUNTIME_BASE=1
+else
+  RUNTIME_BASE="$(readlink -m -- "$RUNTIME_BASE")"
+  case "$RUNTIME_BASE" in
+    /tmp/*) ;;
+    *)
+      echo "[playwright] ERROR: PLAYWRIGHT_RUNTIME_BASE must resolve below /tmp" >&2
+      exit 2
+      ;;
+  esac
+  if [[ -e "$RUNTIME_BASE" || -L "$RUNTIME_BASE" ]]; then
+    echo "[playwright] ERROR: caller-selected runtime base must not already exist: $RUNTIME_BASE" >&2
+    exit 2
+  fi
+  mkdir "$RUNTIME_BASE"
 fi
 
 cleanup() {
-  if [[ "${KEEP_RUNTIME}" != "1" && "${RUNTIME_BASE}" == /tmp/hackme_web_playwright_acceptance_* ]]; then
+  if [[ "${KEEP_RUNTIME}" != "1" && "${AUTO_RUNTIME_BASE}" == "1" ]]; then
     rm -rf "${RUNTIME_BASE}"
+  elif [[ "${AUTO_RUNTIME_BASE}" != "1" ]]; then
+    echo "[playwright] kept caller-selected runtime base: ${RUNTIME_BASE}" >&2
   fi
 }
 trap cleanup EXIT

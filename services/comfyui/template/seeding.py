@@ -2,7 +2,7 @@
 
 The repo ships a set of system workflows under workflows/comfyui/. On first
 server start we copy those into the runtime tree
-(``$HACKME_RUNTIME_DIR/comfyui/`` or ``runtime/comfyui/`` by default) so:
+(``$HACKME_RUNTIME_DIR/comfyui/`` or the external XDG state directory) so:
 
 - Operators can edit / extend templates without git churn.
 - The runtime tree stays gitignored, so customizations don't pollute the
@@ -23,6 +23,8 @@ import shutil
 from pathlib import Path
 from typing import Iterable
 import json
+
+from services.server.runtime import default_runtime_root_path
 
 
 REPO_SOURCE_DIR = Path(__file__).resolve().parents[3] / "workflows" / "comfyui"
@@ -68,11 +70,11 @@ QWEN_IMAGE_EDIT_2509_REFERENCE_IMAGE = "image_qwen_image_edit_2509_reference_ima
 
 
 def _runtime_root() -> Path:
-    """Resolve the runtime base dir (HACKME_RUNTIME_DIR or repo-root/runtime)."""
+    """Resolve the runtime base dir without ever falling back into source."""
     env_dir = os.environ.get("HACKME_RUNTIME_DIR", "").strip()
     if env_dir:
-        return Path(env_dir)
-    return Path(__file__).resolve().parents[3] / "runtime"
+        return Path(env_dir).expanduser().resolve()
+    return default_runtime_root_path()
 
 
 def runtime_comfyui_dir(*, runtime_root: Path | None = None) -> Path:

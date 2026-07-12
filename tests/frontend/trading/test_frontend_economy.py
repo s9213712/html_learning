@@ -426,7 +426,7 @@ def test_root_points_page_is_chain_operations_console():
     assert "function economyPickColdWalletFileForSigning" in economy_js
     assert 'id="economy-wallet-signing-file-input"' in index_html
     assert 'input.type = "file";' in economy_js
-    assert "await economyReadTextFile(file)" in economy_js
+    assert "await economyReadTextFile(file, operation)" in economy_js
     assert "function economyVerifyColdWalletSigningSession" in economy_js
     assert "economyRememberColdWalletSigningSession" in economy_js
     assert "本機已暫時解鎖此冷錢包" in economy_js
@@ -434,14 +434,15 @@ def test_root_points_page_is_chain_operations_console():
     assert "首次解鎖或本機簽署會話逾期" in economy_js
     assert "錢包檔與冷錢包解鎖助記詞只在可信裝置使用" in economy_js
     assert "showAppToast(`${label}：${message}`" in economy_js
-    assert "false,\n    [\"sign\"]" in economy_js
-    assert "privateJwk.d = \"\";" in economy_js
+    assert "false,\n      [\"sign\"]" in economy_js
+    assert 'if (jwk && typeof jwk === "object" && "d" in jwk) jwk.d = "";' in economy_js
+    assert "economyScrubPrivateJwk(privateJwk);" in economy_js
     assert "等待冷錢包本機簽署" in economy_js
     assert "冷錢包檔地址與付款錢包不一致" in economy_js
     assert 'data-dispute-amount="${sanitize(String(tx.amount_points || tx.amount || 0))}"' in economy_js
     assert 'data-dispute-amount="${sanitize(String(row.claimed_amount_points || 0))}"' in economy_js
     assert "signature," in economy_js
-    assert "const tradePassword = await economyDerivedColdWalletTradePassword(privateJwk, address);" in economy_js
+    assert "const tradePassword = await economyDerivedColdWalletTradePassword(privateJwk, address, operation);" in economy_js
     assert "const walletFile = await economyEncryptColdWalletFile" in economy_js
     assert "新建冷錢包不會顯示這種備份碼" not in index_html
     assert "記憶詞考試" in index_html

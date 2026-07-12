@@ -65,6 +65,10 @@ def test_live_learning_validation_fast_retrain_flags_are_wired():
     assert "low_margin_override_rejected" in source
     assert "broad_strength_improvement" in source
     assert "mcts_visit_count" in source
+    assert 'Path("/tmp") / f"chess_live_learning_validation_{stamp}_{os.getpid()}"' in source
+    assert 'if not output_root.is_relative_to(Path("/tmp")):' in source
+    assert 'if output_root.exists() or output_root.is_symlink():' in source
+    assert 'output_root.mkdir(parents=True, exist_ok=False)' in source
 
 
 def test_exp4_quick_retrain_sample_cap_scales_with_timeout():

@@ -10,6 +10,28 @@ let pendingChatAttachments = [];
 const chatMessageLatestIdByRoom = {};
 const chatMessagePollTicksByRoom = {};
 
+function resetChatAccountState() {
+  stopChatPoll();
+  pendingChatAttachments = [];
+  chatRooms = [];
+  selectedChatRoomId = null;
+  chatMessageCache = [];
+  Object.keys(chatMessageLatestIdByRoom).forEach((key) => delete chatMessageLatestIdByRoom[key]);
+  Object.keys(chatMessagePollTicksByRoom).forEach((key) => delete chatMessagePollTicksByRoom[key]);
+  renderPendingChatAttachments();
+  setChatCreatePanelVisible(false);
+  setChatJoinPanelVisible(false);
+  const roomList = $("chat-room-list");
+  const messages = $("chat-room-messages");
+  const attachments = $("chat-attachment-list");
+  if (roomList) roomList.innerHTML = "<p style=\"color:var(--muted);\">尚未載入聊天室</p>";
+  if (messages) messages.innerHTML = "<p style=\"color:var(--muted);\">尚未選擇聊天室</p>";
+  if (attachments) attachments.innerHTML = "";
+  syncChatSharedAttachmentPanel([]);
+}
+
+document.addEventListener("hackme:account-context-changed", resetChatAccountState);
+
 function chatConfirm(message, options = {}) {
   if (typeof showAppConfirm === "function") return showAppConfirm(message, options);
   return Promise.resolve(window.confirm(message));

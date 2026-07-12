@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -16,33 +17,70 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_OUT = ROOT / "artifacts" / "qa" / "pointschain_rc1_release_gate.json"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.test_artifacts import test_artifact_path  # noqa: E402
+
+
+DEFAULT_OUT = test_artifact_path("qa", "pointschain_rc1_release_gate.json")
+PYTEST_WRAPPER = ROOT / "scripts" / "testing" / "pytest_in_tmp.sh"
 
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def run_step(name: str, cmd: list[str], *, timeout: int = 300) -> dict:
+def redacted_command(cmd: list[str]) -> list[str]:
+    redacted = list(cmd)
+    for index, value in enumerate(redacted[:-1]):
+        if value in {"--password", "--root-password", "--manager-password"}:
+            redacted[index + 1] = "<REDACTED>"
+    return redacted
+
+
+def run_step(
+    name: str,
+    cmd: list[str],
+    *,
+    timeout: int = 300,
+    env_overrides: dict[str, str] | None = None,
+) -> dict:
     started = utc_now()
-    proc = subprocess.run(
-        cmd,
-        cwd=ROOT,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        timeout=timeout,
-    )
-    output = proc.stdout or ""
+    env = os.environ.copy()
+    env["PYTHONPYCACHEPREFIX"] = str(test_artifact_path("pycache"))
+    env.update(env_overrides or {})
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=ROOT,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=timeout,
+        )
+        returncode = proc.returncode
+        output = proc.stdout or ""
+    except subprocess.TimeoutExpired as exc:
+        returncode = 124
+        output = f"step timed out after {timeout}s\n{exc.stdout or ''}"
+    except OSError as exc:
+        returncode = 127
+        output = f"step could not start: {exc}"
     return {
         "name": name,
-        "ok": proc.returncode == 0,
-        "returncode": proc.returncode,
+        "ok": returncode == 0,
+        "returncode": returncode,
         "started_at": started,
         "finished_at": utc_now(),
-        "command": cmd,
+        "command": redacted_command(cmd),
         "output_tail": output[-6000:],
     }
+
+
+def pytest_command(*targets: str) -> list[str]:
+    return [str(PYTEST_WRAPPER), "-q", *targets]
 
 
 def parse_scanner_blockers(path: Path) -> int:
@@ -58,11 +96,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--out", default=str(DEFAULT_OUT), help="JSON output path.")
     parser.add_argument("--base-url", default="", help="Optional live isolated server URL for Playwright probes.")
     parser.add_argument("--runtime-root", default="", help="Optional runtime root for live recovery drill probes.")
-    parser.add_argument("--root-password", default="root", help="Root password for live UI probes.")
+    parser.add_argument(
+        "--root-password",
+        default=os.environ.get("HACKME_ROOT_PASSWORD") or os.environ.get("HTML_LEARNING_ROOT_PASSWORD", ""),
+        help="Root password for live probes. Prefer HACKME_ROOT_PASSWORD to avoid shell history and process arguments.",
+    )
     parser.add_argument("--capacity-probe", action="store_true", help="Run the isolated RC1 capacity probe as part of this gate.")
     parser.add_argument(
         "--capacity-probe-out",
-        default=str(ROOT / "artifacts" / "qa" / "predeploy_capacity_probe_rc1.json"),
+        default=str(test_artifact_path("qa", "predeploy_capacity_probe_rc1.json")),
         help="JSON output path for --capacity-probe.",
     )
     parser.add_argument("--skip-live", action="store_true", help="Skip live Playwright/API probes even if URLs are supplied.")
@@ -71,10 +113,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
+    if not args.skip_live and args.base_url and not args.root_password:
+        raise SystemExit("HACKME_ROOT_PASSWORD or --root-password is required when --base-url is used")
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    scanner_json = ROOT / "artifacts" / "qa" / "wallet_direct_call_inventory_release_gate.json"
-    scanner_md = ROOT / "artifacts" / "qa" / "wallet_direct_call_inventory_release_gate.md"
+    scanner_json = test_artifact_path("qa", "wallet_direct_call_inventory_release_gate.json")
+    scanner_md = test_artifact_path("qa", "wallet_direct_call_inventory_release_gate.md")
 
     steps: list[dict] = []
     steps.append(run_step(
@@ -108,42 +152,30 @@ def main() -> int:
     ))
     steps.append(run_step(
         "points_chain_governance_branch_tests",
-        [sys.executable, "-m", "pytest", "-q", "tests/points/test_governance_branch.py"],
+        pytest_command("tests/points/test_governance_branch.py"),
         timeout=240,
     ))
     steps.append(run_step(
         "points_chain_wallet_and_explorer_tests",
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            "-q",
+        pytest_command(
             "tests/points/test_wallet_identity.py",
             "tests/points/test_points_explorer.py",
-        ],
+        ),
         timeout=240,
     ))
     steps.append(run_step(
         "points_chain_block_tamper_tests",
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            "-q",
+        pytest_command(
             "tests/points/test_points_chain.py::test_points_chain_block_and_signature_tables_are_append_only",
             "tests/points/test_points_chain.py::test_points_chain_verify_detects_forged_sealed_transaction_hash_recompute",
             "tests/points/test_points_chain.py::test_points_chain_verify_detects_forged_block_rehash_without_node_signature",
             "tests/points/test_points_chain.py::test_points_chain_verify_does_not_auto_resign_missing_block_signature",
-        ],
+        ),
         timeout=180,
     ))
     steps.append(run_step(
         "trading_wallet_fee_regression_tests",
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            "-q",
+        pytest_command(
             "tests/trading/core/test_trading_engine.py::test_trading_dashboard_uses_selected_payment_wallet_balance",
             "tests/trading/core/test_trading_engine.py::test_trading_dashboard_rejects_inactive_selected_payment_wallet",
             "tests/trading/core/test_trading_engine.py::test_exchange_order_rejects_user_multisig_receive_only_wallet_source",
@@ -151,38 +183,30 @@ def main() -> int:
             "tests/trading/core/test_trading_engine.py::test_mixed_trial_and_real_points_buy_only_records_real_points_on_chain",
             "tests/trading/core/test_trading_engine.py::test_spot_cfd_principal_payout_and_fee_flow_through_exchange_fund",
             "tests/trading/core/test_trading_engine.py::test_margin_cfd_price_loss_is_collected_by_exchange_reserve_pool",
-        ],
+        ),
         timeout=180,
     ))
     steps.append(run_step(
         "product_service_revenue_accounting_tests",
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            "-q",
+        pytest_command(
             "tests/video/api/test_video_tips.py::test_video_tip_debits_viewer_credits_uploader_and_is_idempotent",
             "tests/points/test_governance_branch.py::test_official_treasury_signer_center_reports_service_fee_income",
             "tests/points/test_points_chain.py::test_pc0_spend_points_debits_internal_hot_wallet_immediately",
-        ],
+        ),
         timeout=180,
     ))
     steps.append(run_step(
         "flask_werkzeug_hardening_tests",
-        [sys.executable, "-m", "pytest", "-q", "tests/security/gates/test_flask_hardening.py"],
+        pytest_command("tests/security/gates/test_flask_hardening.py"),
         timeout=180,
     ))
     steps.append(run_step(
         "feature_flag_and_production_guard_tests",
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            "-q",
+        pytest_command(
             "tests/platform/test_feature_flags.py",
             "tests/platform/test_release_policy.py",
             "tests/points/test_chain_production_only.py",
-        ],
+        ),
         timeout=240,
     ))
 
@@ -215,12 +239,11 @@ def main() -> int:
                 args.base_url,
                 "--username",
                 "root",
-                "--password",
-                args.root_password,
                 "--out",
-                str(ROOT / "artifacts" / "qa" / "playwright" / "pointschain_governance_dispute_probe.json"),
+                str(test_artifact_path("qa", "playwright", "pointschain_governance_dispute_probe.json")),
             ],
             timeout=180,
+            env_overrides={"HACKME_ROOT_PASSWORD": args.root_password},
         ))
     if not args.skip_live and args.runtime_root:
         live_results["requested"] = True
@@ -232,7 +255,7 @@ def main() -> int:
                 "--runtime-root",
                 args.runtime_root,
                 "--out",
-                str(ROOT / "artifacts" / "qa" / "pointschain_realistic_recovery_drill.json"),
+                str(test_artifact_path("qa", "pointschain_realistic_recovery_drill.json")),
             ],
             timeout=240,
         ))

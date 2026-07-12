@@ -422,3 +422,25 @@ async function loadUsers(page = adminUsersPage) {
     flash(adminUsersMsgEl(), err.message || "會員清單讀取失敗", false);
   }
 }
+
+function resetAdminUsersAccountState() {
+  closeAdminUserActionMenus();
+  users = [];
+  adminUsersPage = 1;
+  adminUsersPagination = { page: 1, page_size: adminUsersPageSize, total: 0, total_pages: 1, sort: "id", order: "asc", q: "" };
+  adminUsersRoleCounts = {};
+  selectedPendingUserIds.clear();
+  const tbody = $("user-table")?.querySelector("tbody");
+  if (tbody) tbody.replaceChildren();
+  const search = $("admin-user-search");
+  if (search) search.value = "";
+  const info = $("admin-users-page-info");
+  if (info) info.textContent = "";
+  const msg = adminUsersMsgEl();
+  if (msg) {
+    msg.textContent = "";
+    msg.className = "msg";
+  }
+}
+
+document.addEventListener("hackme:account-context-changed", resetAdminUsersAccountState);

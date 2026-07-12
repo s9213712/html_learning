@@ -42,7 +42,7 @@ def test_history_apply_restores_full_generation_payload():
     assert "function comfyuiHistorySeedModeForApply(payload = {}, workflowPresetId = 0)" in js
     assert '["comfyui-seed-after-generate", historySeedMode],' in js
     assert '.filter(([id]) => !(workflowPresetId > 0 && id === "comfyui-model-select"))' in js
-    assert 'await applyComfyuiHistoryAssets(comfyuiHistoryInputAssets(item, payload));' in js
+    assert 'await applyComfyuiHistoryAssets(comfyuiHistoryInputAssets(item, payload), operation);' in js
     assert 'const targetView = payload.diffusers_model_repo ? "hf" : "generate";' in js
     assert 'setComfyuiView(targetView);' in js
     assert 'checked = targetView !== "hf" && controlEnabled' in js

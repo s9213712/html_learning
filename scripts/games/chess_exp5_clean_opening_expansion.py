@@ -14,7 +14,6 @@ from collections import Counter
 from datetime import datetime
 import hashlib
 import json
-import os
 from pathlib import Path
 import sys
 
@@ -30,11 +29,14 @@ from scripts.games.chess_exp5_strength_gate import _train_row_signature  # noqa:
 from services.games.chess_nnue import choose_experiment_nnue_move  # noqa: E402
 
 
-DEFAULT_RESULTS_ROOT = Path(os.environ.get("HACKME_CHESS_RESULTS_DIR", str(ROOT / "runtime" / "reports" / "games" / "chess_results")))
+from scripts.games.common_paths import chess_results_root, runtime_model_path  # noqa: E402
+
+
+DEFAULT_RESULTS_ROOT = chess_results_root()
 DEFAULT_TRAIN_ROWS = DEFAULT_RESULTS_ROOT / "exp5_08_clean_pool" / "inputs" / "exp5_08_train_clean_only.jsonl"
 DEFAULT_BENCHMARK_SUMMARY = DEFAULT_RESULTS_ROOT / "exp5_13_rule_smoke_stalemate_fix_check" / "summary.json"
 DEFAULT_OUTPUT_DIR = DEFAULT_RESULTS_ROOT / "exp5_14b_clean_opening_heldout"
-DEFAULT_PRODUCTION_MODEL = ROOT / "runtime" / "games" / "models" / "chess_experiment_5_nnue_experience.json"
+DEFAULT_PRODUCTION_MODEL = runtime_model_path("chess_experiment_5_nnue_experience.json")
 DEFAULT_PROMOTED_STAGE_CANDIDATE = DEFAULT_RESULTS_ROOT / "exp5_08_stage_candidate" / "chess_experiment_5_nnue_stage_candidate.json"
 DEFAULT_BASELINE_MODEL = DEFAULT_PRODUCTION_MODEL
 DEFAULT_SEARCH_PROFILE = "fixed_depth_strong"

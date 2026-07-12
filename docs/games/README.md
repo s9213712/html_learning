@@ -71,7 +71,10 @@ runtime AI 入口是 `POST /api/games/<game_key>/ai-move`，只接受這三個 `
 python3 scripts/games/setup_katago.py
 ```
 
-預設會安裝到 `runtime/katago`，後端會自動偵測，不需要額外 export。若改用自訂路徑，source 該目錄下的 `hackme_katago.env`，或同格式設定 `HACKME_KATAGO_BIN`、`HACKME_KATAGO_CONFIG`、`HACKME_KATAGO_MODEL`。西洋棋不走這條 API。
+預設會安裝到 `$HACKME_RUNTIME_DIR/katago`；未設定 runtime 時使用外部 XDG state 目錄，
+不會寫入 repo。後端會自動偵測，不需要額外 export。若改用自訂路徑，source 該目錄下的
+`hackme_katago.env`，或同格式設定 `HACKME_KATAGO_BIN`、`HACKME_KATAGO_CONFIG`、
+`HACKME_KATAGO_MODEL`。西洋棋不走這條 API。
 
 ### 西洋棋
 
@@ -96,7 +99,7 @@ PV、source game id、chosen/source move 或逐題答案。
 3. 三棋共用棋盤邏輯在 `public/js/games/board-game-shared.js`。
 4. 使用者切到 `對電腦` 後，前端呼叫 `POST /api/games/<game_key>/ai-move`。
 5. `routes/games.py` 驗證登入、CSRF、game key、難度與棋盤 payload。
-6. `services/games/board_ai.py` 產生 AI 決策；圍棋 `katago` 難度會先找環境變數，再找 `runtime/katago`。
+6. `services/games/board_ai.py` 產生 AI 決策；圍棋 `katago` 難度會先找環境變數，再找外部 runtime 的 `katago/`。
 7. 前端套用回傳的 `move/pass/finish`，並留在同一頁。
 
 ### 維護者量化三棋棋力
@@ -104,7 +107,7 @@ PV、source game id、chosen/source move 或逐題答案。
 1. 執行 `python3 scripts/games/board_ai_benchmark.py`。
 2. CLI 呼叫 `services/games/board_arena.py::run_board_ai_benchmark(...)`。
 3. arena 跑 `random/easy/normal/hard` round-robin，並執行 deterministic skill suite。
-4. 報告寫到 `runtime/reports/games/board_ai_benchmark_*.json`。
+4. standalone 報告寫到 `/tmp/hackme_web_test_artifacts/games/board_ai_benchmark/`。
 5. 先看 `illegal_moves`、`skill_suite.pass_rate`、`standings.score_rate`、`elo`，再決定是否允許後續 AI 強化或 promotion。
 
 ## 放置規則

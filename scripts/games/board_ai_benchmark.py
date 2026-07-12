@@ -22,10 +22,10 @@ if str(ROOT) not in sys.path:
 from services.games.board_arena import (  # noqa: E402
     BOARD_ARENA_ENGINES,
     DEFAULT_BOARD_ARENA_GAMES,
-    default_board_reports_dir,
     run_board_ai_benchmark,
     write_board_ai_benchmark_report,
 )
+from scripts.test_artifacts import test_artifact_path  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -43,7 +43,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rounds", type=int, default=1, help="Rounds per unordered engine pair; each round swaps colors.")
     parser.add_argument("--max-plies", type=int, default=0, help="Optional max plies per match; 0 uses per-game defaults.")
     parser.add_argument("--seed", type=int, default=20260513)
-    parser.add_argument("--output-dir", default="", help="Report directory. Default: runtime/reports/games.")
+    parser.add_argument(
+        "--output-dir",
+        default="",
+        help="Report directory. Default: /tmp/hackme_web_test_artifacts/games/board_ai_benchmark.",
+    )
     parser.add_argument("--json", action="store_true", help="Print the full report JSON to stdout.")
     return parser.parse_args()
 
@@ -61,7 +65,9 @@ def main() -> int:
     args = parse_args()
     games = _split_csv(args.games)
     engines = _split_csv(args.engines)
-    output_dir = Path(args.output_dir) if args.output_dir else default_board_reports_dir()
+    output_dir = Path(args.output_dir).expanduser().resolve() if args.output_dir else test_artifact_path(
+        "games", "board_ai_benchmark"
+    )
     _progress(
         "started "
         f"games={','.join(games)} engines={','.join(engines)} "

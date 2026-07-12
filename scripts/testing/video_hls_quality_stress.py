@@ -11,10 +11,10 @@ This probe is intentionally external to the app. It can:
 
 Example:
 
+    export HACKME_HLS_STRESS_ACCOUNTS_JSON
     python3 scripts/testing/video_hls_quality_stress.py \
       --base-url http://127.0.0.1:5017 \
       --video /tmp/hackme_video_quality_sample.mp4 \
-      --accounts test:test test2:test2 test3:test3 test4:test4 \
       --db /tmp/hackme_video_quality_direct_5017/runtime/database/database.db \
       --runtime-marker /tmp/hackme_video_quality_direct_5017 \
       --upload --wait --measure
@@ -32,6 +32,8 @@ import math
 import mimetypes
 import os
 import re
+import secrets
+import shutil
 import sqlite3
 import statistics
 import subprocess
@@ -41,10 +43,15 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
 import urllib3
 
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 TERMINAL_JOB_STATUSES = {"succeeded", "failed", "cancelled", "expired"}
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -240,6 +247,9 @@ def upload_video(
     video_path: Path,
     privacy_mode: str,
     timeout_seconds: int,
+    visibility: str = "public",
+    share_password: str = "",
+    share_max_views: int = 0,
 ) -> dict[str, Any]:
     auth = login(base_url, username, password)
     result: dict[str, Any] = {
@@ -256,13 +266,17 @@ def upload_video(
     title = f"stress-{username}-{utc_ms()}"
     started = time.perf_counter()
     mime_type = mimetypes.guess_type(video_path.name)[0] or "application/octet-stream"
-    body = StreamingMultipartBody(
-        fields={
+    fields = {
             "title": title,
             "description": "Long video quality stress probe",
-            "visibility": "public",
+            "visibility": visibility,
             "privacy_mode": privacy_mode,
-        },
+        }
+    if visibility == "unlisted":
+        fields["share_password"] = share_password
+        fields["share_max_views"] = str(max(0, int(share_max_views)))
+    body = StreamingMultipartBody(
+        fields=fields,
         file_field="video",
         file_path=video_path,
         content_type=mime_type,
@@ -298,6 +312,8 @@ def upload_video(
                 "file_id": file_info.get("file_id") or video.get("cloud_file_id"),
                 "stream_status": stream_asset.get("status"),
                 "stream_warning": payload.get("stream_warning") or "",
+                "share_url": video.get("share_url") or ((video.get("share_link") or {}).get("url")),
+                "share_password_required": bool(video.get("share_password_required")),
             })
         return result
     except Exception as exc:
@@ -515,9 +531,51 @@ def summarize_monitor(samples: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def uploaded_target_ids(upload_phase: dict[str, Any] | None) -> tuple[set[int], set[str]]:
+    video_ids: set[int] = set()
+    file_ids: set[str] = set()
+    for item in (upload_phase or {}).get("uploads") or []:
+        try:
+            video_id = int(item.get("video_id") or 0)
+        except (TypeError, ValueError):
+            video_id = 0
+        file_id = str(item.get("file_id") or "").strip()
+        if video_id > 0:
+            video_ids.add(video_id)
+        if file_id:
+            file_ids.add(file_id)
+    return video_ids, file_ids
+
+
+def filter_db_state_for_uploads(state: dict[str, Any], upload_phase: dict[str, Any] | None) -> dict[str, Any]:
+    video_ids, file_ids = uploaded_target_ids(upload_phase)
+    if not video_ids and not file_ids:
+        if upload_phase is None:
+            return state
+        filtered = dict(state)
+        for key in ("videos", "jobs", "assets", "variants", "subtitles"):
+            filtered[key] = []
+        filtered["target_video_ids"] = []
+        filtered["target_file_ids"] = []
+        return filtered
+    filtered = dict(state)
+    filtered["videos"] = [row for row in state.get("videos") or [] if int(row.get("id") or 0) in video_ids]
+    filtered["jobs"] = [
+        row
+        for row in state.get("jobs") or []
+        if str(row.get("source_ref") or "").removeprefix("media_stream:") in file_ids
+    ]
+    filtered["assets"] = [row for row in state.get("assets") or [] if str(row.get("uploaded_file_id") or "") in file_ids]
+    filtered["variants"] = [row for row in state.get("variants") or [] if str(row.get("uploaded_file_id") or "") in file_ids]
+    filtered["subtitles"] = [row for row in state.get("subtitles") or [] if str(row.get("uploaded_file_id") or "") in file_ids]
+    filtered["target_video_ids"] = sorted(video_ids)
+    filtered["target_file_ids"] = sorted(file_ids)
+    return filtered
+
+
 def run_upload_phase(args: argparse.Namespace) -> dict[str, Any]:
     video_path = Path(args.video)
-    accounts = parse_accounts(args.accounts)
+    accounts = parse_accounts(args.accounts, os.environ.get("HACKME_HLS_STRESS_ACCOUNTS_JSON", ""))
     if not video_path.exists():
         raise SystemExit(f"video not found: {video_path}")
     samples: list[dict[str, Any]] = []
@@ -537,35 +595,58 @@ def run_upload_phase(args: argparse.Namespace) -> dict[str, Any]:
     monitor.start()
     started_ms = utc_ms()
     uploads: list[dict[str, Any]] = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(accounts))) as executor:
-        futures = [
-            executor.submit(
-                upload_video,
-                base_url=args.base_url,
-                username=username,
-                password=password,
-                video_path=video_path,
-                privacy_mode=args.privacy_mode,
-                timeout_seconds=args.upload_timeout_seconds,
-            )
-            for username, password in accounts
-        ]
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(accounts)))
+    futures = {
+        executor.submit(
+            upload_video,
+            base_url=args.base_url,
+            username=username,
+            password=password,
+            video_path=video_path,
+            privacy_mode=args.privacy_mode,
+            timeout_seconds=args.upload_timeout_seconds,
+            visibility=args.visibility,
+            share_password=args.share_password,
+            share_max_views=args.share_max_views,
+        ): username
+        for username, password in accounts
+    }
+    pending = set(futures)
+    try:
         for future in concurrent.futures.as_completed(futures, timeout=args.upload_timeout_seconds + 60):
+            pending.discard(future)
             try:
                 uploads.append(future.result())
             except Exception as exc:
-                uploads.append({"ok": False, "error": exc.__class__.__name__, "message": str(exc)})
+                uploads.append({
+                    "username": futures[future],
+                    "ok": False,
+                    "error": exc.__class__.__name__,
+                    "message": str(exc),
+                })
+    except concurrent.futures.TimeoutError:
+        for future in pending:
+            future.cancel()
+            uploads.append({
+                "username": futures[future],
+                "ok": False,
+                "error": "upload_phase_timeout",
+                "message": f"parallel upload did not complete within {args.upload_timeout_seconds + 60}s",
+            })
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
     if args.post_upload_observe_seconds > 0:
         time.sleep(args.post_upload_observe_seconds)
     stop_event.set()
     monitor.join(timeout=5)
     result = {
         "phase": "upload",
-        "ok": any(bool(item.get("ok")) for item in uploads),
+        "ok": len(uploads) == len(accounts) and bool(uploads) and all(bool(item.get("ok")) for item in uploads),
         "base_url": args.base_url,
         "video": str(video_path),
         "video_size_bytes": video_path.stat().st_size,
         "privacy_mode": args.privacy_mode,
+        "visibility": args.visibility,
         "accounts": [username for username, _ in accounts],
         "started_at_ms": started_ms,
         "finished_at_ms": utc_ms(),
@@ -599,13 +680,13 @@ def format_wait_status(state: dict[str, Any], processes: list[dict[str, Any]], e
     return json.dumps({"elapsed_s": elapsed_s, "jobs": jobs, "variants": variants, "ffmpeg": ffmpeg}, ensure_ascii=False)
 
 
-def wait_for_hls(args: argparse.Namespace) -> dict[str, Any]:
+def wait_for_hls(args: argparse.Namespace, upload_phase: dict[str, Any] | None = None) -> dict[str, Any]:
     started = time.time()
     history: list[dict[str, Any]] = []
     last_signature = ""
     last_change_at = time.time()
     while True:
-        state = db_state(Path(args.db))
+        state = filter_db_state_for_uploads(db_state(Path(args.db)), upload_phase)
         processes = ps_snapshot(args.runtime_marker)
         elapsed_s = int(time.time() - started)
         history.append({"t_ms": utc_ms(), "state": state, "processes": processes})
@@ -623,9 +704,12 @@ def wait_for_hls(args: argparse.Namespace) -> dict[str, Any]:
                 "history_tail": history[-10:],
             }
         if jobs and all(str(job.get("status") or "") in TERMINAL_JOB_STATUSES for job in jobs):
+            failed_jobs = [job for job in jobs if str(job.get("status") or "") != "succeeded"]
             return {
                 "phase": "wait",
-                "ok": True,
+                "ok": not failed_jobs,
+                "error": "hls_job_terminal_failure" if failed_jobs else "",
+                "failed_jobs": failed_jobs,
                 "elapsed_s": elapsed_s,
                 "final_state": state,
                 "final_processes": processes,
@@ -846,13 +930,13 @@ def measure_subtitle_tracks(
     return results
 
 
-def measure_hls_variants(args: argparse.Namespace) -> dict[str, Any]:
+def measure_hls_variants(args: argparse.Namespace, upload_phase: dict[str, Any] | None = None) -> dict[str, Any]:
     auth = login(args.base_url, args.measure_username, args.measure_password)
     if not auth["ok"]:
         return {"phase": "measure", "ok": False, "error": "login_failed", "login": auth["login"]}
     session = auth["session"]
     token = auth["token"]
-    state = db_state(Path(args.db))
+    state = filter_db_state_for_uploads(db_state(Path(args.db)), upload_phase)
     measurements: list[dict[str, Any]] = []
     phase_ok = True
     videos = state.get("videos") or []
@@ -886,15 +970,28 @@ def measure_hls_variants(args: argparse.Namespace) -> dict[str, Any]:
                 "payload": {
                     "mode": payload.get("mode") if isinstance(payload, dict) else None,
                     "streaming_ready": payload.get("streaming_ready") if isinstance(payload, dict) else None,
+                    "duration_seconds": (
+                        payload.get("duration_seconds") or ((payload.get("status") or {}).get("duration_seconds"))
+                        if isinstance(payload, dict)
+                        else None
+                    ),
                     "variants": payload.get("variants") if isinstance(payload, dict) else [],
+                    "audio_tracks": payload.get("audio_tracks") if isinstance(payload, dict) else [],
                     "subtitles": payload.get("subtitles") if isinstance(payload, dict) else [],
                 },
             }
             if isinstance(payload, dict):
                 variants = list(payload.get("variants") or [])
+                audio_tracks = list(payload.get("audio_tracks") or [])
                 subtitle_tracks = list(payload.get("subtitles") or [])
                 if not payload.get("streaming_ready") or not variants:
                     entry["stream_error"] = "streaming_not_ready_or_variants_missing"
+                    phase_ok = False
+                if len(audio_tracks) < max(0, int(args.expect_audio_tracks)):
+                    entry["audio_track_error"] = {
+                        "expected": int(args.expect_audio_tracks),
+                        "actual": len(audio_tracks),
+                    }
                     phase_ok = False
                 entry["subtitles"] = measure_subtitle_tracks(
                     base_url=args.base_url,
@@ -922,6 +1019,14 @@ def measure_hls_variants(args: argparse.Namespace) -> dict[str, Any]:
                 response = session.get(f"{args.base_url}{playlist_url}", headers={"X-CSRF-Token": token}, timeout=20)
                 paths = parse_playlist(response.text)
                 variant_entry["playlist_paths"] = len(paths)
+                media_segment_count = len([path for path in paths if path != "init.mp4"])
+                variant_entry["media_segment_count"] = media_segment_count
+                if media_segment_count < max(1, int(args.minimum_segments_per_variant)):
+                    variant_entry["segment_count_error"] = {
+                        "expected_minimum": int(args.minimum_segments_per_variant),
+                        "actual": media_segment_count,
+                    }
+                    phase_ok = False
                 variant_entry["burst"] = measure_variant_burst(
                     base_url=args.base_url,
                     session=session,
@@ -948,15 +1053,528 @@ def measure_hls_variants(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
-def parse_accounts(raw_accounts: list[str]) -> list[tuple[str, str]]:
+def share_token_from_url(value: str) -> str:
+    parsed = urlparse(str(value or ""))
+    path = parsed.path or str(value or "").split("?", 1)[0].split("#", 1)[0]
+    marker = "/shared/videos/"
+    if marker not in path:
+        return ""
+    return path.split(marker, 1)[1].split("/", 1)[0].strip()
+
+
+def anonymous_session_with_csrf(base_url: str) -> tuple[requests.Session, str, dict[str, Any]]:
+    session = requests.Session()
+    session.verify = not base_url.startswith("https://")
+    status, payload, elapsed = request_json(session, "GET", f"{base_url}/api/csrf-token", timeout=20)
+    token = ""
+    if isinstance(payload, dict):
+        token = str(payload.get("csrf_token") or payload.get("token") or "")
+    token = str(session.cookies.get("csrf_token") or token)
+    return session, token, {"status": status, "elapsed_ms": round(elapsed * 1000, 2), "ok": status == 200 and bool(token)}
+
+
+def fetch_text_result(session: requests.Session, url: str, *, timeout: int = 30) -> tuple[dict[str, Any], str]:
+    started = time.perf_counter()
+    try:
+        response = session.get(url, timeout=timeout)
+        text = response.text
+        return {
+            "ok": response.status_code == 200,
+            "status": response.status_code,
+            "elapsed_ms": round((time.perf_counter() - started) * 1000, 2),
+            "bytes": len(response.content),
+            "content_type": response.headers.get("Content-Type") or "",
+        }, text
+    except Exception as exc:
+        return {
+            "ok": False,
+            "status": 0,
+            "elapsed_ms": round((time.perf_counter() - started) * 1000, 2),
+            "bytes": 0,
+            "error": f"{exc.__class__.__name__}: {exc}",
+        }, ""
+
+
+def browser_seek_shared_video(
+    *,
+    base_url: str,
+    share_url: str,
+    share_password: str,
+    mobile: bool,
+    minimum_duration_seconds: float,
+) -> dict[str, Any]:
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception as exc:
+        return {"ok": False, "error": f"playwright_import_failed:{exc}"}
+    viewport = {"width": 390, "height": 844} if mobile else {"width": 1366, "height": 768}
+    errors: list[str] = []
+    result: dict[str, Any] = {"ok": False, "viewport": "mobile" if mobile else "desktop"}
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        context = browser.new_context(ignore_https_errors=True, viewport=viewport)
+        page = context.new_page()
+        page.on("pageerror", lambda error: errors.append(f"pageerror:{error}"))
+        page.on(
+            "console",
+            lambda message: errors.append(f"console.{message.type}:{message.text}")
+            if message.type == "error" and "favicon" not in message.text.lower()
+            else None,
+        )
+        try:
+            target = f"{base_url}{share_url}" if share_url.startswith("/") else share_url
+            page.goto(target, wait_until="domcontentloaded", timeout=60_000)
+            page.wait_for_selector("#share-password-form:not(.hidden), #player-host:not(.hidden)", timeout=30_000)
+            if page.locator("#share-password-form:not(.hidden)").count():
+                page.fill("#share-password", share_password)
+                page.locator("#share-password-form button[type=submit]").click()
+            page.wait_for_selector("#player-host:not(.hidden) #shared-player", timeout=60_000)
+            page.wait_for_function(
+                """minimum => {
+                    const video = document.querySelector('#shared-player');
+                    return !!video && Number.isFinite(video.duration) && video.duration >= minimum && video.readyState >= 1;
+                }""",
+                arg=max(1.0, float(minimum_duration_seconds)),
+                timeout=90_000,
+            )
+            seek = page.evaluate(
+                """async () => {
+                    const video = document.querySelector('#shared-player');
+                    video.muted = true;
+                    const before = Number(video.currentTime || 0);
+                    const duration = Number(video.duration || 0);
+                    const target = Math.max(5, Math.min(duration - 2, duration * 0.62));
+                    let event = 'timeout';
+                    const waited = new Promise(resolve => {
+                        const finish = value => { event = value; resolve(); };
+                        video.addEventListener('seeked', () => finish('seeked'), {once: true});
+                        video.addEventListener('timeupdate', () => {
+                            if (Math.abs(Number(video.currentTime || 0) - target) < 12) finish('timeupdate');
+                        }, {once: true});
+                        setTimeout(() => resolve(), 30000);
+                    });
+                    video.currentTime = target;
+                    let playError = '';
+                    try { await video.play(); } catch (error) { playError = String(error?.message || error); }
+                    await waited;
+                    return {
+                        before,
+                        duration,
+                        target,
+                        currentTime: Number(video.currentTime || 0),
+                        readyState: Number(video.readyState || 0),
+                        networkState: Number(video.networkState || 0),
+                        paused: !!video.paused,
+                        event,
+                        playError,
+                    };
+                }"""
+            )
+            layout = page.evaluate(
+                """() => ({
+                    viewportWidth: document.documentElement.clientWidth,
+                    scrollWidth: document.documentElement.scrollWidth,
+                    playerWidth: Math.round(document.querySelector('#shared-player')?.getBoundingClientRect().width || 0),
+                    playerHeight: Math.round(document.querySelector('#shared-player')?.getBoundingClientRect().height || 0),
+                })"""
+            )
+            fatal_errors = [item for item in errors if "status of 5" in item or item.startswith("pageerror:")]
+            seek_ok = (
+                float(seek.get("duration") or 0) >= max(1.0, float(minimum_duration_seconds))
+                and abs(float(seek.get("currentTime") or 0) - float(seek.get("target") or 0)) < 20
+                and int(seek.get("readyState") or 0) >= 1
+            )
+            layout_ok = (
+                int(layout.get("playerWidth") or 0) > 0
+                and int(layout.get("playerHeight") or 0) > 0
+                and int(layout.get("scrollWidth") or 0) <= int(layout.get("viewportWidth") or 0) + 2
+            )
+            result.update({
+                "ok": bool(seek_ok and layout_ok and not fatal_errors),
+                "seek": seek,
+                "layout": layout,
+                "fatal_errors": fatal_errors[:20],
+                "console_errors": errors[:50],
+            })
+            return result
+        except Exception as exc:
+            result.update({"error": f"{exc.__class__.__name__}: {exc}", "console_errors": errors[:50]})
+            return result
+        finally:
+            context.close()
+            browser.close()
+
+
+def verify_share_links(args: argparse.Namespace, upload_phase: dict[str, Any] | None) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    phase_ok = True
+    successful = [item for item in (upload_phase or {}).get("uploads") or [] if item.get("ok")]
+    for index, upload in enumerate(successful):
+        share_url = str(upload.get("share_url") or "")
+        share_token = share_token_from_url(share_url)
+        video_id = int(upload.get("video_id") or 0)
+        username = str(upload.get("username") or "")
+        row: dict[str, Any] = {
+            "username": username,
+            "video_id": video_id,
+            "share_token_present": bool(share_token),
+        }
+        if not share_token or video_id <= 0:
+            row["error"] = "upload_missing_share_token_or_video_id"
+            row["ok"] = False
+            rows.append(row)
+            phase_ok = False
+            continue
+
+        anonymous, csrf, csrf_result = anonymous_session_with_csrf(args.base_url)
+        row["csrf"] = csrf_result
+        locked_status, locked_payload, _ = request_json(
+            anonymous,
+            "GET",
+            f"{args.base_url}/api/videos/shared/{share_token}/playback",
+            timeout=30,
+        )
+        wrong_status, wrong_payload, _ = request_json(
+            anonymous,
+            "POST",
+            f"{args.base_url}/api/videos/shared/{share_token}/unlock",
+            json={"password": "not-the-campaign-password"},
+            headers={"X-CSRF-Token": csrf},
+            timeout=30,
+        )
+        unlock_status, unlock_payload, unlock_elapsed = request_json(
+            anonymous,
+            "POST",
+            f"{args.base_url}/api/videos/shared/{share_token}/unlock",
+            json={"password": args.share_password},
+            headers={"X-CSRF-Token": csrf},
+            timeout=30,
+        )
+        share_session = str(unlock_payload.get("share_session_id") or "") if isinstance(unlock_payload, dict) else ""
+        playback_status, playback_payload, playback_elapsed = request_json(
+            anonymous,
+            "GET",
+            f"{args.base_url}/api/videos/shared/{share_token}/playback",
+            params={"share_session": share_session},
+            timeout=30,
+        )
+        playback_payload = playback_payload if isinstance(playback_payload, dict) else {}
+        master_url = str(playback_payload.get("master_url") or "")
+        master_result, master_text = fetch_text_result(
+            anonymous,
+            f"{args.base_url}{master_url}" if master_url.startswith("/") else master_url,
+            timeout=60,
+        ) if master_url else ({"ok": False, "status": 0, "error": "master_url_missing"}, "")
+        variant_result: dict[str, Any] = {"ok": False, "error": "variant_missing"}
+        segment_results: list[dict[str, Any]] = []
+        variants = list(playback_payload.get("variants") or [])
+        if variants:
+            playlist_url = str(variants[0].get("playlist_url") or "")
+            absolute_playlist = f"{args.base_url}{playlist_url}" if playlist_url.startswith("/") else playlist_url
+            variant_result, variant_text = fetch_text_result(anonymous, absolute_playlist, timeout=60)
+            segment_paths = parse_playlist(variant_text)
+            chosen = choose_segment_paths(segment_paths, 5)
+            for relative in chosen:
+                parsed_playlist = urlparse(absolute_playlist)
+                base_path = parsed_playlist.path.rsplit("/", 1)[0]
+                if relative.startswith("/"):
+                    segment_url = f"{parsed_playlist.scheme}://{parsed_playlist.netloc}{relative}"
+                else:
+                    segment_url = f"{parsed_playlist.scheme}://{parsed_playlist.netloc}{base_path}/{relative}"
+                segment_results.append(timed_get(anonymous, segment_url, "", timeout=60))
+            variant_result["playlist_paths"] = len(segment_paths)
+            variant_result["sampled_segments"] = len(segment_results)
+
+        subtitle_results = measure_subtitle_tracks(
+            base_url=args.base_url,
+            session=anonymous,
+            token="",
+            tracks=list(playback_payload.get("subtitles") or []),
+        )
+        browser_checks: list[dict[str, Any]] = []
+        if args.browser_seek and index == 0:
+            browser_checks.append(browser_seek_shared_video(
+                base_url=args.base_url,
+                share_url=share_url,
+                share_password=args.share_password,
+                mobile=False,
+                minimum_duration_seconds=args.minimum_source_duration_seconds,
+            ))
+            if args.browser_mobile:
+                browser_checks.append(browser_seek_shared_video(
+                    base_url=args.base_url,
+                    share_url=share_url,
+                    share_password=args.share_password,
+                    mobile=True,
+                    minimum_duration_seconds=args.minimum_source_duration_seconds,
+                ))
+
+        owner = login(args.base_url, username, next(
+            (password for account_name, password in parse_accounts(args.accounts, os.environ.get("HACKME_HLS_STRESS_ACCOUNTS_JSON", "")) if account_name == username),
+            "",
+        ))
+        revoke_status, revoke_payload, revoke_elapsed = request_json(
+            owner["session"],
+            "DELETE",
+            f"{args.base_url}/api/videos/{video_id}/share-link",
+            headers={"X-CSRF-Token": owner["token"]},
+            timeout=30,
+        ) if owner.get("ok") else (0, {"error": "owner_login_failed"}, 0.0)
+        revoked_status, revoked_payload, _ = request_json(
+            anonymous,
+            "GET",
+            f"{args.base_url}/api/videos/shared/{share_token}/playback",
+            params={"share_session": share_session},
+            timeout=30,
+        )
+        revoked_master, _ = fetch_text_result(
+            anonymous,
+            f"{args.base_url}{master_url}" if master_url.startswith("/") else master_url,
+            timeout=30,
+        ) if master_url else ({"status": 0}, "")
+
+        locked_ok = locked_status in {401, 403}
+        wrong_ok = wrong_status in {401, 403}
+        unlock_ok = unlock_status == 200 and bool(share_session)
+        playback_duration = playback_payload.get("duration_seconds") or ((playback_payload.get("status") or {}).get("duration_seconds"))
+        playback_ok = (
+            playback_status == 200
+            and playback_payload.get("mode") == "hls"
+            and bool(playback_payload.get("streaming_ready"))
+            and float(playback_duration or 0) >= max(0.0, float(args.minimum_source_duration_seconds))
+            and len(playback_payload.get("audio_tracks") or []) >= max(0, int(args.expect_audio_tracks))
+        )
+        subtitle_ok = not args.expect_subtitles or bool(subtitle_results) and all(item.get("ok") for item in subtitle_results)
+        segment_ok = bool(segment_results) and all(item.get("status") == 200 and int(item.get("bytes") or 0) > 0 for item in segment_results)
+        browser_ok = not browser_checks or all(item.get("ok") for item in browser_checks)
+        revoke_ok = revoke_status == 200 and revoked_status in {404, 410} and int(revoked_master.get("status") or 0) in {404, 410}
+        row_ok = all((
+            locked_ok,
+            wrong_ok,
+            unlock_ok,
+            playback_ok,
+            master_result.get("ok") and "#EXTM3U" in master_text,
+            variant_result.get("ok"),
+            segment_ok,
+            subtitle_ok,
+            browser_ok,
+            revoke_ok,
+        ))
+        row.update({
+            "ok": bool(row_ok),
+            "locked_without_password": {"status": locked_status, "error": (locked_payload or {}).get("error") if isinstance(locked_payload, dict) else ""},
+            "wrong_password": {"status": wrong_status, "error": (wrong_payload or {}).get("error") if isinstance(wrong_payload, dict) else ""},
+            "unlock": {"status": unlock_status, "elapsed_ms": round(unlock_elapsed * 1000, 2), "share_session_present": bool(share_session)},
+            "playback": {
+                "status": playback_status,
+                "elapsed_ms": round(playback_elapsed * 1000, 2),
+                "mode": playback_payload.get("mode"),
+                "streaming_ready": playback_payload.get("streaming_ready"),
+                "duration_seconds": playback_duration,
+                "variants": len(playback_payload.get("variants") or []),
+                "audio_tracks": len(playback_payload.get("audio_tracks") or []),
+                "subtitles": len(playback_payload.get("subtitles") or []),
+            },
+            "master": {**master_result, "extm3u": "#EXTM3U" in master_text},
+            "variant": variant_result,
+            "segments": segment_results,
+            "subtitles": subtitle_results,
+            "browser": browser_checks,
+            "revoke": {
+                "status": revoke_status,
+                "elapsed_ms": round(revoke_elapsed * 1000, 2),
+                "post_revoke_playback_status": revoked_status,
+                "post_revoke_master_status": revoked_master.get("status"),
+                "error": (revoked_payload or {}).get("error") if isinstance(revoked_payload, dict) else "",
+            },
+        })
+        rows.append(row)
+        phase_ok = phase_ok and bool(row_ok)
+    if not successful:
+        phase_ok = False
+    return {"phase": "share", "ok": phase_ok, "shares": rows}
+
+
+def parse_accounts(raw_accounts: list[str], accounts_json: str = "") -> list[tuple[str, str]]:
     accounts: list[tuple[str, str]] = []
+    if not raw_accounts and str(accounts_json or "").strip():
+        try:
+            payload = json.loads(accounts_json)
+        except json.JSONDecodeError as exc:
+            raise ValueError("HACKME_HLS_STRESS_ACCOUNTS_JSON must be valid JSON") from exc
+        if not isinstance(payload, list):
+            raise ValueError("HACKME_HLS_STRESS_ACCOUNTS_JSON must be a JSON list")
+        for item in payload:
+            if not isinstance(item, dict):
+                raise ValueError("each HLS stress account must be an object")
+            username = str(item.get("username") or "").strip()
+            password = str(item.get("password") or "")
+            if not username or not password:
+                raise ValueError("each HLS stress account requires username and password")
+            accounts.append((username, password))
+        return accounts
     for raw in raw_accounts:
         username, sep, password = raw.partition(":")
         username = username.strip()
         if not username:
             continue
         accounts.append((username, password if sep else username))
+    if not accounts:
+        raise ValueError(
+            "upload phase requires HACKME_HLS_STRESS_ACCOUNTS_JSON or explicit --accounts"
+        )
     return accounts
+
+
+def probe_media_file(path: Path, ffprobe_bin: str = "ffprobe") -> dict[str, Any]:
+    executable = shutil.which(ffprobe_bin) or ffprobe_bin
+    try:
+        completed = subprocess.run(
+            [
+                executable,
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration,size:stream=index,codec_type,codec_name,width,height,channels:stream_tags=language,title",
+                "-of",
+                "json",
+                str(path),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        payload = json.loads(completed.stdout or "{}") if completed.returncode == 0 else {}
+    except Exception as exc:
+        return {"ok": False, "error": f"{exc.__class__.__name__}: {exc}", "path": str(path)}
+    streams = list(payload.get("streams") or [])
+    format_row = payload.get("format") or {}
+    return {
+        "ok": completed.returncode == 0,
+        "path": str(path),
+        "size_bytes": path.stat().st_size if path.exists() else 0,
+        "duration_seconds": round(float(format_row.get("duration") or 0.0), 3),
+        "video_streams": len([row for row in streams if row.get("codec_type") == "video"]),
+        "audio_streams": len([row for row in streams if row.get("codec_type") == "audio"]),
+        "subtitle_streams": len([row for row in streams if row.get("codec_type") == "subtitle"]),
+        "streams": streams,
+        "stderr": (completed.stderr or "")[-1000:],
+    }
+
+
+def generate_long_fixture(path: Path, *, duration_seconds: int, ffmpeg_bin: str, timeout_seconds: int) -> dict[str, Any]:
+    executable = shutil.which(ffmpeg_bin) or ffmpeg_bin
+    path.parent.mkdir(parents=True, exist_ok=True)
+    subtitle_path = path.with_suffix(".campaign.srt")
+    duration = max(10, int(duration_seconds))
+
+    def srt_time(seconds: float) -> str:
+        millis = max(0, int(seconds * 1000))
+        hours, remainder = divmod(millis, 3_600_000)
+        minutes, remainder = divmod(remainder, 60_000)
+        secs, ms = divmod(remainder, 1000)
+        return f"{hours:02d}:{minutes:02d}:{secs:02d},{ms:03d}"
+
+    cues = [
+        (1, 1.0, min(duration - 1.0, 8.0), "campaign start"),
+        (2, max(2.0, duration * 0.50), min(duration - 1.0, duration * 0.50 + 8.0), "campaign midpoint"),
+        (3, max(2.0, duration - 12.0), max(3.0, duration - 2.0), "campaign end"),
+    ]
+    subtitle_path.write_text(
+        "\n\n".join(f"{index}\n{srt_time(start)} --> {srt_time(end)}\n{text}" for index, start, end, text in cues) + "\n",
+        encoding="utf-8",
+    )
+    subtitle_codec = "mov_text" if path.suffix.lower() in {".mp4", ".m4v", ".mov"} else "srt"
+    command = [
+        executable,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        f"testsrc=duration={duration}:size=640x360:rate=2",
+        "-f",
+        "lavfi",
+        "-i",
+        f"sine=frequency=440:sample_rate=16000:duration={duration}",
+        "-f",
+        "lavfi",
+        "-i",
+        f"sine=frequency=880:sample_rate=16000:duration={duration}",
+        "-i",
+        str(subtitle_path),
+        "-map",
+        "0:v:0",
+        "-map",
+        "1:a:0",
+        "-map",
+        "2:a:0",
+        "-map",
+        "3:s:0",
+        "-metadata:s:a:0",
+        "language=jpn",
+        "-metadata:s:a:0",
+        "title=Japanese",
+        "-metadata:s:a:1",
+        "language=eng",
+        "-metadata:s:a:1",
+        "title=English",
+        "-metadata:s:s:0",
+        "language=zho",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-tune",
+        "zerolatency",
+        "-crf",
+        "34",
+        "-pix_fmt",
+        "yuv420p",
+        "-g",
+        "12",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "32k",
+        "-ac",
+        "1",
+        "-c:s",
+        subtitle_codec,
+        "-t",
+        str(duration),
+        str(path),
+    ]
+    started = time.perf_counter()
+    try:
+        completed = subprocess.run(command, check=False, capture_output=True, text=True, timeout=max(60, int(timeout_seconds)))
+        result = {
+            "ok": completed.returncode == 0 and path.exists() and path.stat().st_size > 0,
+            "returncode": completed.returncode,
+            "elapsed_seconds": round(time.perf_counter() - started, 3),
+            "requested_duration_seconds": duration,
+            "path": str(path),
+            "stderr": (completed.stderr or "")[-2000:],
+        }
+    except Exception as exc:
+        result = {
+            "ok": False,
+            "elapsed_seconds": round(time.perf_counter() - started, 3),
+            "requested_duration_seconds": duration,
+            "path": str(path),
+            "error": f"{exc.__class__.__name__}: {exc}",
+        }
+    finally:
+        try:
+            subtitle_path.unlink()
+        except FileNotFoundError:
+            pass
+    if result["ok"]:
+        result["media"] = probe_media_file(path)
+    return result
 
 
 def write_result(path: Path, result: dict[str, Any]) -> None:
@@ -971,8 +1589,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--db", default="/tmp/hackme_video_quality_direct_5017/runtime/database/database.db")
     parser.add_argument("--runtime-marker", default="/tmp/hackme_video_quality_direct_5017")
     parser.add_argument("--out", default="/tmp/hackme_video_hls_quality_stress_result.json")
-    parser.add_argument("--accounts", nargs="*", default=["test:test", "test2:test2", "test3:test3", "test4:test4"])
+    parser.add_argument(
+        "--accounts",
+        nargs="*",
+        default=[],
+        help="Legacy username:password entries. Prefer HACKME_HLS_STRESS_ACCOUNTS_JSON so secrets do not enter argv.",
+    )
     parser.add_argument("--privacy-mode", default="server_encrypted", choices=["standard_plain", "server_encrypted"])
+    parser.add_argument("--visibility", default="public", choices=["public", "unlisted"])
+    parser.add_argument("--share-max-views", type=int, default=0)
+    parser.add_argument("--verify-share", action="store_true", help="Verify password unlock, shared HLS, and revocation for unlisted uploads.")
+    parser.add_argument("--browser-seek", action="store_true", help="Use Chromium to seek through the first shared long video.")
+    parser.add_argument("--browser-mobile", action="store_true", help="Also run the shared seek and layout check at a mobile viewport.")
+    parser.add_argument("--generate-fixture-duration-seconds", type=int, default=0)
+    parser.add_argument("--fixture-timeout-seconds", type=int, default=1200)
+    parser.add_argument("--ffmpeg-bin", default="ffmpeg")
+    parser.add_argument("--ffprobe-bin", default="ffprobe")
+    parser.add_argument("--minimum-source-duration-seconds", type=float, default=0.0)
     parser.add_argument("--upload-timeout-seconds", type=int, default=900)
     parser.add_argument("--post-upload-observe-seconds", type=int, default=180)
     parser.add_argument("--monitor-interval", type=float, default=2.0)
@@ -981,9 +1614,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--orphan-grace-seconds", type=int, default=600)
     parser.add_argument("--print-wait-status", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--measure-username", default="root")
-    parser.add_argument("--measure-password", default="root")
+    from scripts.testing.probe_credentials import add_root_password_argument
+    add_root_password_argument(
+        parser,
+        "--measure-password",
+        help_text="Measurement-account password for the existing target server.",
+    )
     parser.add_argument("--segment-concurrency", type=int, default=4)
     parser.add_argument("--max-segments-per-variant", type=int, default=12)
+    parser.add_argument("--minimum-segments-per-variant", type=int, default=1)
+    parser.add_argument("--expect-audio-tracks", type=int, default=0)
     parser.add_argument("--expect-subtitles", action="store_true", help="Fail measure phase when playback has no usable subtitle tracks.")
     parser.add_argument("--upload", action="store_true", help="Run concurrent upload phase.")
     parser.add_argument("--wait", action="store_true", help="Wait for HLS jobs to finish.")
@@ -993,27 +1633,70 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.verify_share and args.visibility != "unlisted":
+        raise SystemExit("--verify-share requires --visibility unlisted")
+    if args.browser_mobile and not args.browser_seek:
+        raise SystemExit("--browser-mobile requires --browser-seek")
+    args.share_password = os.environ.get("HACKME_HLS_SHARE_PASSWORD") or secrets.token_urlsafe(24)
     if not args.upload and not args.wait and not args.measure:
         args.upload = True
         args.wait = True
         args.measure = True
+    fixture_generation: dict[str, Any] | None = None
+    video_path = Path(args.video).resolve()
+    if int(args.generate_fixture_duration_seconds) > 0:
+        fixture_generation = generate_long_fixture(
+            video_path,
+            duration_seconds=int(args.generate_fixture_duration_seconds),
+            ffmpeg_bin=args.ffmpeg_bin,
+            timeout_seconds=int(args.fixture_timeout_seconds),
+        )
+        if not fixture_generation.get("ok"):
+            result = {
+                "ok": False,
+                "verdict": "FAIL",
+                "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                "base_url": args.base_url,
+                "fixture_generation": fixture_generation,
+                "phases": [],
+            }
+            write_result(Path(args.out), result)
+            print(json.dumps(result, ensure_ascii=False, indent=2), flush=True)
+            return 1
+    source_media = probe_media_file(video_path, args.ffprobe_bin) if video_path.exists() else {"ok": False, "error": "video_missing"}
+    source_checks = {
+        "probe": bool(source_media.get("ok")),
+        "duration": float(source_media.get("duration_seconds") or 0) >= max(0.0, float(args.minimum_source_duration_seconds)),
+        "audio_tracks": int(source_media.get("audio_streams") or 0) >= max(0, int(args.expect_audio_tracks)),
+        "subtitles": not args.expect_subtitles or int(source_media.get("subtitle_streams") or 0) >= 1,
+    }
     phases: list[dict[str, Any]] = []
+    upload_phase: dict[str, Any] | None = None
     if args.upload:
-        phases.append(run_upload_phase(args))
+        upload_phase = run_upload_phase(args)
+        phases.append(upload_phase)
     if args.wait:
-        phases.append(wait_for_hls(args))
+        phases.append(wait_for_hls(args, upload_phase))
     if args.measure:
-        phases.append(measure_hls_variants(args))
+        phases.append(measure_hls_variants(args, upload_phase))
+    if args.verify_share:
+        phases.append(verify_share_links(args, upload_phase))
+    ok = all(source_checks.values()) and all(bool(phase.get("ok", True)) for phase in phases)
     result = {
+        "ok": ok,
+        "verdict": "PASS" if ok else "FAIL",
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "base_url": args.base_url,
         "db": args.db,
         "runtime_marker": args.runtime_marker,
+        "fixture_generation": fixture_generation,
+        "source_media": source_media,
+        "source_checks": source_checks,
         "phases": phases,
     }
     write_result(Path(args.out), result)
     print(json.dumps(result, ensure_ascii=False, indent=2), flush=True)
-    return 0 if all(bool(phase.get("ok", True)) for phase in phases) else 1
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":

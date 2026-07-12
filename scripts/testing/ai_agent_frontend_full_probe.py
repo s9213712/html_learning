@@ -5,12 +5,25 @@ import argparse
 import json
 import os
 import re
+import sys
 import time
 from pathlib import Path
 from typing import Any
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
+
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.testing.probe_credentials import (  # noqa: E402
+    add_manager_password_argument,
+    add_root_password_argument,
+    add_user_password_argument,
+    redact_artifact_data,
+)
 
 
 def now_id() -> str:
@@ -166,9 +179,9 @@ def open_ai_agent_tab(page) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", required=True)
-    parser.add_argument("--root-password", required=True)
-    parser.add_argument("--manager-password", required=True)
-    parser.add_argument("--test-password", required=True)
+    add_root_password_argument(parser)
+    add_manager_password_argument(parser)
+    add_user_password_argument(parser)
     parser.add_argument("--out", required=True)
     args = parser.parse_args()
 
@@ -380,7 +393,7 @@ def main() -> int:
         root_ctx.close()
         browser.close()
 
-    result = {
+    result = redact_artifact_data({
         "ok": not rec.failures,
         "run_id": run_id,
         "base_url": args.base_url,
@@ -391,7 +404,7 @@ def main() -> int:
         "test_write_requests": test_requests,
         "console_errors": console_errors,
         "page_errors": page_errors,
-    }
+    }, secret_values=(args.root_password, args.manager_password, args.test_password))
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")

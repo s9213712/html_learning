@@ -4,6 +4,8 @@ let gameSelectedMatchId = null;
 let gameSelectedSquare = null;
 let gameSelectedKey = gameInitialSelectedKey();
 let chessMoveInFlight = false;
+let chessMoveToken = null;
+let gameAccountGeneration = 0;
 let gameState = { matches: [], invites: [], leaderboard: [], users: [], multiplayer: { rooms: [], invites: [], modes: [] } };
 let soloGameTimer = null;
 let localGameModuleCleanup = null;
@@ -63,31 +65,55 @@ const GAME_SOUND_ASSETS = Object.freeze({
 });
 const gameAudioCache = new Map();
 const gameAudioLastPlayedAt = new Map();
+const GAME_ASSET_VERSION = document.documentElement?.dataset?.assetVersion || "unknown";
 const GAME_RUNTIME_SCRIPT_SRCS = Object.freeze([
-  "/js/games/snake.js?v=20260513-game-modules",
-  "/js/games/game-2048.js?v=20260513-game-modules",
-  "/js/games/brick-breaker.js?v=20260602-touch-games",
-  "/js/games/rubiks-cube.js?v=20260602-rubiks-autosolve",
-  "/js/games/bullet-hell.js?v=20260602-touch-games",
-  "/js/games/stickman-shooter.js?v=20260517-level-layouts",
-  "/js/games/open-world.js?v=20260518-game-ux",
-  "/js/games/racing.js?v=20260520-racing-physics",
-  "/js/games/board-game-shared.js?v=20260513-game-modules",
-  "/js/games/reversi.js?v=20260513-game-modules",
-  "/js/games/go.js?v=20260513-game-modules",
-  "/js/games/gomoku.js?v=20260513-game-modules",
-  "/js/games/chinese-chess.js?v=20260513-game-modules",
-  "/js/games/real-tetris.js?v=20260518-game-ux",
-  "/js/games/sudoku.js?v=20260602-touch-games",
-  "/js/games/minesweeper.js?v=20260513-legacy-modules",
-  "/js/games/onea2b.js?v=20260518-game-ux",
-  "/js/games/tetris.js?v=20260513-legacy-modules",
-  "/js/games/space-shooter.js?v=20260602-touch-games",
-  "/js/38-fps-arena.js?v=20260518-game-ux",
-  "/js/games/fps-arena.js?v=20260514-fps-stance-br",
-]);
+  "/js/games/snake.js",
+  "/js/games/game-2048.js",
+  "/js/games/brick-breaker.js",
+  "/js/games/rubiks-cube.js",
+  "/js/games/bullet-hell.js",
+  "/js/games/stickman-shooter.js",
+  "/js/games/open-world.js",
+  "/js/games/racing.js",
+  "/js/games/board-game-shared.js",
+  "/js/games/reversi.js",
+  "/js/games/go.js",
+  "/js/games/gomoku.js",
+  "/js/games/chinese-chess.js",
+  "/js/games/real-tetris.js",
+  "/js/games/sudoku.js",
+  "/js/games/minesweeper.js",
+  "/js/games/onea2b.js",
+  "/js/games/tetris.js",
+  "/js/games/space-shooter.js",
+  "/js/38-fps-arena.js",
+  "/js/games/fps-arena.js",
+].map((src) => `${src}?v=${encodeURIComponent(GAME_ASSET_VERSION)}`));
 let gameRuntimeScriptsLoaded = false;
 let gameRuntimeScriptsPromise = null;
+
+function gameAccountOperationContext() {
+  return {
+    generation: gameAccountGeneration,
+    scope: typeof getCurrentAccountStorageScope === "function"
+      ? getCurrentAccountStorageScope()
+      : String(currentUserId || currentUser || "anonymous"),
+  };
+}
+
+function gameAccountOperationIsCurrent(operation) {
+  if (!operation || operation.generation !== gameAccountGeneration) return false;
+  const scope = typeof getCurrentAccountStorageScope === "function"
+    ? getCurrentAccountStorageScope()
+    : String(currentUserId || currentUser || "anonymous");
+  return operation.scope === scope;
+}
+
+function gameAccountAssertOperationCurrent(operation) {
+  if (gameAccountOperationIsCurrent(operation)) return;
+  if (typeof accountRequestAbortError === "function") throw accountRequestAbortError();
+  throw new DOMException("Account context changed", "AbortError");
+}
 
 async function ensureGameRuntimeScriptsLoaded() {
   if (gameRuntimeScriptsLoaded) return true;
@@ -919,7 +945,11 @@ async function respondGlobalGameMultiplayerInvite(action) {
       setGameMsg("已拒絕多人邀請。", true);
       if (gameSupportsMultiplayer(gameSelectedKey)) await loadSelectedGameMultiplayer();
     }
-    await loadGlobalGameMultiplayerInvites({ force: true }).catch(() => null);
+    await loadGlobalGameMultiplayerInvites({ force: true }).catch((refreshErr) => {
+      reportFrontendFailure("game-multiplayer-invite-refresh", refreshErr);
+      setGameMsg("邀請已處理，但邀請清單更新失敗；請稍後重新整理。", false);
+      return null;
+    });
   } catch (err) {
     const detail = $("game-multiplayer-invite-modal-detail");
     if (detail) detail.textContent = err.message || "多人邀請處理失敗";
@@ -942,7 +972,9 @@ function ensureGameMultiplayerInvitePolling({ kickoff = true } = {}) {
       window.clearTimeout(gameMultiplayerInviteKickoffTimer);
       gameMultiplayerInviteKickoffTimer = null;
     }
-    loadGlobalGameMultiplayerInvites().catch(() => null);
+    loadGlobalGameMultiplayerInvites().catch((err) => {
+      reportFrontendFailure("game-multiplayer-invite-poll", err);
+    });
   };
   const delay = document.hidden
     ? gameInvitePollMs("hidden")
@@ -1167,7 +1199,9 @@ async function loadSelectedGameLeaderboard() {
   renderGameLeaderboard(data);
   const awardBtn = $("game-award-btn");
   if (awardBtn) awardBtn.style.display = currentUser === "root" && key === "chess" ? "" : "none";
-  await loadChessRootDashboard().catch(() => {});
+  await loadChessRootDashboard().catch((err) => {
+    reportFrontendFailure("game-root-chess-dashboard", err);
+  });
   renderGameMetaPanels();
   await loadSelectedGameDailyLeaderboard();
   return data;
@@ -1551,6 +1585,43 @@ document.addEventListener("contextmenu", (event) => {
 });
 
 document.addEventListener("fullscreenchange", updateGameFullscreenButtons);
+
+function resetGameAccountState() {
+  gameAccountGeneration += 1;
+  stopGameMultiplayerInvitePolling();
+  hideGameMultiplayerInviteModal();
+  Object.values(gameViewModules()).forEach((module) => {
+    if (typeof module?.suspend !== "function") return;
+    try {
+      module.suspend(legacyGameRuntime());
+    } catch (err) {
+      reportFrontendFailure(`game-account-reset-${module?.key || "unknown"}`, err);
+    }
+  });
+  if (soloGameTimer) clearInterval(soloGameTimer);
+  soloGameTimer = null;
+  cleanupLocalGameModule();
+  gameSelectedMatchId = null;
+  gameSelectedSquare = null;
+  chessMoveInFlight = false;
+  chessMoveToken = null;
+  gameState = { matches: [], invites: [], leaderboard: [], users: [], multiplayer: { rooms: [], invites: [], modes: [] } };
+  gameMultiplayerSelectedRoomByKey = {};
+  gameMultiplayerInviteSeenUserId = String(currentUserId || "");
+  gameMultiplayerInviteSeenIds.clear();
+  gameMultiplayerInviteModalInvite = null;
+  gameMultiplayerInviteActionBusy = false;
+  if (typeof window.resetChessAccountState === "function") window.resetChessAccountState();
+  renderGameMultiplayerPanel();
+  renderGameLeaderboard({ leaderboard: [] });
+  renderGameMetaPanels();
+  const matchList = $("game-match-list");
+  const inviteList = $("game-invite-list");
+  if (matchList) matchList.innerHTML = '<div class="drive-empty">尚未載入對局</div>';
+  if (inviteList) inviteList.innerHTML = '<div class="drive-empty">尚未載入邀請</div>';
+}
+
+document.addEventListener("hackme:account-context-changed", resetGameAccountState);
 
 document.addEventListener("visibilitychange", () => {
   if (!gameMultiplayerInvitePollTimer || !currentUserId) return;

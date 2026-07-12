@@ -167,7 +167,31 @@ def test_root_recovery_cli_rejects_weak_password(tmp_path):
     assert "密碼" in payload["msg"]
 
 
-def test_root_recovery_default_runtime_dir_uses_repo_runtime(monkeypatch):
+def test_root_recovery_default_runtime_dir_requires_explicit_runtime(monkeypatch):
     monkeypatch.delenv("HACKME_RUNTIME_DIR", raising=False)
 
-    assert root_recovery.default_runtime_dir() == (Path(__file__).resolve().parents[3] / "runtime").resolve()
+    try:
+        root_recovery.default_runtime_dir()
+    except ValueError as exc:
+        assert "HACKME_RUNTIME_DIR or --runtime-dir is required" in str(exc)
+    else:
+        raise AssertionError("repo runtime fallback must remain disabled")
+
+
+def test_root_recovery_cli_can_infer_runtime_from_explicit_db_path(tmp_path):
+    runtime = _prepare_runtime(tmp_path)
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--db-path",
+            str(runtime / "database" / "database.db"),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["runtime_dir"] == str(runtime.resolve())

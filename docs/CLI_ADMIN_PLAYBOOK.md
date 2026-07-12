@@ -46,6 +46,8 @@ export BASE="https://your.domain"
 ```bash
 export BASE="https://127.0.0.1:5012"
 export JAR="/tmp/hackme_web_cli.cookie"
+read -rsp "Root password: " ROOT_PASSWORD && export ROOT_PASSWORD
+printf '\n'
 ```
 
 ### 3. 取 CSRF token
@@ -60,10 +62,11 @@ export CSRF="$(
 ### 4. root 登入
 
 ```bash
-curl -k -sS -b "$JAR" -c "$JAR" \
+python3 -c 'import json,os; print(json.dumps({"username":"root","password":os.environ["ROOT_PASSWORD"]}))' \
+  | curl -k -sS -b "$JAR" -c "$JAR" \
   -H "Content-Type: application/json" \
   -H "X-CSRF-Token: $CSRF" \
-  -d '{"username":"root","password":"root"}' \
+  --data-binary @- \
   "$BASE/api/login"
 ```
 
@@ -88,15 +91,18 @@ curl -k -sS -b "$JAR" "$BASE/api/me"
 
 ### root 離線密碼補救
 
-`root` 不走一般 web 忘記密碼流程。若 root 忘記密碼，請直接在實體 runtime / repo 上執行：
+`root` 不走一般 web 忘記密碼流程。若 root 忘記密碼，請在有權讀取實體 runtime
+的主機上先明確選定 runtime：
 
 ```bash
+export HACKME_RUNTIME_DIR=/srv/hackme-web/runtime
 python3 scripts/admin/root_recovery.py --json
 ```
 
 互動式自訂臨時密碼：
 
 ```bash
+export HACKME_RUNTIME_DIR=/srv/hackme-web/runtime
 python3 scripts/admin/root_recovery.py --prompt-password
 ```
 
@@ -112,6 +118,9 @@ python3 scripts/admin/root_recovery.py --db-path /path/to/runtime/database/datab
 - 撤銷 root 既有 session
 - 清掉 root 的 CSRF token
 - 強制下次登入立刻改密碼
+
+工具不再回退到 checkout 內的 `runtime/`。未提供 `HACKME_RUNTIME_DIR`、
+`--runtime-dir` 或可推導 runtime 的 `--db-path` 時會直接拒絕執行。
 
 不要把 `--password ...` 寫進 shell history；除非是臨時測試，否則建議使用 `--prompt-password`。
 
@@ -392,10 +401,11 @@ curl -k -sS -b "$JAR" "$BASE/api/root/security-tests/<job_id>"
 ```bash
 curl -k -sS "$BASE/api/version"
 curl -k -sS -c "$JAR" "$BASE/api/csrf-token"
-curl -k -sS -b "$JAR" -c "$JAR" -H "Content-Type: application/json" -H "X-CSRF-Token: $TOKEN" \
-  -d '{"username":"root","password":"root"}' \
-  "$BASE/api/login"
+python3 -c 'import json,os; print(json.dumps({"username":"root","password":os.environ["ROOT_PASSWORD"]}))' \
+  | curl -k -sS -b "$JAR" -c "$JAR" -H "Content-Type: application/json" -H "X-CSRF-Token: $CSRF" \
+    --data-binary @- "$BASE/api/login"
 curl -k -sS -b "$JAR" "$BASE/api/me"
+unset ROOT_PASSWORD
 ```
 
 深入驗證：

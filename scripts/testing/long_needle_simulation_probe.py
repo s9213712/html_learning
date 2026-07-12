@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -59,7 +60,7 @@ def api_json(session: requests.Session, method: str, url: str, *, csrf: str = ""
         }
 
 
-def enable_probe_features(base_url: str, root_password: str) -> dict[str, Any]:
+def root_session(base_url: str, root_password: str) -> tuple[requests.Session, str, dict[str, Any]]:
     session = requests.Session()
     session.verify = False
     csrf_result = api_json(session, "GET", f"{base_url}/api/csrf-token")
@@ -72,9 +73,14 @@ def enable_probe_features(base_url: str, root_password: str) -> dict[str, Any]:
         json={"username": "root", "password": root_password},
     )
     csrf = str(session.cookies.get("csrf_token") or csrf)
+    return session, csrf, {"csrf": csrf_result, "login": login_result}
+
+
+def enable_probe_features(base_url: str, root_password: str) -> dict[str, Any]:
+    session, csrf, auth = root_session(base_url, root_password)
     feature_payload = {key: True for key in FEATURE_FLAG_KEYS}
     feature_result = {"ok": False, "status": 0, "body": {"ok": False, "error": "login_failed"}}
-    if login_result.get("ok"):
+    if auth["login"].get("ok"):
         feature_result = api_json(
             session,
             "PUT",
@@ -83,12 +89,72 @@ def enable_probe_features(base_url: str, root_password: str) -> dict[str, Any]:
             json=feature_payload,
         )
     return {
-        "ok": bool(csrf_result.get("ok") and login_result.get("ok") and feature_result.get("ok")),
-        "csrf": csrf_result,
-        "login": login_result,
+        "ok": bool(auth["csrf"].get("ok") and auth["login"].get("ok") and feature_result.get("ok")),
+        **auth,
         "features": feature_result,
         "feature_count": len(feature_payload),
     }
+
+
+def provision_probe_accounts(
+    base_url: str,
+    root_password: str,
+    *,
+    prefix: str,
+    count: int,
+    password: str,
+) -> dict[str, Any]:
+    session, csrf, auth = root_session(base_url, root_password)
+    if not auth["login"].get("ok"):
+        return {"ok": False, **auth, "accounts": [], "error": "root_login_failed"}
+    accounts = []
+    for index in range(1, max(2, int(count)) + 1):
+        username = f"{prefix}{index:02d}"
+        lookup = api_json(session, "GET", f"{base_url}/api/admin/users?q={username}&page_size=100")
+        users = (lookup.get("body") or {}).get("users") or []
+        created = None
+        if not any(str(item.get("username") or "") == username for item in users):
+            created = api_json(
+                session,
+                "POST",
+                f"{base_url}/api/admin/users",
+                csrf=csrf,
+                json={
+                    "username": username,
+                    "password": password,
+                    "password_confirm": password,
+                    "nickname": f"Long Needle {index:02d}",
+                    "role": "user",
+                    "status": "active",
+                },
+            )
+            if int(created.get("status") or 0) not in {200, 201, 409}:
+                return {
+                    "ok": False,
+                    **auth,
+                    "accounts": [item[0] for item in accounts],
+                    "error": f"account_create_failed:{username}:{created.get('status')}",
+                }
+        member = requests.Session()
+        member.verify = False
+        member_csrf = api_json(member, "GET", f"{base_url}/api/csrf-token")
+        member_token = str((member_csrf.get("body") or {}).get("csrf_token") or member.cookies.get("csrf_token") or "")
+        login = api_json(
+            member,
+            "POST",
+            f"{base_url}/api/login",
+            csrf=member_token,
+            json={"username": username, "password": password},
+        )
+        if not login.get("ok"):
+            return {
+                "ok": False,
+                **auth,
+                "accounts": [item[0] for item in accounts],
+                "error": f"account_login_failed:{username}:{login.get('status')}",
+            }
+        accounts.append((username, password))
+    return {"ok": True, **auth, "accounts": accounts}
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -130,14 +196,14 @@ def profile_defaults(profile: str) -> dict[str, int]:
         "direct_transfer_ops": 24,
         "trading_ops": 8,
         "points_concurrency": 4,
-        "system_ops": 90,
-        "system_logical_users": 90,
+        "system_ops": 180,
+        "system_logical_users": 180,
         "system_concurrency": 12,
         "session_pool": 4,
     }
 
 
-def run_child(label: str, command: list[str], *, stdout_path: Path, timeout: int) -> dict[str, Any]:
+def run_child(label: str, command: list[str], *, stdout_path: Path, timeout: int, env: dict[str, str] | None = None) -> dict[str, Any]:
     started = time.perf_counter()
     stdout_path.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -145,6 +211,7 @@ def run_child(label: str, command: list[str], *, stdout_path: Path, timeout: int
             proc = subprocess.run(
                 command,
                 cwd=str(ROOT),
+                env={**os.environ, **(env or {})},
                 stdout=stdout,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -161,8 +228,26 @@ def run_child(label: str, command: list[str], *, stdout_path: Path, timeout: int
         "returncode": returncode,
         "elapsed_seconds": round(time.perf_counter() - started, 3),
         "stdout": str(stdout_path),
-        "command": command,
+        "command": sanitized_command(command),
     }
+
+
+def sanitized_command(command: list[str]) -> list[str]:
+    redacted = []
+    hide_next = False
+    for value in command:
+        if hide_next:
+            redacted.append("[redacted]")
+            hide_next = False
+            continue
+        matched = next((flag for flag in {"--root-password", "--test-password", "--accounts"} if value.startswith(f"{flag}=")), "")
+        if matched:
+            redacted.append(f"{matched}=[redacted]")
+            continue
+        redacted.append(value)
+        if value in {"--root-password", "--test-password", "--accounts"}:
+            hide_next = True
+    return redacted
 
 
 def summarize_child(label: str, child: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
@@ -245,11 +330,19 @@ def main() -> int:
     parser.add_argument("--runtime-root", default="")
     parser.add_argument("--out", default="")
     parser.add_argument("--profile", choices=["quick", "medium", "long"], default="quick")
-    parser.add_argument("--root-password", default=ROOT_PASSWORD)
-    parser.add_argument("--test-password", default=TEST_PASSWORD)
+    parser.add_argument("--root-password", default=os.environ.get("HACKME_LONG_NEEDLE_ROOT_PASSWORD", ""))
+    parser.add_argument("--test-password", default=os.environ.get("HACKME_LONG_NEEDLE_TEST_PASSWORD", ""))
     parser.add_argument("--keep-server", action="store_true")
     parser.add_argument("--timeout-seconds", type=int, default=900)
     args = parser.parse_args()
+    if args.base_url and (not args.root_password or not args.test_password):
+        parser.error(
+            "existing --base-url targets require HACKME_LONG_NEEDLE_ROOT_PASSWORD/--root-password "
+            "and HACKME_LONG_NEEDLE_TEST_PASSWORD/--test-password"
+        )
+    if not args.base_url:
+        args.root_password = args.root_password or ROOT_PASSWORD
+        args.test_password = args.test_password or TEST_PASSWORD
     requests.packages.urllib3.disable_warnings()
 
     stamp = utc_stamp()
@@ -268,9 +361,25 @@ def main() -> int:
         server = start_server(runtime_root, port)
         base_url = wait_for_server(port)
 
-    setup = {"enable_features": enable_probe_features(base_url, args.root_password)}
-
     defaults = profile_defaults(args.profile)
+    account_prefix = f"needle{stamp.lower().replace('t', '').replace('z', '')[-10:]}"
+    account_setup = provision_probe_accounts(
+        base_url,
+        args.root_password,
+        prefix=account_prefix,
+        count=defaults["accounts"],
+        password=args.test_password,
+    )
+    setup = {
+        "enable_features": enable_probe_features(base_url, args.root_password),
+        "accounts": {
+            "ok": account_setup.get("ok"),
+            "count": len(account_setup.get("accounts") or []),
+            "usernames": [item[0] for item in account_setup.get("accounts") or []],
+            "error": account_setup.get("error") or "",
+        },
+    }
+    account_spec = ",".join(f"{username}:{password}" for username, password in account_setup.get("accounts") or [])
     children: list[dict[str, Any]] = []
     payloads: dict[str, dict[str, Any]] = {}
     try:
@@ -286,8 +395,6 @@ def main() -> int:
                 str(runtime_root),
                 "--out",
                 str(points_out),
-                "--root-password",
-                args.root_password,
                 "--accounts",
                 str(defaults["accounts"]),
                 "--transfer-ops",
@@ -303,6 +410,10 @@ def main() -> int:
             ],
             stdout_path=report_dir / f"long_needle_points_chain_{stamp}.stdout",
             timeout=args.timeout_seconds,
+            env={
+                "HACKME_POINTS_STRESS_ROOT_PASSWORD": args.root_password,
+                "HACKME_SERVER_PIDS": str(server.pid if server else ""),
+            },
         ))
         payloads["economy_private_chain"] = {**load_json(points_out), "_artifact_path": str(points_out)}
 
@@ -318,12 +429,6 @@ def main() -> int:
                 str(runtime_root),
                 "--out",
                 str(system_out),
-                "--root-password",
-                args.root_password,
-                "--test-password",
-                args.test_password,
-                "--accounts",
-                f"test:{args.test_password},test2:test2,test3:test3",
                 "--session-mode",
                 "clone",
                 "--session-pool",
@@ -335,11 +440,22 @@ def main() -> int:
                 "--concurrency",
                 str(defaults["system_concurrency"]),
                 "--allow-server-busy",
+                "--max-server-busy-rate",
+                "0.25" if args.profile == "quick" else ("0.15" if args.profile == "medium" else "0.10"),
+                "--operation-mode",
+                "rotation",
+                "--require-all-accounts",
+                "--require-operation-coverage",
                 "--server-pids",
                 str(server.pid if server else ""),
             ],
             stdout_path=report_dir / f"long_needle_full_feature_{stamp}.stdout",
             timeout=args.timeout_seconds,
+            env={
+                "HACKME_STRESS_ACCOUNTS": account_spec,
+                "HACKME_STRESS_TEST_PASSWORD": args.test_password,
+                "HACKME_SERVER_PIDS": str(server.pid if server else ""),
+            },
         ))
         payloads["full_feature"] = {**load_json(system_out), "_artifact_path": str(system_out)}
     finally:
@@ -358,6 +474,12 @@ def main() -> int:
             "severity": "high",
             "title": "long needle feature setup failed",
             "setup": setup.get("enable_features"),
+        })
+    if not (setup.get("accounts") or {}).get("ok"):
+        findings.insert(0, {
+            "severity": "high",
+            "title": "long needle account provisioning failed",
+            "setup": setup.get("accounts"),
         })
     payload = {
         "ok": not findings and all(item.get("ok") for item in probes),

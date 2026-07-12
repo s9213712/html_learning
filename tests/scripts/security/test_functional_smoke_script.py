@@ -1,7 +1,64 @@
+import subprocess
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[3]
+SCRIPT = ROOT / "scripts" / "security" / "pentest" / "run_functional_smoke.sh"
+
+
+def test_functional_smoke_refuses_runtime_outside_tmp(tmp_path):
+    runtime = Path("/tmp") / f"not_hackme_web_functional_{tmp_path.name}"
+    result = subprocess.run(
+        [str(SCRIPT), "--runtime", str(runtime), "--out", "/tmp/hackme_web_test_artifacts/security"],
+        cwd=ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=30,
+    )
+
+    assert result.returncode == 2
+    assert "runtime must resolve below /tmp/hackme_web_*" in result.stdout
+
+
+def test_functional_smoke_refuses_existing_or_symlink_runtime(tmp_path):
+    runtime = Path("/tmp") / f"hackme_web_functional_symlink_{tmp_path.name}"
+    runtime.symlink_to(ROOT, target_is_directory=True)
+    try:
+        result = subprocess.run(
+            [str(SCRIPT), "--runtime", str(runtime), "--out", str(tmp_path / "reports")],
+            cwd=ROOT,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=30,
+        )
+    finally:
+        runtime.unlink(missing_ok=True)
+
+    assert result.returncode == 2
+    assert "runtime must not already exist" in result.stdout
+
+
+def test_functional_smoke_sanitizes_report_credentials():
+    script = SCRIPT.read_text(encoding="utf-8")
+    docs = (ROOT / "docs" / "security" / "FUNCTIONAL_SMOKE.md").read_text(encoding="utf-8")
+
+    assert 'if [[ -e "$OUT_DIR" || -L "$OUT_DIR" ]]' in script
+    assert 'COOKIE_JAR="$RUNTIME_ROOT/.functional_smoke_cookies.txt"' in script
+    assert "generate_smoke_password()" in script
+    assert 'ROOT_PASSWORD="${ROOT_PASSWORD:-$(generate_smoke_password)}"' in script
+    assert "sanitize_report_secrets()" in script
+    assert 'rm -f "$COOKIE_JAR"' in script
+    assert 'root.rglob("*.json")' in script
+    assert '"<REDACTED>" if sensitive_key(key)' in script
+    assert '"share_url"' in script
+    assert '"fragment_key"' in script
+    assert "report secret sanitization failed" in script
+    assert 'args+=(--data-binary @-)' in script
+    assert "printf '%s' \"$body\" | curl" in script
+    assert "證據包不得保留可重放憑證" in docs
+    assert "cookie jar 只會建立在 disposable runtime" in docs
 
 
 def test_functional_smoke_waits_for_reset_restart_reconnect():

@@ -21,10 +21,13 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_RUNTIME = ROOT / "runtime"
-DEFAULT_DB = DEFAULT_RUNTIME / "database" / "database.db"
-DEFAULT_OUT_DIR = ROOT / "artifacts" / "anchors"
-DEFAULT_ANCHOR_KEY = DEFAULT_RUNTIME / ".anchor_signing_key"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.test_artifacts import test_artifact_path  # noqa: E402
+
+
+DEFAULT_OUT_DIR = test_artifact_path("anchors")
 
 
 def utc_now() -> str:
@@ -215,13 +218,26 @@ def default_out_path(out_dir: Path, generated_at: str) -> Path:
     return out_dir / f"{stamp}.json"
 
 
+def configured_runtime_root() -> Path | None:
+    value = str(os.environ.get("HACKME_RUNTIME_DIR", "") or "").strip()
+    return Path(value).expanduser() if value else None
+
+
+def runtime_root_for_db(db_path: Path) -> Path:
+    if db_path.parent.name == "database":
+        return db_path.parent.parent
+    return db_path.parent
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Export a signed PointsChain anchor checkpoint.")
-    parser.add_argument("--db", default=str(DEFAULT_DB), help="Path to runtime database.db.")
-    parser.add_argument("--out", default="", help="Output JSON path. Defaults to artifacts/anchors/<timestamp>.json.")
+    runtime_root = configured_runtime_root()
+    default_db = runtime_root / "database" / "database.db" if runtime_root else ""
+    parser.add_argument("--db", default=str(default_db), help="Path to runtime database.db. Required unless HACKME_RUNTIME_DIR is set.")
+    parser.add_argument("--out", default="", help="Output JSON path. Defaults under /tmp/hackme_web_test_artifacts/anchors.")
     parser.add_argument("--out-dir", default=str(DEFAULT_OUT_DIR), help="Output directory when --out is omitted.")
-    parser.add_argument("--anchor-key-file", default=str(DEFAULT_ANCHOR_KEY), help="Local HMAC key file for anchor signing.")
-    parser.add_argument("--chain-seed-file", default=str(DEFAULT_RUNTIME / ".chain_seed"), help="Optional chain seed for local verify.")
+    parser.add_argument("--anchor-key-file", default="", help="Local HMAC key file. Defaults beside the selected runtime database.")
+    parser.add_argument("--chain-seed-file", default="", help="Optional chain seed. Defaults beside the selected runtime database when present.")
     parser.add_argument("--environment", default=os.environ.get("HTML_LEARNING_SERVER_MODE", "unknown"))
     parser.add_argument("--release-version", default=os.environ.get("SERVER_RELEASE_ID", "unknown"))
     return parser
@@ -229,12 +245,20 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
-    db_path = Path(args.db)
+    if not args.db:
+        raise SystemExit("--db or HACKME_RUNTIME_DIR is required")
+    db_path = Path(args.db).expanduser()
     if not db_path.exists():
         raise SystemExit(f"database not found: {db_path}")
     generated_at = utc_now()
-    signing_key = read_or_create_key(Path(args.anchor_key_file))
-    chain_seed_file = Path(args.chain_seed_file) if args.chain_seed_file else None
+    runtime_root = runtime_root_for_db(db_path)
+    anchor_key_file = Path(args.anchor_key_file).expanduser() if args.anchor_key_file else runtime_root / ".anchor_signing_key"
+    signing_key = read_or_create_key(anchor_key_file)
+    if args.chain_seed_file:
+        chain_seed_file = Path(args.chain_seed_file).expanduser()
+    else:
+        candidate = runtime_root / ".chain_seed"
+        chain_seed_file = candidate if candidate.exists() else None
     chain_verify = maybe_verify_chain(db_path, chain_seed_file)
     anchor = build_anchor_payload(
         db_path=db_path,

@@ -5,9 +5,9 @@ repos:
         name: gitleaks secrets scan
         language: system
         pass_filenames: false
-        entry: bash -c 'repo="$(git rev-parse --show-toplevel)"; if ! command -v gitleaks >/dev/null 2>&1; then echo "gitleaks is required before committing. See docs/security/secrets_scanning.md for Linux/macOS install commands." >&2; exit 1; fi; gitleaks detect --source "$repo" --no-git --redact --verbose --config "$repo/.gitleaks.toml"'
+        entry: python3 -m scripts.prepush.checks.secrets_check --mode quick --strict
       - id: plaintext-secrets-scan
         name: plaintext secrets scan
         language: system
         pass_filenames: false
-        entry: python3 scripts/security/scan_plaintext_secrets.py --fail-on high
+        entry: python3 scripts/security/gate/scan_plaintext_secrets.py --fail-on high

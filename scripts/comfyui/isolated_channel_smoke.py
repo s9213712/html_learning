@@ -545,7 +545,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Run isolated ComfyUI regular/HF/GGUF channel smoke checks.")
     parser.add_argument("--base-url", default="", help="hackme_web base URL; needed for diffusers/gguf channels.")
     parser.add_argument("--username", default="root")
-    parser.add_argument("--password", default="root")
+    from scripts.testing.probe_credentials import add_root_password_argument
+    add_root_password_argument(parser, "--password")
     parser.add_argument("--insecure", action="store_true")
     parser.add_argument("--comfyui-url", default="http://192.168.18.19:8188")
     parser.add_argument("--hf-cache-root", default=os.environ.get("HF_PROBE_CACHE_ROOT", ""))

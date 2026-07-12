@@ -1,4 +1,5 @@
 import json
+import os
 import secrets
 from datetime import datetime
 from pathlib import Path
@@ -37,6 +38,7 @@ from services.comfyui.template.remap import (
 )
 from services.comfyui.workflow.compat import apply_workflow_compatibility_fixes
 from services.platform.settings import is_feature_enabled
+from services.server.runtime import default_runtime_root_path
 
 
 _OFFICIAL_TEMPLATE_MEDIA_DIR = Path(__file__).resolve().parents[2] / "workflows" / "comfyui" / "assets"
@@ -216,8 +218,8 @@ def _resolve_upload_source_path(file_row, *, storage_root=None, resolve_file_sto
                 pass
         elif storage_root:
             candidates.append(Path(storage_root) / raw_path)
-        candidates.append(Path.cwd() / "runtime" / "storage" / raw_path)
-        candidates.append(Path.cwd() / raw_path)
+        runtime_root = Path(os.environ.get("HACKME_RUNTIME_DIR") or default_runtime_root_path())
+        candidates.append(runtime_root / "storage" / raw_path)
 
     seen = set()
     for candidate in candidates:

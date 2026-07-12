@@ -127,7 +127,7 @@ def test_feature_gate_maps_existing_modules():
 
 
 def test_external_chain_features_remain_disabled_by_rc1_scope():
-    scope = (ROOT / "docs" / "RELEASE" / "RC1_SCOPE.md").read_text(encoding="utf-8")
+    scope = (ROOT / "docs" / "archive" / "pointschain_rc1" / "RC1_SCOPE.md").read_text(encoding="utf-8")
     backlog = (ROOT / "docs" / "BLOCKCHAIN" / "POST_RC1_BACKLOG.md").read_text(encoding="utf-8")
     matrix = (ROOT / "docs" / "BLOCKCHAIN" / "POINTSCHAIN_REAL_INCIDENT_GAP_MATRIX.md").read_text(encoding="utf-8")
     combined = f"{scope}\n{backlog}\n{matrix}".lower()

@@ -370,7 +370,15 @@ function bindUiEvents() {
     let adminUsersSearchTimer = null;
     adminUsersSearch.addEventListener("input", () => {
       if (adminUsersSearchTimer) clearTimeout(adminUsersSearchTimer);
-      adminUsersSearchTimer = setTimeout(() => loadUsers(1), 250);
+      const requestGeneration = accountRequestGeneration;
+      adminUsersSearchTimer = setTimeout(() => {
+        adminUsersSearchTimer = null;
+        if (requestGeneration === accountRequestGeneration && canAccessModule("accounts")) loadUsers(1);
+      }, 250);
+    });
+    document.addEventListener("hackme:account-context-changed", () => {
+      if (adminUsersSearchTimer) clearTimeout(adminUsersSearchTimer);
+      adminUsersSearchTimer = null;
     });
   }
   if (adminBulkApproveBtn) adminBulkApproveBtn.addEventListener("click", () => bulkReviewRegistrations("approve"));
@@ -650,14 +658,18 @@ function bindUiEvents() {
   if (launchCheckUploadFile) launchCheckUploadFile.addEventListener("change", async () => {
     const file = launchCheckUploadFile.files && launchCheckUploadFile.files[0];
     if (!file) return;
+    const requestGeneration = accountRequestGeneration;
     const textarea = $("launch-check-upload-json");
     const sub = $("launch-check-upload-sub");
     try {
       const text = await file.text();
+      assertAccountRequestGeneration(requestGeneration, true);
+      if (launchCheckUploadFile.files?.[0] !== file) return;
       if (textarea) textarea.value = text;
       if (sub) sub.textContent = `已載入 ${file.name}，請確認 JSON 後再上傳。`;
       if (typeof launchCheckSetUploadStatus === "function") launchCheckSetUploadStatus("");
     } catch (err) {
+      if (typeof isAccountContextAbortError === "function" && isAccountContextAbortError(err)) return;
       if (typeof launchCheckSetUploadStatus === "function") launchCheckSetUploadStatus(`讀取檔案失敗：${err && err.message ? err.message : "未知錯誤"}`, false);
     }
   });

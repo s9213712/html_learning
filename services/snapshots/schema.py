@@ -48,6 +48,7 @@ PRODUCTION_REQUIRED_REPORT_TYPES = (
     "points_chain_consistency",
     "cloud_drive_quota_permission",
     "ai_agent_boundary",
+    "operational_campaign_24h",
 )
 PORTABLE_SNAPSHOT_FILES = ("metadata.json", "checksums.sha256", "db.sqlite3.backup", "uploads.tar.gz", "config.tar.gz", "manifest.json")
 DEFAULT_ACCOUNT_NAMES = ("root", "admin", "test")

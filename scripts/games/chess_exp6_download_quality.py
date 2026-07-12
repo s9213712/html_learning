@@ -20,7 +20,7 @@ Pipeline (each step is idempotent — re-runs skip what's already done):
    ``pgn_labels.categories``, plus a minimum game length so the
    latter-50% positions are still substantive.
 
-Outputs (all under ``runtime/private/games/exp6/``, gitignored):
+Outputs (all under ``$HACKME_RUNTIME_DIR/private/games/exp6/``):
 
 - ``downloads/`` — raw PGN files / zips
 - ``downloaded_replay.jsonl`` — converted replay rows (per-source)
@@ -31,7 +31,7 @@ Outputs (all under ``runtime/private/games/exp6/``, gitignored):
 
 This script is meant to be run ONCE before
 ``run_exp6_curriculum.py``. It does not touch any committed code
-paths; it only writes into the gitignored runtime tree.
+paths; it only writes into the configured external runtime tree.
 """
 
 from __future__ import annotations
@@ -49,7 +49,13 @@ from urllib.request import urlopen, Request
 
 
 REPO = Path(__file__).resolve().parents[2]
-OUT_DIR = REPO / "runtime/private/games/exp6"
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
+
+from scripts.games.common_paths import exp6_private_dir  # noqa: E402
+
+
+OUT_DIR = exp6_private_dir()
 DOWNLOADS_DIR = OUT_DIR / "downloads"
 REPLAY_JSONL = OUT_DIR / "downloaded_replay.jsonl"
 FINAL_JSONL = OUT_DIR / "quality_1000_games.jsonl"
