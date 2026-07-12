@@ -82,6 +82,9 @@ def test_playwright_qa_workflow_is_installed_in_github_actions():
     assert "schedule:" in text
     assert "github.event.inputs.run_deep_playwright" in text
     assert "03b.Comfyui" in text
+    assert "PLAYWRIGHT_RUNTIME_BASE: /tmp/hackme_web_playwright_acceptance_" in text
+    assert "${{ runner.temp }}/hackme_web_playwright_acceptance" not in text
+    assert "/tmp/hackme_web_playwright_acceptance*/**/reports/**" in text
 
 
 def test_platform_health_filters_expected_offline_browser_http_failures():

@@ -41,7 +41,7 @@ jobs:
           RUN_DEEP_PLAYWRIGHT: ${{ github.event_name == 'schedule' && '1' || github.event.inputs.run_deep_playwright || '0' }}
           PLAYWRIGHT_ACCEPTANCE_RETRIES: "2"
           KEEP_PLAYWRIGHT_RUNTIME: "1"
-          PLAYWRIGHT_RUNTIME_BASE: ${{ runner.temp }}/hackme_web_playwright_acceptance
+          PLAYWRIGHT_RUNTIME_BASE: /tmp/hackme_web_playwright_acceptance_${{ github.run_id }}_${{ github.run_attempt }}
         run: bash scripts/testing/run_playwright_acceptance.sh
 
       - name: Upload Playwright failure artifacts
@@ -50,7 +50,7 @@ jobs:
         with:
           name: playwright-qa-runtime-${{ github.run_id }}
           path: |
-            ${{ runner.temp }}/hackme_web_playwright_acceptance*/**/reports/**
-            ${{ runner.temp }}/hackme_web_playwright_acceptance*/**/*.log
-            ${{ runner.temp }}/hackme_web_playwright_acceptance*/**/*.out
+            /tmp/hackme_web_playwright_acceptance*/**/reports/**
+            /tmp/hackme_web_playwright_acceptance*/**/*.log
+            /tmp/hackme_web_playwright_acceptance*/**/*.out
           if-no-files-found: ignore
