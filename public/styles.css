@@ -13117,6 +13117,21 @@
         white-space: nowrap;
       }
 
+      /* Root operations are primary controls, not a carousel. Keep every
+         destination visible beside the mobile sidebar icon rail. */
+      .tabs.system-operation-tabs {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        overflow-x: visible;
+      }
+
+      .tabs.system-operation-tabs .tab {
+        width: 100%;
+        min-width: 0;
+        white-space: normal;
+        overflow-wrap: anywhere;
+      }
+
       .chat-layout,
       .chat-toolbar,
       .chat-room-create,

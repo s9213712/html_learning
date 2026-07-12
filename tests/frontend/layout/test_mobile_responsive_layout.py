@@ -40,6 +40,13 @@ def test_main_app_has_mobile_responsive_overrides():
     assert ".system-resource-gauges" in css
     assert ".server-env-kv-grid" in css
     assert "overscroll-behavior-inline: contain;" in css
+    assert re.search(
+        r'id="module-system"[\s\S]*?class="tabs system-operation-tabs"[\s\S]*?id="tab-system-health"',
+        index_html,
+    )
+    assert ".tabs.system-operation-tabs" in css
+    assert "grid-template-columns: repeat(2, minmax(0, 1fr));" in css
+    assert "overflow-x: visible;" in css
     assert ".trading-indicator-controls" in css
     assert ".trading-bot-tabs" in css
     assert ".chess-board" in css
