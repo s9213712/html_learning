@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping
+from scripts.testing.campaign_control_channel import send_hello
 
 
 STATE_SCHEMA_VERSION = "hackme.campaign-state.v1"
@@ -382,6 +383,7 @@ class WatchdogConfig:
     poll_seconds: float = 1.0
     kill_verify_seconds: float = 10.0
     production: bool = True
+    auth_socket: Path | None = None
 
 
 def validate_runtime_path(path: Path, *, root: Path, label: str) -> Path:
@@ -1084,6 +1086,10 @@ class ExternalCampaignWatchdog:
         return INCIDENT_EXIT_CODE
 
     def run(self, *, once: bool = False) -> int:
+        if self.config.production and self.config.auth_socket is None:
+            raise WatchdogError("production watchdog requires authenticated control socket")
+        if self.config.auth_socket is not None:
+            send_hello(self.config.auth_socket, campaign_uuid=self.config.campaign_uuid)
         self._validate_paths()
         if once and self.config.production:
             raise WatchdogError("--once is forbidden for a production watchdog")
@@ -1258,6 +1264,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--campaign-cgroup", required=True)
     parser.add_argument("--campaign-cgroup-device", required=True, type=int)
     parser.add_argument("--campaign-cgroup-inode", required=True, type=int)
+    parser.add_argument("--auth-socket")
     parser.add_argument("--stale-after-seconds", type=float, default=DEFAULT_STALE_SECONDS)
     parser.add_argument("--poll-seconds", type=float, default=1.0)
     parser.add_argument("--kill-verify-seconds", type=float, default=10.0)
@@ -1299,6 +1306,7 @@ def config_from_args(args: argparse.Namespace) -> WatchdogConfig:
         poll_seconds=float(args.poll_seconds),
         kill_verify_seconds=float(args.kill_verify_seconds),
         production=not bool(args.development_mode),
+        auth_socket=Path(args.auth_socket) if args.auth_socket else None,
     )
 
 
