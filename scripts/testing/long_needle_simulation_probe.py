@@ -199,9 +199,12 @@ def profile_defaults(profile: str) -> dict[str, int]:
             # Rotation must complete at least one full pass over every
             # operation.  Keep quick runs bounded, but leave enough work for
             # slow/failed requests not to truncate the coverage proof.
-            "system_ops": 1200,
-            "system_logical_users": 1200,
-        "system_concurrency": 12,
+            "system_ops": 420,
+            "system_logical_users": 420,
+            # Keep the complete rotation pass, but avoid turning the quick
+            # CI probe into a latency stress run; high pressure is covered by
+            # medium/long profiles and the formal campaign.
+            "system_concurrency": 4,
         "session_pool": 4,
     }
 
