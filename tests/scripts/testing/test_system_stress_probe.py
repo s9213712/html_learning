@@ -1,22 +1,65 @@
 import json
+import os
+import sys
+import threading
+import time
 from pathlib import Path
 
 from scripts.testing.points_chain_destructive_stress import chain_seed_path
 from scripts.testing.operational_soak_probe import (
+    FORMAL_RAMP_LEVELS,
     MIN_SIGNOFF_SECONDS,
     SentinelStats,
     aggregate_resource_evidence,
     aggregate_rounds,
+    build_effective_load_sample,
+    finish_command,
+    main as operational_soak_main,
+    measured_active_workers,
+    normalized_32_throughput,
+    request_command_stop,
     sanitized_command,
+    start_command,
+    stop_control_reason,
     validate_run_policy,
 )
 from scripts.testing.system_stress_probe import (
+    InflightWorkerTelemetry,
     OperationBudget,
     Stats,
+    record_operation_result,
     resolve_session_pool_size,
     rotation_operation_account,
     run_operation,
 )
+
+
+def test_native_worker_telemetry_does_not_treat_idle_executor_capacity_as_active():
+    telemetry = InflightWorkerTelemetry(32, sample_interval_seconds=0.005)
+    release = threading.Event()
+
+    def operation() -> None:
+        telemetry.begin_operation()
+        try:
+            release.wait(0.2)
+        finally:
+            telemetry.end_operation()
+
+    telemetry.start()
+    workers = [threading.Thread(target=operation) for _index in range(4)]
+    for worker in workers:
+        worker.start()
+    time.sleep(0.05)
+    release.set()
+    for worker in workers:
+        worker.join(timeout=1)
+    result = telemetry.stop()
+
+    assert result["configured_workers"] == 32
+    assert result["active_workers_peak"] == 4
+    assert 0 < result["sustained_active_workers"] <= 4
+    assert result["active_worker_time_ratio_at_or_above_85_percent"] == 0.0
+    assert result["complete"] is True
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -173,6 +216,73 @@ def test_bt_reject_uses_rejected_torrent_url_instead_of_creating_magnet_task():
     assert 202 not in kwargs["expected"]
 
 
+def test_hf_generate_zero_budget_records_status_fallback_not_positive_generate():
+    calls = []
+
+    class FakeClient:
+        def request(self, *args, **kwargs):
+            calls.append((args, kwargs))
+            return {"op": args[0], "ok": True, "status": 200, "elapsed_ms": 1.0}
+
+    result = run_operation(
+        "hf_generate",
+        FakeClient(),
+        {},
+        OperationBudget({"hf_generate": 0}),
+        1,
+    )
+    stats = Stats()
+    recorded = record_operation_result(
+        stats,
+        requested_operation="hf_generate",
+        result=result,
+        account="alice",
+    )
+    summary = stats.summary()
+
+    assert calls[0][0][:3] == ("hf_generate_fallback_status", "GET", "/api/comfyui/status")
+    assert recorded == "hf_generate_fallback_status"
+    assert "hf_generate" not in summary["ops"]
+    assert summary["ops"]["hf_generate_fallback_status"]["successful_2xx"] == 1
+    assert summary["accounts"]["alice"]["successful_operations"] == {
+        "hf_generate_fallback_status": 1
+    }
+    aggregate = aggregate_rounds(
+        [
+            {
+                "ok": True,
+                "registered_operations": ["hf_generate"],
+                "account_operation_counts": {"alice": 1},
+                "summary": summary,
+            }
+        ],
+        ["alice"],
+    )
+    assert "hf_generate" in aggregate["missing_operations"]
+    assert "hf_generate" in aggregate["operations_without_success"]
+
+
+def test_actual_result_operation_name_preserves_other_budget_fallbacks():
+    stats = Stats()
+
+    recorded = record_operation_result(
+        stats,
+        requested_operation="drive_upload",
+        result={
+            "op": "drive_upload_fallback_list",
+            "ok": True,
+            "status": 200,
+            "elapsed_ms": 2.0,
+        },
+        account="bob",
+    )
+    summary = stats.summary()
+
+    assert recorded == "drive_upload_fallback_list"
+    assert "drive_upload" not in summary["ops"]
+    assert summary["ops"]["drive_upload_fallback_list"]["successful_2xx"] == 1
+
+
 def test_auto_login_session_pool_is_capped_to_account_count():
     size, mode = resolve_session_pool_size(
         requested=0,
@@ -265,6 +375,99 @@ def test_operational_soak_aggregates_all_accounts_and_operations():
     assert len(summary["round_failures"]) == 1
 
 
+def test_formal_operational_soak_requires_real_4_8_16_32_ramp() -> None:
+    assert FORMAL_RAMP_LEVELS == (4, 8, 16, 32)
+    assert normalized_32_throughput(
+        operations_completed=400,
+        window_seconds=60,
+        scheduled_load_level=8,
+    ) == 1600.0
+
+
+def test_idle_configured_workers_do_not_count_as_effective_target_load() -> None:
+    native_worker_telemetry = {
+        "schema_version": "hackme.system-stress-worker-telemetry.v1",
+        "method": "native_inflight_operation_counter_time_samples",
+        "configured_workers": 32,
+        "sample_count": 20,
+        "active_worker_histogram": {"4": 20},
+        "sustained_active_workers": 4,
+        "active_workers_at_stop": 0,
+        "complete": True,
+    }
+    payload = {
+        "ok": True,
+        "total_ops_requested": 1_000,
+        "worker_telemetry": native_worker_telemetry,
+        "summary": {"total_ops": 1_000, "server_busy_503": 0},
+    }
+    # All 32 executor threads can exist (/proc sees 35 with orchestrators), but
+    # native operation entry/exit sampling proves only four did work.
+    run = {
+        "returncode": 0,
+        "partial": False,
+        "terminal_status": "COMPLETED",
+        "elapsed_seconds": 60.0,
+        "process_thread_count_peak": 35,
+        "process_thread_sample_count": 20,
+    }
+
+    sample = build_effective_load_sample(
+        payload=payload,
+        run=run,
+        scheduled_load_level=32,
+        expected_operations=1_000,
+        baseline_32_operations_per_minute=1_000.0,
+        window_started_at="2026-07-13T00:00:00Z",
+    )
+
+    assert measured_active_workers(run, 32, payload) == 4
+    assert sample["worker_measurement"]["proc_task_active_worker_upper_bound"] == 32
+    assert sample["worker_measurement"]["measured_active_workers"] == 4
+    assert sample["target_conditions"]["active_workers_at_least_28"] is False
+    assert sample["at_target_load"] is False
+    assert "ACTIVE_WORKERS_BELOW_28" in sample["target_failure_reasons"]
+
+
+def test_high_worker_count_without_required_throughput_is_not_target_load() -> None:
+    sample = build_effective_load_sample(
+        payload={
+            "ok": True,
+            "total_ops_requested": 1_000,
+            "degraded_reasons": ["ordinary_p95_above_configured_limit"],
+            "worker_telemetry": {
+                "schema_version": "hackme.system-stress-worker-telemetry.v1",
+                "method": "native_inflight_operation_counter_time_samples",
+                "configured_workers": 32,
+                "sample_count": 20,
+                "active_worker_histogram": {"32": 20},
+                "sustained_active_workers": 32,
+                "active_workers_at_stop": 0,
+                "complete": True,
+            },
+            "summary": {"total_ops": 100, "server_busy_503": 0},
+        },
+        run={
+            "returncode": 0,
+            "partial": False,
+            "terminal_status": "COMPLETED",
+            "elapsed_seconds": 60.0,
+            "process_thread_count_peak": 35,
+            "process_thread_sample_count": 20,
+        },
+        scheduled_load_level=32,
+        expected_operations=1_000,
+        baseline_32_operations_per_minute=1_000.0,
+        window_started_at="2026-07-13T00:00:00Z",
+    )
+
+    assert sample["active_workers"] == 32
+    assert sample["target_conditions"]["throughput_at_least_baseline_80_percent"] is False
+    assert sample["target_conditions"]["effective_load_ratio_at_least_0_85"] is False
+    assert sample["degradation_reason"] == "LATENCY_HIGH"
+    assert sample["at_target_load"] is False
+
+
 def test_operational_soak_requires_eight_hours_for_signoff_and_redacts_commands():
     command = sanitized_command([
         "python3",
@@ -352,6 +555,193 @@ def test_operational_soak_restricts_destructive_targets_and_artifacts_to_tmp(tmp
         assert "under /tmp" in str(exc)
     else:
         raise AssertionError("source-repo runtime should be rejected")
+
+    try:
+        validate_run_policy("https://user:secret@127.0.0.1:54321", tmp_path, owns_target=False)
+    except ValueError as exc:
+        assert "must not contain credentials" in str(exc)
+    else:
+        raise AssertionError("credentials embedded in the base URL should be rejected")
+
+
+def test_operational_soak_child_honors_external_stop_without_waiting_for_round_timeout(tmp_path):
+    state = start_command(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        stdout_path=tmp_path / "child.stdout",
+    )
+    stop_file = tmp_path / "campaign.stop"
+    stop_file.write_text("stop", encoding="utf-8")
+    started = time.monotonic()
+
+    result = finish_command(state, timeout=120, stop_file=stop_file)
+
+    assert time.monotonic() - started < 5
+    assert result["stopped_by_control"] is True
+    assert result["stop_reason"] == "external_stop_file"
+    assert result["timed_out"] is False
+    assert result["partial"] is True
+    assert result["terminal_status"] == "NOT_EVALUATED"
+    assert result["returncode"] != 0
+    assert result["orphan_pids"] == []
+
+
+def test_operational_soak_child_honors_campaign_deadline_and_is_not_fake_pass(tmp_path):
+    state = start_command(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        stdout_path=tmp_path / "deadline-child.stdout",
+    )
+    started = time.monotonic()
+
+    result = finish_command(
+        state,
+        timeout=120,
+        stop_at_monotonic=time.monotonic() + 0.2,
+    )
+
+    assert time.monotonic() - started < 3
+    assert result["stopped_by_control"] is True
+    assert result["stop_reason"] == "campaign_deadline"
+    assert result["partial"] is True
+    assert result["terminal_status"] == "NOT_EVALUATED"
+    assert result["returncode"] != 0
+    assert result["orphan_pids"] == []
+
+
+def test_operational_soak_deadline_signals_round_points_and_browser_at_same_edge(tmp_path):
+    states = {
+        name: start_command(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            stdout_path=tmp_path / f"{name}.stdout",
+        )
+        for name in ("round", "points", "browser")
+    }
+
+    round_result = finish_command(
+        states["round"],
+        timeout=120,
+        stop_at_monotonic=time.monotonic() + 0.2,
+        on_stop=lambda reason: (
+            request_command_stop(states["points"], reason),
+            request_command_stop(states["browser"], reason),
+        ),
+    )
+    points_result = finish_command(states["points"], timeout=120)
+    browser_result = finish_command(states["browser"], timeout=120)
+
+    for result in (round_result, points_result, browser_result):
+        assert result["partial"] is True
+        assert result["terminal_status"] == "NOT_EVALUATED"
+        assert result["stop_reason"] == "campaign_deadline"
+        assert result["returncode"] != 0
+        assert result["orphan_pids"] == []
+
+
+def test_operational_soak_command_timeout_is_partial_harness_evidence(tmp_path):
+    state = start_command(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        stdout_path=tmp_path / "timeout-child.stdout",
+    )
+
+    result = finish_command(state, timeout=1)
+
+    assert result["returncode"] == 124
+    assert result["timed_out"] is True
+    assert result["stopped_by_control"] is False
+    assert result["stop_reason"] == "command_timeout"
+    assert result["partial"] is True
+    assert result["terminal_status"] == "TIMEOUT"
+    assert result["orphan_pids"] == []
+
+
+def test_operational_soak_stop_kills_escaped_descendant_without_orphan(tmp_path):
+    child_pid_path = tmp_path / "escaped-child.pid"
+    parent_code = (
+        "import pathlib,subprocess,sys,time; "
+        "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'], start_new_session=True); "
+        "pathlib.Path(sys.argv[1]).write_text(str(child.pid), encoding='utf-8'); "
+        "time.sleep(60)"
+    )
+    state = start_command(
+        [sys.executable, "-c", parent_code, str(child_pid_path)],
+        stdout_path=tmp_path / "escaped-parent.stdout",
+    )
+    deadline = time.monotonic() + 5
+    while not child_pid_path.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert child_pid_path.exists()
+    child_pid = int(child_pid_path.read_text(encoding="utf-8"))
+    # Allow finish_command's process-tree sampler to observe the escaped child.
+    time.sleep(1.05)
+    stop_file = tmp_path / "campaign.stop"
+    stop_file.write_text("stop", encoding="utf-8")
+
+    result = finish_command(state, timeout=120, stop_file=stop_file)
+
+    assert result["orphan_pids"] == []
+    try:
+        os.kill(child_pid, 0)
+    except ProcessLookupError:
+        pass
+    else:
+        stat = Path(f"/proc/{child_pid}/stat").read_text(encoding="utf-8")
+        assert stat[stat.rfind(")") + 2 :].split()[0] == "Z"
+
+
+def test_operational_soak_stop_control_reason_is_allowlisted_token_only(tmp_path):
+    stop_file = tmp_path / "campaign.stop.json"
+    stop_file.write_text(
+        json.dumps({"reason": "required_continuous_active_duration_completed", "secret": "do-not-copy"}),
+        encoding="utf-8",
+    )
+
+    assert stop_control_reason(stop_file) == "required_continuous_active_duration_completed"
+
+    stop_file.write_text(json.dumps({"reason": "secret value with spaces"}), encoding="utf-8")
+    assert stop_control_reason(stop_file) == "unrecognized"
+
+
+def test_operational_soak_has_no_markdown_or_post_deadline_final_browser():
+    script = (ROOT / "scripts" / "testing" / "operational_soak_probe.py").read_text(encoding="utf-8")
+
+    assert "write_markdown" not in script
+    assert 'f"browser_{len(browser_runs) + 1:03d}_final"' not in script
+
+
+def test_operational_soak_preexisting_stop_writes_secret_free_terminal_json(tmp_path, monkeypatch):
+    stop_file = tmp_path / "campaign.stop.json"
+    stop_file.write_text(json.dumps({"reason": "campaign_runner_exception"}), encoding="utf-8")
+    out_path = tmp_path / "terminal.json"
+    secret = "must-not-appear-in-terminal-json"
+    monkeypatch.setattr(sys, "argv", [
+        "operational_soak_probe.py",
+        "--base-url", "http://127.0.0.1:9",  # ci-safety: no request occurs after preexisting stop
+        "--runtime-root", str(tmp_path),
+        "--out", str(out_path),
+        "--duration-seconds", "1",
+        "--allow-short-duration",
+        "--account-count", "2",
+        "--root-password", secret,
+        "--manager-password", secret,
+        "--account-password", secret,
+        "--test-password", secret,
+        "--skip-points-stress",
+        "--skip-browser",
+        "--stop-file", str(stop_file),
+    ])
+
+    returncode = operational_soak_main()
+    payload_text = out_path.read_text(encoding="utf-8")
+    payload = json.loads(payload_text)
+    checkpoint = json.loads(
+        (tmp_path / "reports" / "operational_soak" / "operational_soak.checkpoint.json").read_text(encoding="utf-8")
+    )
+
+    assert returncode == 3
+    assert payload["terminal_status"] == "INTERRUPTED"
+    assert payload["termination_reason"] == "external_stop_file_preexisting"
+    assert checkpoint["status"] == "terminal"
+    assert secret not in payload_text
+    assert not list(tmp_path.rglob("*.md"))
 
 
 def test_operational_sentinel_treats_requirements_not_ready_as_business_state():

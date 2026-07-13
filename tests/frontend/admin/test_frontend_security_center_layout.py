@@ -35,6 +35,20 @@ def test_security_center_logs_have_non_overlapping_layout():
     assert "grid-template-columns: auto auto minmax(0, .9fr) minmax(0, .7fr) minmax(0, 1.6fr);" in css
 
 
+def test_security_center_mobile_tabs_and_test_fields_stay_in_viewport():
+    index_html = (ROOT / "public" / "index.html").read_text(encoding="utf-8")
+    css = (ROOT / "public" / "styles.css").read_text(encoding="utf-8")
+    mobile_css = css.split("Mobile security center containment", 1)[1]
+
+    assert 'class="tabs server-management-tabs"' in index_html
+    assert "@media (max-width: 720px)" in mobile_css
+    assert ".tabs.server-management-tabs" in mobile_css
+    assert "grid-template-columns: repeat(2, minmax(0, 1fr));" in mobile_css
+    assert ".security-log-grid" in mobile_css
+    assert "grid-template-columns: minmax(0, 1fr);" in mobile_css
+    assert ".security-test-panel .settings-option-grid" in mobile_css
+
+
 def test_server_and_system_management_tabs_are_split_by_domain():
     index_html = (ROOT / "public" / "index.html").read_text(encoding="utf-8")
     admin_js = (ROOT / "public" / "js" / "50-admin.js").read_text(encoding="utf-8")

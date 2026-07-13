@@ -1,8 +1,18 @@
 # Update Summary
 
-Release ID: `05_2026.07.12-002`
+Release ID: `05_2026.07.12-003`
 
-## 05_2026.07.12-002
+## 05_2026.07.12-003
+
+- Hardened the 24-hour operational campaign harness with verified cgroup v2
+  limits, an out-of-scope watchdog, atomic hard stops and dual checkpoints,
+  layered readiness, production-security sentinels, source-drift detection,
+  field-level resource completeness, strict scenario contracts, and validated
+  artifact/gate indexes. Formal execution remains fail-closed until all
+  qualification gates and the 60-minute rehearsal have machine evidence.
+- Fixed the deep Playwright account-isolation call signature and contained the
+  root account/server-management layouts at 360, 390, and 768-pixel viewports,
+  including card-style account rows and bounded operation menus.
 
 - Added an explicit pre-handler rejection contract for backpressure. Browser,
   Playwright, stress, capacity, and pentest clients retry/classify a 503 as

@@ -2,7 +2,7 @@
 
 [English README](../README.md)
 
-目前 Release ID：`05_2026.07.12-002`
+目前 Release ID：`05_2026.07.12-003`
 
 這份文件只做導覽，不放功能流水帳。近期變更看
 [UPDATE_SUMMARY.md](UPDATE_SUMMARY.md)，完整英文索引看

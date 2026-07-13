@@ -42,6 +42,7 @@ DEFENSIVE_LATENCY_OPS = {
     "remote_direct_reject",
     "qos_version",
 }
+WORKER_TELEMETRY_SCHEMA_VERSION = "hackme.system-stress-worker-telemetry.v1"
 
 
 def utc_now() -> str:
@@ -53,6 +54,122 @@ def percentile(sorted_values: list[float], pct: float) -> float:
         return 0.0
     idx = min(len(sorted_values) - 1, int(len(sorted_values) * pct))
     return float(sorted_values[idx])
+
+
+class InflightWorkerTelemetry:
+    """Measure workers inside the actual operation critical section."""
+
+    def __init__(self, configured_workers: int, *, sample_interval_seconds: float = 0.02):
+        self.configured_workers = max(1, int(configured_workers))
+        self.sample_interval_seconds = max(0.005, float(sample_interval_seconds))
+        self._lock = threading.Lock()
+        self._active = 0
+        self._peak = 0
+        self._started = 0
+        self._completed = 0
+        self._histogram: Counter = Counter()
+        self._sample_count = 0
+        self._first_operation = threading.Event()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self._thread is not None:
+            raise RuntimeError("worker telemetry already started")
+
+        def sample_loop() -> None:
+            while not self._stop.is_set():
+                if not self._first_operation.wait(self.sample_interval_seconds):
+                    continue
+                if self._stop.is_set():
+                    break
+                # Do not sample the executor's thread-start ramp as sustained
+                # load.  The first full interval gives submitted workers a
+                # chance to enter their actual operation section.
+                if self._stop.wait(self.sample_interval_seconds):
+                    break
+                with self._lock:
+                    active = self._active
+                    self._histogram[active] += 1
+                    self._sample_count += 1
+
+        self._thread = threading.Thread(
+            target=sample_loop,
+            daemon=True,
+            name="system-stress-inflight-worker-sampler",
+        )
+        self._thread.start()
+
+    def begin_operation(self) -> None:
+        with self._lock:
+            self._active += 1
+            self._started += 1
+            self._peak = max(self._peak, self._active)
+        self._first_operation.set()
+
+    def end_operation(self) -> None:
+        with self._lock:
+            if self._active <= 0:
+                raise RuntimeError("worker telemetry active count underflow")
+            self._active -= 1
+            self._completed += 1
+
+    @staticmethod
+    def _histogram_percentile(histogram: Counter, sample_count: int, pct: float) -> int:
+        if sample_count <= 0:
+            return 0
+        target = min(sample_count - 1, max(0, int((sample_count - 1) * pct)))
+        observed = 0
+        for value in sorted(histogram):
+            observed += int(histogram[value])
+            if observed > target:
+                return int(value)
+        return 0
+
+    def stop(self) -> dict[str, Any]:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2)
+        with self._lock:
+            histogram = Counter(self._histogram)
+            sample_count = int(self._sample_count)
+            active = int(self._active)
+            started = int(self._started)
+            completed = int(self._completed)
+            peak = int(self._peak)
+        worker_floor = int((self.configured_workers * 0.85) + 0.999999)
+        samples_at_floor = sum(
+            int(count) for value, count in histogram.items() if int(value) >= worker_floor
+        )
+        return {
+            "schema_version": WORKER_TELEMETRY_SCHEMA_VERSION,
+            "method": "native_inflight_operation_counter_time_samples",
+            "configured_workers": self.configured_workers,
+            "sample_interval_seconds": self.sample_interval_seconds,
+            "sample_count": sample_count,
+            "active_worker_histogram": {
+                str(int(value)): int(count) for value, count in sorted(histogram.items())
+            },
+            "active_workers_peak": peak,
+            "active_workers_p10": self._histogram_percentile(histogram, sample_count, 0.10),
+            "active_workers_p50": self._histogram_percentile(histogram, sample_count, 0.50),
+            "active_workers_p95": self._histogram_percentile(histogram, sample_count, 0.95),
+            "sustained_active_workers": self._histogram_percentile(histogram, sample_count, 0.10),
+            "samples_at_or_above_85_percent": samples_at_floor,
+            "active_worker_time_ratio_at_or_above_85_percent": round(
+                samples_at_floor / sample_count if sample_count else 0.0,
+                6,
+            ),
+            "idle_workers_p95": max(
+                0,
+                self.configured_workers
+                - self._histogram_percentile(histogram, sample_count, 0.10),
+            ),
+            "operations_started": started,
+            "operations_completed": completed,
+            "active_workers_at_stop": active,
+            "complete": bool(sample_count > 0 and active == 0 and started == completed),
+        }
 
 
 def make_tiny_png() -> bytes:
@@ -433,6 +550,30 @@ class OperationBudget:
     def counts(self) -> dict[str, int]:
         with self._lock:
             return dict(self._counts)
+
+
+def record_operation_result(
+    stats: Stats,
+    *,
+    requested_operation: str,
+    result: dict[str, Any],
+    account: str,
+) -> str:
+    """Record the operation that actually ran, preserving fallback identity."""
+
+    actual_operation = str(result.get("op") or "").strip() or str(requested_operation)
+    stats.record(
+        actual_operation,
+        status=int(result.get("status") or 0),
+        elapsed_ms=float(result.get("elapsed_ms") or 0.0),
+        ok=bool(result.get("ok")),
+        error=str(result.get("error") or ""),
+        body_sample=str(result.get("body_sample") or ""),
+        bytes_received=int(result.get("bytes") or 0),
+        account=account,
+        backpressure_rejected=bool(result.get("backpressure_rejected")),
+    )
+    return actual_operation
 
 
 def db_paths_from_runtime(runtime_root: str) -> dict[str, Path]:
@@ -971,6 +1112,7 @@ def main() -> int:
     total_ops = max(1, int(args.ops or args.logical_users))
     concurrency = max(1, int(args.concurrency))
     start_event = threading.Event()
+    worker_telemetry = InflightWorkerTelemetry(concurrency)
 
     def task(task_id: int) -> None:
         rng = random.Random((task_id + 1) * 7919)
@@ -986,21 +1128,21 @@ def main() -> int:
             client = clients[task_id % len(clients)]
             op = choose_operation(rng, weighted_ops)
         start_event.wait()
-        result = run_operation(op, client, seed, budget, task_id)
-        stats.record(
-            op,
-            status=int(result.get("status") or 0),
-            elapsed_ms=float(result.get("elapsed_ms") or 0.0),
-            ok=bool(result.get("ok")),
-            error=str(result.get("error") or ""),
-            body_sample=str(result.get("body_sample") or ""),
-            bytes_received=int(result.get("bytes") or 0),
-            account=client.username,
-            backpressure_rejected=bool(result.get("backpressure_rejected")),
-        )
+        worker_telemetry.begin_operation()
+        try:
+            result = run_operation(op, client, seed, budget, task_id)
+            record_operation_result(
+                stats,
+                requested_operation=op,
+                result=result,
+                account=client.username,
+            )
+        finally:
+            worker_telemetry.end_operation()
 
     started_at = utc_now()
     started = time.perf_counter()
+    worker_telemetry.start()
     try:
         with ThreadPoolExecutor(max_workers=concurrency) as pool:
             futures = [pool.submit(task, idx) for idx in range(total_ops)]
@@ -1008,6 +1150,7 @@ def main() -> int:
             for _future in as_completed(futures):
                 pass
     finally:
+        worker_telemetry_summary = worker_telemetry.stop()
         stop_qos.set()
         qos_thread.join(timeout=3)
         if monitor:
@@ -1093,6 +1236,12 @@ def main() -> int:
     total_ops_per_second = round(summary_total_ops / elapsed_seconds, 2) if elapsed_seconds > 0 else 0.0
     accepted_ops_per_second = round(accepted_ops / elapsed_seconds, 2) if elapsed_seconds > 0 else 0.0
     server_busy_ops_per_second = round(server_busy_ops / elapsed_seconds, 2) if elapsed_seconds > 0 else 0.0
+    worker_telemetry_summary.update({
+        "throughput_operations_per_minute": round(total_ops_per_second * 60.0, 6),
+        "accepted_operations_per_minute": round(accepted_ops_per_second * 60.0, 6),
+        "blocked_worker_events": server_busy_ops,
+        "blocked_worker_event_rate": round(server_busy_ops / summary_total_ops, 6) if summary_total_ops else 0.0,
+    })
 
     payload = {
         "ok": not degraded_reasons if args.allow_server_busy else (not degraded_reasons and transport_failure_count == 0),
@@ -1135,6 +1284,7 @@ def main() -> int:
         "total_ops_per_second": total_ops_per_second,
         "accepted_ops_per_second": accepted_ops_per_second,
         "server_busy_ops_per_second": server_busy_ops_per_second,
+        "worker_telemetry": worker_telemetry_summary,
         "hard_failure_rate": summary.get("hard_failure_rate_excluding_503", 0),
         "seed": seed,
         "login_elapsed_seconds": round(login_elapsed_seconds, 3),

@@ -1,4 +1,5 @@
 import argparse
+import ast
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,25 @@ from scripts.testing.playwright_platform_health_check import ignored_browser_err
 
 
 ROOT = Path(__file__).resolve().parents[3]
+
+
+def test_playwright_wait_for_function_arguments_use_current_keyword_api():
+    failures = []
+    for path in sorted((ROOT / "scripts" / "testing").glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "wait_for_function"
+                and len(node.args) > 1
+            ):
+                failures.append(f"{path.name}:{node.lineno}")
+
+    assert failures == [], (
+        "Playwright Python requires the evaluated value to be passed as arg=; "
+        f"found positional values at {failures}"
+    )
 
 
 def test_deep_playwright_external_server_requires_environment_credentials(monkeypatch):

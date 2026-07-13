@@ -16476,3 +16476,159 @@
     grid-template-columns: auto minmax(0, 1fr);
   }
 }
+
+/* Root account management keeps navigation and row actions in the viewport.
+   Desktop retains the dense table; tablet/mobile rows become labelled cards. */
+@media (max-width: 768px) {
+  #module-accounts .accounts-operation-tabs {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    overflow-x: visible;
+  }
+
+  #module-accounts .accounts-operation-tabs .tab {
+    width: 100%;
+    min-width: 0;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  #sec-users .table-scroll-wrap {
+    overflow-x: visible;
+  }
+
+  #sec-users .user-table {
+    display: block;
+    width: 100%;
+    min-width: 0;
+    border: 0;
+    background: transparent;
+  }
+
+  #sec-users .user-table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  #sec-users .user-table tbody {
+    display: grid;
+    width: 100%;
+    gap: .65rem;
+  }
+
+  #sec-users .user-table tr {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: 100%;
+    min-width: 0;
+    padding: .6rem;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: rgba(21, 26, 34, .76);
+  }
+
+  #sec-users .user-table td {
+    display: grid;
+    grid-template-columns: minmax(4.5rem, .42fr) minmax(0, 1fr);
+    gap: .45rem;
+    min-width: 0;
+    padding: .3rem !important;
+    border-bottom: 0;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  #sec-users .user-table td::before {
+    content: attr(data-label);
+    color: var(--muted);
+    font-size: .72rem;
+    font-weight: 700;
+  }
+
+  #sec-users .user-table td[data-label="帳號"],
+  #sec-users .user-table td[data-label="行為"] {
+    grid-column: 1 / -1;
+  }
+
+  #sec-users .user-table td[data-label="行為"] {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  #sec-users .user-table td[data-label="行為"]::before {
+    margin-bottom: .2rem;
+  }
+
+  #sec-users .user-table .admin-user-actions {
+    display: flex;
+    position: relative;
+    width: 100%;
+    min-width: 0;
+    margin-top: 0;
+  }
+
+  #sec-users .user-table .admin-user-action-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 4.25rem;
+  }
+
+  #sec-users .user-table .admin-user-action-menu {
+    display: none;
+    width: 100%;
+    min-width: 0;
+    margin-top: .35rem;
+    padding: .5rem;
+    border: 1px solid color-mix(in srgb, var(--line) 78%, transparent);
+    border-radius: 12px;
+    background: color-mix(in srgb, var(--panel) 96%, #050816);
+    flex-wrap: wrap;
+    align-items: center;
+    gap: .42rem;
+  }
+
+  #sec-users .user-table .admin-user-actions.open {
+    width: 100% !important;
+    max-width: 100% !important;
+    flex-wrap: wrap;
+  }
+
+  #sec-users .user-table .admin-user-actions.open .admin-user-action-menu {
+    display: flex;
+  }
+}
+
+/* Mobile security center containment.  These tabs are destinations, so keep
+   all four visible instead of placing unannounced controls off-canvas. */
+@media (max-width: 720px) {
+  .tabs.server-management-tabs {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    overflow-x: visible;
+  }
+
+  .tabs.server-management-tabs .tab {
+    width: 100%;
+    min-width: 0;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .security-log-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .security-test-panel,
+  .security-test-panel .settings-option-grid,
+  .security-test-panel .field {
+    min-width: 0;
+    max-width: 100%;
+  }
+}

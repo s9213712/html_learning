@@ -75,3 +75,32 @@ def test_workflow_editor_has_mobile_responsive_overrides():
     assert "min-width: 1450px;" not in css
     assert "min-width: 980px;" not in css
     assert "min-width: 100%;" in css
+
+
+def test_root_accounts_tabs_and_user_actions_stay_in_mobile_viewport():
+    index_html = (ROOT / "public" / "index.html").read_text(encoding="utf-8")
+    css = (ROOT / "public" / "styles.css").read_text(encoding="utf-8")
+    users_js = (ROOT / "public" / "js" / "10-users.js").read_text(encoding="utf-8")
+
+    accounts_section = index_html.split('id="module-accounts"', 1)[1].split('id="module-system"', 1)[0]
+    assert 'class="tabs accounts-operation-tabs"' in accounts_section
+    assert 'id="tab-violations"' in accounts_section
+    assert 'id="tab-reports"' in accounts_section
+
+    responsive_accounts = css.split(
+        "/* Root account management keeps navigation and row actions in the viewport.",
+        1,
+    )[1]
+    assert "@media (max-width: 768px)" in responsive_accounts
+    assert "#module-accounts .accounts-operation-tabs" in responsive_accounts
+    assert "grid-template-columns: repeat(2, minmax(0, 1fr));" in responsive_accounts
+    assert "overflow-x: visible;" in responsive_accounts
+    assert "#sec-users .user-table" in responsive_accounts
+    assert "min-width: 0;" in responsive_accounts
+    assert "#sec-users .user-table td::before" in responsive_accounts
+    assert "content: attr(data-label);" in responsive_accounts
+    assert "#sec-users .user-table .admin-user-action-toggle" in responsive_accounts
+    assert "#sec-users .user-table .admin-user-actions.open .admin-user-action-menu" in responsive_accounts
+
+    for label in ("選取", "ID", "在線", "帳號", "暱稱", "真實姓名", "角色", "會員等級", "狀態", "違規", "行為"):
+        assert f'"{label}"' in users_js

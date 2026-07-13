@@ -1356,7 +1356,7 @@ def check_account_context_isolation_journey(
         page.evaluate("identity => setAuthState(identity)", me["body"])
         page.wait_for_function(
             "expected => getCurrentAccountStorageScope() === expected",
-            f"user:{bob['id']}",
+            arg=f"user:{bob['id']}",
             timeout=10000,
         )
         page.wait_for_timeout(400)

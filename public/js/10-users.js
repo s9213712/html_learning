@@ -227,13 +227,15 @@ function renderUsers() {
     }
     const tr = document.createElement("tr");
     if (isBlocked) tr.style.opacity = "0.5";
-    const appendTextCell = (value) => {
+    const appendTextCell = (value, label) => {
       const td = document.createElement("td");
+      td.dataset.label = label;
       td.textContent = value == null ? "" : String(value);
       tr.appendChild(td);
       return td;
     };
     const selectCell = document.createElement("td");
+    selectCell.dataset.label = "選取";
     if (canReviewPending) {
       const checkbox = document.createElement("input");
       checkbox.type = "checkbox";
@@ -249,8 +251,9 @@ function renderUsers() {
       selectCell.style.color = "var(--muted)";
     }
     const actions = buildAdminUserActionMenu(actionButtons, u);
-    appendTextCell(u.id);
+    appendTextCell(u.id, "ID");
     const onlineCell = document.createElement("td");
+    onlineCell.dataset.label = "在線";
     const onlineDot = document.createElement("span");
     onlineDot.className = `online-dot ${u.is_online ? "online" : "offline"}`;
     onlineDot.title = u.is_online
@@ -259,6 +262,7 @@ function renderUsers() {
     onlineCell.appendChild(onlineDot);
     tr.appendChild(onlineCell);
     const usernameCell = document.createElement("td");
+    usernameCell.dataset.label = "帳號";
     usernameCell.innerHTML = userIdentityMarkup(u.id, u.username || "", u.nickname || "", "user-table-identity", u.avatar_file_id || "");
     const relationBadges = [];
     if (u.is_friend) relationBadges.push('<span class="profile-official-badge">好友</span>');
@@ -284,11 +288,12 @@ function renderUsers() {
       usernameCell.appendChild(walletLine);
     }
     tr.appendChild(usernameCell);
-    appendTextCell(u.nickname || "");
-    appendTextCell(u.real_name || "");
-    appendTextCell(u.role_label || u.role || "");
-    appendTextCell(u.member_level_label || `${u.effective_level || u.member_level || "-"}${u.base_level && u.base_level !== u.effective_level ? ` (${u.base_level})` : ""}`);
+    appendTextCell(u.nickname || "", "暱稱");
+    appendTextCell(u.real_name || "", "真實姓名");
+    appendTextCell(u.role_label || u.role || "", "角色");
+    appendTextCell(u.member_level_label || `${u.effective_level || u.member_level || "-"}${u.base_level && u.base_level !== u.effective_level ? ` (${u.base_level})` : ""}`, "會員等級");
     const statusCell = document.createElement("td");
+    statusCell.dataset.label = "狀態";
     const statusSpan = document.createElement("span");
     statusSpan.textContent = "正常";
     statusSpan.style.color = "#4caf50";
@@ -312,6 +317,7 @@ function renderUsers() {
     statusCell.appendChild(statusSpan);
     tr.appendChild(statusCell);
     const violationCell = document.createElement("td");
+    violationCell.dataset.label = "違規";
     const violationCount = u.violation_count || 0;
     if (violationCount > 0) {
       const violationSpan = document.createElement("span");
@@ -325,6 +331,7 @@ function renderUsers() {
     tr.appendChild(violationCell);
     tr.insertBefore(selectCell, tr.firstChild);
     const actionCell = document.createElement("td");
+    actionCell.dataset.label = "行為";
     actionCell.appendChild(actions);
     tr.appendChild(actionCell);
     tbody.appendChild(tr);
