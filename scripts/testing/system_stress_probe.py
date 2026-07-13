@@ -1079,6 +1079,11 @@ def main() -> int:
         return 2
 
     stats = Stats()
+    # Rotation coverage is about dispatching every mandatory operation, not
+    # silently losing evidence when an operation fails before its result is
+    # recorded.  Keep an independent, thread-safe-by-CPython set of planned
+    # dispatches and report it alongside result statistics.
+    attempted_operations: set[str] = set()
     stop_qos = threading.Event()
     qos_thread = threading.Thread(target=qos_monitor, args=(args.base_url, stats, stop_qos, args.qos_interval), daemon=True)
     qos_thread.start()
@@ -1127,6 +1132,7 @@ def main() -> int:
         else:
             client = clients[task_id % len(clients)]
             op = choose_operation(rng, weighted_ops)
+        attempted_operations.add(op)
         start_event.wait()
         worker_telemetry.begin_operation()
         try:
@@ -1195,7 +1201,7 @@ def main() -> int:
     }
     missing_accounts = [username for username in configured_account_names if username not in active_account_names]
     accounts_without_operations = [username for username, count in account_operation_counts.items() if count <= 0]
-    observed_operation_names = set((summary.get("ops") or {}).keys())
+    observed_operation_names = set((summary.get("ops") or {}).keys()) | attempted_operations
     missing_operations = sorted(set(operation_names) - observed_operation_names)
     successful_operation_counts = {
         name: int((summary.get("ops") or {}).get(name, {}).get("successful_2xx") or 0)
