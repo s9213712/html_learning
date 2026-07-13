@@ -196,8 +196,11 @@ def profile_defaults(profile: str) -> dict[str, int]:
         "direct_transfer_ops": 24,
         "trading_ops": 8,
         "points_concurrency": 4,
-        "system_ops": 180,
-        "system_logical_users": 180,
+            # Rotation must complete at least one full pass over every
+            # operation.  Keep quick runs bounded, but leave enough work for
+            # slow/failed requests not to truncate the coverage proof.
+            "system_ops": 420,
+            "system_logical_users": 420,
         "system_concurrency": 12,
         "session_pool": 4,
     }
