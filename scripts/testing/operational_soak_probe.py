@@ -149,7 +149,7 @@ def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def activation_contract(args: argparse.Namespace, runtime_root: Path) -> dict[str, Any]:
-    required = args.campaign_level in {"rehearsal", "formal"}
+    required = args.campaign_level in {"rehearsal", "soak", "formal"}
     if not required:
         return {"required": False}
     fields = {
@@ -1228,7 +1228,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--duration-seconds", type=int, default=MIN_SIGNOFF_SECONDS)
     parser.add_argument(
         "--campaign-level",
-        choices=("standalone", "smoke", "rehearsal", "formal"),
+        choices=("standalone", "smoke", "rehearsal", "soak", "formal"),
         default="standalone",
     )
     parser.add_argument("--allow-short-duration", action="store_true", help="Development smoke only; short runs are never production sign-off evidence")

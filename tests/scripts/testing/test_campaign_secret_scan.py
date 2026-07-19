@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import os
+import tarfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -70,6 +72,25 @@ def test_secret_match_crosses_chunk_boundary_and_progress_is_byte_driven(
     assert result["error_count"] == 0
     assert result["progress_events"] >= 1
     assert progress and "bytes=" in progress[0]
+
+
+def test_tar_payload_is_scanned_from_start_after_outer_file_digest(
+    tmp_path: Path,
+) -> None:
+    archive_path = tmp_path / "evidence.tar"
+    payload = b"audit-prefix-SECRET-audit-suffix"
+    with tarfile.open(archive_path, "w", format=tarfile.USTAR_FORMAT) as archive:
+        member = tarfile.TarInfo("audit.log")
+        member.size = len(payload)
+        archive.addfile(member, io.BytesIO(payload))
+
+    result = scan(tmp_path, needles={"root": b"SECRET"})
+
+    assert result["ok"] is False
+    assert any(hit["label"] == "archive:root" for hit in result["hits"])
+    assert result["archive_entries"] == 1
+    assert result["archive_decoded_bytes"] == len(payload)
+    assert "archive_scan_failed" not in error_codes(result)
 
 
 def test_file_larger_than_historical_100_mib_limit_is_fully_streamed(
@@ -429,6 +450,33 @@ def test_control_snapshot_copies_every_regular_file_and_rejects_symlink(
     assert "control_snapshot_symlink_rejected" in {
         row["code"] for row in unsafe["errors"]
     }
+
+
+def test_manifest_durability_avoids_per_file_fsync_for_smoke(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / ".control"
+    source.mkdir(mode=0o700)
+    (source / "one.json").write_text("one", encoding="utf-8")
+    (source / "two.json").write_text("two", encoding="utf-8")
+    fsync_calls: list[int] = []
+    real_fsync = secret_scan_module.os.fsync
+
+    def record_fsync(descriptor: int) -> None:
+        fsync_calls.append(descriptor)
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(secret_scan_module.os, "fsync", record_fsync)
+    result = snapshot_control_evidence(ControlSnapshotConfig(
+        source_root=source,
+        snapshot_root=tmp_path / "snapshot",
+        durability_mode=secret_scan_module.CONTROL_SNAPSHOT_DURABILITY_MANIFEST,
+    ))
+
+    assert result["ok"] is True
+    assert result["durability_mode"] == "manifest_fsync"
+    assert len(fsync_calls) == 2
 
 
 def test_control_snapshot_continuous_rewrite_exhausts_bounded_rounds(

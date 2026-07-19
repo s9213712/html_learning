@@ -14,6 +14,7 @@ test_backtest_full.py
 
 *.log
 *.json
+!scripts/testing/schemas/audit_evidence_triad.schema.json
 !services/games/models/
 !services/games/models/*.json
 services/games/models/*.db

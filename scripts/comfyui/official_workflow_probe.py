@@ -27,36 +27,16 @@ if str(REPO_ROOT) not in sys.path:
 from services.comfyui.client import ComfyUIClient, ComfyUIError  # noqa: E402
 from services.comfyui.template.capability import resolve_model_option  # noqa: E402
 from services.comfyui.template.seeding import SYSTEM_WORKFLOW_IDS  # noqa: E402
+from services.comfyui.workflow.summary import (  # noqa: E402
+    GRAPH_LOADER_DEPENDENCY_INPUTS,
+    validate_manifest_dependency_contract,
+)
 
 
-MODEL_INPUTS = {
-    "CheckpointLoaderSimple": {"ckpt_name": ("CheckpointLoaderSimple", "ckpt_name")},
-    "UNETLoader": {"unet_name": ("UNETLoader", "unet_name")},
-    "UnetLoaderGGUF": {"unet_name": ("UnetLoaderGGUF", "unet_name")},
-    "UnetLoaderGGUFAdvanced": {"unet_name": ("UnetLoaderGGUFAdvanced", "unet_name")},
-    "CLIPLoader": {"clip_name": ("CLIPLoader", "clip_name")},
-    "CLIPLoaderGGUF": {"clip_name": ("CLIPLoaderGGUF", "clip_name")},
-    "DualCLIPLoader": {
-        "clip_name1": ("DualCLIPLoader", "clip_name1"),
-        "clip_name2": ("DualCLIPLoader", "clip_name2"),
-    },
-    "DualCLIPLoaderGGUF": {
-        "clip_name1": ("DualCLIPLoaderGGUF", "clip_name1"),
-        "clip_name2": ("DualCLIPLoaderGGUF", "clip_name2"),
-    },
-    "TripleCLIPLoaderGGUF": {
-        "clip_name1": ("TripleCLIPLoaderGGUF", "clip_name1"),
-        "clip_name2": ("TripleCLIPLoaderGGUF", "clip_name2"),
-        "clip_name3": ("TripleCLIPLoaderGGUF", "clip_name3"),
-    },
-    "VAELoader": {"vae_name": ("VAELoader", "vae_name")},
-    "LoraLoader": {"lora_name": ("LoraLoader", "lora_name")},
-    "LoraLoaderModelOnly": {"lora_name": ("LoraLoaderModelOnly", "lora_name")},
-    "ControlNetLoader": {"control_net_name": ("ControlNetLoader", "control_net_name")},
-    "UpscaleModelLoader": {"model_name": ("UpscaleModelLoader", "model_name")},
-    "LatentUpscaleModelLoader": {"model_name": ("LatentUpscaleModelLoader", "model_name")},
-    "LoadVideo": {"file": ("LoadVideo", "file")},
-}
+MODEL_INPUTS = {}
+for node_input in GRAPH_LOADER_DEPENDENCY_INPUTS:
+    node_class, input_name = node_input
+    MODEL_INPUTS.setdefault(node_class, {})[input_name] = node_input
 
 HEAVY_WORKFLOWS = {
     "origin_audio_ace_step_15_xl_base",
@@ -156,6 +136,11 @@ def _output_quality_issues(output):
 
 def _load_workflow(bundle_id):
     path = REPO_ROOT / "workflows" / "comfyui" / bundle_id / "workflow.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _load_manifest(bundle_id):
+    path = REPO_ROOT / "workflows" / "comfyui" / bundle_id / "manifest.json"
     return json.loads(path.read_text(encoding="utf-8"))
 
 
@@ -497,44 +482,109 @@ def _queue_prompt_location(client, prompt_id, *, timeout_seconds=None):
     return "absent"
 
 
+def _probe_report(args, *, bundle_ids, custom_params, parameter_mode, results):
+    completed = sum(1 for item in results if item["status"] in {"completed", "accepted"})
+    failed = sum(
+        1
+        for item in results
+        if item["status"] in {"preflight_failed", "run_failed", "blocked_unsafe_prompt"}
+    )
+    return {
+        "ok": failed == 0,
+        "summary": {
+            "comfyui_url": args.comfyui_url,
+            "started_at": _now(),
+            "bundle_count": len(bundle_ids),
+            "completed": completed,
+            "failed": failed,
+            "preflight_only": bool(args.preflight_only),
+            "include_heavy": bool(args.include_heavy),
+            "formal_params": bool(args.formal_params),
+            "force_run": bool(args.force_run),
+            "parameter_mode": parameter_mode,
+            "custom_param_keys": sorted(
+                key for key in custom_params.keys() if key not in {"node_inputs", "class_inputs"}
+            ),
+            "fetch_outputs": not bool(args.no_fetch_outputs),
+            "acceptance_only": bool(args.acceptance_only),
+        },
+        "results": results,
+    }
+
+
 def run_probe(args):
     client = ComfyUIClient(args.comfyui_url, timeout=args.request_timeout)
     object_info = client.get_object_info()
-    source_ref = client.upload_image_bytes(
-        _png_rgba(args.image_size, args.image_size, (80, 140, 230, 255)),
-        "hackme_official_probe_source.png",
-        overwrite=True,
-    )
-    mask_ref = client.upload_image_bytes(
-        _png_rgba(args.image_size, args.image_size, (255, 255, 255, 255)),
-        "hackme_official_probe_mask.png",
-        overwrite=True,
-    )
-    source_image_name = source_ref["filename"]
-    mask_image_name = mask_ref["filename"]
-
     bundle_ids = list(SYSTEM_WORKFLOW_IDS)
     if args.only:
         wanted = {item.strip() for item in args.only.split(",") if item.strip()}
         bundle_ids = [item for item in bundle_ids if item in wanted]
     custom_params = _load_custom_params(args)
     parameter_mode = "custom" if args.custom_params or custom_params else ("formal" if args.formal_params else "smoke")
-    results = []
+    source_bundles = []
     for bundle_id in bundle_ids:
         workflow = _load_workflow(bundle_id)
-        preflight = _preflight(bundle_id, workflow, object_info)
-        if not preflight["runnable"]:
-            if args.preflight_only or not args.force_run:
-                results.append(_result(bundle_id, status="preflight_failed", preflight=preflight))
-                if not args.continue_on_fail:
-                    break
-                continue
-        if args.preflight_only:
-            results.append(_result(bundle_id, status="preflight_pass", preflight=preflight))
-            continue
-        if bundle_id in HEAVY_WORKFLOWS and not args.include_heavy:
-            results.append(_result(bundle_id, status="skipped_heavy", preflight=preflight, detail="Use --include-heavy to run this heavy audio/video workflow."))
-            continue
+        manifest = _load_manifest(bundle_id)
+        dependency_contract = validate_manifest_dependency_contract(workflow, manifest)
+        source_bundles.append((bundle_id, workflow, dependency_contract))
+
+    # Source dependency contracts are immutable safety evidence.  Validate
+    # every selected bundle before uploading even a tiny media fixture; unlike
+    # missing host models, a bad source contract is never force-runnable.
+    invalid_contracts = [row for row in source_bundles if row[2].get("ok") is not True]
+    if invalid_contracts:
+        results = []
+        for bundle_id, workflow, dependency_contract in invalid_contracts:
+            preflight = _preflight(bundle_id, workflow, object_info)
+            preflight["dependency_contract"] = dependency_contract
+            preflight["source_dependency_contract_valid"] = False
+            preflight["runnable"] = False
+            results.append(_result(bundle_id, status="preflight_failed", preflight=preflight))
+            if not args.continue_on_fail:
+                break
+        return _probe_report(
+            args,
+            bundle_ids=bundle_ids,
+            custom_params=custom_params,
+            parameter_mode=parameter_mode,
+            results=results,
+        )
+
+    # Dependency preflight is read-only.  Uploading fixed-name fixtures before
+    # ``--preflight-only`` both polluted the backend and made a dirty input
+    # directory look healthier than a clean one (notably for LoadVideo).  The
+    # exact placeholder names are sufficient because media inputs are runtime
+    # fixtures, not installed model dependencies.
+    source_image_name = "hackme_official_probe_source.png"
+    mask_image_name = "hackme_official_probe_mask.png"
+    if not args.preflight_only:
+        probe_nonce = f"{int(time.time() * 1000)}_{id(args):x}"
+        source_ref = client.upload_image_bytes(
+            _png_rgba(args.image_size, args.image_size, (80, 140, 230, 255)),
+            f"hackme_official_probe_source_{probe_nonce}.png",
+            overwrite=False,
+            subfolder="hackme_official_probe",
+        )
+        mask_ref = client.upload_image_bytes(
+            _png_rgba(args.image_size, args.image_size, (255, 255, 255, 255)),
+            f"hackme_official_probe_mask_{probe_nonce}.png",
+            overwrite=False,
+            subfolder="hackme_official_probe",
+        )
+        source_image_name = "/".join(
+            part for part in (source_ref.get("subfolder"), source_ref.get("filename")) if part
+        )
+        mask_image_name = "/".join(
+            part for part in (mask_ref.get("subfolder"), mask_ref.get("filename")) if part
+        )
+
+    results = []
+    for bundle_id, workflow, dependency_contract in source_bundles:
+        # Preflight the exact graph that will be queued.  In particular, a
+        # custom model override may intentionally replace a missing/default
+        # model with a host-approved one.  Checking the checked-in graph first
+        # makes the override ineffective (or tempts callers to use
+        # ``--force-run``), while checking only after queueing is too late.
         patched = _patch_for_probe(
             workflow,
             bundle_id,
@@ -549,6 +599,27 @@ def run_probe(args):
             parameter_mode=parameter_mode,
             custom_params=custom_params,
         )
+        preflight = _preflight(bundle_id, patched, object_info)
+        preflight["dependency_contract"] = dependency_contract
+        preflight["source_dependency_contract_valid"] = dependency_contract.get("ok") is True
+        if dependency_contract.get("ok") is not True:
+            preflight["runnable"] = False
+            results.append(_result(bundle_id, status="preflight_failed", preflight=preflight))
+            if not args.continue_on_fail:
+                break
+            continue
+        if not preflight["runnable"]:
+            if args.preflight_only or not args.force_run:
+                results.append(_result(bundle_id, status="preflight_failed", preflight=preflight))
+                if not args.continue_on_fail:
+                    break
+                continue
+        if args.preflight_only:
+            results.append(_result(bundle_id, status="preflight_pass", preflight=preflight))
+            continue
+        if bundle_id in HEAVY_WORKFLOWS and not args.include_heavy:
+            results.append(_result(bundle_id, status="skipped_heavy", preflight=preflight, detail="Use --include-heavy to run this heavy audio/video workflow."))
+            continue
         safety_issue = _prompt_safety_issue(patched)
         if safety_issue:
             results.append(_result(bundle_id, status="blocked_unsafe_prompt", detail=safety_issue, preflight=preflight))
@@ -624,27 +695,13 @@ def run_probe(args):
             if not args.continue_on_fail:
                 break
 
-    completed = sum(1 for item in results if item["status"] in {"completed", "accepted"})
-    failed = sum(1 for item in results if item["status"] in {"preflight_failed", "run_failed", "blocked_unsafe_prompt"})
-    return {
-        "ok": failed == 0,
-        "summary": {
-            "comfyui_url": args.comfyui_url,
-            "started_at": _now(),
-            "bundle_count": len(bundle_ids),
-            "completed": completed,
-            "failed": failed,
-            "preflight_only": bool(args.preflight_only),
-            "include_heavy": bool(args.include_heavy),
-            "formal_params": bool(args.formal_params),
-            "force_run": bool(args.force_run),
-            "parameter_mode": parameter_mode,
-            "custom_param_keys": sorted(key for key in custom_params.keys() if key not in {"node_inputs", "class_inputs"}),
-            "fetch_outputs": not bool(args.no_fetch_outputs),
-            "acceptance_only": bool(args.acceptance_only),
-        },
-        "results": results,
-    }
+    return _probe_report(
+        args,
+        bundle_ids=bundle_ids,
+        custom_params=custom_params,
+        parameter_mode=parameter_mode,
+        results=results,
+    )
 
 
 def parse_args():

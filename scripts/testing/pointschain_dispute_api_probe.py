@@ -429,6 +429,7 @@ def main() -> int:
             and not contains_identity_leak(reviewed)
             and not contains_identity_leak(disputes_list)
         ),
+        "fixture_usernames": [victim["username"], str(suspect_row["username"])],
         "tx_hash": theft["transaction_hash"],
         "dispute_uuid": dispute_uuid,
         "wrong_purpose_status": wrong_purpose.get("status"),

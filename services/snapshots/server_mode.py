@@ -532,6 +532,246 @@ class ServerModeService:
         rows = conn.execute("SELECT key, value FROM system_settings ORDER BY key").fetchall()
         return {row["key"]: row["value"] for row in rows}
 
+    def _incident_profile_updates(self):
+        profile = BUILTIN_SECURITY_PROFILES["incident_lockdown"]
+        updates = {}
+        updates.update(profile.get("settings") or {})
+        updates.update(profile.get("thresholds") or {})
+        return updates
+
+    def _settings_conn_for_incident(self, control_conn=None):
+        if control_conn is not None and self._table_exists(control_conn, "system_settings"):
+            return control_conn, False
+        conn = self.get_db()
+        if not self._table_exists(conn, "system_settings"):
+            conn.close()
+            raise RuntimeError("system_settings table is unavailable")
+        return conn, True
+
+    def _security_epoch_value(self, value):
+        try:
+            return max(0, int(value or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def _boolean_setting_value(self, value):
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on", "y", "t"}
+        return bool(value)
+
+    def _apply_incident_settings(self, *, actor, control_conn=None, previous_settings=None, increment_epoch=True):
+        settings_conn, owned_conn = self._settings_conn_for_incident(control_conn)
+        now = datetime.now().isoformat()
+        updated_by = f"server_mode:{self._actor_name(actor)}"
+        try:
+            live_settings = self._settings_snapshot(settings_conn)
+            captured_settings = dict(live_settings if previous_settings is None else previous_settings)
+            epoch_before = self._security_epoch_value(live_settings.get("server_security_epoch"))
+            epoch_after = epoch_before + 1 if increment_epoch else epoch_before
+            updates = self._incident_profile_updates()
+            if (
+                self._boolean_setting_value(updates.get("audit_chain_enabled"))
+                and not self._boolean_setting_value(live_settings.get("audit_chain_enabled"))
+            ):
+                updates["audit_chain_reseal_required"] = True
+            for key, value in updates.items():
+                settings_conn.execute(
+                    "INSERT OR REPLACE INTO system_settings (key, value, updated_at, updated_by) VALUES (?, ?, ?, ?)",
+                    (key, str(value), now, updated_by),
+                )
+            settings_conn.execute(
+                "INSERT OR REPLACE INTO system_settings (key, value, updated_at, updated_by) VALUES (?, ?, ?, ?)",
+                ("server_security_epoch", str(epoch_after), now, updated_by),
+            )
+            if owned_conn:
+                settings_conn.commit()
+            return {
+                "ok": True,
+                "previous_settings": captured_settings,
+                "previous_settings_hash": self._stable_hash(captured_settings),
+                "applied_settings": updates,
+                "security_epoch_before": epoch_before,
+                "security_epoch_after": epoch_after,
+            }
+        except Exception:
+            if owned_conn:
+                try:
+                    settings_conn.rollback()
+                except Exception:
+                    pass
+            raise
+        finally:
+            if owned_conn:
+                settings_conn.close()
+
+    def _restore_incident_settings(self, *, actor, previous_settings, expected_hash):
+        if not isinstance(previous_settings, dict):
+            raise RuntimeError("incident previous settings snapshot is invalid")
+        actual_hash = self._stable_hash(previous_settings)
+        if not expected_hash or actual_hash != str(expected_hash):
+            raise RuntimeError("incident previous settings snapshot hash mismatch")
+        conn = self.get_db()
+        now = datetime.now().isoformat()
+        updated_by = f"server_mode-resolve:{self._actor_name(actor)}"
+        try:
+            if not self._table_exists(conn, "system_settings"):
+                raise RuntimeError("system_settings table is unavailable")
+            live_settings = self._settings_snapshot(conn)
+            current_epoch = self._security_epoch_value(live_settings.get("server_security_epoch"))
+            captured_epoch = self._security_epoch_value(previous_settings.get("server_security_epoch"))
+            preserved_epoch = max(current_epoch, captured_epoch)
+            effective_settings = dict(previous_settings)
+            effective_settings["server_security_epoch"] = str(preserved_epoch)
+
+            conn.execute("DELETE FROM system_settings")
+            for key, value in effective_settings.items():
+                conn.execute(
+                    "INSERT INTO system_settings (key, value, updated_at, updated_by) VALUES (?, ?, ?, ?)",
+                    (str(key), str(value), now, updated_by),
+                )
+            restored_settings = self._settings_snapshot(conn)
+            effective_hash = self._stable_hash(effective_settings)
+            restored_hash = self._stable_hash(restored_settings)
+            if restored_hash != effective_hash:
+                raise RuntimeError("incident settings read-back verification failed")
+            conn.commit()
+            return {
+                "ok": True,
+                "captured_settings_hash": actual_hash,
+                "effective_settings_hash": effective_hash,
+                "restored_settings_hash": restored_hash,
+                "security_epoch_before_restore": current_epoch,
+                "security_epoch_captured": captured_epoch,
+                "security_epoch_after_restore": preserved_epoch,
+                "session_epoch_preserved": preserved_epoch >= current_epoch,
+                "restored_key_count": len(restored_settings),
+            }
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            raise
+        finally:
+            conn.close()
+
+    def _record_incident_resolution_failure(
+        self,
+        *,
+        incident_id,
+        actor,
+        target_mode,
+        error,
+        restore_result=None,
+        claim_payload=None,
+    ):
+        conn = self.get_control_db()
+        try:
+            self.ensure_schema(conn)
+            params = [
+                str(error or "incident restore failed"),
+                json.dumps(restore_result or {}, ensure_ascii=False, sort_keys=True),
+                incident_id,
+            ]
+            ownership_clause = ""
+            if claim_payload is not None:
+                ownership_clause = " AND entry_state='resolving' AND entry_error=?"
+                params.append(str(claim_payload))
+            updated = conn.execute(
+                f"""
+                UPDATE incident_reports
+                SET entry_state='restore_failed', entry_error=?, restore_result_json=?
+                WHERE id=? AND status='open'{ownership_clause}
+                """,
+                tuple(params),
+            )
+            if int(updated.rowcount or 0) == 1:
+                try:
+                    self._record_mode_switch(
+                        conn,
+                        from_mode="incident_lockdown",
+                        to_mode=target_mode or "unknown",
+                        actor=actor,
+                        reason="incident resolution failed",
+                        success=False,
+                        error_message=str(error or "incident restore failed"),
+                        restore_result=restore_result or {},
+                    )
+                except Exception:
+                    pass
+            else:
+                conn.rollback()
+                return
+            conn.commit()
+        finally:
+            conn.close()
+        try:
+            self.audit(
+                "SERVER_MODE_INCIDENT_RESOLVE",
+                "-",
+                user=self._actor_name(actor),
+                success=False,
+                detail=f"incident_id={incident_id},target_mode={target_mode},error={error}",
+            )
+        except Exception:
+            pass
+
+    def _validate_incident_restore_evidence(self, incident):
+        incident_id = str(incident.get("id") or "")
+        settings_hash = str(incident.get("previous_settings_hash") or "")
+        if not incident_id or not settings_hash:
+            raise RuntimeError("incident restore evidence is incomplete")
+        conn = self.get_control_db()
+        try:
+            self.ensure_schema(conn)
+            chain = verify_mode_switch_log_hash_chain(conn)
+            if not chain.get("ok"):
+                raise RuntimeError("incident mode switch audit chain is invalid")
+            rows = conn.execute(
+                """
+                SELECT * FROM mode_switch_logs
+                WHERE to_mode='incident_lockdown'
+                ORDER BY created_at DESC, id DESC
+                LIMIT 200
+                """
+            ).fetchall()
+            entry_log = None
+            entry_diff = {}
+            for row in rows:
+                item = dict(row)
+                try:
+                    config_diff = json.loads(item.get("config_diff_json") or "{}")
+                except Exception:
+                    continue
+                if str(config_diff.get("incident_id") or "") == incident_id:
+                    entry_log = item
+                    entry_diff = config_diff
+                    break
+            if not entry_log:
+                raise RuntimeError("incident entry audit event is missing")
+            signature = self._verify_mode_log_signature(entry_log)
+            if not signature.get("ok"):
+                raise RuntimeError(f"incident entry audit signature is invalid: {signature.get('reason') or 'unknown'}")
+            if str(entry_diff.get("previous_settings_hash") or "") != settings_hash:
+                raise RuntimeError("incident settings hash does not match entry audit event")
+            checkpoint_id = str(incident.get("checkpoint_id") or "")
+            checkpoint_verified = False
+            if checkpoint_id:
+                checkpoint = self._checkpoint_record(conn, checkpoint_id)
+                if checkpoint and str(checkpoint.get("status") or "") == "ready":
+                    if str(checkpoint.get("config_hash") or "") != settings_hash:
+                        raise RuntimeError("incident settings hash does not match pre-incident checkpoint")
+                    checkpoint_verified = True
+            return {
+                "ok": True,
+                "entry_log_id": entry_log.get("id"),
+                "entry_log_signature_valid": True,
+                "audit_chain_valid": True,
+                "checkpoint_verified": checkpoint_verified,
+            }
+        finally:
+            conn.close()
+
     def _points_chain_checkpoint(self, conn):
         payload = {"ledger_count": 0, "block_count": 0, "latest_block_hash": "", "latest_ledger_hash": ""}
         if self._table_exists(conn, "points_ledger"):
@@ -693,16 +933,97 @@ class ServerModeService:
                 raise RuntimeError(f"mode switch audit export failed: {exc}") from exc
         return log_id
 
-    def _enter_incident_lockdown_on_conn(self, conn, *, actor, trigger_type, reason, verification=None):
+    def _enter_incident_lockdown_on_conn(
+        self,
+        conn,
+        *,
+        actor,
+        trigger_type,
+        reason,
+        verification=None,
+        previous_mode_state=None,
+        previous_settings=None,
+        checkpoint=None,
+    ):
         now = datetime.now().isoformat()
-        current_row = conn.execute("SELECT current_mode FROM server_modes WHERE id=1").fetchone()
-        current = current_row["current_mode"] if current_row else None
+        settings_on_control = self._table_exists(conn, "system_settings")
+        current_row = conn.execute("SELECT * FROM server_modes WHERE id=1").fetchone()
+        actual_current = self._normalize_mode(current_row["current_mode"] if current_row else "dev_ready")
+        current_state = dict(previous_mode_state or (dict(current_row) if current_row else {}))
+        current = self._normalize_mode(current_state.get("current_mode") or "dev_ready")
+        existing = conn.execute(
+            "SELECT * FROM incident_reports WHERE status='open' ORDER BY entered_at DESC LIMIT 1"
+        ).fetchone()
+        if actual_current == "incident_lockdown" and existing:
+            return {
+                "incident_id": existing["id"],
+                "entry_state": existing["entry_state"] or "active",
+                "entry_error": existing["entry_error"] or "",
+                "already_active": True,
+                "checkpoint_id": existing["checkpoint_id"],
+                "snapshot_id": existing["snapshot_id"],
+            }
+
+        supplied_checkpoint = checkpoint if isinstance(checkpoint, dict) else {}
+        supplied_components = supplied_checkpoint.get("components") if supplied_checkpoint.get("ok") else None
+        supplied_checkpoint_settings = (
+            supplied_components.get("config")
+            if isinstance(supplied_components, dict)
+            else None
+        )
+        if isinstance(supplied_checkpoint_settings, dict):
+            captured_previous_settings = dict(supplied_checkpoint_settings)
+        else:
+            captured_previous_settings = dict(previous_settings) if isinstance(previous_settings, dict) else None
+        if captured_previous_settings is None:
+            snapshot_conn = None
+            owned_snapshot_conn = False
+            try:
+                snapshot_conn, owned_snapshot_conn = self._settings_conn_for_incident(conn)
+                captured_previous_settings = self._settings_snapshot(snapshot_conn)
+            except Exception:
+                captured_previous_settings = None
+            finally:
+                if owned_snapshot_conn and snapshot_conn is not None:
+                    snapshot_conn.close()
+        try:
+            settings_result = self._apply_incident_settings(
+                actor=actor,
+                control_conn=conn,
+                previous_settings=captured_previous_settings,
+                increment_epoch=True,
+            )
+            entry_state = "active"
+            entry_error = ""
+        except Exception as exc:
+            settings_result = {
+                "ok": False,
+                "previous_settings": dict(captured_previous_settings or {}),
+                "previous_settings_hash": (
+                    self._stable_hash(captured_previous_settings)
+                    if isinstance(captured_previous_settings, dict)
+                    else ""
+                ),
+                "applied_settings": {},
+            }
+            entry_state = "degraded"
+            entry_error = str(exc)
+
+        checkpoint = dict(checkpoint or {})
+        if not checkpoint and isinstance(verification, dict):
+            candidate = verification.get("checkpoint") if isinstance(verification.get("checkpoint"), dict) else verification
+            if isinstance(candidate, dict) and (candidate.get("checkpoint_id") or candidate.get("snapshot_id")):
+                checkpoint = dict(candidate)
+        checkpoint_id = checkpoint.get("checkpoint_id")
+        snapshot_id = checkpoint.get("snapshot_id")
         incident_id = f"incident_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{secrets.token_hex(4)}"
         conn.execute(
             """
             INSERT INTO incident_reports
-            (id, status, trigger_type, reason, entered_by, entered_at, verification_json)
-            VALUES (?, 'open', ?, ?, ?, ?, ?)
+            (id, status, trigger_type, reason, entered_by, entered_at, verification_json,
+             previous_mode, previous_mode_json, previous_settings_json, previous_settings_hash,
+             checkpoint_id, snapshot_id, entry_state, entry_error)
+            VALUES (?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 incident_id,
@@ -711,25 +1032,17 @@ class ServerModeService:
                 self._actor_id(actor),
                 now,
                 json.dumps(verification or {}, ensure_ascii=False, sort_keys=True),
+                current,
+                json.dumps(current_state, ensure_ascii=False, sort_keys=True),
+                json.dumps(settings_result.get("previous_settings") or {}, ensure_ascii=False, sort_keys=True),
+                settings_result.get("previous_settings_hash") or "",
+                checkpoint_id,
+                snapshot_id,
+                entry_state,
+                entry_error,
             ),
         )
         profile = BUILTIN_SECURITY_PROFILES["incident_lockdown"]
-        now_updated_by = f"server_mode:{self._actor_name(actor)}"
-        if self._table_exists(conn, "system_settings"):
-            try:
-                epoch_row = conn.execute("SELECT value FROM system_settings WHERE key='server_security_epoch'").fetchone()
-                next_epoch = int((epoch_row["value"] if epoch_row else 0) or 0) + 1
-            except Exception:
-                next_epoch = 1
-            conn.execute(
-                "INSERT OR REPLACE INTO system_settings (key, value, updated_at, updated_by) VALUES (?, ?, ?, ?)",
-                ("server_security_epoch", str(next_epoch), now, now_updated_by),
-            )
-            for key, value in (profile.get("settings") or {}).items():
-                conn.execute(
-                    "INSERT OR REPLACE INTO system_settings (key, value, updated_at, updated_by) VALUES (?, ?, ?, ?)",
-                    (key, str(value), now, now_updated_by),
-                )
         if self._table_exists(conn, "tester_tokens"):
             conn.execute(
                 "UPDATE tester_tokens SET revoked_at=? WHERE revoked_at IS NULL",
@@ -738,12 +1051,13 @@ class ServerModeService:
         conn.execute(
             """
             UPDATE server_modes
-            SET previous_mode=?, current_mode='incident_lockdown', checkpoint_id=NULL, active_snapshot_id=NULL,
+            SET previous_mode=?, current_mode='incident_lockdown', checkpoint_id=?, active_snapshot_id=NULL,
                 mode_changed_by=?, mode_changed_at=?, notes=?, reason=?, config_json=?
             WHERE id=1
             """,
             (
                 current,
+                checkpoint_id,
                 self._actor_id(actor),
                 now,
                 reason or "",
@@ -757,10 +1071,39 @@ class ServerModeService:
             to_mode="incident_lockdown",
             actor=actor,
             reason=reason or trigger_type or "",
-            success=True,
-            config_diff={"trigger_type": trigger_type, "verification": verification or {}},
+            checkpoint_id=checkpoint_id,
+            snapshot_id=snapshot_id,
+            success=bool(settings_result.get("ok")),
+            error_message=entry_error,
+            config_diff={
+                "incident_id": incident_id,
+                "trigger_type": trigger_type,
+                "verification": verification or {},
+                "previous_settings_hash": settings_result.get("previous_settings_hash") or "",
+                "security_epoch_before": settings_result.get("security_epoch_before"),
+                "security_epoch_after": settings_result.get("security_epoch_after"),
+            },
         )
-        return incident_id
+        if not settings_on_control:
+            self._mirror_current_mode_to_main_db(
+                current_mode="incident_lockdown",
+                previous_mode=current,
+                checkpoint_id=checkpoint_id,
+                snapshot_id=None,
+                actor_id=self._actor_id(actor),
+                notes=reason or "",
+                reason=reason or "",
+                config_json=json.dumps(profile, ensure_ascii=False, sort_keys=True),
+            )
+        return {
+            "incident_id": incident_id,
+            "entry_state": entry_state,
+            "entry_error": entry_error,
+            "already_active": False,
+            "checkpoint_id": checkpoint_id,
+            "snapshot_id": snapshot_id,
+            "settings": settings_result,
+        }
 
     def create_mode_checkpoint(self, *, actor, target_mode, reason="", snapshot_type="mode_checkpoint", from_mode=None):
         target_mode = self._normalize_mode(target_mode)
@@ -1245,20 +1588,433 @@ class ServerModeService:
         finally:
             conn.close()
 
+    def reconcile_open_incident_on_startup(self, *, actor):
+        """Re-assert a persisted open incident before normal startup writes.
+
+        The control database is authoritative.  An unavailable/ambiguous
+        incident store must never be interpreted as permission to apply a
+        launcher-selected normal mode.  This method does not resolve or edit
+        incident reports; it only restores lockdown mode/profile and verifies
+        both databases before a launcher may continue.
+        """
+
+        control_conn = None
+        try:
+            control_conn = self.get_control_db()
+            self.ensure_schema(control_conn)
+            control_conn.commit()
+            control_conn.execute("BEGIN IMMEDIATE")
+            open_rows = control_conn.execute(
+                """
+                SELECT * FROM incident_reports
+                WHERE status='open'
+                ORDER BY entered_at DESC, id DESC
+                """
+            ).fetchall()
+            mode_row = control_conn.execute(
+                "SELECT * FROM server_modes WHERE id=1"
+            ).fetchone()
+            control_mode = self._normalize_mode(
+                mode_row["current_mode"] if mode_row else ""
+            )
+            if not open_rows:
+                control_conn.commit()
+                if control_mode == "incident_lockdown":
+                    return {
+                        "ok": False,
+                        "active": True,
+                        "error": "incident_lockdown_without_open_incident",
+                        "open_incident_count": 0,
+                    }
+                return {
+                    "ok": True,
+                    "active": False,
+                    "reconciled": False,
+                    "open_incident_count": 0,
+                }
+
+            incident = dict(open_rows[0]) if len(open_rows) == 1 else None
+            open_count = len(open_rows)
+            observed_control_mode = control_mode or "unknown"
+            incident_profile_json = json.dumps(
+                BUILTIN_SECURITY_PROFILES["incident_lockdown"],
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            expected_previous_mode = (
+                self._normalize_mode(incident.get("previous_mode"))
+                if incident is not None
+                else None
+            )
+            expected_checkpoint_id = (
+                incident.get("checkpoint_id") if incident is not None else None
+            )
+
+            def mode_row_matches_incident(row):
+                if not row:
+                    return False
+                if self._normalize_mode(row["current_mode"]) != "incident_lockdown":
+                    return False
+                if incident is None:
+                    return True
+                return (
+                    self._normalize_mode(row["previous_mode"]) == expected_previous_mode
+                    and not str(row["active_snapshot_id"] or "").strip()
+                    and str(row["checkpoint_id"] or "")
+                    == str(expected_checkpoint_id or "")
+                    and str(row["config_json"] or "") == incident_profile_json
+                )
+
+            control_reconciled = not mode_row_matches_incident(mode_row)
+            if control_reconciled:
+                previous_mode = (
+                    expected_previous_mode
+                    if incident is not None
+                    else (mode_row["previous_mode"] if mode_row else None)
+                )
+                checkpoint_id = (
+                    expected_checkpoint_id
+                    if incident is not None
+                    else (mode_row["checkpoint_id"] if mode_row else None)
+                )
+                control_conn.execute(
+                    """
+                    UPDATE server_modes
+                    SET current_mode='incident_lockdown', previous_mode=?,
+                        active_snapshot_id=NULL, checkpoint_id=?, mode_changed_by=?,
+                        mode_changed_at=?, notes=?, reason=?, config_json=?
+                    WHERE id=1
+                    """,
+                    (
+                        previous_mode,
+                        checkpoint_id,
+                        self._actor_id(actor),
+                        datetime.now().isoformat(),
+                        "startup incident preservation",
+                        "open incident survives controlled restart",
+                        incident_profile_json,
+                    ),
+                )
+                if incident is not None:
+                    self._record_mode_switch(
+                        control_conn,
+                        from_mode=observed_control_mode,
+                        to_mode="incident_lockdown",
+                        actor=actor,
+                        reason="startup reconciled persisted open incident",
+                        checkpoint_id=incident.get("checkpoint_id"),
+                        snapshot_id=incident.get("snapshot_id"),
+                        success=True,
+                        config_diff={
+                            "incident_id": incident.get("id"),
+                            "previous_settings_hash": incident.get("previous_settings_hash") or "",
+                            "startup_reconciliation": True,
+                        },
+                    )
+            control_readback = control_conn.execute(
+                "SELECT * FROM server_modes WHERE id=1"
+            ).fetchone()
+            if not mode_row_matches_incident(control_readback):
+                raise RuntimeError("control database incident lockdown read-back failed")
+            control_mode_state = dict(control_readback)
+            control_conn.commit()
+        except Exception as exc:
+            if control_conn is not None:
+                try:
+                    control_conn.rollback()
+                except Exception:
+                    pass
+            raise RuntimeError(
+                f"startup incident reconciliation could not read or lock the control database: {exc}"
+            ) from exc
+        finally:
+            if control_conn is not None:
+                control_conn.close()
+
+        # Once control says an incident is open, any main DB/profile failure
+        # must leave control locked and abort startup.  Never use the legacy
+        # mirror helper here because it deliberately swallows write failures.
+        main_conn = None
+        try:
+            main_conn = self.get_db()
+            ensure_snapshot_schema(main_conn)
+            if not self._table_exists(main_conn, "system_settings"):
+                raise RuntimeError("system_settings table is unavailable")
+            current_settings = self._settings_snapshot(main_conn)
+            incident_updates = self._incident_profile_updates()
+
+            def setting_matches(key, expected):
+                if key not in current_settings:
+                    return False
+                actual = current_settings.get(key)
+                if isinstance(expected, bool):
+                    return self._boolean_setting_value(actual) is expected
+                return str(actual) == str(expected)
+
+            profile_drift = [
+                key
+                for key, expected in incident_updates.items()
+                if not setting_matches(key, expected)
+            ]
+            main_conn.close()
+            main_conn = None
+            if profile_drift:
+                # Incident entry already rotated the epoch.  Reconciliation is
+                # idempotent and must not create a fresh epoch on each restart.
+                self._apply_incident_settings(
+                    actor=actor,
+                    previous_settings={},
+                    increment_epoch=False,
+                )
+
+            main_conn = self.get_db()
+            ensure_snapshot_schema(main_conn)
+            main_mode_row = main_conn.execute(
+                "SELECT * FROM server_modes WHERE id=1"
+            ).fetchone()
+            main_reconciled = not mode_row_matches_incident(main_mode_row)
+            if main_reconciled:
+                previous_mode = (
+                    expected_previous_mode
+                    if incident is not None
+                    else (main_mode_row["previous_mode"] if main_mode_row else None)
+                )
+                checkpoint_id = (
+                    expected_checkpoint_id
+                    if incident is not None
+                    else (main_mode_row["checkpoint_id"] if main_mode_row else None)
+                )
+                main_conn.execute(
+                    """
+                    UPDATE server_modes
+                    SET current_mode='incident_lockdown', previous_mode=?,
+                        active_snapshot_id=NULL, checkpoint_id=?, mode_changed_by=?,
+                        mode_changed_at=?, notes=?, reason=?, config_json=?
+                    WHERE id=1
+                    """,
+                    (
+                        previous_mode,
+                        checkpoint_id,
+                        self._actor_id(actor),
+                        datetime.now().isoformat(),
+                        "startup incident preservation",
+                        "open incident survives controlled restart",
+                        incident_profile_json,
+                    ),
+                )
+            main_conn.commit()
+            main_mode_readback = main_conn.execute(
+                "SELECT * FROM server_modes WHERE id=1"
+            ).fetchone()
+            settings_readback = self._settings_snapshot(main_conn)
+            missing_profile_keys = []
+            for key, expected in incident_updates.items():
+                if key not in settings_readback:
+                    missing_profile_keys.append(key)
+                    continue
+                actual = settings_readback.get(key)
+                matches = (
+                    self._boolean_setting_value(actual) is expected
+                    if isinstance(expected, bool)
+                    else str(actual) == str(expected)
+                )
+                if not matches:
+                    missing_profile_keys.append(key)
+            if not mode_row_matches_incident(main_mode_readback):
+                raise RuntimeError("main database incident lockdown read-back failed")
+            if incident is not None:
+                for field in (
+                    "current_mode",
+                    "previous_mode",
+                    "active_snapshot_id",
+                    "checkpoint_id",
+                    "config_json",
+                ):
+                    if str(main_mode_readback[field] or "") != str(control_mode_state[field] or ""):
+                        raise RuntimeError(
+                            f"main/control incident mode state differs for {field}"
+                        )
+            if missing_profile_keys:
+                raise RuntimeError(
+                    "incident profile read-back failed for: "
+                    + ", ".join(sorted(missing_profile_keys))
+                )
+        except Exception as exc:
+            if main_conn is not None:
+                try:
+                    main_conn.rollback()
+                except Exception:
+                    pass
+            raise RuntimeError(
+                f"startup incident reconciliation could not enforce the main database/profile: {exc}"
+            ) from exc
+        finally:
+            if main_conn is not None:
+                main_conn.close()
+
+        result = {
+            "ok": open_count == 1,
+            "active": True,
+            "reconciled": bool(control_reconciled or main_reconciled or profile_drift),
+            "control_mode_reconciled": bool(control_reconciled),
+            "main_mode_reconciled": bool(main_reconciled),
+            "profile_reconciled": bool(profile_drift),
+            "open_incident_count": open_count,
+            "incident_id": incident.get("id") if incident is not None else "",
+        }
+        if open_count != 1:
+            result["error"] = "multiple_open_incidents"
+        try:
+            self.audit(
+                "SERVER_MODE_INCIDENT_STARTUP_PRESERVED",
+                "-",
+                user=self._actor_name(actor),
+                success=bool(result["ok"]),
+                detail=json.dumps(result, ensure_ascii=False, sort_keys=True),
+            )
+        except Exception:
+            pass
+        return result
+
     def enter_incident_lockdown(self, *, actor, trigger_type, reason, verification=None):
+        previous_mode_state = self.get_current_mode()
+        previous_mode = self._normalize_mode(previous_mode_state.get("current_mode") or "dev_ready")
+        if previous_mode == "incident_lockdown":
+            status = self.incident_status()
+            existing = status.get("incident") or {}
+            if existing:
+                return {
+                    "ok": existing.get("entry_state") == "active",
+                    "incident_lockdown": True,
+                    "incident_id": existing.get("id"),
+                    "entry_state": existing.get("entry_state") or "active",
+                    "entry_error": existing.get("entry_error") or "",
+                    "already_active": True,
+                    "checkpoint": {
+                        "ok": bool(existing.get("checkpoint_id") and existing.get("snapshot_id")),
+                        "checkpoint_id": existing.get("checkpoint_id"),
+                        "snapshot_id": existing.get("snapshot_id"),
+                    },
+                    "checkpoint_ok": bool(existing.get("checkpoint_id") and existing.get("snapshot_id")),
+                    "root_reauthentication_required": False,
+                    "mode": status.get("mode") or previous_mode_state,
+                }
+            return {
+                "ok": False,
+                "incident_lockdown": True,
+                "msg": "incident_lockdown 已啟用但缺少可還原的 open incident；禁止覆寫事故前快照",
+                "entry_state": "invalid_legacy_state",
+                "root_reauthentication_required": False,
+                "mode": status.get("mode") or previous_mode_state,
+            }
+        try:
+            checkpoint = self.create_mode_checkpoint(
+                actor=actor,
+                target_mode="incident_lockdown",
+                reason=reason or trigger_type or "",
+                snapshot_type="before_incident_lockdown",
+                from_mode=previous_mode,
+            )
+        except Exception as exc:
+            checkpoint = {
+                "ok": False,
+                "msg": "incident checkpoint 建立失敗",
+                "error": str(exc),
+            }
+        checkpoint_components = checkpoint.get("components") if isinstance(checkpoint, dict) else None
+        checkpoint_settings = (
+            checkpoint_components.get("config")
+            if isinstance(checkpoint_components, dict)
+            else None
+        )
+        if isinstance(checkpoint_settings, dict):
+            previous_settings = dict(checkpoint_settings)
+        else:
+            main_conn = self.get_db()
+            try:
+                previous_settings = (
+                    self._settings_snapshot(main_conn)
+                    if self._table_exists(main_conn, "system_settings")
+                    else None
+                )
+            finally:
+                main_conn.close()
         conn = self.get_control_db()
         try:
             self.ensure_schema(conn)
-            incident_id = self._enter_incident_lockdown_on_conn(
+            transition = self._enter_incident_lockdown_on_conn(
                 conn,
                 actor=actor,
                 trigger_type=trigger_type,
                 reason=reason,
                 verification=verification or {},
+                previous_mode_state=previous_mode_state,
+                previous_settings=previous_settings,
+                checkpoint=checkpoint,
             )
             conn.commit()
-            self.audit("SERVER_MODE_INCIDENT_LOCKDOWN_ENTER", "-", user=self._actor_name(actor), success=True, detail=f"incident_id={incident_id},trigger={trigger_type},reason={reason}")
-            return {"ok": True, "incident_id": incident_id, "mode": self.get_current_mode()}
+            incident_id = transition["incident_id"]
+            if transition.get("already_active"):
+                return {
+                    "ok": transition.get("entry_state") == "active",
+                    "incident_lockdown": True,
+                    "incident_id": incident_id,
+                    "entry_state": transition.get("entry_state") or "active",
+                    "entry_error": transition.get("entry_error") or "",
+                    "already_active": True,
+                    "checkpoint": {
+                        "ok": bool(transition.get("checkpoint_id") and transition.get("snapshot_id")),
+                        "checkpoint_id": transition.get("checkpoint_id"),
+                        "snapshot_id": transition.get("snapshot_id"),
+                    },
+                    "checkpoint_ok": bool(transition.get("checkpoint_id") and transition.get("snapshot_id")),
+                    "root_reauthentication_required": False,
+                    "mode": self.get_current_mode(),
+                }
+            self._mirror_current_mode_to_main_db(
+                current_mode="incident_lockdown",
+                previous_mode=previous_mode,
+                checkpoint_id=transition.get("checkpoint_id"),
+                snapshot_id=None,
+                actor_id=self._actor_id(actor),
+                notes=reason or "",
+                reason=reason or "",
+                config_json=json.dumps(BUILTIN_SECURITY_PROFILES["incident_lockdown"], ensure_ascii=False, sort_keys=True),
+            )
+            complete = transition.get("entry_state") == "active"
+            self.audit(
+                "SERVER_MODE_INCIDENT_LOCKDOWN_ENTER",
+                "-",
+                user=self._actor_name(actor),
+                success=complete,
+                detail=(
+                    f"incident_id={incident_id},trigger={trigger_type},reason={reason},"
+                    f"previous_mode={previous_mode},entry_state={transition.get('entry_state')},"
+                    f"checkpoint_id={transition.get('checkpoint_id')},snapshot_id={transition.get('snapshot_id')},"
+                    f"security_epoch_after={(transition.get('settings') or {}).get('security_epoch_after')}"
+                ),
+            )
+            return {
+                "ok": complete,
+                "incident_lockdown": True,
+                "incident_id": incident_id,
+                "entry_state": transition.get("entry_state"),
+                "entry_error": transition.get("entry_error") or "",
+                "already_active": bool(transition.get("already_active")),
+                "checkpoint": checkpoint,
+                "checkpoint_ok": bool(checkpoint.get("ok")),
+                "root_reauthentication_required": bool(
+                    (transition.get("settings") or {}).get("security_epoch_after")
+                    != (transition.get("settings") or {}).get("security_epoch_before")
+                ),
+                "mode": self.get_current_mode(),
+            }
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            raise
         finally:
             conn.close()
 
@@ -1268,7 +2024,17 @@ class ServerModeService:
             self.ensure_schema(conn)
             row = conn.execute("SELECT * FROM incident_reports WHERE status='open' ORDER BY entered_at DESC LIMIT 1").fetchone()
             mode_row = conn.execute("SELECT * FROM server_modes WHERE id=1").fetchone()
-            return {"ok": True, "incident": dict(row) if row else None, "mode": dict(mode_row) if mode_row else None}
+            incident = dict(row) if row else None
+            if incident:
+                try:
+                    settings_count = len(json.loads(incident.get("previous_settings_json") or "{}"))
+                except Exception:
+                    settings_count = 0
+                incident["previous_settings_present"] = bool(incident.get("previous_settings_hash"))
+                incident["previous_settings_count"] = settings_count
+                incident.pop("previous_settings_json", None)
+                incident.pop("previous_mode_json", None)
+            return {"ok": True, "incident": incident, "mode": dict(mode_row) if mode_row else None}
         finally:
             conn.close()
 
@@ -1281,25 +2047,266 @@ class ServerModeService:
             row = conn.execute("SELECT * FROM incident_reports WHERE status='open' ORDER BY entered_at DESC LIMIT 1").fetchone()
             if not row:
                 return {"ok": False, "msg": "目前沒有 open incident"}
-            now = datetime.now().isoformat()
-            conn.execute(
+            incident = dict(row)
+            mode_row = conn.execute("SELECT * FROM server_modes WHERE id=1").fetchone()
+            mode_state = dict(mode_row) if mode_row else {}
+        finally:
+            conn.close()
+
+        incident_id = incident["id"]
+        target_mode = self._normalize_mode(incident.get("previous_mode"))
+        if self._normalize_mode(mode_state.get("current_mode")) != "incident_lockdown":
+            return {"ok": False, "msg": "目前 server mode 不是 incident_lockdown", "incident_id": incident_id}
+        if not target_mode or target_mode == "incident_lockdown":
+            error = "incident previous mode is unavailable"
+            self._record_incident_resolution_failure(
+                incident_id=incident_id,
+                actor=actor,
+                target_mode=target_mode,
+                error=error,
+            )
+            return {"ok": False, "msg": "事故前模式快照無效，維持 incident_lockdown", "incident_id": incident_id}
+        claim_state = str(incident.get("entry_state") or "active")
+        claim_error = str(incident.get("entry_error") or "")
+        if claim_state == "resolving":
+            try:
+                existing_claim = json.loads(claim_error or "{}")
+                claim_age = time.time() - float(existing_claim.get("claimed_at_epoch") or 0)
+            except Exception:
+                claim_age = 301
+            if claim_age < 300:
+                return {
+                    "ok": False,
+                    "msg": "事故解除已由另一個請求處理中",
+                    "incident_id": incident_id,
+                    "resolution_in_progress": True,
+                    "retry_after_seconds": max(1, int(300 - claim_age)),
+                }
+        claim_payload = json.dumps(
+            {
+                "claimed_at_epoch": time.time(),
+                "actor_id": self._actor_id(actor),
+                "token": secrets.token_hex(12),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        claim_conn = self.get_control_db()
+        try:
+            self.ensure_schema(claim_conn)
+            claimed = claim_conn.execute(
                 """
                 UPDATE incident_reports
-                SET status='resolved', resolved_by=?, resolved_at=?, resolution_notes=?, verification_json=?
-                WHERE id=?
+                SET entry_state='resolving', entry_error=?
+                WHERE id=? AND status='open' AND entry_state=? AND COALESCE(entry_error, '')=?
+                """,
+                (claim_payload, incident_id, claim_state, claim_error),
+            )
+            if int(claimed.rowcount or 0) != 1:
+                claim_conn.rollback()
+                return {
+                    "ok": False,
+                    "msg": "事故解除已由另一個請求處理中",
+                    "incident_id": incident_id,
+                    "resolution_in_progress": True,
+                }
+            claim_conn.commit()
+        finally:
+            claim_conn.close()
+        try:
+            previous_settings = json.loads(incident.get("previous_settings_json") or "{}")
+        except Exception:
+            previous_settings = None
+        try:
+            previous_mode_state = json.loads(incident.get("previous_mode_json") or "{}")
+        except Exception:
+            previous_mode_state = {}
+        try:
+            evidence = self._validate_incident_restore_evidence(incident)
+        except Exception as exc:
+            error = str(exc)
+            self._record_incident_resolution_failure(
+                incident_id=incident_id,
+                actor=actor,
+                target_mode=target_mode,
+                error=error,
+                restore_result={"ok": False, "error": error, "evidence_valid": False},
+                claim_payload=claim_payload,
+            )
+            return {
+                "ok": False,
+                "msg": "事故還原證據驗證失敗，維持 incident_lockdown",
+                "incident_id": incident_id,
+                "error": error,
+            }
+        try:
+            restore_result = self._restore_incident_settings(
+                actor=actor,
+                previous_settings=previous_settings,
+                expected_hash=incident.get("previous_settings_hash") or "",
+            )
+            restore_result["evidence"] = evidence
+        except Exception as exc:
+            error = str(exc)
+            self._record_incident_resolution_failure(
+                incident_id=incident_id,
+                actor=actor,
+                target_mode=target_mode,
+                error=error,
+                restore_result={"ok": False, "error": error},
+                claim_payload=claim_payload,
+            )
+            return {
+                "ok": False,
+                "msg": "事故前設定還原失敗，維持 incident_lockdown",
+                "incident_id": incident_id,
+                "error": error,
+            }
+
+        now = datetime.now().isoformat()
+        conn = self.get_control_db()
+        try:
+            self.ensure_schema(conn)
+            current_incident = conn.execute(
+                "SELECT status, entry_state, entry_error FROM incident_reports WHERE id=?",
+                (incident_id,),
+            ).fetchone()
+            current_mode_row = conn.execute("SELECT current_mode FROM server_modes WHERE id=1").fetchone()
+            if not current_incident or current_incident["status"] != "open":
+                raise RuntimeError("incident state changed during resolution")
+            if (
+                current_incident["entry_state"] != "resolving"
+                or str(current_incident["entry_error"] or "") != claim_payload
+            ):
+                raise RuntimeError("incident resolution claim ownership was lost")
+            if not current_mode_row or self._normalize_mode(current_mode_row["current_mode"]) != "incident_lockdown":
+                raise RuntimeError("server mode changed during incident resolution")
+            conn.execute(
+                """
+                UPDATE server_modes
+                SET current_mode=?, previous_mode='incident_lockdown', active_snapshot_id=?, checkpoint_id=?,
+                    mode_changed_by=?, mode_changed_at=?, notes=?, reason=?, config_json=?
+                WHERE id=1
+                """,
+                (
+                    target_mode,
+                    previous_mode_state.get("active_snapshot_id"),
+                    previous_mode_state.get("checkpoint_id"),
+                    self._actor_id(actor),
+                    now,
+                    notes or "incident resolved",
+                    notes or "incident resolved",
+                    previous_mode_state.get("config_json") or "{}",
+                ),
+            )
+            self._record_mode_switch(
+                conn,
+                from_mode="incident_lockdown",
+                to_mode=target_mode,
+                actor=actor,
+                reason=notes or "incident resolved",
+                checkpoint_id=incident.get("checkpoint_id"),
+                snapshot_id=incident.get("snapshot_id"),
+                success=True,
+                config_diff={
+                    "previous_settings_hash": incident.get("previous_settings_hash") or "",
+                    "effective_settings_hash": restore_result.get("effective_settings_hash") or "",
+                },
+                restore_result=restore_result,
+            )
+            chain = verify_mode_switch_log_hash_chain(conn)
+            if not chain.get("ok"):
+                raise RuntimeError("mode switch log hash chain failed during incident resolution")
+            resolved = conn.execute(
+                """
+                UPDATE incident_reports
+                SET status='resolved', resolved_by=?, resolved_at=?, resolution_notes=?,
+                    entry_state='resolved', entry_error='', restore_result_json=?, resolution_verification_json=?
+                WHERE id=? AND status='open' AND entry_state='resolving' AND entry_error=?
                 """,
                 (
                     self._actor_id(actor),
                     now,
                     notes or "",
+                    json.dumps(restore_result, ensure_ascii=False, sort_keys=True),
                     json.dumps(verification or {}, ensure_ascii=False, sort_keys=True),
-                    row["id"],
+                    incident_id,
+                    claim_payload,
                 ),
             )
+            if int(resolved.rowcount or 0) != 1:
+                raise RuntimeError("incident resolution claim finalization failed")
             conn.commit()
-            return {"ok": True, "incident_id": row["id"], "resolved_at": now}
+        except Exception as exc:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            owns_claim = False
+            try:
+                ownership = conn.execute(
+                    "SELECT entry_state, entry_error FROM incident_reports WHERE id=? AND status='open'",
+                    (incident_id,),
+                ).fetchone()
+                owns_claim = bool(
+                    ownership
+                    and ownership["entry_state"] == "resolving"
+                    and str(ownership["entry_error"] or "") == claim_payload
+                )
+            except Exception:
+                owns_claim = False
+            if owns_claim:
+                try:
+                    self._apply_incident_settings(actor=actor, increment_epoch=True)
+                except Exception:
+                    pass
+            error = str(exc)
+            self._record_incident_resolution_failure(
+                incident_id=incident_id,
+                actor=actor,
+                target_mode=target_mode,
+                error=error,
+                restore_result=restore_result,
+                claim_payload=claim_payload,
+            )
+            return {
+                "ok": False,
+                "msg": "事故解除狀態提交失敗，已重新套用 incident_lockdown",
+                "incident_id": incident_id,
+                "error": error,
+            }
         finally:
             conn.close()
+
+        self._mirror_current_mode_to_main_db(
+            current_mode=target_mode,
+            previous_mode="incident_lockdown",
+            checkpoint_id=previous_mode_state.get("checkpoint_id"),
+            snapshot_id=previous_mode_state.get("active_snapshot_id"),
+            actor_id=self._actor_id(actor),
+            notes=notes or "incident resolved",
+            reason=notes or "incident resolved",
+            config_json=previous_mode_state.get("config_json") or "{}",
+        )
+        self.audit(
+            "SERVER_MODE_INCIDENT_RESOLVE",
+            "-",
+            user=self._actor_name(actor),
+            success=True,
+            detail=(
+                f"incident_id={incident_id},restored_mode={target_mode},"
+                f"settings_hash={restore_result.get('effective_settings_hash')},"
+                f"security_epoch={restore_result.get('security_epoch_after_restore')}"
+            ),
+        )
+        return {
+            "ok": True,
+            "incident_id": incident_id,
+            "resolved_at": now,
+            "restored_mode": target_mode,
+            "restore": restore_result,
+            "mode": self.get_current_mode(),
+        }
 
     def _apply_production_upload_policy(self, conn):
         try:
@@ -1505,6 +2512,13 @@ class ServerModeService:
         expected_confirm = MODE_CONFIRM_PHRASES.get(target_mode, "SWITCH_CUSTOM_MODE")
         if confirm != expected_confirm:
             return {"ok": False, "msg": f"confirm 必須等於 {expected_confirm}"}
+        if target_mode == "incident_lockdown":
+            return self.enter_incident_lockdown(
+                actor=actor,
+                trigger_type="manual_mode_switch",
+                reason=notes or "manual incident lockdown",
+                verification={"requested_via": "switch_mode"},
+            )
         if target_mode == "production":
             requirements = self.production_requirements()
             if not requirements.get("ok"):
@@ -1533,21 +2547,21 @@ class ServerModeService:
                             error_message="integrity guard high risk finding",
                             config_diff={"high_risk_count": high_risk_count},
                         )
-                        self._enter_incident_lockdown_on_conn(
-                            conn,
-                            actor=actor,
-                            trigger_type="integrity_high_risk",
-                            reason="production entry blocked by high risk Integrity Guard finding",
-                            verification={"high_risk_count": high_risk_count},
-                        )
                         conn.commit()
                     finally:
                         conn.close()
+                    incident = self.enter_incident_lockdown(
+                        actor=actor,
+                        trigger_type="integrity_high_risk",
+                        reason="production entry blocked by high risk Integrity Guard finding",
+                        verification={"high_risk_count": high_risk_count},
+                    )
                     return {
                         "ok": False,
                         "msg": "Integrity Guard 存在高風險異常，不允許進入 production，已進入 incident_lockdown",
                         "high_risk_count": high_risk_count,
                         "incident_lockdown": True,
+                        "incident": incident,
                     }
         applied_settings = {}
         production_result = None
@@ -1557,6 +2571,9 @@ class ServerModeService:
         try:
             self.ensure_schema(control_conn)
             current_row = control_conn.execute("SELECT current_mode FROM server_modes WHERE id=1").fetchone()
+            current_mode_state = dict(
+                control_conn.execute("SELECT * FROM server_modes WHERE id=1").fetchone() or {}
+            )
             current = self._normalize_mode(current_row["current_mode"] if current_row else "test")
             if current == "incident_lockdown" and target_mode == "superweak":
                 self._record_mode_switch(
@@ -1602,6 +2619,9 @@ class ServerModeService:
                     trigger_type="mode_switch_failed",
                     reason=f"checkpoint before {target_mode} failed",
                     verification=checkpoint,
+                    previous_mode_state=current_mode_state,
+                    previous_settings=current_settings,
+                    checkpoint=checkpoint,
                 )
                 conn.commit()
             finally:
@@ -1642,6 +2662,9 @@ class ServerModeService:
                     trigger_type="mode_switch_failed",
                     reason=f"mode switch to {target_mode} failed: {exc}",
                     verification={"checkpoint": checkpoint, "target_mode": target_mode},
+                    previous_mode_state=current_mode_state,
+                    previous_settings=current_settings,
+                    checkpoint=checkpoint,
                 )
                 conn.commit()
             finally:
@@ -1691,6 +2714,9 @@ class ServerModeService:
                     trigger_type="mode_switch_log_chain_broken",
                     reason=f"mode switch log hash chain failed after switching to {target_mode}",
                     verification=chain,
+                    previous_mode_state=current_mode_state,
+                    previous_settings=current_settings,
+                    checkpoint=checkpoint,
                 )
                 conn.commit()
                 return {"ok": False, "msg": "mode switch log chain broken; incident_lockdown entered", "chain": chain, "incident_lockdown": True}
@@ -1759,6 +2785,8 @@ class ServerModeService:
                         trigger_type="restore_validation_failed",
                         reason="exit superweak restore failed",
                         verification=result,
+                        previous_mode_state=current,
+                        checkpoint={"checkpoint_id": checkpoint_id, "snapshot_id": snapshot_id},
                     )
                     conn.commit()
                 finally:
@@ -1787,6 +2815,8 @@ class ServerModeService:
                         trigger_type="restore_validation_failed",
                         reason="superweak checkpoint restore validation failed",
                         verification=validation,
+                        previous_mode_state=current,
+                        checkpoint={"checkpoint_id": checkpoint_id, "snapshot_id": snapshot_id},
                     )
                     conn.commit()
                 finally:
@@ -1849,6 +2879,7 @@ class ServerModeService:
                     trigger_type="superweak_recovery_failed",
                     reason="startup found superweak without active checkpoint",
                     verification={"mode": current},
+                    previous_mode_state=current,
                 )
                 conn.commit()
             finally:
@@ -1920,6 +2951,8 @@ class ServerModeService:
                 trigger_type="superweak_recovery_failed",
                 reason="startup superweak restore validation failed",
                 verification={"restore": result, "validation": validation},
+                previous_mode_state=current,
+                checkpoint={"checkpoint_id": checkpoint_id, "snapshot_id": snapshot_id},
             )
             conn.commit()
             return {"ok": False, "recovered": False, "incident_lockdown": True, "restore": result, "validation": validation}

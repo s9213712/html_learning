@@ -31,14 +31,28 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping
-from scripts.testing.campaign_control_channel import send_hello
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.testing.campaign_control_channel import (
+    ControlChannelError,
+    PeerIdentity,
+    derive_runner_auth_key,
+    send_hello,
+    sign_authenticated_payload,
+    verify_authenticated_payload,
+)
 
 
 STATE_SCHEMA_VERSION = "hackme.campaign-state.v1"
 CONTROL_SCHEMA_VERSION = "hackme.campaign-control.v1"
 WATCHDOG_SCHEMA_VERSION = "hackme.campaign-watchdog.v1"
+WATCHDOG_LIVENESS_SCHEMA_VERSION = "hackme.campaign-watchdog-liveness.v1"
 DEFAULT_STALE_SECONDS = 120.0
 INCIDENT_EXIT_CODE = 10
+DURABLE_HEARTBEAT_INTERVAL_SECONDS = 5.0
 MAX_EVIDENCE_FILE_BYTES = 16 * 1024 * 1024
 
 
@@ -366,6 +380,7 @@ class WatchdogPaths:
     ready: Path
     evidence: Path
     process_lock: Path
+    liveness: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -384,6 +399,10 @@ class WatchdogConfig:
     kill_verify_seconds: float = 10.0
     production: bool = True
     auth_socket: Path | None = None
+    supervisor_pid: int = 0
+    supervisor_start_ticks: int = 0
+    supervisor_boot_id: str = ""
+    supervisor_cgroup: str = ""
 
 
 def validate_runtime_path(path: Path, *, root: Path, label: str) -> Path:
@@ -439,6 +458,17 @@ class ExternalCampaignWatchdog:
         self._process_lock_context: Any = None
         self.paths_validated = False
         self.terminal_state_seen = ""
+        self.runner_auth_key: bytes | None = None
+        self.watchdog_auth_key: bytes | None = None
+        self.control_authentication_evidence: dict[str, Any] = {}
+        self.authenticated_streams: dict[str, dict[str, Any]] = {}
+        self.watchdog_liveness_sequence = 0
+        self.last_watchdog_heartbeat_ns = 0
+
+    def _liveness_path(self) -> Path:
+        return self.config.paths.liveness or self.config.paths.ready.with_name(
+            "watchdog.liveness.json"
+        )
 
     def _validate_paths(self) -> None:
         paths = self.config.paths
@@ -451,6 +481,7 @@ class ExternalCampaignWatchdog:
                 "heartbeat path": paths.heartbeat,
                 "checkpoint path": paths.checkpoint,
                 "ready path": paths.ready,
+                "liveness path": self._liveness_path(),
                 "evidence path": paths.evidence,
                 "process lock": paths.process_lock,
             }.items()
@@ -460,9 +491,13 @@ class ExternalCampaignWatchdog:
         for label in ("state path", "control path", "heartbeat path", "checkpoint path"):
             if resolved["ready path"] == resolved[label]:
                 raise WatchdogError(f"ready path must not overwrite {label}")
+            if resolved["liveness path"] == resolved[label]:
+                raise WatchdogError(f"liveness path must not overwrite {label}")
+        if resolved["ready path"] == resolved["liveness path"]:
+            raise WatchdogError("ready and liveness paths must be distinct")
         self.paths_validated = True
 
-    def validate_startup(self) -> dict[str, Any]:
+    def _validate_configuration(self) -> None:
         self._validate_paths()
         if not self.config.campaign_uuid:
             raise WatchdogError("campaign UUID is required")
@@ -483,10 +518,24 @@ class ExternalCampaignWatchdog:
                 raise WatchdogError("production poll interval must be between 0.1s and 5s")
             if not (1.0 <= float(self.config.kill_verify_seconds) <= 30.0):
                 raise WatchdogError("production cgroup kill verification must be between 1s and 30s")
+            if (
+                int(self.config.supervisor_pid) <= 1
+                or int(self.config.supervisor_start_ticks) <= 0
+                or not self.config.supervisor_boot_id
+                or not self.config.supervisor_cgroup
+            ):
+                raise WatchdogError("production supervisor process identity is required")
         elif float(self.config.stale_after_seconds) < 0:
             raise WatchdogError("heartbeat timeout cannot be negative")
         if int(self.config.orchestrator_pid) == os.getpid():
             raise WatchdogError("watchdog must run as an external process, not inside the orchestrator")
+
+    def validate_startup(self) -> dict[str, Any]:
+        self._validate_configuration()
+        if self.config.production and (
+            self.runner_auth_key is None or self.watchdog_auth_key is None
+        ):
+            raise WatchdogError("production watchdog session authentication is unavailable")
 
         state = load_json(self.config.paths.state)
         if state.get("schema_version") != STATE_SCHEMA_VERSION:
@@ -526,6 +575,7 @@ class ExternalCampaignWatchdog:
             "external_process": os.getpid() != self.config.orchestrator_pid,
             "watchdog_pid": os.getpid(),
             "watchdog_start_ticks": self.watchdog_identity.start_ticks,
+            "watchdog_boot_id": self.watchdog_identity.boot_id,
             "watchdog_cgroup": self.watchdog_identity.cgroup_path,
             "watchdog_outside_campaign_cgroup": True,
             "campaign_cgroup": {
@@ -536,6 +586,7 @@ class ExternalCampaignWatchdog:
                 "freeze_control_open": True,
             },
             "stale_after_seconds": self.config.stale_after_seconds,
+            "authenticated_control_channel": dict(self.control_authentication_evidence),
             "validated_at": utc_now(),
         }
 
@@ -562,10 +613,11 @@ class ExternalCampaignWatchdog:
             atomic_write_json(self.config.paths.state, payload)
             return copy.deepcopy(payload)
 
-    def _record_watchdog_heartbeat(self) -> None:
+    def _record_watchdog_heartbeat(self, *, update_state: bool = True) -> None:
         identity = self.watchdog_identity
         if identity is None:
             raise WatchdogError("watchdog identity was not captured")
+        now_ns = self.monotonic_ns()
 
         def mutate(payload: dict[str, Any]) -> None:
             heartbeat = payload.setdefault("heartbeat", {})
@@ -573,15 +625,69 @@ class ExternalCampaignWatchdog:
                 "watchdog_pid": os.getpid(),
                 "watchdog_start_ticks": identity.start_ticks,
                 "watchdog_at": utc_now(),
-                "watchdog_monotonic_ns": self.monotonic_ns(),
+                "watchdog_monotonic_ns": now_ns,
                 "watchdog_cgroup": identity.cgroup_path,
                 "watchdog_outside_campaign_cgroup": True,
             })
 
-        self._update_state(mutate)
+        if update_state:
+            self._update_state(mutate)
+        liveness = {
+            "schema_version": WATCHDOG_LIVENESS_SCHEMA_VERSION,
+            "campaign_uuid": self.config.campaign_uuid,
+            "watchdog": {
+                "pid": os.getpid(),
+                "start_ticks": identity.start_ticks,
+                "boot_id": identity.boot_id,
+                "cgroup": identity.cgroup_path,
+                "monotonic_ns": now_ns,
+            },
+            "updated_at": utc_now(),
+        }
+        if self.watchdog_auth_key is not None:
+            self.watchdog_liveness_sequence += 1
+            liveness = sign_authenticated_payload(
+                liveness,
+                session_secret=self.watchdog_auth_key,
+                campaign_uuid=self.config.campaign_uuid,
+                stream="watchdog_liveness",
+                sequence=self.watchdog_liveness_sequence,
+                monotonic_ns=now_ns,
+            )
+        elif self.config.production:
+            raise WatchdogError("cannot publish unsigned production watchdog liveness")
+        atomic_write_json(self._liveness_path(), liveness)
+        self.last_watchdog_heartbeat_ns = now_ns
+
+    def _watchdog_heartbeat_due(self) -> bool:
+        if self.last_watchdog_heartbeat_ns <= 0:
+            return True
+        elapsed_ns = self.monotonic_ns() - self.last_watchdog_heartbeat_ns
+        return elapsed_ns >= int(DURABLE_HEARTBEAT_INTERVAL_SECONDS * 1_000_000_000)
+
+    def _verify_authenticated_stream(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        stream: str,
+    ) -> dict[str, Any]:
+        if self.runner_auth_key is None:
+            if self.config.production:
+                raise ControlChannelError("production control session key is unavailable")
+            return {"required": False, "ok": True}
+        previous = self.authenticated_streams.get(stream) or {}
+        return verify_authenticated_payload(
+            payload,
+            session_secret=self.runner_auth_key,
+            expected_campaign_uuid=self.config.campaign_uuid,
+            expected_stream=stream,
+            previous_sequence=int(previous.get("sequence") or 0),
+            previous_payload_sha256=str(previous.get("payload_sha256") or ""),
+        )
 
     def _heartbeat_health(self) -> tuple[bool, str, dict[str, Any]]:
         heartbeat_payload = load_json(self.config.paths.heartbeat)
+        checkpoint = load_json(self.config.paths.checkpoint)
         heartbeat = extract_heartbeat(heartbeat_payload)
         details: dict[str, Any] = {}
         if str(heartbeat_payload.get("campaign_uuid") or self.config.campaign_uuid) != self.config.campaign_uuid:
@@ -597,6 +703,30 @@ class ExternalCampaignWatchdog:
             "heartbeat_start_ticks": heartbeat_ticks,
             "heartbeat_monotonic_ns": heartbeat_ns,
         })
+        try:
+            heartbeat_auth = self._verify_authenticated_stream(
+                heartbeat_payload,
+                stream="runner_heartbeat",
+            )
+            checkpoint_auth = self._verify_authenticated_stream(
+                checkpoint,
+                stream="runner_checkpoint",
+            )
+        except ControlChannelError as exc:
+            details["authentication_error"] = str(exc)
+            return False, "HEARTBEAT_AUTHENTICATION_INVALID", details
+        if heartbeat_auth.get("required") is not False:
+            if int(heartbeat_auth.get("monotonic_ns") or 0) != heartbeat_ns:
+                details["authentication_error"] = "heartbeat monotonic binding mismatch"
+                return False, "HEARTBEAT_AUTHENTICATION_INVALID", details
+            checkpoint_auth_ns = int(checkpoint_auth.get("monotonic_ns") or 0)
+            if checkpoint_auth_ns <= 0 or checkpoint_auth_ns > self.monotonic_ns():
+                details["authentication_error"] = "checkpoint monotonic binding invalid"
+                return False, "HEARTBEAT_AUTHENTICATION_INVALID", details
+            self.authenticated_streams["runner_heartbeat"] = heartbeat_auth
+            self.authenticated_streams["runner_checkpoint"] = checkpoint_auth
+            details["heartbeat_authentication"] = heartbeat_auth
+            details["checkpoint_authentication"] = checkpoint_auth
         if heartbeat_pid != self.config.orchestrator_pid or heartbeat_ticks != self.config.orchestrator_start_ticks:
             return False, "HEARTBEAT_IDENTITY_MISMATCH", details
         now_ns = self.monotonic_ns()
@@ -607,7 +737,6 @@ class ExternalCampaignWatchdog:
         if age_seconds >= float(self.config.stale_after_seconds):
             return False, "HEARTBEAT_STALE", details
 
-        checkpoint = load_json(self.config.paths.checkpoint)
         try:
             expected_revision = int(heartbeat.get("checkpoint_revision") or 0)
             actual_revision = int(checkpoint.get("revision") or checkpoint.get("checkpoint_revision") or 0)
@@ -1080,19 +1209,50 @@ class ExternalCampaignWatchdog:
             return INCIDENT_EXIT_CODE
         healthy, reason, details = self.evaluate()
         if healthy:
-            self._record_watchdog_heartbeat()
+            if self._watchdog_heartbeat_due():
+                # The authenticated liveness artifact is the recurring proof.
+                # State already contains the startup identity; rewriting both
+                # files every interval doubles durable fsync load on WSL.
+                self._record_watchdog_heartbeat(update_state=False)
             return 0
         self.trigger_incident(reason=reason, details=details)
         return INCIDENT_EXIT_CODE
 
     def run(self, *, once: bool = False) -> int:
-        if self.config.production and self.config.auth_socket is None:
-            raise WatchdogError("production watchdog requires authenticated control socket")
-        if self.config.auth_socket is not None:
-            send_hello(self.config.auth_socket, campaign_uuid=self.config.campaign_uuid)
+        # Preserve the public validation order: path safety and the production
+        # --once prohibition must be evaluated before either broader production
+        # configuration checks or the authenticated-socket requirement.
         self._validate_paths()
         if once and self.config.production:
             raise WatchdogError("--once is forbidden for a production watchdog")
+        self._validate_configuration()
+        if self.config.production and self.config.auth_socket is None:
+            raise WatchdogError("production watchdog requires authenticated control socket")
+        if self.config.auth_socket is not None:
+            authentication = send_hello(
+                self.config.auth_socket,
+                campaign_uuid=self.config.campaign_uuid,
+                role="watchdog",
+                require_session_secret=True,
+                expected_server_peer=PeerIdentity(
+                    self.config.supervisor_pid,
+                    os.getuid(),
+                    os.getgid(),
+                ),
+                expected_server_process={
+                    "pid": self.config.supervisor_pid,
+                    "start_ticks": self.config.supervisor_start_ticks,
+                    "boot_id": self.config.supervisor_boot_id,
+                    "cgroup_path": self.config.supervisor_cgroup,
+                },
+            )
+            if not isinstance(authentication, tuple):
+                raise WatchdogError("watchdog control handshake did not deliver a session key")
+            authentication_evidence, self.watchdog_auth_key = authentication
+            self.control_authentication_evidence = dict(authentication_evidence)
+            self.runner_auth_key = derive_runner_auth_key(self.watchdog_auth_key)
+            if self.runner_auth_key == self.watchdog_auth_key:
+                raise WatchdogError("runner and watchdog authentication keys are not separated")
         try:
             self._process_lock_context = locked_path(self.config.paths.process_lock, nonblocking=True)
             self._process_lock_context.__enter__()
@@ -1116,6 +1276,7 @@ class ExternalCampaignWatchdog:
                     if not healthy:
                         self.trigger_incident(reason=reason, details=details)
                         return INCIDENT_EXIT_CODE
+                    self._record_watchdog_heartbeat()
                     ready["initial_health"] = {"ok": True, "reason": reason, **details}
                 else:
                     ready["initial_health"] = {
@@ -1194,6 +1355,7 @@ def _default_paths(root: Path) -> WatchdogPaths:
         ready=root / "checkpoint" / "watchdog.status.json",
         evidence=root / "artifacts" / "watchdog",
         process_lock=root / "checkpoint" / "watchdog.process.lock",
+        liveness=root / "checkpoint" / "watchdog.liveness.json",
     )
 
 
@@ -1222,6 +1384,7 @@ def build_watchdog_command(
         "--heartbeat-path", str(paths.heartbeat),
         "--checkpoint-path", str(paths.checkpoint),
         "--ready-path", str(paths.ready),
+        "--liveness-path", str(paths.liveness or paths.ready.with_name("watchdog.liveness.json")),
         "--evidence-path", str(paths.evidence),
         "--process-lock-path", str(paths.process_lock),
         "--orchestrator-pid", str(config.orchestrator_pid),
@@ -1241,6 +1404,15 @@ def build_watchdog_command(
             "--proc-root", str(config.proc_root),
             "--cgroup-root", str(config.cgroup_root),
         ])
+    if config.auth_socket is not None:
+        command.extend(["--auth-socket", str(config.auth_socket)])
+    if config.supervisor_pid > 0:
+        command.extend([
+            "--supervisor-pid", str(config.supervisor_pid),
+            "--supervisor-start-ticks", str(config.supervisor_start_ticks),
+            "--supervisor-boot-id", config.supervisor_boot_id,
+            "--supervisor-cgroup", config.supervisor_cgroup,
+        ])
     if once:
         command.append("--once")
     return command
@@ -1255,6 +1427,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--heartbeat-path")
     parser.add_argument("--checkpoint-path")
     parser.add_argument("--ready-path")
+    parser.add_argument("--liveness-path")
     parser.add_argument("--evidence-path")
     parser.add_argument("--process-lock-path")
     parser.add_argument("--orchestrator-pid", required=True, type=int)
@@ -1265,6 +1438,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--campaign-cgroup-device", required=True, type=int)
     parser.add_argument("--campaign-cgroup-inode", required=True, type=int)
     parser.add_argument("--auth-socket")
+    parser.add_argument("--supervisor-pid", type=int, default=0)
+    parser.add_argument("--supervisor-start-ticks", type=int, default=0)
+    parser.add_argument("--supervisor-boot-id", default="")
+    parser.add_argument("--supervisor-cgroup", default="")
     parser.add_argument("--stale-after-seconds", type=float, default=DEFAULT_STALE_SECONDS)
     parser.add_argument("--poll-seconds", type=float, default=1.0)
     parser.add_argument("--kill-verify-seconds", type=float, default=10.0)
@@ -1287,6 +1464,7 @@ def config_from_args(args: argparse.Namespace) -> WatchdogConfig:
         ready=Path(args.ready_path) if args.ready_path else defaults.ready,
         evidence=Path(args.evidence_path) if args.evidence_path else defaults.evidence,
         process_lock=Path(args.process_lock_path) if args.process_lock_path else defaults.process_lock,
+        liveness=Path(args.liveness_path) if args.liveness_path else defaults.liveness,
     )
     return WatchdogConfig(
         campaign_uuid=str(args.campaign_uuid),
@@ -1307,6 +1485,10 @@ def config_from_args(args: argparse.Namespace) -> WatchdogConfig:
         kill_verify_seconds=float(args.kill_verify_seconds),
         production=not bool(args.development_mode),
         auth_socket=Path(args.auth_socket) if args.auth_socket else None,
+        supervisor_pid=int(args.supervisor_pid),
+        supervisor_start_ticks=int(args.supervisor_start_ticks),
+        supervisor_boot_id=str(args.supervisor_boot_id),
+        supervisor_cgroup=str(args.supervisor_cgroup),
     )
 
 

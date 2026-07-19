@@ -868,9 +868,26 @@ def register_system_admin_runtime_routes(app, ctx):
         if actor["username"] != "root":
             return json_resp({"ok":False,"msg":"只有最高管理者可重啟服務器"}), 403
 
-        audit("SERVER_RESTART", get_client_ip(), user=actor["username"], detail="initiated by admin")
         try:
-            restart = schedule_server_restart(reason="manual-restart", delay_seconds=1.25)
+            data = request.get_json(silent=True) or {}
+        except Exception:
+            return json_resp({"ok":False,"msg":"請求 JSON 格式錯誤"}), 400
+        if not isinstance(data, dict):
+            return json_resp({"ok":False,"msg":"請求內容格式錯誤"}), 400
+        reason = str(data.get("reason") or "manual-restart").strip()
+        if not reason:
+            reason = "manual-restart"
+        if len(reason) > 300 or any(ord(character) < 32 for character in reason):
+            return json_resp({"ok":False,"msg":"重啟原因格式錯誤"}), 400
+
+        audit(
+            "SERVER_RESTART",
+            get_client_ip(),
+            user=actor["username"],
+            detail=f"initiated by admin reason={reason[:200]}",
+        )
+        try:
+            restart = schedule_server_restart(reason=reason, delay_seconds=1.25)
         except Exception as exc:
             return json_resp({"ok":False,"msg":"重啟排程失敗","error":str(exc)}), 500
         return json_resp({"ok":True,"msg":"服務器正在重啟，請稍後重新整理頁面","restart_scheduled":True,"restart":restart})

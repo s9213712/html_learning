@@ -22,13 +22,29 @@ from pathlib import PurePosixPath
 import re
 import sqlite3
 import stat
+import sys
 import tarfile
 import tempfile
 import time
 import unicodedata
 from typing import Any, Callable, Mapping, Sequence
 
+if __package__ in {None, ""}:
+    _REPO_ROOT = Path(__file__).resolve().parents[2]
+    if str(_REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(_REPO_ROOT))
+
 try:
+    from scripts.testing.audit_evidence_triad import (
+        ARCHIVE_SCHEMA_VERSION as AUDIT_EVIDENCE_ARCHIVE_SCHEMA_VERSION,
+        SCHEMA_VERSION as AUDIT_EVIDENCE_SCHEMA_VERSION,
+        validate_audit_evidence_archive,
+        validate_audit_evidence_receipt,
+    )
+    from scripts.testing.campaign_cgroup import (
+        CGROUP_SCHEMA_VERSION,
+        DEFAULT_IO_WEIGHT,
+    )
     from scripts.testing.campaign_dependency_preflight import (
         BACKUP_RESTORE_MANIFEST_SCHEMA_VERSION,
         BACKUP_SNAPSHOT_MARKER_TABLE,
@@ -38,11 +54,25 @@ try:
     from scripts.testing.campaign_observability import ResourceCollector
     from scripts.testing.campaign_scenario_binding import (
         FORMAL_SCENARIO_BINDINGS,
+        NATIVE_ARTIFACT_ARCHIVE_SCHEMA_VERSION,
+        NATIVE_ARTIFACT_BUNDLE_SCHEMA_VERSION,
         RUNTIME_RECEIPT_SCHEMA_VERSION,
+        build_strict_native_adapter_registry,
+        build_strict_native_validator_registry,
+        native_artifact_bundle_validation_errors,
+        native_evidence_manifest_validation_errors,
+        scenario_member_inventory_sha256,
         validate_scenario_runtime_receipt,
     )
     from scripts.testing.campaign_source_freeze import REVIEWED_PROTECTED_IGNORED_PATHS
 except ModuleNotFoundError:  # Direct ``python scripts/testing/...`` execution.
+    from audit_evidence_triad import (
+        ARCHIVE_SCHEMA_VERSION as AUDIT_EVIDENCE_ARCHIVE_SCHEMA_VERSION,
+        SCHEMA_VERSION as AUDIT_EVIDENCE_SCHEMA_VERSION,
+        validate_audit_evidence_archive,
+        validate_audit_evidence_receipt,
+    )
+    from campaign_cgroup import CGROUP_SCHEMA_VERSION, DEFAULT_IO_WEIGHT
     from campaign_dependency_preflight import (
         BACKUP_RESTORE_MANIFEST_SCHEMA_VERSION,
         BACKUP_SNAPSHOT_MARKER_TABLE,
@@ -52,7 +82,14 @@ except ModuleNotFoundError:  # Direct ``python scripts/testing/...`` execution.
     from campaign_observability import ResourceCollector
     from campaign_scenario_binding import (
         FORMAL_SCENARIO_BINDINGS,
+        NATIVE_ARTIFACT_ARCHIVE_SCHEMA_VERSION,
+        NATIVE_ARTIFACT_BUNDLE_SCHEMA_VERSION,
         RUNTIME_RECEIPT_SCHEMA_VERSION,
+        build_strict_native_adapter_registry,
+        build_strict_native_validator_registry,
+        native_artifact_bundle_validation_errors,
+        native_evidence_manifest_validation_errors,
+        scenario_member_inventory_sha256,
         validate_scenario_runtime_receipt,
     )
     from campaign_source_freeze import REVIEWED_PROTECTED_IGNORED_PATHS
@@ -132,11 +169,12 @@ _PERSISTENT_CHECKPOINT_ROOT = (
     Path.home() / "logs" / "hackme_web_campaign_24h"
 ).resolve(strict=False)
 _EXPECTED_LIMITS = {
-    "memory.high": 7 * _GIB,
-    "memory.max": 8 * _GIB,
-    "memory.swap.max": 1 * _GIB,
-    "cpu.quota_percent": 600,
-    "pids.max": 768,
+    "memory.high": 5 * _GIB,
+    "memory.max": 6 * _GIB,
+    "memory.swap.max": 512 * _MIB,
+    "cpu.quota_percent": 300,
+    "pids.max": 384,
+    "io.weight": DEFAULT_IO_WEIGHT,
 }
 _MANDATORY_ROLES = {
     "primary", "recovery", "security_sentinel", "load_generator", "browser",
@@ -180,6 +218,7 @@ _SECURITY_CHECKS = {
     "user_root_boundary_denied", "authenticated_missing_csrf_denied",
     "dangerous_confirmation_required", "production_security_controls",
     "audit_log_chain", "cross_worker_session_consistency",
+    "audit_evidence_triad_online",
 }
 _PROTECTED_ENTRY_SCHEMA_VERSION = "hackme.source-protected-ignored-entry/v1"
 _PROTECTED_ENTRY_FIELDS = {
@@ -467,17 +506,23 @@ class RawSpec:
 
 
 def _scenario_specs() -> dict[str, RawSpec]:
-    return {
-        f"scenario_{scenario_id}": RawSpec(
+    specs: dict[str, RawSpec] = {}
+    for scenario_id in _MANDATORY_REHEARSAL_SCENARIOS:
+        specs[f"scenario_{scenario_id}"] = RawSpec(
             "application/json", RUNTIME_RECEIPT_SCHEMA_VERSION
         )
-        for scenario_id in _MANDATORY_REHEARSAL_SCENARIOS
-    }
+        specs[f"scenario_bundle_{scenario_id}"] = RawSpec(
+            "application/json", NATIVE_ARTIFACT_BUNDLE_SCHEMA_VERSION
+        )
+        specs[f"scenario_archive_{scenario_id}"] = RawSpec(
+            "application/x-tar", NATIVE_ARTIFACT_ARCHIVE_SCHEMA_VERSION
+        )
+    return specs
 
 
 GATE_RAW_SPECS: Mapping[str, Mapping[str, RawSpec]] = {
     "cgroup_limits_verified": {
-        "cgroup_readback": RawSpec("application/json", "hackme.campaign-cgroup/v1"),
+        "cgroup_readback": RawSpec("application/json", CGROUP_SCHEMA_VERSION),
         "pid_placement": RawSpec("application/json", "hackme.campaign-cgroup-placement-set/v1"),
     },
     "external_watchdog_verified": {
@@ -510,6 +555,9 @@ GATE_RAW_SPECS: Mapping[str, Mapping[str, RawSpec]] = {
     },
     "production_security_sentinel_verified": {
         "security_sentinel": RawSpec("application/json", "hackme.production-security-sentinel.v1"),
+        "audit_evidence_archive": RawSpec(
+            "application/x-tar", AUDIT_EVIDENCE_ARCHIVE_SCHEMA_VERSION
+        ),
     },
     "all_mandatory_dependencies_verified": {
         "dependency_preflight": RawSpec("application/json", "hackme.campaign.dependency-preflight/v1"),
@@ -1225,7 +1273,10 @@ def _derive_cgroup(raw: Mapping[str, RawArtifact]) -> dict[str, Any]:
     _require(readback.get("expected_limits") == _EXPECTED_LIMITS, "cgroup expected limits were weakened")
     _require(readback.get("actual_limits") == _EXPECTED_LIMITS, "cgroup kernel limit readback mismatch")
     controllers = {str(item) for item in (readback.get("controllers_verified") or [])}
-    _require({"cpu", "memory", "pids"}.issubset(controllers), "cgroup controller proof is incomplete")
+    _require(
+        {"cpu", "io", "memory", "pids"}.issubset(controllers),
+        "cgroup controller proof is incomplete",
+    )
     rows = placement.get("placements")
     _require(isinstance(rows, list), "cgroup placement rows are missing")
     by_role: dict[str, dict[str, Any]] = {}
@@ -1476,7 +1527,182 @@ def _derive_security(raw: Mapping[str, RawArtifact]) -> dict[str, Any]:
     session = _object(checks["cross_worker_session_consistency"].get("detail"), label="cross-worker security detail")
     statuses = session.get("statuses")
     _require(isinstance(statuses, list) and len(statuses) >= 2 and all(value == 200 for value in statuses), "cross-worker session consistency failed")
-    return {"checks": sorted(checks), "cross_worker_requests": len(statuses)}
+    audit_reference = _object(
+        report.get("audit_evidence"),
+        label="production security audit evidence reference",
+    )
+    _require(
+        set(audit_reference)
+        == {
+            "schema_version",
+            "receipt_schema_version",
+            "mode",
+            "target",
+            "receipt_path",
+            "receipt_sha256",
+            "receipt_size_bytes",
+            "receipt",
+            "validation",
+            "archive_schema_version",
+            "archive_path",
+            "archive_sha256",
+            "archive_size_bytes",
+            "archive_validation",
+        },
+        "production security audit evidence reference shape mismatch",
+    )
+    _require(
+        audit_reference.get("schema_version")
+        == "hackme.audit-evidence-triad-reference/v1"
+        and audit_reference.get("receipt_schema_version")
+        == AUDIT_EVIDENCE_SCHEMA_VERSION
+        and audit_reference.get("mode") == "online"
+        and audit_reference.get("target") == "security_sentinel",
+        "production security audit evidence identity mismatch",
+    )
+    triad_receipt = _object(
+        audit_reference.get("receipt"),
+        label="production security online audit evidence receipt",
+    )
+    triad_validation = validate_audit_evidence_receipt(
+        triad_receipt,
+        required_mode="online",
+        required_target="security_sentinel",
+    )
+    _require(
+        triad_validation.get("ok") is True,
+        "production security online audit evidence receipt failed independent validation",
+    )
+    encoded_receipt = (
+        json.dumps(
+            triad_receipt,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+    _require(
+        audit_reference.get("receipt_sha256") == sha256_bytes(encoded_receipt)
+        and audit_reference.get("receipt_size_bytes") == len(encoded_receipt)
+        and _SHA256.fullmatch(str(audit_reference.get("receipt_sha256") or ""))
+        is not None,
+        "production security online audit evidence receipt hash/size mismatch",
+    )
+    archive_artifact = raw["audit_evidence_archive"]
+    archive_validation = validate_audit_evidence_archive(
+        archive_artifact.path,
+        descriptor=archive_artifact.descriptor,
+        required_mode="online",
+        required_target="security_sentinel",
+        expected_sha256=archive_artifact.content_sha256,
+        expected_size=archive_artifact.size_bytes,
+    )
+    _require(
+        archive_validation.get("ok") is True
+        and archive_validation.get("classification") == "PASS"
+        and archive_validation.get("errors") == [],
+        "production security online audit archive failed independent re-derivation",
+    )
+    archive_receipt = _object(
+        archive_validation.get("receipt"),
+        label="production security pinned audit archive receipt evidence",
+    )
+    _require(
+        archive_receipt.get("payload") == triad_receipt
+        and archive_receipt.get("sha256") == audit_reference.get("receipt_sha256")
+        and archive_receipt.get("size") == audit_reference.get("receipt_size_bytes"),
+        "production security report receipt differs from pinned audit archive receipt",
+    )
+    _require(
+        audit_reference.get("archive_schema_version")
+        == AUDIT_EVIDENCE_ARCHIVE_SCHEMA_VERSION
+        and audit_reference.get("archive_sha256")
+        == archive_artifact.content_sha256
+        and audit_reference.get("archive_size_bytes")
+        == archive_artifact.size_bytes,
+        "production security audit archive reference hash/size mismatch",
+    )
+    producer_archive_validation = _object(
+        audit_reference.get("archive_validation"),
+        label="production security online audit archive producer validation",
+    )
+    _require(
+        producer_archive_validation.get("ok") is True
+        and producer_archive_validation.get("classification") == "PASS"
+        and producer_archive_validation.get("errors") == [],
+        "production security producer did not validate its audit archive",
+    )
+    producer_validation = _object(
+        audit_reference.get("validation"),
+        label="production security online audit evidence producer validation",
+    )
+    _require(
+        producer_validation.get("ok") is True
+        and producer_validation.get("classification") == "PASS"
+        and producer_validation.get("errors") == []
+        and producer_validation.get("artifact_files_verified") is True,
+        "production security sentinel did not verify online audit artifact files",
+    )
+    triad_check = _object(
+        checks["audit_evidence_triad_online"].get("detail"),
+        label="production security online audit evidence check",
+    )
+    _require(
+        triad_check.get("receipt_schema_version") == AUDIT_EVIDENCE_SCHEMA_VERSION
+        and triad_check.get("mode") == "online"
+        and triad_check.get("target") == "security_sentinel"
+        and triad_check.get("receipt_sha256")
+        == audit_reference.get("receipt_sha256")
+        and triad_check.get("receipt_size_bytes")
+        == audit_reference.get("receipt_size_bytes")
+        and triad_check.get("artifact_files_verified") is True
+        and triad_check.get("validation_classification") == "PASS"
+        and triad_check.get("validation_errors") == [],
+        "production security online audit evidence check/reference mismatch",
+    )
+    _require(
+        triad_check.get("archive_schema_version")
+        == AUDIT_EVIDENCE_ARCHIVE_SCHEMA_VERSION
+        and triad_check.get("archive_sha256")
+        == archive_artifact.content_sha256
+        and triad_check.get("archive_size_bytes")
+        == archive_artifact.size_bytes
+        and triad_check.get("archive_validation_classification") == "PASS"
+        and triad_check.get("archive_validation_errors") == [],
+        "production security audit archive check/reference mismatch",
+    )
+    _require(
+        report.get("classification") == "PASS",
+        "production security sentinel classification is not PASS",
+    )
+    triad_counts = _object(
+        triad_receipt.get("counts"),
+        label="production security online audit evidence counts",
+    )
+    triad_artifacts = _object(
+        triad_receipt.get("artifacts"),
+        label="production security online audit evidence artifacts",
+    )
+    return {
+        "checks": sorted(checks),
+        "cross_worker_requests": len(statuses),
+        "audit_evidence": {
+            "schema_version": AUDIT_EVIDENCE_SCHEMA_VERSION,
+            "mode": "online",
+            "target": "security_sentinel",
+            "db_rows": int(triad_counts["db_rows"]),
+            "rows_after_latest": int(triad_counts["rows_after_latest"]),
+            "receipt_sha256": audit_reference["receipt_sha256"],
+            "archive_sha256": archive_artifact.content_sha256,
+            "artifact_sha256": {
+                role: metadata.get("sha256")
+                for role, metadata in sorted(triad_artifacts.items())
+                if isinstance(metadata, Mapping)
+            },
+        },
+    }
 
 
 def _external_receipt_errors(dependency: str, receipt: Mapping[str, Any]) -> list[str]:
@@ -2700,8 +2926,324 @@ def _receipt_has_shortcut(value: Any) -> bool:
     return False
 
 
-def _derive_scenario_receipt(payload: Mapping[str, Any], scenario_id: str) -> dict[str, Any]:
-    receipt = _native(payload)
+_REHEARSAL_AUTHORITY_FIELDS = (
+    "qualification_campaign_uuid",
+    "campaign_uuid",
+    "campaign_attempt_uuid",
+    "native_invocation_id",
+    "commit",
+    "source_digest",
+    "protected_source_digest",
+    "started_at",
+    "finished_at",
+    "started_monotonic_ns",
+    "finished_monotonic_ns",
+)
+
+
+def _rehearsal_authority(payload: Mapping[str, Any], *, label: str) -> dict[str, Any]:
+    authority = {field: payload.get(field) for field in _REHEARSAL_AUTHORITY_FIELDS}
+    for field in (
+        "qualification_campaign_uuid",
+        "campaign_uuid",
+        "campaign_attempt_uuid",
+        "native_invocation_id",
+    ):
+        _require(
+            _UUIDISH.fullmatch(str(authority[field] or "")) is not None,
+            f"{label} {field} is invalid",
+        )
+    _require(
+        _SHA40.fullmatch(str(authority["commit"] or "")) is not None,
+        f"{label} commit is invalid",
+    )
+    for field in ("source_digest", "protected_source_digest"):
+        _require(
+            _SHA256.fullmatch(str(authority[field] or "")) is not None,
+            f"{label} {field} is invalid",
+        )
+    started = parse_utc(authority["started_at"], label=f"{label}.started_at")
+    finished = parse_utc(authority["finished_at"], label=f"{label}.finished_at")
+    started_ns = authority["started_monotonic_ns"]
+    finished_ns = authority["finished_monotonic_ns"]
+    _require(
+        type(started_ns) is int
+        and type(finished_ns) is int
+        and started_ns > 0
+        and finished_ns > started_ns,
+        f"{label} monotonic boundary is invalid",
+    )
+    wall_seconds = (finished - started).total_seconds()
+    monotonic_seconds = (finished_ns - started_ns) / 1_000_000_000.0
+    _require(wall_seconds > 0, f"{label} wall boundary is invalid")
+    _require(
+        abs(wall_seconds - monotonic_seconds)
+        <= _EXECUTION_WALL_MONOTONIC_TOLERANCE_SECONDS,
+        f"{label} wall/monotonic duration mismatch",
+    )
+    return authority
+
+
+def _authority_identity(authority: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        field: authority[field]
+        for field in (
+            "qualification_campaign_uuid",
+            "campaign_uuid",
+            "campaign_attempt_uuid",
+            "native_invocation_id",
+            "commit",
+            "source_digest",
+            "protected_source_digest",
+        )
+    }
+
+
+def _scenario_parent_authority_identity(
+    authority: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Identity shared with the runner; scenario invocation stays per-attempt."""
+
+    return {
+        field: authority[field]
+        for field in (
+            "qualification_campaign_uuid",
+            "campaign_uuid",
+            "campaign_attempt_uuid",
+            "commit",
+            "source_digest",
+            "protected_source_digest",
+        )
+    }
+
+
+def _require_interval_contains(
+    outer: Mapping[str, Any],
+    inner: Mapping[str, Any],
+    *,
+    label: str,
+) -> None:
+    outer_started = parse_utc(outer["started_at"], label=f"{label}.outer.started_at")
+    outer_finished = parse_utc(outer["finished_at"], label=f"{label}.outer.finished_at")
+    inner_started = parse_utc(inner["started_at"], label=f"{label}.inner.started_at")
+    inner_finished = parse_utc(inner["finished_at"], label=f"{label}.inner.finished_at")
+    _require(
+        outer_started <= inner_started <= inner_finished <= outer_finished,
+        f"{label} wall interval escapes its parent",
+    )
+    _require(
+        int(outer["started_monotonic_ns"])
+        <= int(inner["started_monotonic_ns"])
+        < int(inner["finished_monotonic_ns"])
+        <= int(outer["finished_monotonic_ns"]),
+        f"{label} monotonic interval escapes its parent",
+    )
+
+
+def _require_artifact_link(
+    value: object,
+    artifact: RawArtifact,
+    *,
+    label: str,
+) -> dict[str, Any]:
+    link = _object(value, label=label)
+    _require(
+        set(link) == {"path", "sha256", "size_bytes"},
+        f"{label} shape mismatch",
+    )
+    _require(
+        link.get("path") == str(artifact.path)
+        and link.get("sha256") == artifact.content_sha256
+        and link.get("size_bytes") == artifact.size_bytes,
+        f"{label} path/hash/size mismatch",
+    )
+    return link
+
+
+def _scenario_archive_json_payloads(
+    archive_artifact: RawArtifact,
+    inventory: Sequence[Mapping[str, Any]],
+    *,
+    scenario_id: str,
+) -> dict[str, object]:
+    """Reparse bounded JSON members from the already pinned sealed archive."""
+
+    by_path = {
+        str(item.get("member_path") or ""): item
+        for item in inventory
+    }
+    _require(
+        archive_artifact.descriptor is not None,
+        f"scenario {scenario_id} archive is not pinned",
+    )
+    deadline = time.monotonic() + _ARCHIVE_VALIDATION_TIMEOUT_SECONDS
+    payloads: dict[str, object] = {}
+    duplicate = os.dup(archive_artifact.descriptor)
+    os.lseek(duplicate, 0, os.SEEK_SET)
+    with os.fdopen(duplicate, "rb", closefd=True) as archive_handle:
+        with tarfile.open(fileobj=archive_handle, mode="r:") as archive:
+            for member in archive:
+                _archive_deadline_check(deadline)
+                inventory_item = by_path.get(member.name)
+                _require(
+                    member.isfile() and isinstance(inventory_item, Mapping),
+                    f"scenario {scenario_id} archive yielded an unreviewed member",
+                )
+                artifact_id = str(inventory_item.get("artifact_id") or "")
+                artifact_type = str(inventory_item.get("artifact_type") or "")
+                manifest_id = f"native.manifest.{scenario_id}"
+                if artifact_type not in {"json", "application/json"} and artifact_id != manifest_id:
+                    continue
+                _require(
+                    int(member.size) <= _MAX_SMALL_NATIVE_BYTES,
+                    f"scenario {scenario_id} JSON archive member exceeds limit: {artifact_id}",
+                )
+                extracted = archive.extractfile(member)
+                _require(
+                    extracted is not None,
+                    f"scenario {scenario_id} JSON archive member is unreadable: {artifact_id}",
+                )
+                content = extracted.read(_MAX_SMALL_NATIVE_BYTES + 1)
+                _require(
+                    len(content) == member.size,
+                    f"scenario {scenario_id} JSON archive member size mismatch: {artifact_id}",
+                )
+                try:
+                    value = json.loads(content.decode("utf-8", errors="strict"))
+                except Exception as exc:
+                    raise GateBundleError(
+                        f"scenario {scenario_id} JSON archive member cannot be reparsed: "
+                        f"{artifact_id}:{exc.__class__.__name__}"
+                    ) from exc
+                _validate_json_shape(
+                    value,
+                    label=f"scenario {scenario_id} archive member {artifact_id}",
+                )
+                _require(
+                    isinstance(value, (Mapping, list)),
+                    f"scenario {scenario_id} JSON archive member is scalar: {artifact_id}",
+                )
+                _require(
+                    artifact_id not in payloads,
+                    f"scenario {scenario_id} archive artifact ID is duplicated: {artifact_id}",
+                )
+                payloads[artifact_id] = value
+    return payloads
+
+
+def _rederive_scenario_bundle_results(
+    *,
+    scenario_id: str,
+    binding: Any,
+    bundle: Mapping[str, Any],
+    archive_payloads: Mapping[str, object],
+    inventory: Sequence[Mapping[str, Any]],
+) -> None:
+    """Re-run every reviewed adapter/validator from sealed archive bytes."""
+
+    manifest_id = f"native.manifest.{scenario_id}"
+    manifest = archive_payloads.get(manifest_id)
+    _require(
+        isinstance(manifest, Mapping),
+        f"scenario {scenario_id} sealed manifest is missing or invalid",
+    )
+    artifact_payloads = {
+        artifact_id: value
+        for artifact_id, value in archive_payloads.items()
+        if artifact_id != manifest_id
+    }
+    artifact_sha256 = {
+        str(item.get("artifact_id") or ""): str(item.get("sha256") or "")
+        for item in inventory
+        if str(item.get("artifact_id") or "") != manifest_id
+    }
+    artifact_records = _object(
+        bundle.get("artifact_records"),
+        label=f"scenario {scenario_id} artifact records",
+    )
+    manifest_errors = native_evidence_manifest_validation_errors(
+        manifest,
+        binding,
+        artifact_ids=artifact_records,
+    )
+    _require(
+        not manifest_errors,
+        f"scenario {scenario_id} sealed manifest validation failed: "
+        + ",".join(manifest_errors),
+    )
+    manifest_record = _object(
+        bundle.get("manifest_record"),
+        label=f"scenario {scenario_id} manifest record",
+    )
+    declared_evidence = _object(
+        bundle.get("evidence_adapter_results"),
+        label=f"scenario {scenario_id} declared evidence results",
+    )
+    declared_validators = _object(
+        bundle.get("validator_results"),
+        label=f"scenario {scenario_id} declared validator results",
+    )
+    adapter_registry = build_strict_native_adapter_registry(
+        bindings={scenario_id: binding}
+    )
+    validator_registry = build_strict_native_validator_registry(
+        bindings={scenario_id: binding}
+    )
+    for evidence_id, adapter_id in binding.evidence_adapter_ids.items():
+        registration = adapter_registry[adapter_id]
+        recomputed = registration.handler(
+            registration=registration,
+            manifest=manifest,
+            artifact_payloads=artifact_payloads,
+            artifact_sha256=artifact_sha256,
+        )
+        _require(
+            isinstance(recomputed, Mapping)
+            and dict(recomputed)
+            == _object(
+                declared_evidence.get(evidence_id),
+                label=f"scenario {scenario_id} declared evidence {evidence_id}",
+            ),
+            f"rehearsal sealed evidence re-derivation mismatch: {scenario_id}:{evidence_id}",
+        )
+    validator_ids = (
+        binding.terminal_validator_ids
+        + binding.cleanup_validator_ids
+        + binding.artifact_validator_ids
+    )
+    for validator_id in validator_ids:
+        registration = validator_registry[validator_id]
+        recomputed = registration.handler(
+            registration=registration,
+            manifest=manifest,
+            artifact_payloads=artifact_payloads,
+            artifact_sha256=artifact_sha256,
+            artifact_records=artifact_records,
+            manifest_record=manifest_record,
+        )
+        _require(
+            isinstance(recomputed, Mapping)
+            and dict(recomputed)
+            == _object(
+                declared_validators.get(validator_id),
+                label=f"scenario {scenario_id} declared validator {validator_id}",
+            ),
+            f"rehearsal sealed validator re-derivation mismatch: {scenario_id}:{validator_id}",
+        )
+
+
+def _derive_scenario_receipt(
+    raw: Mapping[str, RawArtifact],
+    scenario_id: str,
+    *,
+    runner_authority: Mapping[str, Any],
+    runner_index: Mapping[str, Any],
+) -> dict[str, Any]:
+    receipt_artifact = raw[f"scenario_{scenario_id}"]
+    bundle_artifact = raw[f"scenario_bundle_{scenario_id}"]
+    archive_artifact = raw[f"scenario_archive_{scenario_id}"]
+    receipt = _native(_object(receipt_artifact.data, label=f"scenario {scenario_id} receipt"))
+    bundle = _native(_object(bundle_artifact.data, label=f"scenario {scenario_id} bundle"))
     binding = FORMAL_SCENARIO_BINDINGS.get(scenario_id)
     _require(binding is not None, f"rehearsal scenario has no reviewed binding: {scenario_id}")
     validation = validate_scenario_runtime_receipt(receipt, binding)
@@ -2710,16 +3252,228 @@ def _derive_scenario_receipt(payload: Mapping[str, Any], scenario_id: str) -> di
         f"rehearsal scenario canonical receipt validation failed: {scenario_id}: "
         + ",".join(validation.errors),
     )
+    authority = _object(receipt.get("authority"), label=f"scenario {scenario_id} authority")
+    _require(
+        _scenario_parent_authority_identity(authority)
+        == _scenario_parent_authority_identity(runner_authority),
+        f"rehearsal scenario authority mismatch: {scenario_id}",
+    )
+    _require(
+        authority.get("native_invocation_id")
+        != runner_authority.get("native_invocation_id"),
+        f"rehearsal scenario reused the outer native invocation: {scenario_id}",
+    )
+    _require_interval_contains(
+        runner_authority,
+        authority,
+        label=f"rehearsal scenario {scenario_id}",
+    )
+    index = _object(runner_index.get(scenario_id), label=f"runner scenario index {scenario_id}")
+    _require(
+        set(index)
+        == {
+            "scenario_attempt_uuid",
+            "native_invocation_id",
+            "receipt",
+            "artifact_bundle",
+            "artifact_archive",
+        },
+        f"runner scenario index shape mismatch: {scenario_id}",
+    )
+    _require(
+        index.get("scenario_attempt_uuid") == authority.get("scenario_attempt_uuid"),
+        f"runner scenario attempt mismatch: {scenario_id}",
+    )
+    _require(
+        index.get("native_invocation_id") == authority.get("native_invocation_id"),
+        f"runner scenario invocation mismatch: {scenario_id}",
+    )
+    _require_artifact_link(
+        index.get("receipt"),
+        receipt_artifact,
+        label=f"runner scenario receipt {scenario_id}",
+    )
+    _require_artifact_link(
+        index.get("artifact_bundle"),
+        bundle_artifact,
+        label=f"runner scenario bundle {scenario_id}",
+    )
+    _require_artifact_link(
+        index.get("artifact_archive"),
+        archive_artifact,
+        label=f"runner scenario archive {scenario_id}",
+    )
+    bundle_errors = native_artifact_bundle_validation_errors(
+        bundle,
+        binding,
+        expected_authority=authority,
+    )
+    _require(
+        not bundle_errors,
+        f"rehearsal scenario artifact bundle validation failed: {scenario_id}: "
+        + ",".join(bundle_errors),
+    )
+    _require(
+        receipt.get("status") == "PASS"
+        and bundle.get("candidate_status") == receipt.get("status")
+        and bundle.get("diagnostics") == receipt.get("diagnostics") == [],
+        f"rehearsal receipt/bundle status or diagnostics mismatch: {scenario_id}",
+    )
+    bundle_evidence = _object(
+        bundle.get("evidence_adapter_results"),
+        label=f"scenario {scenario_id} bundle evidence results",
+    )
+    receipt_evidence = _object(
+        receipt.get("evidence_receipts"),
+        label=f"scenario {scenario_id} receipt evidence results",
+    )
+    for evidence_id in binding.evidence_adapter_ids:
+        bundle_result = _object(
+            bundle_evidence.get(evidence_id),
+            label=f"scenario {scenario_id} bundle evidence {evidence_id}",
+        )
+        receipt_result = _object(
+            receipt_evidence.get(evidence_id),
+            label=f"scenario {scenario_id} receipt evidence {evidence_id}",
+        )
+        _require(
+            receipt_result.get("evidence_id") == bundle_result.get("evidence_id")
+            and receipt_result.get("adapter_id") == bundle_result.get("adapter_id")
+            and receipt_result.get("validated") == bundle_result.get("validated")
+            and receipt_result.get("native_observation_ids")
+            == bundle_result.get("native_observation_ids"),
+            f"rehearsal receipt/bundle evidence result mismatch: {scenario_id}:{evidence_id}",
+        )
+    bundle_validators = _object(
+        bundle.get("validator_results"),
+        label=f"scenario {scenario_id} bundle validator results",
+    )
+    for receipt_field, validator_ids in (
+        ("terminal_validator_results", binding.terminal_validator_ids),
+        ("cleanup_validator_results", binding.cleanup_validator_ids),
+        ("artifact_validator_results", binding.artifact_validator_ids),
+    ):
+        receipt_results = _object(
+            receipt.get(receipt_field),
+            label=f"scenario {scenario_id} {receipt_field}",
+        )
+        for validator_id in validator_ids:
+            bundle_result = _object(
+                bundle_validators.get(validator_id),
+                label=f"scenario {scenario_id} bundle validator {validator_id}",
+            )
+            _require(
+                receipt_results.get(validator_id) == bundle_result.get("passed"),
+                f"rehearsal receipt/bundle validator result mismatch: {scenario_id}:{validator_id}",
+            )
+    bundle_reference = _object(
+        receipt.get("artifact_bundle"),
+        label=f"scenario {scenario_id} bundle reference",
+    )
+    _require(
+        bundle_reference.get("path") == str(bundle_artifact.path)
+        and bundle_reference.get("sha256") == bundle_artifact.content_sha256
+        and bundle_reference.get("size_bytes") == bundle_artifact.size_bytes,
+        f"rehearsal scenario receipt bundle path/hash/size mismatch: {scenario_id}",
+    )
+    manifest_record = _object(
+        bundle.get("manifest_record"),
+        label=f"scenario {scenario_id} manifest record",
+    )
+    inventory = bundle.get("member_inventory")
+    _require(isinstance(inventory, list), f"scenario {scenario_id} member inventory invalid")
+    archive_reference = _object(
+        bundle.get("artifact_archive"),
+        label=f"scenario {scenario_id} archive reference",
+    )
+    _require(
+        archive_reference.get("path") == str(archive_artifact.path)
+        and archive_reference.get("sha256") == archive_artifact.content_sha256
+        and archive_reference.get("size_bytes") == archive_artifact.size_bytes,
+        f"rehearsal scenario bundle archive path/hash/size mismatch: {scenario_id}",
+    )
+    _require(
+        bundle_reference.get("manifest_sha256") == manifest_record.get("sha256")
+        and bundle_reference.get("member_inventory_sha256")
+        == scenario_member_inventory_sha256(inventory)
+        and bundle_reference.get("member_count") == len(inventory)
+        and bundle_reference.get("artifact_archive_id")
+        == archive_reference.get("artifact_id")
+        and bundle_reference.get("artifact_archive_sha256")
+        == archive_artifact.content_sha256
+        and bundle_reference.get("artifact_archive_size_bytes")
+        == archive_artifact.size_bytes,
+        f"rehearsal scenario receipt bundle manifest/inventory/archive mismatch: {scenario_id}",
+    )
+    reopened_members = _safe_tar_members(archive_artifact)
+    expected_members = {
+        str(item.get("member_path") or ""): {
+            "kind": "file",
+            "sha256": str(item.get("sha256") or ""),
+            "size_bytes": item.get("size_bytes"),
+        }
+        for item in inventory
+        if isinstance(item, Mapping)
+    }
+    _require(
+        reopened_members == expected_members,
+        f"rehearsal scenario archive member inventory/content mismatch: {scenario_id}",
+    )
+    archive_payloads = _scenario_archive_json_payloads(
+        archive_artifact,
+        inventory,
+        scenario_id=scenario_id,
+    )
+    _rederive_scenario_bundle_results(
+        scenario_id=scenario_id,
+        binding=binding,
+        bundle=bundle,
+        archive_payloads=archive_payloads,
+        inventory=inventory,
+    )
     return {
         "terminal_state": receipt["terminal_state"],
         "runner_id": binding.runner_id,
         "artifact_count": len(receipt["artifact_ids"]),
+        "scenario_attempt_uuid": authority["scenario_attempt_uuid"],
+        "native_invocation_id": authority["native_invocation_id"],
+        "member_count": len(inventory),
+        "bundle_sha256": bundle_artifact.content_sha256,
+        "archive_sha256": archive_artifact.content_sha256,
+        "authority": authority,
     }
 
 
 def _derive_rehearsal(raw: Mapping[str, RawArtifact]) -> dict[str, Any]:
     supervisor = _json(raw, "supervisor_result")
     runner = _json(raw, "runner_result")
+    supervisor_authority = _rehearsal_authority(
+        supervisor,
+        label="rehearsal supervisor",
+    )
+    runner_authority = _rehearsal_authority(
+        runner,
+        label="rehearsal runner",
+    )
+    _require(
+        _authority_identity(supervisor_authority)
+        == _authority_identity(runner_authority),
+        "rehearsal supervisor/runner authority mismatch",
+    )
+    _require_interval_contains(
+        supervisor_authority,
+        runner_authority,
+        label="rehearsal runner",
+    )
+    supervisor_runner = _object(
+        supervisor.get("runner_report"),
+        label="rehearsal supervisor runner report",
+    )
+    _require_artifact_link(
+        supervisor_runner,
+        raw["runner_result"],
+        label="rehearsal supervisor runner report",
+    )
     _require(supervisor.get("level") == "rehearsal" and supervisor.get("ok") is True and supervisor.get("classification") == "PASS", "rehearsal supervisor did not PASS")
     _require(supervisor.get("runner_returncode") == 0 and supervisor.get("runner_verdict") == "PASS", "rehearsal supervisor runner failed")
     _require(supervisor.get("source_final", {}).get("verified") is True, "rehearsal source changed")
@@ -2733,14 +3487,44 @@ def _derive_rehearsal(raw: Mapping[str, RawArtifact]) -> dict[str, Any]:
     features = runner.get("mandatory_features_executed")
     _require(isinstance(features, list) and _MANDATORY_REHEARSAL_FEATURES.issubset(set(features)), "rehearsal mandatory heavy features are incomplete")
     _require(runner.get("skips") == [] and runner.get("fallbacks") == [] and runner.get("expected_gaps") == [], "rehearsal contains skipped/fallback/gap work")
+    runner_index = _object(
+        runner.get("scenario_receipts"),
+        label="rehearsal runner scenario receipt inventory",
+    )
+    _require(
+        set(runner_index) == set(_MANDATORY_REHEARSAL_SCENARIOS),
+        "rehearsal runner scenario receipt inventory role set mismatch",
+    )
     derived = {
         scenario_id: _derive_scenario_receipt(
-            _object(raw[f"scenario_{scenario_id}"].data, label=f"scenario {scenario_id}"),
+            raw,
             scenario_id,
+            runner_authority=runner_authority,
+            runner_index=runner_index,
         )
         for scenario_id in _MANDATORY_REHEARSAL_SCENARIOS
     }
-    return {"active_seconds": runner["active_test_seconds"], "scenarios": derived, "features": sorted(set(features))}
+    scenario_attempts = [
+        str(item["scenario_attempt_uuid"]) for item in derived.values()
+    ]
+    _require(
+        len(scenario_attempts) == len(set(scenario_attempts)),
+        "rehearsal scenario attempt UUIDs are reused",
+    )
+    scenario_invocations = [
+        str(item["native_invocation_id"]) for item in derived.values()
+    ]
+    _require(
+        len(scenario_invocations) == len(set(scenario_invocations)),
+        "rehearsal scenario native invocation IDs are reused",
+    )
+    return {
+        "active_seconds": runner["active_test_seconds"],
+        "scenarios": derived,
+        "features": sorted(set(features)),
+        "authority": runner_authority,
+        "supervisor_authority": supervisor_authority,
+    }
 
 
 def _manifest_digests(rows: Sequence[Mapping[str, Any]]) -> tuple[str, str]:
@@ -3272,10 +4056,52 @@ def _validate_unsealed_gate_evidence(
                 "smoke runner duration exceeds supervised native execution boundary",
             )
         elif gate_name == "60_minute_rehearsal_passed":
+            rehearsal_authority = _object(
+                derived.get("authority"),
+                label="rehearsal derived authority",
+            )
+            _require(
+                rehearsal_authority.get("qualification_campaign_uuid")
+                == qualification_campaign_uuid
+                and rehearsal_authority.get("commit") == commit
+                and rehearsal_authority.get("source_digest") == source_digest
+                and rehearsal_authority.get("protected_source_digest")
+                == protected_source_digest,
+                "rehearsal authority differs from outer qualification source/campaign",
+            )
+            native_receipt = native_execution["receipt"]
+            _require(
+                rehearsal_authority.get("native_invocation_id")
+                == native_receipt.get("invocation_id"),
+                "rehearsal authority native invocation mismatch",
+            )
+            native_bounds = {
+                "started_at": native_receipt["started_at"],
+                "finished_at": native_receipt["finished_at"],
+                "started_monotonic_ns": native_receipt["started_monotonic_ns"],
+                "finished_monotonic_ns": native_receipt["finished_monotonic_ns"],
+            }
+            _require_interval_contains(
+                native_bounds,
+                _object(
+                    derived.get("supervisor_authority"),
+                    label="rehearsal supervisor authority",
+                ),
+                label="rehearsal supervisor native execution",
+            )
             _require(
                 float(derived.get("active_seconds") or 0.0)
                 <= native_execution["duration_seconds"] + _EXECUTION_WALL_MONOTONIC_TOLERANCE_SECONDS,
                 "rehearsal active duration exceeds supervised native execution boundary",
+            )
+            runner_duration = (
+                int(rehearsal_authority["finished_monotonic_ns"])
+                - int(rehearsal_authority["started_monotonic_ns"])
+            ) / 1_000_000_000.0
+            _require(
+                float(derived.get("active_seconds") or 0.0)
+                <= runner_duration + _EXECUTION_WALL_MONOTONIC_TOLERANCE_SECONDS,
+                "rehearsal active duration exceeds runner authority boundary",
             )
         if gate_name == "worktree_clean_and_frozen":
             _require(derived.get("tracked_content_digest") == source_digest, "clean Git authority is bound to a different source digest")

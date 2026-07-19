@@ -7,6 +7,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
+from services.comfyui.template.cleanup import discard_comfyui_ref_exact
+
 
 def register_comfyui_image_routes(app, ctx):
     base64 = ctx["base64"]
@@ -1534,38 +1536,34 @@ def register_comfyui_image_routes(app, ctx):
         finally:
             conn.close()
         image_binding = _comfyui_binding(actor, backend_url=(ref_row or {}).get("backend_url"))
-        if image_binding["connection_mode"] != "local":
-            result = {
-                "file_deleted": False,
-                "file_missing": False,
-                "file_delete_supported": False,
-                "history_deleted": False,
-                "remote_preview_only": True,
-            }
-            audit("COMFYUI_DISCARD_REMOTE_PREVIEW_ONLY", get_client_ip(), user=actor["username"], success=True, ua=get_ua(), detail=f"file={image_ref.get('filename')}")
-            return json_resp({
-                "ok": True,
-                "msg": "已移除網頁上的預覽；遠端 ComfyUI API 不支援刪除 output 原始檔。",
-                "discard": result,
-                "warning": "source_file_not_deleted",
-            })
         active_client = _client_for_url(image_binding["url"])
         try:
             if not hasattr(active_client, "discard_image"):
                 return json_resp({"ok": False, "msg": "ComfyUI 原始檔刪除不支援"}), 501
-            result = active_client.discard_image(
-                image_ref,
+            result = discard_comfyui_ref_exact(
+                client=active_client,
+                file_ref=image_ref,
+                backend_url=image_binding["url"],
                 prompt_id=data.get("prompt_id"),
                 local_base_dir=str(_configured_comfyui_project_dir() or _configured_comfyui_base_dir() or ""),
-                allow_api_delete=False,
             )
-        except ComfyUIError as exc:
+        except (ComfyUIError, ValueError, OSError) as exc:
             audit("COMFYUI_DISCARD_ERROR", get_client_ip(), user=actor["username"], success=False, ua=get_ua(), detail=str(exc)[:180])
+            if not isinstance(exc, ComfyUIError):
+                return json_resp({"ok": False, "msg": str(exc), "stage": "discard_validation"}), 400
             return _json_error_from_comfy(exc, active_client)
-        if not (result.get("file_deleted") or result.get("file_missing")):
-            msg = "已丟棄前端預覽；ComfyUI 未提供刪除 output 檔案端點，原始檔可能仍留在 ComfyUI output。若要同步刪原檔，請設定 COMFYUI_OUTPUT_DIR 或 COMFYUI_BASE_DIR。"
-            audit("COMFYUI_DISCARD_UNSUPPORTED", get_client_ip(), user=actor["username"], success=True, ua=get_ua(), detail=str(result)[:180])
-            return json_resp({"ok": True, "msg": msg, "discard": result, "warning": "source_file_not_deleted"})
+        if not (
+            result.get("absence_verified") is True
+            and (result.get("file_deleted") is True or result.get("file_missing") is True)
+        ):
+            msg = "無法證明 ComfyUI 原始檔已刪除；預覽保留失敗狀態，請由管理員確認 backend 刪除能力或本機 listener 綁定。"
+            audit("COMFYUI_DISCARD_UNVERIFIED", get_client_ip(), user=actor["username"], success=False, ua=get_ua(), detail=str(result)[:1000])
+            return json_resp({
+                "ok": False,
+                "msg": msg,
+                "discard": result,
+                "warning": "source_file_not_deleted",
+            }), 409
         audit("COMFYUI_DISCARD", get_client_ip(), user=actor["username"], success=True, ua=get_ua(), detail=f"file={image_ref.get('filename')}, result={result}")
         return json_resp({"ok": True, "msg": "已丟棄預覽並刪除 ComfyUI 原始檔", "discard": result})
 

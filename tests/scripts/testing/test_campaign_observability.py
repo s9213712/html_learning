@@ -8,10 +8,13 @@ import pytest
 from scripts.testing import campaign_observability as observability
 from scripts.testing.campaign_observability import (
     GIB,
+    MIB,
     RESOURCE_SAMPLE_SCHEMA_VERSION,
     ProcessRoleRegistry,
     ResourceCollector,
     ResourceCollectorConfig,
+    collect_host_safety_preflight,
+    wait_for_host_safety_preflight,
 )
 
 
@@ -42,11 +45,11 @@ def fake_cgroup(tmp_path: Path) -> Path:
     write(cgroup / "memory.swap.events", "high 0\nmax 0\nfail 0\n")
     write(cgroup / "pids.current", "5\n")
     write(cgroup / "pids.events", "max 0\n")
-    write(cgroup / "memory.high", str(7 * GIB))
-    write(cgroup / "memory.max", str(8 * GIB))
-    write(cgroup / "memory.swap.max", str(GIB))
-    write(cgroup / "cpu.max", "600000 100000\n")
-    write(cgroup / "pids.max", "768\n")
+    write(cgroup / "memory.high", str(5 * GIB))
+    write(cgroup / "memory.max", str(6 * GIB))
+    write(cgroup / "memory.swap.max", str(512 * MIB))
+    write(cgroup / "cpu.max", "300000 100000\n")
+    write(cgroup / "pids.max", "384\n")
     return cgroup
 
 
@@ -131,8 +134,417 @@ def test_cgroup_limit_drift_is_fail_closed(tmp_path: Path) -> None:
     sample = result.collect(monotonic_ns=1_000_000_000)
 
     assert sample["cgroup"]["limits_verified"] is False
-    assert sample["cgroup"]["limit_mismatches"]["memory.max"]["expected"] == str(8 * GIB)
+    assert sample["cgroup"]["limit_mismatches"]["memory.max"]["expected"] == str(6 * GIB)
     assert "CGROUP_LIMIT_DRIFT" in sample["hard_limit_state"]["tripped"]
+
+
+@pytest.mark.parametrize(
+    ("pressure_name", "pressure_value", "reason_code"),
+    (
+        ("io", 91.0, "HOST_IO_PRESSURE_HIGH"),
+        ("memory", 12.0, "HOST_MEMORY_PRESSURE_HIGH"),
+    ),
+)
+def test_host_pressure_trips_hard_stop(
+    tmp_path: Path,
+    pressure_name: str,
+    pressure_value: float,
+    reason_code: str,
+) -> None:
+    result = collector(tmp_path)
+    write(
+        result.config.proc_root / "pressure" / pressure_name,
+        "some avg10=95.00 avg60=80.00 avg300=20.00 total=100\n"
+        f"full avg10={pressure_value:.2f} avg60=70.00 avg300=10.00 total=100\n",
+    )
+
+    sample = result.collect(monotonic_ns=1_000_000_000)
+
+    assert sample["hard_limit_state"]["ok"] is False
+    assert reason_code in sample["hard_limit_state"]["tripped"]
+
+
+def test_host_swap_and_load_trip_hard_stop(tmp_path: Path) -> None:
+    result = collector(tmp_path)
+    result.config.maximum_host_load1_per_cpu = 0.01
+    write(
+        result.config.proc_root / "meminfo",
+        "MemTotal:       16777216 kB\n"
+        "MemAvailable:    8388608 kB\n"
+        "SwapTotal:       1048576 kB\n"
+        "SwapFree:         131072 kB\n",
+    )
+
+    sample = result.collect(monotonic_ns=1_000_000_000)
+
+    assert "HOST_LOAD1_HIGH" in sample["hard_limit_state"]["tripped"]
+    assert "HOST_SWAP_USAGE_HIGH" in sample["hard_limit_state"]["tripped"]
+
+
+def test_host_safety_preflight_fails_closed_on_io_pressure(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    data.mkdir()
+    proc = fake_proc(
+        tmp_path,
+        major=os.major(os.stat(data).st_dev),
+        minor=os.minor(os.stat(data).st_dev),
+    )
+    write(
+        proc / "pressure" / "io",
+        "some avg10=94.00 avg60=90.00 avg300=50.00 total=100\n"
+        "full avg10=92.00 avg60=88.00 avg300=45.00 total=100\n",
+    )
+
+    result = collect_host_safety_preflight(proc_root=proc)
+
+    assert result["ok"] is False
+    assert result["errors"] == {}
+    assert "HOST_IO_PRESSURE_HIGH" in result["tripped"]
+    assert result["checks"]["host_io_pressure"]["value"] == {
+        "avg10": 92.0,
+        "avg60": 88.0,
+    }
+
+
+def test_host_startup_safety_uses_three_percent_io_headroom(
+    tmp_path: Path,
+) -> None:
+    data = tmp_path / "data"
+    data.mkdir()
+    proc = fake_proc(
+        tmp_path,
+        major=os.major(os.stat(data).st_dev),
+        minor=os.minor(os.stat(data).st_dev),
+    )
+    write(
+        proc / "pressure" / "io",
+        "some avg10=3.00 avg60=3.00 avg300=1.00 total=100\n"
+        "full avg10=3.00 avg60=3.00 avg300=1.00 total=100\n",
+    )
+
+    boundary = observability.collect_host_startup_safety_preflight(
+        proc_root=proc,
+    )
+    default = collect_host_safety_preflight(proc_root=proc)
+
+    assert boundary["ok"] is True
+    assert boundary["checks"]["host_io_pressure"]["maximum"] == {
+        "avg10": 3.0,
+        "avg60": 3.0,
+    }
+    assert default["ok"] is True
+    assert default["checks"]["host_io_pressure"]["maximum"] == {
+        "avg10": 10.0,
+        "avg60": 10.0,
+    }
+
+    write(
+        proc / "pressure" / "io",
+        "some avg10=3.01 avg60=3.00 avg300=1.00 total=100\n"
+        "full avg10=3.01 avg60=3.00 avg300=1.00 total=100\n",
+    )
+    over = observability.collect_host_startup_safety_preflight(proc_root=proc)
+
+    assert over["ok"] is False
+    assert over["tripped"] == ["HOST_IO_PRESSURE_HIGH"]
+
+    write(
+        proc / "pressure" / "io",
+        "some avg10=10.00 avg60=10.00 avg300=1.00 total=100\n"
+        "full avg10=10.00 avg60=10.00 avg300=1.00 total=100\n",
+    )
+    exact_hard_boundary = (
+        observability.collect_host_startup_safety_preflight(proc_root=proc)
+    )
+    hard_boundary_check = exact_hard_boundary["checks"][
+        "host_io_pressure_hard_limit"
+    ]
+    assert hard_boundary_check["ok"] is True
+    assert hard_boundary_check["exceeded"] is False
+    assert exact_hard_boundary["tripped"] == ["HOST_IO_PRESSURE_HIGH"]
+
+    for avg10, avg60 in ((10.01, 10.0), (10.0, 10.01)):
+        write(
+            proc / "pressure" / "io",
+            f"some avg10={avg10:.2f} avg60={avg60:.2f} "
+            "avg300=1.00 total=100\n"
+            f"full avg10={avg10:.2f} avg60={avg60:.2f} "
+            "avg300=1.00 total=100\n",
+        )
+        hard = observability.collect_host_startup_safety_preflight(
+            proc_root=proc,
+        )
+
+        assert hard["checks"]["host_io_pressure_hard_limit"] == {
+            "ok": False,
+            "evaluated": True,
+            "exceeded": True,
+            "value": {"avg10": avg10, "avg60": avg60},
+            "maximum": {"avg10": 10.0, "avg60": 10.0},
+            "reason_code": "HOST_IO_PRESSURE_HARD_LIMIT_EXCEEDED",
+        }
+        assert hard["tripped"] == [
+            "HOST_IO_PRESSURE_HIGH",
+            "HOST_IO_PRESSURE_HARD_LIMIT_EXCEEDED",
+        ]
+
+    waited = wait_for_host_safety_preflight(
+        collector=lambda: hard,
+        sleeper=lambda _seconds: pytest.fail("hard limit must not wait"),
+    )
+
+    assert waited["admission_wait"]["sample_count"] == 1
+    assert waited["admission_wait"]["non_waitable"] == [
+        "HOST_IO_PRESSURE_HARD_LIMIT_EXCEEDED",
+    ]
+
+
+def test_host_safety_preflight_rejects_missing_telemetry(tmp_path: Path) -> None:
+    result = collect_host_safety_preflight(proc_root=tmp_path / "missing-proc")
+
+    assert result["ok"] is False
+    assert "HOST_SAFETY_TELEMETRY_INCOMPLETE" in result["tripped"]
+    assert result["errors"]
+
+
+def test_host_safety_admission_wait_requires_two_safe_io_samples() -> None:
+    unsafe = {
+        "at": "t0",
+        "ok": False,
+        "tripped": ["HOST_IO_PRESSURE_HIGH"],
+        "checks": {"host_io_pressure": {"value": {"avg10": 5.0, "avg60": 5.0}}},
+    }
+    safe = {
+        "at": "t1",
+        "ok": True,
+        "tripped": [],
+        "checks": {"host_io_pressure": {"value": {"avg10": 2.0, "avg60": 3.0}}},
+    }
+    samples = iter((unsafe, safe, safe))
+    now = [0.0]
+
+    def sleep(seconds: float) -> None:
+        now[0] += seconds
+
+    result = wait_for_host_safety_preflight(
+        timeout_seconds=5.0,
+        poll_seconds=1.0,
+        collector=lambda: next(samples),
+        clock=lambda: now[0],
+        sleeper=sleep,
+    )
+
+    assert result["ok"] is True
+    assert result["admission_wait"]["sample_count"] == 3
+    assert result["admission_wait"]["waited_seconds"] == 2.0
+
+
+def test_host_safety_admission_wait_rejects_non_io_failure_immediately() -> None:
+    now = [0.0]
+    result = wait_for_host_safety_preflight(
+        timeout_seconds=30.0,
+        collector=lambda: {
+            "at": "t0",
+            "ok": False,
+            "tripped": ["HOST_MEMORY_AVAILABLE_LOW"],
+            "checks": {},
+        },
+        clock=lambda: now[0],
+        sleeper=lambda seconds: now.__setitem__(0, now[0] + seconds),
+    )
+
+    assert result["ok"] is False
+    assert result["admission_wait"]["sample_count"] == 1
+    assert result["admission_wait"]["non_waitable"] == [
+        "HOST_MEMORY_AVAILABLE_LOW"
+    ]
+
+
+def test_host_safety_admission_wait_times_out_without_relaxing_io_limit() -> None:
+    now = [0.0]
+
+    def sleep(seconds: float) -> None:
+        now[0] += seconds
+
+    result = wait_for_host_safety_preflight(
+        timeout_seconds=2.0,
+        poll_seconds=1.0,
+        collector=lambda: {
+            "at": "busy",
+            "ok": False,
+            "tripped": ["HOST_IO_PRESSURE_HIGH"],
+            "checks": {
+                "host_io_pressure": {"value": {"avg10": 5.0, "avg60": 5.0}}
+            },
+        },
+        clock=lambda: now[0],
+        sleeper=sleep,
+    )
+
+    assert result["ok"] is False
+    assert "HOST_IO_PRESSURE_HIGH" in result["tripped"]
+    assert "HOST_SAFETY_ADMISSION_TIMEOUT" in result["tripped"]
+    assert result["admission_wait"]["sample_count"] == 3
+
+
+def _diskstats_row(
+    *,
+    reads: int = 0,
+    read_ms: int = 0,
+    writes: int = 0,
+    write_ms: int = 0,
+    in_flight: int = 0,
+    weighted_io_ms: int = 0,
+    flushes: int = 0,
+    flush_ms: int = 0,
+) -> str:
+    return (
+        f"8 48 sdd {reads} 0 0 {read_ms} {writes} 0 0 {write_ms} "
+        f"{in_flight} 0 {weighted_io_ms} 0 0 0 0 {flushes} {flush_ms}"
+    )
+
+
+def test_startup_block_io_sampler_rejects_a_delayed_rolling_window() -> None:
+    now = [0.0]
+    row = [_diskstats_row()]
+    sampler = observability.HostStartupBlockIoSampler(
+        device_major_minor=(8, 48),
+        read_text=lambda _path: row[0],
+        clock=lambda: now[0],
+    )
+
+    assert sampler.sample()["status"] == "pending"
+    for second in (1.0, 2.0, 3.0):
+        now[0] = second
+        assert sampler.sample()["status"] == "pending"
+
+    row[0] = _diskstats_row(
+        writes=10,
+        write_ms=100,
+        weighted_io_ms=400,
+        flushes=2,
+        flush_ms=80,
+    )
+    now[0] = 4.0
+    safe = sampler.sample()
+    assert safe["status"] == "safe"
+    assert safe["interval_seconds"] == 4.0
+
+    row[0] = _diskstats_row(
+        writes=20,
+        write_ms=1400,
+        weighted_io_ms=6000,
+        flushes=4,
+        flush_ms=600,
+    )
+    now[0] = 5.0
+    unsafe = sampler.sample()
+    assert unsafe["status"] == "unsafe"
+    assert unsafe["reason_codes"] == [
+        "block_io_write_await_high",
+        "block_io_flush_await_high",
+        "block_io_average_queue_high",
+    ]
+
+
+def test_host_safety_wait_treats_block_pending_as_waitable() -> None:
+    now = [0.0]
+    block_samples = iter((
+        {
+            "status": "pending",
+            "safe": False,
+            "reason_codes": ["block_io_baseline_pending"],
+        },
+        {"status": "safe", "safe": True, "reason_codes": []},
+        {"status": "safe", "safe": True, "reason_codes": []},
+    ))
+
+    class BlockSampler:
+        @staticmethod
+        def sample() -> dict[str, object]:
+            return next(block_samples)
+
+    def collect() -> dict[str, object]:
+        return {
+            "at": "safe",
+            "ok": True,
+            "tripped": [],
+            "checks": {
+                "host_io_pressure": {
+                    "value": {"avg10": 1.0, "avg60": 1.0},
+                },
+            },
+        }
+
+    result = wait_for_host_safety_preflight(
+        timeout_seconds=5.0,
+        poll_seconds=1.0,
+        required_consecutive_safe=2,
+        collector=collect,
+        block_io_sampler=BlockSampler(),  # type: ignore[arg-type]
+        clock=lambda: now[0],
+        sleeper=lambda seconds: now.__setitem__(0, now[0] + seconds),
+    )
+
+    assert result["ok"] is True
+    assert result["block_io"]["status"] == "safe"
+    assert result["admission_wait"]["sample_count"] == 3
+    assert result["admission_wait"]["waited_seconds"] == 2.0
+
+
+def test_host_safety_wait_rejects_unavailable_block_telemetry() -> None:
+    class BlockSampler:
+        @staticmethod
+        def sample() -> dict[str, object]:
+            return {
+                "status": "unavailable",
+                "safe": False,
+                "reason_codes": ["block_io_telemetry_unavailable"],
+            }
+
+    result = wait_for_host_safety_preflight(
+        collector=lambda: {
+            "at": "safe",
+            "ok": True,
+            "tripped": [],
+            "checks": {
+                "host_io_pressure": {
+                    "value": {"avg10": 1.0, "avg60": 1.0},
+                },
+            },
+        },
+        block_io_sampler=BlockSampler(),  # type: ignore[arg-type]
+        sleeper=lambda _seconds: pytest.fail("telemetry failure must not wait"),
+    )
+
+    assert result["ok"] is False
+    assert result["admission_wait"]["non_waitable"] == [
+        "HOST_BLOCK_DEVICE_TELEMETRY_INCOMPLETE",
+    ]
+
+
+def test_gpu_temperature_trips_hard_stop_before_thermal_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = collector(tmp_path)
+    result.config.require_gpu = True
+    monkeypatch.setattr(
+        result,
+        "_collect_gpu",
+        lambda _errors: [{
+            "index": 0,
+            "utilization_percent": 40.0,
+            "memory_used_mib": 1024.0,
+            "memory_total_mib": 8192.0,
+            "temperature_c": 81.0,
+        }],
+    )
+
+    sample = result.collect(monotonic_ns=1_000_000_000)
+
+    assert sample["hard_limit_state"]["ok"] is False
+    assert "GPU_TEMPERATURE_HIGH" in sample["hard_limit_state"]["tripped"]
 
 
 def test_process_registry_requires_pid_start_identity(tmp_path: Path) -> None:

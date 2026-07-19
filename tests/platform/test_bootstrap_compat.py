@@ -526,3 +526,99 @@ def test_init_db_relaxes_default_password_gate_for_dev_default_accounts(tmp_path
     row = conn.execute("SELECT must_change_password, is_default_password FROM users WHERE username='root'").fetchone()
     conn.close()
     assert row == (0, 0)
+
+
+def test_init_db_preserve_existing_runtime_skips_account_and_legacy_mutations(tmp_path, monkeypatch):
+    db_path = tmp_path / "incident-preserved.db"
+    schema_path = Path(__file__).resolve().parents[2] / "bootstrap.schema.sql"
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    conn.executescript(schema_path.read_text(encoding="utf-8"))
+    conn.execute(
+        """
+        INSERT INTO users
+            (username, status, role, must_change_password, is_default_password,
+             failed_login_count, locked_until, blocked_until, created_at, updated_at)
+        VALUES
+            ('root', 'suspended', 'user', 1, 1, 7,
+             '2099-01-01T00:00:00', '2099-01-02T00:00:00',
+             '2026-01-01T00:00:00', '2026-01-02T00:00:00')
+        """
+    )
+    root_id = conn.execute("SELECT id FROM users WHERE username='root'").fetchone()["id"]
+    conn.execute(
+        "INSERT INTO user_passwords (user_id, password_hash, created_at) VALUES (?, 'original-hash', '2026-01-01T00:00:00')",
+        (root_id,),
+    )
+    conn.commit()
+    account_before = dict(conn.execute("SELECT * FROM users WHERE id=?", (root_id,)).fetchone())
+    passwords_before = [
+        tuple(row)
+        for row in conn.execute(
+            "SELECT user_id, password_hash, created_at FROM user_passwords WHERE user_id=? ORDER BY id",
+            (root_id,),
+        ).fetchall()
+    ]
+    conn.close()
+
+    original_state = dict(bootstrap._STATE)
+    monkeypatch.setenv("HTML_LEARNING_ROOT_PASSWORD", "DifferentRootPassword123!")
+    monkeypatch.setenv("HTML_LEARNING_MANAGER_PASSWORD", "DifferentManagerPassword123!")
+    monkeypatch.setenv("HTML_LEARNING_TEST_PASSWORD", "DifferentTestPassword123!")
+
+    def forbidden_legacy_read(_path):
+        raise AssertionError("legacy artifacts must not be read during incident preservation")
+
+    def forbidden_room_mutation(_conn):
+        raise AssertionError("official room must not be mutated during incident preservation")
+
+    try:
+        bootstrap.configure_bootstrap_service(
+            get_db=_get_db_factory(str(db_path)),
+            db_path=str(db_path),
+            schema_path=str(schema_path),
+            legacy_fail_log=str(tmp_path / "legacy-fail.json"),
+            legacy_blocked_ips=str(tmp_path / "legacy-ip.json"),
+            legacy_rate_limit=str(tmp_path / "legacy-rate.json"),
+            legacy_audit_log=str(tmp_path / "legacy-audit.json"),
+            chain_seed="seed",
+            chain_hash=lambda prev_hash, entry_json: f"{prev_hash}:{len(entry_json)}",
+            load_json=forbidden_legacy_read,
+            normalize_text=lambda value: value if isinstance(value, str) else "",
+            hash_password=lambda value: f"new-hash:{value}",
+            verify_password=lambda hashed, raw: False,
+            audit=_noop,
+            refresh_system_settings=_noop,
+            init_system_settings_table=_noop,
+            seed_missing_settings=_noop,
+            import_legacy_settings_files=_noop,
+            default_settings={},
+        )
+        result = bootstrap.init_db(
+            ensure_secure_audit_columns=_noop,
+            ensure_user_columns=_noop,
+            ensure_appeal_columns=_noop,
+            ensure_session_columns=_ensure_session_columns,
+            ensure_security_support_schema=_noop,
+            ensure_points_economy_schema=_noop,
+            ensure_official_chat_room=forbidden_room_mutation,
+            hash_password=lambda value: f"new-hash:{value}",
+            preserve_existing_runtime=True,
+        )
+    finally:
+        bootstrap._STATE.clear()
+        bootstrap._STATE.update(original_state)
+
+    assert result["preserved_existing_runtime"] is True
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    assert dict(conn.execute("SELECT * FROM users WHERE id=?", (root_id,)).fetchone()) == account_before
+    assert [
+        tuple(row)
+        for row in conn.execute(
+            "SELECT user_id, password_hash, created_at FROM user_passwords WHERE user_id=? ORDER BY id",
+            (root_id,),
+        ).fetchall()
+    ] == passwords_before
+    assert conn.execute("SELECT COUNT(*) FROM users WHERE username IN ('admin', 'test')").fetchone()[0] == 0
+    conn.close()

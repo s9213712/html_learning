@@ -17,6 +17,7 @@ from services.ai_agent.hermes import (
 
 from routes.ai_agent import register_ai_agent_routes
 from routes.ai_agent import AI_AGENT_WRITE_TOOL_SPECS
+from services.server.request_guards import path_is_root_recovery_allowed_during_lockdown
 
 
 def _json_resp(payload, status=200):
@@ -151,7 +152,16 @@ def _build_db(path):
     conn.close()
 
 
-def _register_fake_comfyui_workflow_routes(app, *, workflow_id, preset_id=77, captured=None):
+def _register_fake_comfyui_workflow_routes(
+    app,
+    *,
+    workflow_id,
+    preset_id=77,
+    captured=None,
+    dependency_status=None,
+    manifest_override=None,
+    workflow_json_override=None,
+):
     captured = captured if captured is not None else {}
     manifest = {
         "ui": {
@@ -268,6 +278,10 @@ def _register_fake_comfyui_workflow_routes(app, *, workflow_id, preset_id=77, ca
         "44": {"class_type": "ImagePadForOutpaint", "inputs": {"left": 0, "top": 0, "right": 0, "bottom": 0, "feathering": 40}},
         "9": {"class_type": "SaveImage", "inputs": {"filename_prefix": "hackme_web"}},
     }
+    if manifest_override is not None:
+        manifest = manifest_override
+    if workflow_json_override is not None:
+        workflow_json = workflow_json_override
 
     @app.route("/api/comfyui/workflows", methods=["GET"])
     def fake_comfyui_workflows():
@@ -283,7 +297,7 @@ def _register_fake_comfyui_workflow_routes(app, *, workflow_id, preset_id=77, ca
                 "system_bundle_id": workflow_id,
                 "manifest_json": manifest,
                 "workflow_json": workflow_json,
-                "dependency_status": {},
+                "dependency_status": dependency_status or {},
             },
         })
 
@@ -295,7 +309,18 @@ def _register_fake_comfyui_workflow_routes(app, *, workflow_id, preset_id=77, ca
     return captured
 
 
-def _build_app(db_path, actor, *, settings=None, audit_events=None, fernet=None):
+_DEFAULT_SERVER_MODE = object()
+
+
+def _build_app(
+    db_path,
+    actor,
+    *,
+    settings=None,
+    audit_events=None,
+    fernet=None,
+    server_mode_service=_DEFAULT_SERVER_MODE,
+):
     def get_db():
         conn = sqlite3.connect(db_path)
         conn.row_factory = sqlite3.Row
@@ -307,6 +332,18 @@ def _build_app(db_path, actor, *, settings=None, audit_events=None, fernet=None)
     def record_audit(*args, **kwargs):
         if audit_events is not None:
             audit_events.append({"args": args, "kwargs": kwargs})
+
+    if server_mode_service is _DEFAULT_SERVER_MODE:
+        class DefaultServerMode:
+            @staticmethod
+            def get_current_mode():
+                return {"current_mode": "dev_ready"}
+
+            @staticmethod
+            def list_profiles():
+                return []
+
+        server_mode_service = DefaultServerMode()
 
     register_ai_agent_routes(
         app,
@@ -322,9 +359,123 @@ def _build_app(db_path, actor, *, settings=None, audit_events=None, fernet=None)
             "get_db": get_db,
             "fernet": fernet or Fernet(Fernet.generate_key()),
             "role_rank": lambda role: {"user": 0, "manager": 1, "admin": 1, "super_admin": 2}.get(role or "user", 0),
+            "server_mode_service": server_mode_service,
         }
     )
     return app
+
+
+def test_incident_lockdown_ai_gateway_only_dispatches_resolve_tool(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+
+    class IncidentMode:
+        @staticmethod
+        def get_current_mode():
+            return {"current_mode": "incident_lockdown", "incident_active": True}
+
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "super_admin"},
+        settings={
+            "ai_agent_operation_mode": "write",
+            "ai_agent_allowed_tools": "write_incident_resolve,write_server_restart",
+        },
+        server_mode_service=IncidentMode(),
+    )
+
+    @app.route("/api/root/incident/resolve", methods=["POST"])
+    def fake_incident_resolve():
+        return _json_resp({"ok": True, "incident": {"status": "resolved"}})
+
+    client = app.test_client()
+    denied = client.post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_server_restart",
+        "confirm": "EXECUTE",
+        "arguments": {},
+    })
+    resolved = client.post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_incident_resolve",
+        "confirm": "EXECUTE",
+        "arguments": {"confirm": "RESOLVE_INCIDENT"},
+    })
+
+    assert path_is_root_recovery_allowed_during_lockdown(
+        "/api/ai-agent/write-tools/execute"
+    ) is True
+    assert denied.status_code == 503
+    assert denied.get_json()["allowed_tool"] == "write_incident_resolve"
+    assert resolved.status_code == 200
+    assert resolved.get_json()["ok"] is True
+
+
+@pytest.mark.parametrize("mode_service", [None, "raises", "empty"])
+def test_write_tools_fail_closed_when_server_mode_is_unavailable(tmp_path, mode_service):
+    db_path = tmp_path / f"mode-unavailable-{mode_service}.db"
+    _build_db(db_path)
+
+    if mode_service == "raises":
+        class ModeService:
+            @staticmethod
+            def get_current_mode():
+                raise RuntimeError("mode store unavailable")
+
+        service = ModeService()
+    elif mode_service == "empty":
+        class ModeService:
+            @staticmethod
+            def get_current_mode():
+                return {"current_mode": ""}
+
+        service = ModeService()
+    else:
+        service = None
+
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "super_admin"},
+        settings={
+            "ai_agent_operation_mode": "write",
+            "ai_agent_allowed_tools": "write_server_restart",
+        },
+        server_mode_service=service,
+    )
+    response = app.test_client().post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_server_restart",
+        "confirm": "EXECUTE",
+        "arguments": {},
+    })
+
+    assert response.status_code == 503
+    assert response.get_json()["blocked_by"] == "server_mode_unavailable"
+
+
+def test_incident_resolve_requires_super_admin_at_ai_gateway(tmp_path):
+    db_path = tmp_path / "incident-resolve-role.db"
+    _build_db(db_path)
+
+    class IncidentMode:
+        @staticmethod
+        def get_current_mode():
+            return {"current_mode": "incident_lockdown"}
+
+    app = _build_app(
+        db_path,
+        {"id": 9, "username": "ordinary", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "write",
+            "ai_agent_allowed_tools": "write_incident_resolve",
+        },
+        server_mode_service=IncidentMode(),
+    )
+    response = app.test_client().post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_incident_resolve",
+        "confirm": "EXECUTE",
+        "arguments": {"confirm": "RESOLVE_INCIDENT"},
+    })
+
+    assert response.status_code == 403
+    assert "super admin" in response.get_json()["msg"]
 
 
 def _insert_user(db_path, *, user_id, username, role):
@@ -1961,6 +2112,58 @@ def test_ai_agent_comfyui_write_tool_img2img_does_not_auto_route_to_qwen(tmp_pat
     assert payload["ok"] is True
     assert captured["generation_mode"] == "img2img"
     assert "official_workflow_id" not in captured
+
+
+def test_ai_agent_official_gguf_workflow_passes_explicit_profile_to_final_run_gate(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "write",
+            "ai_agent_allowed_tools": "write_comfyui_generate",
+        },
+    )
+    captured = _register_fake_comfyui_workflow_routes(
+        app,
+        workflow_id="origin_sdxl_gguf_txt2img",
+        preset_id=76,
+        dependency_status={
+            "missing_models": [
+                {"kind": "diffusion_model", "name": "stale-default-q8.gguf"},
+            ],
+        },
+        manifest_override={"ui": {"panels": []}},
+        workflow_json_override={
+            "3": {"class_type": "KSampler", "inputs": {"steps": 24, "cfg": 7, "seed": 1}},
+            "4": {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": "stale-default-q8.gguf"}},
+            "9": {"class_type": "SaveImage", "inputs": {"filename_prefix": "hackme_web"}},
+        },
+    )
+
+    response = app.test_client().post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_comfyui_generate",
+        "confirm": "EXECUTE",
+        "arguments": {
+            "prompt": "formal safe GGUF AI Agent canary",
+            "official_workflow_id": "origin_sdxl_gguf_txt2img",
+            "gguf_profile": "diving_illustrious_flat_anime_sdxl",
+            "gguf_variant": "q4_k_m",
+            "steps": 2,
+            "width": 512,
+            "height": 512,
+            "confirm_billing": True,
+        },
+    })
+    payload = response.get_json()
+
+    assert response.status_code == 200, payload
+    assert payload["ok"] is True
+    assert captured["gguf_workflow"] == {
+        "profile_id": "diving_illustrious_flat_anime_sdxl",
+        "variant_id": "q4_k_m",
+    }
 
 
 def test_ai_agent_official_qwen_controlnet_run_receives_pose_args(tmp_path):

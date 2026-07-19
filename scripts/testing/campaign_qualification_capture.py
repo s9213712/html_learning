@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import fcntl
 import hashlib
 import json
 import math
@@ -119,6 +120,14 @@ except ModuleNotFoundError:  # Direct ``python scripts/testing/...`` execution.
 
 
 QUALIFICATION_CONTEXT_SCHEMA_VERSION = "hackme.formal-qualification-context.v1"
+REHEARSAL_PROJECTION_CONTEXT_SCHEMA_VERSION = (
+    "hackme.formal-rehearsal-projection-context.v1"
+)
+REHEARSAL_PROJECTION_CONTEXT_ENV = "HACKME_FORMAL_REHEARSAL_PROJECTION_CONTEXT"
+REHEARSAL_PROJECTION_CONTEXT_SHA256_ENV = (
+    "HACKME_FORMAL_REHEARSAL_PROJECTION_CONTEXT_SHA256"
+)
+_SEALED_MEMFD_PATH = re.compile(r"^/proc/([1-9][0-9]*)/fd/([0-9]+)$")
 
 # JSON must be parsed to add a binding, so it is intentionally small and
 # bounded.  JSONL and opaque artifacts are streamed.  The large-stream ceiling
@@ -864,6 +873,313 @@ def planned_capture_paths(
     }
 
 
+def _rehearsal_scenario_ids() -> tuple[str, ...]:
+    gate = "60_minute_rehearsal_passed"
+    return tuple(
+        role.removeprefix("scenario_")
+        for role in GATE_RAW_SPECS[gate]
+        if role.startswith("scenario_")
+        and not role.startswith("scenario_bundle_")
+        and not role.startswith("scenario_archive_")
+    )
+
+
+def validate_rehearsal_projection_context(
+    value: object,
+    *,
+    require_live_producer: bool = True,
+) -> dict[str, Any]:
+    """Validate the non-secret, parent-sealed rehearsal projection contract.
+
+    The context is transport authority only.  It cannot declare PASS and it
+    contains no credentials.  Its capture bindings and all 41 native/planned
+    paths are exact so a child cannot redirect a later qualification capture.
+    """
+
+    _require(isinstance(value, Mapping), "rehearsal projection context is not an object")
+    payload = dict(value)
+    expected_fields = {
+        "schema_version",
+        "gate_name",
+        "outer_native_invocation_id",
+        "activation_nonce",
+        "campaign_attempt_uuid",
+        "capture_context",
+        "native_artifact_paths",
+        "planned_capture_paths",
+        "formal_bindings",
+        "scenario_authorities",
+    }
+    _require(
+        set(payload) == expected_fields,
+        "rehearsal projection context shape mismatch",
+    )
+    gate = "60_minute_rehearsal_passed"
+    _require(
+        payload.get("schema_version") == REHEARSAL_PROJECTION_CONTEXT_SCHEMA_VERSION
+        and payload.get("gate_name") == gate,
+        "rehearsal projection context schema/gate mismatch",
+    )
+    outer_invocation = str(payload.get("outer_native_invocation_id") or "")
+    activation_nonce = str(payload.get("activation_nonce") or "")
+    campaign_attempt = str(payload.get("campaign_attempt_uuid") or "")
+    _require(
+        _UUIDISH.fullmatch(outer_invocation) is not None
+        and _UUIDISH.fullmatch(activation_nonce) is not None
+        and _UUIDISH.fullmatch(campaign_attempt) is not None,
+        "rehearsal projection invocation/attempt authority is invalid",
+    )
+
+    capture_context = payload.get("capture_context")
+    _require(isinstance(capture_context, Mapping), "projection capture context is missing")
+    _require(
+        set(capture_context)
+        == {
+            "schema_version",
+            "qualification_campaign_uuid",
+            "commit",
+            "source_digest",
+            "protected_source_digest",
+            "source_authority",
+            "producer",
+            "created_at",
+        }
+        and capture_context.get("schema_version") == QUALIFICATION_CONTEXT_SCHEMA_VERSION,
+        "projection capture context shape/schema mismatch",
+    )
+    _require(
+        _UUIDISH.fullmatch(str(capture_context.get("qualification_campaign_uuid") or ""))
+        is not None
+        and _SHA40.fullmatch(str(capture_context.get("commit") or "")) is not None
+        and _SHA256.fullmatch(str(capture_context.get("source_digest") or "")) is not None
+        and _SHA256.fullmatch(str(capture_context.get("protected_source_digest") or ""))
+        is not None,
+        "projection capture source/campaign identity is invalid",
+    )
+    producer = capture_context.get("producer")
+    _require(
+        isinstance(producer, Mapping)
+        and set(producer)
+        == {"kind", "pid", "start_ticks", "boot_id", "cgroup_path", "invocation_id"}
+        and producer.get("kind") == CAPTURE_PRODUCER_KIND
+        and type(producer.get("pid")) is int
+        and int(producer.get("pid") or 0) > 0
+        and type(producer.get("start_ticks")) is int
+        and int(producer.get("start_ticks") or 0) > 0
+        and _UUIDISH.fullmatch(str(producer.get("invocation_id") or "")) is not None,
+        "projection capture producer identity is invalid",
+    )
+    if require_live_producer:
+        try:
+            live = capture_process_identity(int(producer["pid"]))
+        except Exception as exc:
+            raise QualificationCaptureError(
+                f"projection capture producer is not live: {exc.__class__.__name__}: {exc}"
+            ) from exc
+        _require(
+            live.pid == producer.get("pid")
+            and live.start_ticks == producer.get("start_ticks")
+            and live.boot_id == producer.get("boot_id")
+            and live.cgroup_path == producer.get("cgroup_path"),
+            "projection capture producer identity changed",
+        )
+
+    role_set = set(GATE_RAW_SPECS[gate])
+    native_paths = payload.get("native_artifact_paths")
+    planned_paths = payload.get("planned_capture_paths")
+    _require(
+        isinstance(native_paths, Mapping)
+        and isinstance(planned_paths, Mapping)
+        and set(native_paths) == role_set
+        and set(planned_paths) == role_set
+        and len(role_set) == 41,
+        "rehearsal projection role inventory is not exactly 41",
+    )
+    for role in sorted(role_set):
+        native = _absolute_path(native_paths[role], label=f"projection native path {role}")
+        planned = _absolute_path(planned_paths[role], label=f"projection planned path {role}")
+        _require(native != planned, f"projection native/planned paths alias: {role}")
+
+    json_roles = {
+        role
+        for role, spec in GATE_RAW_SPECS[gate].items()
+        if spec.media_type == "application/json"
+    }
+    bindings = payload.get("formal_bindings")
+    _require(
+        isinstance(bindings, Mapping) and set(bindings) == json_roles,
+        "rehearsal projection formal binding role set mismatch",
+    )
+    for role in sorted(json_roles):
+        expected_binding = {
+            "schema_version": RAW_ARTIFACT_BINDING_SCHEMA_VERSION,
+            "gate_name": gate,
+            "artifact_role": role,
+            "qualification_campaign_uuid": capture_context["qualification_campaign_uuid"],
+            "commit": capture_context["commit"],
+            "source_digest": capture_context["source_digest"],
+            "protected_source_digest": capture_context["protected_source_digest"],
+            "actual_execution": True,
+            "simulated": False,
+            "component_only": False,
+            "captured_at": capture_context["created_at"],
+            "producer": dict(producer),
+        }
+        _require(
+            isinstance(bindings[role], Mapping)
+            and dict(bindings[role]) == expected_binding,
+            f"rehearsal projection formal binding mismatch: {role}",
+        )
+
+    scenario_ids = _rehearsal_scenario_ids()
+    scenario_authorities = payload.get("scenario_authorities")
+    _require(
+        isinstance(scenario_authorities, Mapping)
+        and set(scenario_authorities) == set(scenario_ids),
+        "rehearsal projection scenario authority inventory mismatch",
+    )
+    attempts: set[str] = set()
+    invocations: set[str] = set()
+    for scenario_id in scenario_ids:
+        authority = scenario_authorities[scenario_id]
+        _require(
+            isinstance(authority, Mapping)
+            and set(authority) == {"scenario_attempt_uuid", "native_invocation_id"},
+            f"rehearsal projection scenario authority shape mismatch: {scenario_id}",
+        )
+        attempt = str(authority.get("scenario_attempt_uuid") or "")
+        invocation = str(authority.get("native_invocation_id") or "")
+        _require(
+            _UUIDISH.fullmatch(attempt) is not None
+            and _UUIDISH.fullmatch(invocation) is not None
+            and attempt not in attempts
+            and invocation not in invocations
+            and invocation != outer_invocation,
+            f"rehearsal projection scenario attempt/invocation is invalid or reused: {scenario_id}",
+        )
+        attempts.add(attempt)
+        invocations.add(invocation)
+    return payload
+
+
+def build_rehearsal_projection_context(
+    *,
+    context: QualificationContext,
+    attempt_root: Path,
+    native_artifact_paths: Mapping[str, Path],
+    outer_native_invocation_id: str,
+    activation_nonce: str,
+    campaign_attempt_uuid: str,
+    scenario_authorities: Mapping[str, Mapping[str, str]],
+) -> dict[str, Any]:
+    """Build the exact non-secret projection plan before the child starts."""
+
+    gate = "60_minute_rehearsal_passed"
+    _assert_qualification_context_live(context)
+    planned = planned_capture_paths(
+        attempt_root,
+        gate_name=gate,
+        native_artifact_paths=native_artifact_paths,
+        qualification_campaign_uuid=context.qualification_campaign_uuid,
+    )
+    payload = {
+        "schema_version": REHEARSAL_PROJECTION_CONTEXT_SCHEMA_VERSION,
+        "gate_name": gate,
+        "outer_native_invocation_id": str(outer_native_invocation_id),
+        "activation_nonce": str(activation_nonce),
+        "campaign_attempt_uuid": str(campaign_attempt_uuid),
+        "capture_context": context.to_dict(),
+        "native_artifact_paths": {
+            role: str(Path(path)) for role, path in native_artifact_paths.items()
+        },
+        "planned_capture_paths": {
+            role: str(path) for role, path in planned.items()
+        },
+        "formal_bindings": {
+            role: context.formal_binding(
+                gate_name=gate,
+                artifact_role=role,
+                captured_at=context.created_at,
+            )
+            for role, spec in GATE_RAW_SPECS[gate].items()
+            if spec.media_type == "application/json"
+        },
+        "scenario_authorities": {
+            scenario_id: dict(authority)
+            for scenario_id, authority in scenario_authorities.items()
+        },
+    }
+    return validate_rehearsal_projection_context(payload)
+
+
+def encoded_rehearsal_projection_context(payload: Mapping[str, Any]) -> bytes:
+    """Return the canonical bytes written into the sealed parent memfd."""
+
+    validated = validate_rehearsal_projection_context(payload)
+    return b"".join(_iter_json_bytes(validated))
+
+
+def read_sealed_rehearsal_projection_context(
+    locator: str,
+    expected_sha256: str,
+) -> dict[str, Any]:
+    """Read a live parent's immutable memfd without inheriting its descriptor."""
+
+    match = _SEALED_MEMFD_PATH.fullmatch(str(locator or ""))
+    _require(match is not None, "rehearsal projection locator is not a parent memfd path")
+    _require(
+        _SHA256.fullmatch(str(expected_sha256 or "")) is not None,
+        "rehearsal projection digest is invalid",
+    )
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    try:
+        descriptor = os.open(str(locator), flags)
+    except OSError as exc:
+        raise QualificationCaptureError(
+            f"cannot open sealed rehearsal projection: {exc.__class__.__name__}: {exc}"
+        ) from exc
+    try:
+        identity = FileIdentity.from_stat(os.fstat(descriptor))
+        _require(stat.S_ISREG(identity.mode), "rehearsal projection memfd is not regular")
+        _require(identity.uid == os.geteuid(), "rehearsal projection memfd owner mismatch")
+        _require(0 < identity.size <= MAX_JSON_BYTES, "rehearsal projection size is invalid")
+        required_seals = (
+            getattr(fcntl, "F_SEAL_SEAL", 0x0001)
+            | getattr(fcntl, "F_SEAL_SHRINK", 0x0002)
+            | getattr(fcntl, "F_SEAL_GROW", 0x0004)
+            | getattr(fcntl, "F_SEAL_WRITE", 0x0008)
+        )
+        actual_seals = int(fcntl.fcntl(descriptor, fcntl.F_GET_SEALS))
+        _require(
+            actual_seals & required_seals == required_seals,
+            "rehearsal projection memfd is not fully sealed",
+        )
+        content = bytearray()
+        while len(content) <= MAX_JSON_BYTES:
+            chunk = os.read(descriptor, min(COPY_CHUNK_BYTES, MAX_JSON_BYTES + 1 - len(content)))
+            if not chunk:
+                break
+            content.extend(chunk)
+        _require(len(content) == identity.size, "rehearsal projection changed while reading")
+    finally:
+        os.close(descriptor)
+    digest = hashlib.sha256(content).hexdigest()
+    _require(digest == expected_sha256, "rehearsal projection digest mismatch")
+    try:
+        decoded = json.loads(bytes(content))
+    except Exception as exc:
+        raise QualificationCaptureError(
+            f"rehearsal projection JSON is invalid: {exc.__class__.__name__}: {exc}"
+        ) from exc
+    payload = validate_rehearsal_projection_context(decoded)
+    producer_pid = int(payload["capture_context"]["producer"]["pid"])
+    _require(
+        int(match.group(1)) == producer_pid,
+        "rehearsal projection locator is not owned by the capture producer",
+    )
+    return payload
+
+
 def _require_declared_path(
     payload: Mapping[str, Any],
     keys: Sequence[str],
@@ -905,6 +1221,26 @@ def _bounded_native_bytes(
     return bytes(content)
 
 
+def _native_stream_sha256(
+    path: Path,
+    identity: FileIdentity,
+    *,
+    label: str,
+) -> tuple[str, int]:
+    digest = hashlib.sha256()
+    size = 0
+    with _open_expected(path, identity, label=label) as handle:
+        while True:
+            chunk = handle.read(COPY_CHUNK_BYTES)
+            if not chunk:
+                break
+            size += len(chunk)
+            digest.update(chunk)
+        _verify_open_and_path(path, handle, identity, label=label)
+    _require(size == identity.size, f"{label} size changed during hash")
+    return digest.hexdigest(), size
+
+
 def _native_json_for_path_contract(
     *,
     gate_name: str,
@@ -919,6 +1255,40 @@ def _native_json_for_path_contract(
         maximum_bytes=MAX_JSON_BYTES,
     )
     return payload
+
+
+def _require_projected_json_link(
+    *,
+    context: QualificationContext,
+    gate_name: str,
+    source_role: str,
+    source: Path,
+    destination: Path,
+    value: object,
+    label: str,
+) -> None:
+    _require(isinstance(value, Mapping), f"{label} is not an artifact link")
+    _require(
+        set(value) == {"path", "sha256", "size_bytes"},
+        f"{label} shape mismatch",
+    )
+    _require_declared_path(
+        {"link": value},
+        ("link", "path"),
+        destination,
+        label=f"{label}.path",
+    )
+    projection = project_bound_json_identity(
+        context=context,
+        gate_name=gate_name,
+        role=source_role,
+        native_path=source,
+    )
+    _require(
+        value.get("sha256") == projection["sha256"]
+        and value.get("size_bytes") == projection["size_bytes"],
+        f"{label} hash/size must match projected bound raw authority",
+    )
 
 
 def _validate_worktree_path_contract(
@@ -1095,6 +1465,224 @@ def _validate_dependency_path_contract(
     )
 
 
+def _validate_rehearsal_path_contract(
+    *,
+    context: QualificationContext,
+    sources: Mapping[str, Path],
+    identities: Mapping[str, FileIdentity],
+    destinations: Mapping[str, Path],
+) -> None:
+    """Bind supervisor -> runner -> receipt -> bundle -> sealed archive pre-copy."""
+
+    gate = "60_minute_rehearsal_passed"
+    scenario_ids = tuple(
+        role.removeprefix("scenario_")
+        for role in GATE_RAW_SPECS[gate]
+        if role.startswith("scenario_")
+        and not role.startswith("scenario_bundle_")
+        and not role.startswith("scenario_archive_")
+    )
+    supervisor = _native_json_for_path_contract(
+        gate_name=gate,
+        role="supervisor_result",
+        source=sources["supervisor_result"],
+        identity=identities["supervisor_result"],
+    )
+    runner = _native_json_for_path_contract(
+        gate_name=gate,
+        role="runner_result",
+        source=sources["runner_result"],
+        identity=identities["runner_result"],
+    )
+    _require_projected_json_link(
+        context=context,
+        gate_name=gate,
+        source_role="runner_result",
+        source=sources["runner_result"],
+        destination=destinations["runner_result"],
+        value=supervisor.get("runner_report"),
+        label="rehearsal supervisor runner report",
+    )
+    authority_fields = (
+        "qualification_campaign_uuid",
+        "campaign_uuid",
+        "campaign_attempt_uuid",
+        "native_invocation_id",
+        "commit",
+        "source_digest",
+        "protected_source_digest",
+    )
+    scenario_common_fields = tuple(
+        field for field in authority_fields if field != "native_invocation_id"
+    )
+    supervisor_identity = {field: supervisor.get(field) for field in authority_fields}
+    runner_identity = {field: runner.get(field) for field in authority_fields}
+    _require(
+        supervisor_identity == runner_identity,
+        "rehearsal supervisor/runner authority mismatch before capture",
+    )
+    _require(
+        runner_identity["qualification_campaign_uuid"]
+        == context.qualification_campaign_uuid
+        and runner_identity["commit"] == context.commit
+        and runner_identity["source_digest"] == context.source_digest
+        and runner_identity["protected_source_digest"]
+        == context.protected_source_digest,
+        "rehearsal producer authority differs from qualification context",
+    )
+    runner_index = runner.get("scenario_receipts")
+    _require(
+        isinstance(runner_index, Mapping)
+        and set(runner_index) == set(scenario_ids),
+        "rehearsal runner scenario receipt inventory role set mismatch",
+    )
+    scenario_attempts: set[str] = set()
+    scenario_invocations: set[str] = set()
+    for scenario_id in scenario_ids:
+        receipt_role = f"scenario_{scenario_id}"
+        bundle_role = f"scenario_bundle_{scenario_id}"
+        archive_role = f"scenario_archive_{scenario_id}"
+        receipt = _native_json_for_path_contract(
+            gate_name=gate,
+            role=receipt_role,
+            source=sources[receipt_role],
+            identity=identities[receipt_role],
+        )
+        bundle = _native_json_for_path_contract(
+            gate_name=gate,
+            role=bundle_role,
+            source=sources[bundle_role],
+            identity=identities[bundle_role],
+        )
+        authority = receipt.get("authority")
+        _require(
+            isinstance(authority, Mapping),
+            f"rehearsal scenario authority is missing: {scenario_id}",
+        )
+        _require(
+            {field: authority.get(field) for field in scenario_common_fields}
+            == {field: runner_identity[field] for field in scenario_common_fields},
+            f"rehearsal scenario authority mismatch before capture: {scenario_id}",
+        )
+        attempt_uuid = str(authority.get("scenario_attempt_uuid") or "")
+        _require(
+            _UUIDISH.fullmatch(attempt_uuid) is not None
+            and attempt_uuid not in scenario_attempts,
+            f"rehearsal scenario attempt is invalid or reused: {scenario_id}",
+        )
+        scenario_attempts.add(attempt_uuid)
+        scenario_invocation = str(authority.get("native_invocation_id") or "")
+        _require(
+            _UUIDISH.fullmatch(scenario_invocation) is not None
+            and scenario_invocation != runner_identity["native_invocation_id"]
+            and scenario_invocation not in scenario_invocations,
+            f"rehearsal scenario invocation is invalid or reused: {scenario_id}",
+        )
+        scenario_invocations.add(scenario_invocation)
+        _require(
+            isinstance(bundle.get("authority"), Mapping)
+            and dict(bundle["authority"]) == dict(authority),
+            f"rehearsal receipt/bundle authority mismatch before capture: {scenario_id}",
+        )
+        index = runner_index.get(scenario_id)
+        _require(
+            isinstance(index, Mapping)
+            and set(index)
+            == {
+                "scenario_attempt_uuid",
+                "native_invocation_id",
+                "receipt",
+                "artifact_bundle",
+                "artifact_archive",
+            },
+            f"rehearsal runner scenario index shape mismatch: {scenario_id}",
+        )
+        _require(
+            index.get("scenario_attempt_uuid") == attempt_uuid,
+            f"rehearsal runner scenario attempt mismatch: {scenario_id}",
+        )
+        _require(
+            index.get("native_invocation_id") == scenario_invocation,
+            f"rehearsal runner scenario invocation mismatch: {scenario_id}",
+        )
+        _require_projected_json_link(
+            context=context,
+            gate_name=gate,
+            source_role=receipt_role,
+            source=sources[receipt_role],
+            destination=destinations[receipt_role],
+            value=index.get("receipt"),
+            label=f"rehearsal runner scenario receipt {scenario_id}",
+        )
+        _require_projected_json_link(
+            context=context,
+            gate_name=gate,
+            source_role=bundle_role,
+            source=sources[bundle_role],
+            destination=destinations[bundle_role],
+            value=index.get("artifact_bundle"),
+            label=f"rehearsal runner scenario bundle {scenario_id}",
+        )
+        receipt_bundle = receipt.get("artifact_bundle")
+        _require(
+            isinstance(receipt_bundle, Mapping),
+            f"rehearsal scenario concrete bundle reference missing: {scenario_id}",
+        )
+        _require_projected_json_link(
+            context=context,
+            gate_name=gate,
+            source_role=bundle_role,
+            source=sources[bundle_role],
+            destination=destinations[bundle_role],
+            value={
+                "path": receipt_bundle.get("path"),
+                "sha256": receipt_bundle.get("sha256"),
+                "size_bytes": receipt_bundle.get("size_bytes"),
+            },
+            label=f"rehearsal receipt concrete bundle {scenario_id}",
+        )
+        archive_sha, archive_size = _native_stream_sha256(
+            sources[archive_role],
+            identities[archive_role],
+            label=f"rehearsal scenario archive {scenario_id}",
+        )
+        archive_link = index.get("artifact_archive")
+        _require(
+            isinstance(archive_link, Mapping)
+            and set(archive_link) == {"path", "sha256", "size_bytes"},
+            f"rehearsal runner scenario archive link shape mismatch: {scenario_id}",
+        )
+        _require_declared_path(
+            {"link": archive_link},
+            ("link", "path"),
+            destinations[archive_role],
+            label=f"rehearsal runner scenario archive {scenario_id}.path",
+        )
+        _require(
+            archive_link.get("sha256") == archive_sha
+            and archive_link.get("size_bytes") == archive_size,
+            f"rehearsal runner scenario archive hash/size mismatch: {scenario_id}",
+        )
+        bundle_archive = bundle.get("artifact_archive")
+        _require(
+            isinstance(bundle_archive, Mapping),
+            f"rehearsal bundle archive reference missing: {scenario_id}",
+        )
+        _require_declared_path(
+            {"archive": bundle_archive},
+            ("archive", "path"),
+            destinations[archive_role],
+            label=f"rehearsal bundle archive {scenario_id}.path",
+        )
+        _require(
+            bundle_archive.get("sha256") == archive_sha
+            and bundle_archive.get("size_bytes") == archive_size
+            and receipt_bundle.get("artifact_archive_sha256") == archive_sha
+            and receipt_bundle.get("artifact_archive_size_bytes") == archive_size,
+            f"rehearsal bundle/archive identity mismatch before capture: {scenario_id}",
+        )
+
+
 def _validate_gate_path_contract(
     *,
     context: QualificationContext,
@@ -1111,6 +1699,13 @@ def _validate_gate_path_contract(
         )
     elif gate_name == "all_mandatory_dependencies_verified":
         _validate_dependency_path_contract(
+            context=context,
+            sources=sources,
+            identities=identities,
+            destinations=destinations,
+        )
+    elif gate_name == "60_minute_rehearsal_passed":
+        _validate_rehearsal_path_contract(
             context=context,
             sources=sources,
             identities=identities,

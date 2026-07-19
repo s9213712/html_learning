@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+import sqlite3
 from flask import request
 
 from services.governance.sanction_notices import ensure_admin_sanction_appeal_schema, restore_admin_sanction_context
@@ -9,6 +10,16 @@ from services.governance.violation_fines import (
     mark_violation_fine_paid,
     submit_violation_fine_appeal,
 )
+
+
+def restored_violation_count(*, current_count, penalty_points):
+    """Remove only this appeal's points from the current account counter.
+
+    The submission snapshot is evidence, not a value that may overwrite
+    violations recorded after the appeal was submitted.
+    """
+
+    return max(0, int(current_count or 0) - max(0, int(penalty_points or 0)))
 
 
 def register_appeal_routes(app, deps):
@@ -144,7 +155,7 @@ def register_appeal_routes(app, deps):
                 (user_id,)
             ).fetchall()
             rows = conn.execute(
-                "SELECT id, latest_violation_id, violation_count_snapshot, penalty_points, reason, status, reviewed_by, reviewed_at, review_note, created_at "
+                "SELECT id, user_id, username, latest_violation_id, violation_count_snapshot, penalty_points, pre_status, pre_role, reason, status, reviewed_by, reviewed_at, review_note, created_at "
                 "FROM violation_appeals WHERE user_id=? ORDER BY id DESC LIMIT 20",
                 (user_id,)
             ).fetchall()
@@ -153,7 +164,7 @@ def register_appeal_routes(app, deps):
             if violation_ids:
                 placeholders = ",".join("?" for _ in violation_ids)
                 appeal_rows = conn.execute(
-                    "SELECT id, latest_violation_id, violation_count_snapshot, penalty_points, reason, status, reviewed_by, reviewed_at, review_note, created_at "
+                    "SELECT id, user_id, username, latest_violation_id, violation_count_snapshot, penalty_points, pre_status, pre_role, reason, status, reviewed_by, reviewed_at, review_note, created_at "
                     f"FROM violation_appeals WHERE user_id=? AND latest_violation_id IN ({placeholders}) ORDER BY id DESC",
                     [user_id, *violation_ids]
                 ).fetchall()
@@ -265,6 +276,8 @@ def register_appeal_routes(app, deps):
                 if violation_id == 0:
                     return json_resp({"ok":False,"msg":"violation_id 格式錯誤"}), 400
             ensure_admin_sanction_appeal_schema(conn)
+            conn.commit()
+            conn.execute("BEGIN IMMEDIATE")
             if violation_id is None:
                 latest_violation = get_latest_violation(conn, user_id)
             elif violation_id < 0:
@@ -311,22 +324,26 @@ def register_appeal_routes(app, deps):
                 return json_resp({"ok":False,"msg":"帳號不存在"}), 404
 
             penalty_points = latest_violation["points"] if "points" in latest_violation.keys() else 0
-            conn.execute(
-                "INSERT INTO violation_appeals "
-                "(user_id, username, latest_violation_id, violation_count_snapshot, penalty_points, pre_status, pre_role, reason, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    user_id,
-                    user_row["username"],
-                    latest_violation["id"],
-                    user_row["violation_count"],
-                    penalty_points,
-                    user_row["status"],
-                    user_row["role"],
-                    reason,
-                    datetime.now().isoformat()
+            try:
+                conn.execute(
+                    "INSERT INTO violation_appeals "
+                    "(user_id, username, latest_violation_id, violation_count_snapshot, penalty_points, pre_status, pre_role, reason, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        user_id,
+                        user_row["username"],
+                        latest_violation["id"],
+                        user_row["violation_count"],
+                        penalty_points,
+                        user_row["status"],
+                        user_row["role"],
+                        reason,
+                        datetime.now().isoformat()
+                    )
                 )
-            )
+            except sqlite3.IntegrityError:
+                conn.rollback()
+                return json_resp({"ok":False,"msg":"這筆違規已提交過申覆"}), 409
             conn.commit()
             audit("VIOLATION_APPEAL_SUBMITTED", get_client_ip(), user=actor_username,
                   detail=f"user_id={user_id} latest_violation_id={latest_violation['id']}")
@@ -449,7 +466,9 @@ def register_appeal_routes(app, deps):
             ensure_admin_sanction_appeal_schema(conn)
             where = "WHERE 1=1"
             params = []
-            if status in ("pending","approved","rejected"):
+            if status == "pending":
+                where = "WHERE status IN ('pending','reviewing_approve')"
+            elif status in ("approved","rejected"):
                 where = "WHERE status=?"
                 params.append(status)
             count_query = "SELECT COUNT(*) as c FROM violation_appeals " + where
@@ -513,33 +532,84 @@ def register_appeal_routes(app, deps):
 
         conn = get_db()
         try:
-            appeal = conn.execute(
-                "SELECT * FROM violation_appeals WHERE id=?", (appeal_id,)
-            ).fetchone()
-            if not appeal:
-                return json_resp({"ok":False,"msg":"找不到申覆申請"}), 404
-            if appeal["status"] != "pending":
-                return json_resp({"ok":False,"msg":"申覆申請已處理"}), 409
-
-            user_row = conn.execute(
-                "SELECT id, username, status, role, violation_count FROM users WHERE id=?",
-                (appeal["user_id"],)
-            ).fetchone()
-            if not user_row:
-                return json_resp({"ok":False,"msg":"申覆帳號已不存在"}), 404
-
             final_status = "approved" if action == "approve" else "rejected"
             reviewed_at = datetime.now().isoformat()
             points_ledger_uuid = None
             points_rollback = None
+            ensure_admin_sanction_appeal_schema(conn)
+            conn.commit()
 
-            if action == "approve":
+            if action == "reject":
+                conn.execute("BEGIN IMMEDIATE")
+                appeal = conn.execute(
+                    "SELECT * FROM violation_appeals WHERE id=?", (appeal_id,)
+                ).fetchone()
+                if not appeal:
+                    conn.rollback()
+                    return json_resp({"ok":False,"msg":"找不到申覆申請"}), 404
+                if appeal["status"] != "pending":
+                    conn.rollback()
+                    return json_resp({"ok":False,"msg":"申覆申請已處理"}), 409
+                updated = conn.execute(
+                    "UPDATE violation_appeals "
+                    "SET status='rejected', reviewed_by=?, reviewed_at=?, review_note=? "
+                    "WHERE id=? AND status='pending'",
+                    (actor["username"], reviewed_at, note, appeal_id),
+                )
+                if updated.rowcount != 1:
+                    conn.rollback()
+                    return json_resp({"ok":False,"msg":"申覆申請已由另一個審核程序處理"}), 409
+                conn.commit()
+            else:
+                # Claim before the external points compensation.  The
+                # intermediate state is retryable: compensation itself is
+                # idempotent and final account mutation is guarded by a CAS.
+                conn.execute("BEGIN IMMEDIATE")
+                appeal = conn.execute(
+                    "SELECT * FROM violation_appeals WHERE id=?", (appeal_id,)
+                ).fetchone()
+                if not appeal:
+                    conn.rollback()
+                    return json_resp({"ok":False,"msg":"找不到申覆申請"}), 404
+                if appeal["status"] == "pending":
+                    user_row = conn.execute(
+                        "SELECT id FROM users WHERE id=?", (appeal["user_id"],)
+                    ).fetchone()
+                    if not user_row:
+                        conn.rollback()
+                        return json_resp({"ok":False,"msg":"申覆帳號已不存在"}), 404
+                    claimed = conn.execute(
+                        "UPDATE violation_appeals "
+                        "SET status='reviewing_approve', reviewed_by=?, reviewed_at=?, review_note=? "
+                        "WHERE id=? AND status='pending'",
+                        (actor["username"], reviewed_at, note, appeal_id),
+                    )
+                    if claimed.rowcount != 1:
+                        conn.rollback()
+                        return json_resp({"ok":False,"msg":"申覆申請已由另一個審核程序認領"}), 409
+                    conn.commit()
+                elif appeal["status"] == "reviewing_approve":
+                    if str(appeal["reviewed_by"] or "") != actor["username"]:
+                        conn.rollback()
+                        return json_resp({"ok":False,"msg":"申覆申請正由另一個審核者處理"}), 409
+                    conn.commit()
+                else:
+                    conn.rollback()
+                    return json_resp({"ok":False,"msg":"申覆申請已處理"}), 409
+
                 context = conn.execute(
-                    "SELECT points_ledger_uuid FROM admin_sanction_appeal_contexts WHERE violation_id=? AND user_id=?",
+                    "SELECT points_ledger_uuid FROM admin_sanction_appeal_contexts "
+                    "WHERE violation_id=? AND user_id=?",
                     (appeal["latest_violation_id"], appeal["user_id"]),
                 ).fetchone()
                 points_ledger_uuid = context["points_ledger_uuid"] if context and context["points_ledger_uuid"] else None
-                if points_ledger_uuid and points_service:
+                if points_ledger_uuid and not points_service:
+                    return json_resp({
+                        "ok": False,
+                        "msg": "申覆點數補償服務不可用，申覆保留於可重試審核狀態",
+                        "points_ledger_uuid": points_ledger_uuid,
+                    }), 503
+                if points_ledger_uuid:
                     try:
                         points_rollback = points_service.compensate_ledger(
                             actor=actor,
@@ -551,38 +621,50 @@ def register_appeal_routes(app, deps):
                               detail=f"appeal_id={appeal_id} ledger_uuid={points_ledger_uuid} error={exc}")
                         return json_resp({
                             "ok": False,
-                            "msg": "申覆點數補償交易失敗，申覆狀態尚未變更，請修復後重試",
+                            "msg": "申覆點數補償交易失敗，申覆保留於可重試審核狀態",
                             "points_ledger_uuid": points_ledger_uuid,
                         }), 500
-                penalty_points = appeal["penalty_points"] or 0
-                restored_count = max(0, (appeal["violation_count_snapshot"] or 0) - (penalty_points or 0))
+
+                conn.execute("BEGIN IMMEDIATE")
+                appeal = conn.execute(
+                    "SELECT * FROM violation_appeals WHERE id=?", (appeal_id,)
+                ).fetchone()
+                if not appeal or appeal["status"] != "reviewing_approve":
+                    conn.rollback()
+                    return json_resp({"ok":False,"msg":"申覆申請已由另一個審核程序處理"}), 409
+                user_row = conn.execute(
+                    "SELECT id, username, status, role, violation_count FROM users WHERE id=?",
+                    (appeal["user_id"],),
+                ).fetchone()
+                if not user_row:
+                    conn.rollback()
+                    return json_resp({"ok":False,"msg":"申覆帳號已不存在"}), 404
+                restored_count = restored_violation_count(
+                    current_count=user_row["violation_count"],
+                    penalty_points=appeal["penalty_points"],
+                )
                 restored_sanction = restore_admin_sanction_context(
                     conn,
                     user_id=appeal["user_id"],
                     violation_id=appeal["latest_violation_id"],
                 )
                 if appeal["latest_violation_id"] < 0 and not restored_sanction:
+                    conn.rollback()
                     return json_resp({"ok":False,"msg":"找不到對應的會員權益通知上下文，無法完成申覆恢復"}), 409
-                if restored_sanction:
-                    conn.execute(
-                        "UPDATE users SET violation_count=?, updated_at=? WHERE id=?",
-                        (restored_count, reviewed_at, appeal["user_id"]),
-                    )
-                else:
-                    # 申覆成立→恢復申覆前狀態
-                    conn.execute(
-                        "UPDATE users SET status=?, role=?, violation_count=?, blocked_until=CASE WHEN ?='active' THEN NULL ELSE blocked_until END WHERE id=?",
-                        (appeal["pre_status"], appeal["pre_role"], restored_count, appeal["pre_status"], appeal["user_id"])
-                    )
-            else:
-                # 若維持原處分，保留目前狀態，但可記錄檢閱備註
-                pass
-
-            conn.execute(
-                "UPDATE violation_appeals SET status=?, reviewed_by=?, reviewed_at=?, review_note=? WHERE id=?",
-                (final_status, actor["username"], reviewed_at, note, appeal_id)
-            )
-            conn.commit()
+                conn.execute(
+                    "UPDATE users SET violation_count=?, updated_at=? WHERE id=?",
+                    (restored_count, reviewed_at, appeal["user_id"]),
+                )
+                finalized = conn.execute(
+                    "UPDATE violation_appeals "
+                    "SET status='approved', reviewed_by=?, reviewed_at=?, review_note=? "
+                    "WHERE id=? AND status='reviewing_approve'",
+                    (actor["username"], reviewed_at, note, appeal_id),
+                )
+                if finalized.rowcount != 1:
+                    conn.rollback()
+                    return json_resp({"ok":False,"msg":"申覆申請已由另一個審核程序處理"}), 409
+                conn.commit()
             audit("VIOLATION_APPEAL_REVIEWED", get_client_ip(), user=actor["username"],
                   detail=f"appeal_id={appeal_id} action={action}")
             return json_resp({"ok":True,"msg": "已核准撤銷" if action == "approve" else "已維持原處分", "points_rollback": points_rollback})

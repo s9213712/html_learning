@@ -169,26 +169,117 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip", default="", help="Comma-separated system_bundle_id or preset id list.")
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--per-template-timeout", type=int, default=2100)
+    parser.add_argument("--request-timeout", type=int, default=30)
     parser.add_argument("--poll-seconds", type=float, default=3.0)
+    parser.add_argument("--gguf-profile", default="", help="Explicit official profile for origin_sdxl_gguf_txt2img.")
+    parser.add_argument("--gguf-variant", default="", help="Explicit official variant for origin_sdxl_gguf_txt2img.")
+    parser.add_argument("--gguf-vae", default="", help="Explicit attested VAE override for origin_sdxl_gguf_txt2img.")
     parser.add_argument("--headful", action="store_true")
     return parser.parse_args()
 
 
-def browser_api(page, method: str, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+def browser_api(
+    page,
+    method: str,
+    path: str,
+    body: dict[str, Any] | None = None,
+    *,
+    timeout_seconds: int = 30,
+) -> dict[str, Any]:
+    timeout_ms = max(1, min(120, int(timeout_seconds))) * 1000
     return page.evaluate(
-        """async ({method, path, body}) => {
-            await fetchCsrfToken({force: method !== "GET"});
-            const options = {method, credentials: "same-origin", headers: {"X-CSRF-Token": getCsrfToken() || ""}};
-            if (body !== null && body !== undefined) {
-                options.headers["Content-Type"] = "application/json";
-                options.body = JSON.stringify(body);
+        """async ({method, path, body, timeoutMs}) => {
+            const controller = new AbortController();
+            let timer = null;
+            const deadline = new Promise((_, reject) => {
+                timer = setTimeout(() => {
+                    controller.abort();
+                    reject(new Error(`browser API deadline exceeded after ${timeoutMs}ms: ${method} ${path}`));
+                }, timeoutMs);
+            });
+            const operation = (async () => {
+                await fetchCsrfToken({force: method !== "GET"});
+                const options = {
+                    method,
+                    credentials: "same-origin",
+                    signal: controller.signal,
+                    headers: {"X-CSRF-Token": getCsrfToken() || ""},
+                };
+                if (body !== null && body !== undefined) {
+                    options.headers["Content-Type"] = "application/json";
+                    options.body = JSON.stringify(body);
+                }
+                const res = await apiFetch(API + path, options);
+                const json = await res.json().catch(() => ({}));
+                return {status: res.status, ok: res.ok, body: json};
+            })();
+            try {
+                return await Promise.race([operation, deadline]);
+            } finally {
+                if (timer !== null) clearTimeout(timer);
             }
-            const res = await apiFetch(API + path, options);
-            const json = await res.json().catch(() => ({}));
-            return {status: res.status, ok: res.ok, body: json};
         }""",
-        {"method": method, "path": path, "body": body},
+        {"method": method, "path": path, "body": body, "timeoutMs": timeout_ms},
     )
+
+
+def bounded_interrupt(page, job_id: str, *, grace_seconds: int = 45) -> dict[str, Any]:
+    """Interrupt a timed-out job and prove the site job reached terminal state."""
+
+    try:
+        interrupt = browser_api(
+            page,
+            "POST",
+            "/comfyui/interrupt",
+            {"reason": "official_template_deadline_exceeded"},
+            timeout_seconds=min(15, max(5, int(grace_seconds))),
+        )
+    except Exception as exc:
+        interrupt = {"status": 0, "ok": False, "body": {}, "error": str(exc)}
+    terminal_job: dict[str, Any] = {}
+    deadline = time.monotonic() + max(5, int(grace_seconds))
+    while time.monotonic() < deadline:
+        try:
+            polled = browser_api(
+                page,
+                "GET",
+                f"/comfyui/jobs/{job_id}",
+                timeout_seconds=min(10, max(3, int(grace_seconds))),
+            )
+        except Exception as exc:
+            terminal_job = {"status": "poll_error", "error": str(exc)}
+            time.sleep(0.5)
+            continue
+        if polled.get("status") == 200 and polled.get("body", {}).get("ok") is True:
+            terminal_job = polled["body"].get("job") or {}
+            if str(terminal_job.get("status") or "").lower() in {
+                "completed",
+                "error",
+                "failed",
+                "cancelled",
+            }:
+                break
+        time.sleep(0.5)
+    interrupt_payload = interrupt.get("body") if isinstance(interrupt.get("body"), dict) else {}
+    interrupt_state = (
+        interrupt_payload.get("interrupt")
+        if isinstance(interrupt_payload.get("interrupt"), dict)
+        else {}
+    )
+    return {
+        "interrupt": interrupt,
+        "backend_interrupted": interrupt_state.get("backend_interrupted") is True,
+        "terminal_job": terminal_job,
+        "terminal_verified": str(terminal_job.get("status") or "").lower()
+        in {"completed", "error", "failed", "cancelled"},
+        "ok": bool(
+            interrupt.get("status") == 200
+            and interrupt_payload.get("ok") is True
+            and interrupt_state.get("backend_interrupted") is True
+            and str(terminal_job.get("status") or "").lower()
+            in {"completed", "error", "failed", "cancelled"}
+        ),
+    }
 
 
 def request_failure_text(request) -> str:
@@ -204,6 +295,10 @@ def request_failure_text(request) -> str:
 
 def main() -> int:
     args = parse_args()
+    if len([value for value in (args.gguf_profile, args.gguf_variant, args.gguf_vae) if value]) not in {0, 3}:
+        raise SystemExit("--gguf-profile, --gguf-variant, and --gguf-vae must be supplied together")
+    if not 5 <= int(args.request_timeout) <= 120:
+        raise SystemExit("--request-timeout must be between 5 and 120 seconds")
     out_dir = Path(args.out_dir)
     screenshots_dir = out_dir / "screenshots"
     images_dir = out_dir / "images"
@@ -235,32 +330,74 @@ def main() -> int:
 
         page.goto(args.base_url + "/", wait_until="domcontentloaded")
         page.wait_for_function("() => typeof fetchCsrfToken === 'function' && typeof apiFetch === 'function'")
-        login = browser_api(page, "POST", "/login", {"username": "root", "password": args.root_password})
+        login = browser_api(
+            page,
+            "POST",
+            "/login",
+            {"username": "root", "password": args.root_password},
+            timeout_seconds=args.request_timeout,
+        )
         if login["status"] != 200 or not login["body"].get("ok"):
             raise RuntimeError(f"login failed: {login}")
         page.goto(args.base_url + "/", wait_until="networkidle")
         page.wait_for_function("() => typeof fetchCsrfToken === 'function' && typeof apiFetch === 'function'")
 
-        features = browser_api(page, "PUT", "/admin/features", {"feature_comfyui_enabled": True})
+        features = browser_api(
+            page,
+            "PUT",
+            "/admin/features",
+            {"feature_comfyui_enabled": True},
+            timeout_seconds=args.request_timeout,
+        )
         if features["status"] != 200 or not features["body"].get("ok"):
             raise RuntimeError(f"feature enable failed: {features}")
-        settings = browser_api(page, "PUT", "/admin/settings", {
-            "comfyui_connection_mode": "remote",
-            "comfyui_remote_api_url": args.comfyui_api_url,
-        })
+        settings = browser_api(
+            page,
+            "PUT",
+            "/admin/settings",
+            {
+                "comfyui_connection_mode": "remote",
+                "comfyui_remote_api_url": args.comfyui_api_url,
+            },
+            timeout_seconds=args.request_timeout,
+        )
         if settings["status"] != 200 or not settings["body"].get("ok"):
             raise RuntimeError(f"ComfyUI settings failed: {settings}")
-        connection = browser_api(page, "POST", "/root/comfyui/test-connection", {
-            "connection_mode": "remote",
-            "comfyui_connection_mode": "remote",
-            "comfyui_remote_api_url": args.comfyui_api_url,
-        })
+        connection = browser_api(
+            page,
+            "POST",
+            "/root/comfyui/test-connection",
+            {
+                "connection_mode": "remote",
+                "comfyui_connection_mode": "remote",
+                "comfyui_remote_api_url": args.comfyui_api_url,
+            },
+            timeout_seconds=args.request_timeout,
+        )
 
         page.goto(args.base_url + "/", wait_until="networkidle")
         page.evaluate("""() => { if (typeof switchModuleTab === "function") switchModuleTab("comfyui"); }""")
         page.wait_for_selector("#comfyui-template-select", state="attached")
+        page.evaluate(
+            """() => {
+                window.__qaWithTimeout = async (factory, timeoutMs, label) => {
+                    let timer = null;
+                    const deadline = new Promise((_, reject) => {
+                        timer = setTimeout(
+                            () => reject(new Error(`${label} deadline exceeded after ${timeoutMs}ms`)),
+                            timeoutMs,
+                        );
+                    });
+                    try {
+                        return await Promise.race([factory(), deadline]);
+                    } finally {
+                        if (timer !== null) clearTimeout(timer);
+                    }
+                };
+            }"""
+        )
         presets_payload = page.evaluate(
-            """async () => {
+            """async ({timeoutMs}) => window.__qaWithTimeout(async () => {
                 const presets = await loadComfyuiWorkflowPresets({silentTemplateReload: false});
                 return {
                     presets: presets.map((item) => ({
@@ -275,7 +412,8 @@ def main() -> int:
                     })),
                     selected: Number(comfyuiSelectedTemplatePresetId || 0),
                 };
-            }"""
+            }, timeoutMs, "official preset inventory")""",
+            {"timeoutMs": int(args.request_timeout) * 1000},
         )
         presets = [item for item in presets_payload["presets"] if item.get("is_official")]
         presets.sort(key=lambda item: (order.get(item.get("system_bundle_id") or "", 9999), str(item.get("title") or "")))
@@ -317,8 +455,15 @@ def main() -> int:
             before_console = len(console_events)
             before_errors = len(page_errors)
             try:
+                forced_gguf = (
+                    {"profile_id": args.gguf_profile, "variant_id": args.gguf_variant}
+                    if bundle_id == "origin_sdxl_gguf_txt2img"
+                    and args.gguf_profile
+                    and args.gguf_variant
+                    else None
+                )
                 prepared = page.evaluate(
-                    """async ({presetId}) => {
+                    """async ({presetId, forcedGgufSpec, forcedGgufVae, timeoutMs}) => window.__qaWithTimeout(async () => {
                         const select = document.getElementById("comfyui-template-select");
                         if (select) select.value = String(presetId);
                         await loadComfyuiSelectedTemplateDetail(presetId, {silent: true, applyDefaults: true});
@@ -338,9 +483,11 @@ def main() -> int:
                         const sdxlRefinerSpec = comfyuiTemplateIsSdxlRefinerWorkflow(detail)
                             ? comfyuiSdxlRefinerRunSpec(detail)
                             : null;
-                        const ggufWorkflowSpec = comfyuiTemplateIsGgufWorkflow(detail)
-                            ? comfyuiGgufWorkflowRunSpec(detail)
-                            : null;
+                        const ggufWorkflowSpec = forcedGgufSpec || (
+                            comfyuiTemplateIsGgufWorkflow(detail)
+                                ? comfyuiGgufWorkflowRunSpec(detail)
+                                : null
+                        );
                         const promptish = [];
                         Object.entries(userInputs || {}).forEach(([nodeId, inputs]) => {
                             Object.entries(inputs || {}).forEach(([name, value]) => {
@@ -375,11 +522,17 @@ def main() -> int:
                             upscaleBreakpointSpec,
                             sdxlRefinerSpec,
                             ggufWorkflowSpec,
+                            ggufVae: forcedGgufVae || "",
                             outputNodes,
                             templateMessage: document.getElementById("comfyui-message")?.textContent || "",
                         };
-                    }""",
-                    {"presetId": preset_id},
+                    }, timeoutMs, "official template preparation")""",
+                    {
+                        "presetId": preset_id,
+                        "forcedGgufSpec": forced_gguf,
+                        "forcedGgufVae": args.gguf_vae if forced_gguf else "",
+                        "timeoutMs": int(args.request_timeout) * 1000,
+                    },
                 )
                 item["prepared"] = prepared
                 if prepared.get("missingAssignments"):
@@ -389,31 +542,35 @@ def main() -> int:
                     print(f"[qa] {bundle_id} blocked by missing media assignment", flush=True)
                     continue
 
-                run_result = page.evaluate(
-                    """async ({presetId, prepared}) => {
-                        await fetchCsrfToken({force: true});
-                        const res = await apiFetch(API + `/comfyui/workflows/${encodeURIComponent(presetId)}/run`, {
-                            method: "POST",
-                            credentials: "same-origin",
-                            headers: {
-                                "Content-Type": "application/json",
-                                "X-CSRF-Token": getCsrfToken() || "",
-                            },
-                            body: JSON.stringify({
-                                confirm_paid_api_nodes: true,
-                                user_inputs: prepared.userInputs || {},
-                                image_field_assignments: prepared.assignments || {},
-                                multi_compare: prepared.multiCompareSpec || undefined,
-                                upscale_breakpoint: prepared.upscaleBreakpointSpec || undefined,
-                                sdxl_refiner: prepared.sdxlRefinerSpec || undefined,
-                                gguf_workflow: prepared.ggufWorkflowSpec || undefined,
-                            }),
-                        });
-                        const json = await res.json().catch(() => ({}));
-                        return {http_status: res.status, http_ok: res.ok, json};
-                    }""",
-                    {"presetId": preset_id, "prepared": prepared},
+                run_body = {
+                    "confirm_paid_api_nodes": True,
+                    "user_inputs": prepared.get("userInputs") or {},
+                    "image_field_assignments": prepared.get("assignments") or {},
+                }
+                for body_key, prepared_key in (
+                    ("multi_compare", "multiCompareSpec"),
+                    ("upscale_breakpoint", "upscaleBreakpointSpec"),
+                    ("sdxl_refiner", "sdxlRefinerSpec"),
+                    ("gguf_workflow", "ggufWorkflowSpec"),
+                    ("vae", "ggufVae"),
+                ):
+                    if prepared.get(prepared_key):
+                        run_body[body_key] = prepared[prepared_key]
+                acceptance_started = time.monotonic()
+                accepted = browser_api(
+                    page,
+                    "POST",
+                    f"/comfyui/workflows/{preset_id}/run",
+                    run_body,
+                    timeout_seconds=args.request_timeout,
                 )
+                run_result = {
+                    "http_status": accepted.get("status"),
+                    "http_ok": accepted.get("ok"),
+                    "json": accepted.get("body") or {},
+                    "acceptance_duration_seconds": round(time.monotonic() - acceptance_started, 3),
+                    "submission_path": "browser_apiFetch_with_abort_controller",
+                }
                 item["run_response"] = run_result
                 if not run_result.get("http_ok") or not run_result.get("json", {}).get("ok"):
                     item["status"] = "run_rejected"
@@ -427,7 +584,12 @@ def main() -> int:
                 deadline = time.time() + args.per_template_timeout
                 last_phase = ""
                 while time.time() < deadline:
-                    job_payload = browser_api(page, "GET", f"/comfyui/jobs/{job_id}")
+                    job_payload = browser_api(
+                        page,
+                        "GET",
+                        f"/comfyui/jobs/{job_id}",
+                        timeout_seconds=args.request_timeout,
+                    )
                     if job_payload["status"] != 200 or not job_payload["body"].get("ok"):
                         raise RuntimeError(f"job poll failed: {job_payload}")
                     job = job_payload["body"].get("job") or {}
@@ -439,7 +601,7 @@ def main() -> int:
                     if job.get("status") == "completed" and job.get("result"):
                         item["job"] = job
                         break
-                    if job.get("status") == "error":
+                    if str(job.get("status") or "").lower() in {"error", "failed", "cancelled"}:
                         item["status"] = "job_error"
                         item["issues"].append("job_error")
                         item["error"] = job.get("error") or progress.get("detail") or "ComfyUI job error"
@@ -449,6 +611,16 @@ def main() -> int:
                     item["status"] = "timeout"
                     item["issues"].append("timeout")
                     item["error"] = f"Timed out after {args.per_template_timeout}s"
+                    item["bounded_abort"] = bounded_interrupt(
+                        page,
+                        job_id,
+                        grace_seconds=min(60, max(15, int(args.poll_seconds * 10))),
+                    )
+                    if item["bounded_abort"].get("ok") is not True:
+                        item["issues"].append("bounded_abort_unverified")
+                        raise RuntimeError(
+                            f"bounded interrupt could not prove terminal cancellation: {item['bounded_abort']}"
+                        )
 
                 if item["status"] in {"job_error", "timeout"}:
                     print(f"[qa] {bundle_id} failed: {item.get('error')}", flush=True)
@@ -456,7 +628,7 @@ def main() -> int:
 
                 result = item.get("job", {}).get("result") or {}
                 hydrated = page.evaluate(
-                    """async ({jobId, result}) => {
+                    """async ({jobId, result, timeoutMs}) => window.__qaWithTimeout(async () => {
                         const rawImages = Array.isArray(result.images) && result.images.length
                             ? result.images
                             : [result.image].filter(Boolean);
@@ -480,8 +652,12 @@ def main() -> int:
                                 outputLabels: Array.from(preview?.querySelectorAll(".comfyui-output-label") || []).map((el) => el.textContent.trim()),
                             },
                         };
-                    }""",
-                    {"jobId": item["job_id"], "result": result},
+                    }, timeoutMs, "official output hydration")""",
+                    {
+                        "jobId": item["job_id"],
+                        "result": result,
+                        "timeoutMs": int(args.request_timeout) * 1000,
+                    },
                 )
                 item["preview_dom"] = hydrated.get("preview") or {}
                 images = hydrated.get("images") or []
@@ -556,6 +732,8 @@ def main() -> int:
                 item["issues"].append("script_error")
                 item["error"] = str(exc)
                 print(f"[qa] {bundle_id} script error: {exc}", flush=True)
+                if "deadline exceeded" in str(exc).lower():
+                    raise
             finally:
                 item["duration_seconds"] = round(time.time() - started, 2)
                 item["console_events"] = console_events[before_console:]

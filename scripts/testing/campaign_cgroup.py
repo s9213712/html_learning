@@ -15,6 +15,7 @@ limit mismatch, or unverifiable PID placement is a hard error.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -31,10 +32,19 @@ from typing import Any, Iterable, Mapping, Sequence
 
 
 GIB = 1024**3
-CGROUP_SCHEMA_VERSION = "hackme.campaign-cgroup/v1"
+MIB = 1024**2
+CGROUP_SCHEMA_VERSION = "hackme.campaign-cgroup/v2"
 DEFAULT_CGROUP_ROOT = Path("/sys/fs/cgroup")
 DEFAULT_PROC_ROOT = Path("/proc")
 EXEC_FAILURE = 125
+SYSTEMD_IO_WEIGHT_MIN = 1
+SYSTEMD_IO_WEIGHT_MAX = 10_000
+# systemd defaults to 100.  Half of that lowers campaign I/O priority without
+# approaching the starvation-prone minimum weight.
+DEFAULT_IO_WEIGHT = 10
+HOST_TRANSITION_SCHEMA_VERSION = "hackme.campaign-comfyui-host-transition.v1"
+COMFYUI_SANDBOX_MODULE_NAME = "campaign_comfyui_sandbox.py"
+MAX_HOST_TRANSITION_JSON_BYTES = 64 * 1024
 _BOOT_ID_RE = re.compile(r"^[0-9a-fA-F-]{32,36}$")
 _INVOCATION_ID_RE = re.compile(r"^[0-9a-fA-F]{32}$")
 MANDATORY_EVENT_COUNTERS: Mapping[str, tuple[str, ...]] = {
@@ -56,6 +66,11 @@ MANDATORY_MANAGED_ROLES = frozenset({
     "comfyui",
     "scenario",
 })
+LATE_BOUND_MANAGED_ENVIRONMENT_KEYS = frozenset({
+    "HACKME_CAMPAIGN_COMFYUI_API_URL",
+    "HACKME_CAMPAIGN_COMFYUI_MODELS_ROOT",
+    "HACKME_CAMPAIGN_COMFYUI_BACKEND_PID",
+})
 
 _ROLE_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _SCOPE_ID_RE = re.compile(r"[^A-Za-z0-9_.-]+")
@@ -65,11 +80,21 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     temporary.write_text(json.dumps(dict(payload), ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.chmod(temporary, 0o600)
     os.replace(temporary, path)
+    os.chmod(path, 0o600)
 
 
 class CampaignCgroupError(RuntimeError):
@@ -82,6 +107,217 @@ class CgroupUnavailableError(CampaignCgroupError):
 
 class CgroupVerificationError(CampaignCgroupError):
     """Raised when a limit or process placement cannot be proven."""
+
+
+def _native_identity_record(
+    path: Path,
+    *,
+    reported_path: Path,
+    directory: bool,
+    label: str,
+) -> dict[str, Any]:
+    candidate = Path(path)
+    try:
+        metadata = candidate.lstat()
+        resolved = candidate.resolve(strict=True)
+    except Exception as exc:
+        raise CgroupVerificationError(f"cannot inspect {label}: {exc}") from exc
+    if not candidate.is_absolute() or candidate != resolved:
+        raise CgroupVerificationError(f"{label} is not a canonical path: {candidate}")
+    if stat.S_ISLNK(metadata.st_mode):
+        raise CgroupVerificationError(f"{label} cannot be a symlink: {candidate}")
+    expected_type = stat.S_ISDIR if directory else stat.S_ISREG
+    if not expected_type(metadata.st_mode):
+        kind = "directory" if directory else "regular control file"
+        raise CgroupVerificationError(f"{label} is not a {kind}: {candidate}")
+    return {
+        "path": str(reported_path),
+        "device": int(metadata.st_dev),
+        "inode": int(metadata.st_ino),
+        "mode": int(metadata.st_mode),
+        "uid": int(metadata.st_uid),
+        "gid": int(metadata.st_gid),
+    }
+
+
+def _count_native_cgroup_descendants(root: Path) -> int:
+    pending = [Path(root)]
+    count = 0
+    while pending:
+        current = pending.pop()
+        try:
+            entries = list(os.scandir(current))
+        except Exception as exc:
+            raise CgroupVerificationError(
+                f"cannot enumerate cgroup descendants below {current}: {exc}"
+            ) from exc
+        for entry in entries:
+            if entry.is_symlink():
+                raise CgroupVerificationError(
+                    f"cgroup leaf contains a symlinked entry: {entry.path}"
+                )
+            if not entry.is_dir(follow_symlinks=False):
+                continue
+            count += 1
+            if count > 1024:
+                raise CgroupVerificationError(
+                    "cgroup descendant enumeration exceeded its safety bound"
+                )
+            pending.append(Path(entry.path))
+    return count
+
+
+def _sandbox_write_root_records(values: Sequence[Path]) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    seen: set[Path] = set()
+    for value in values:
+        candidate = Path(value)
+        record = _native_identity_record(
+            candidate,
+            reported_path=candidate,
+            directory=True,
+            label="sandbox write root",
+        )
+        if candidate in seen:
+            raise CgroupVerificationError(
+                f"sandbox write roots contain a duplicate: {candidate}"
+            )
+        seen.add(candidate)
+        records.append(record)
+    if not records:
+        raise CgroupVerificationError("sandbox requires at least one write root")
+    return records
+
+
+def _host_transition_leaf_identity(
+    *,
+    scope_fs: Path,
+    scope_path: str,
+    pid: int,
+) -> dict[str, Any]:
+    native_root = Path(f"/sys/fs/cgroup{scope_path}")
+    procs_path = scope_fs / "cgroup.procs"
+    events_path = scope_fs / "cgroup.events"
+    try:
+        members = {
+            int(row.strip())
+            for row in procs_path.read_text(encoding="ascii").splitlines()
+            if row.strip()
+        }
+        cgroup_type = (scope_fs / "cgroup.type").read_text(
+            encoding="ascii"
+        ).strip()
+        subtree_control = (scope_fs / "cgroup.subtree_control").read_text(
+            encoding="ascii"
+        ).split()
+    except Exception as exc:
+        raise CgroupVerificationError(
+            f"cannot inspect ComfyUI cgroup leaf controls: {exc}"
+        ) from exc
+    if pid not in members:
+        raise CgroupVerificationError(
+            "ComfyUI host transition leaf does not contain the launcher"
+        )
+    if cgroup_type not in {"domain", "domain threaded", "threaded"}:
+        raise CgroupVerificationError(
+            f"ComfyUI host transition cgroup type is invalid: {cgroup_type!r}"
+        )
+    if subtree_control:
+        raise CgroupVerificationError(
+            "ComfyUI host transition leaf has enabled subtree controllers"
+        )
+    descendants = _count_native_cgroup_descendants(scope_fs)
+    if descendants:
+        raise CgroupVerificationError(
+            "ComfyUI host transition leaf has descendant cgroups"
+        )
+    return {
+        "root": _native_identity_record(
+            scope_fs,
+            reported_path=native_root,
+            directory=True,
+            label="ComfyUI cgroup leaf",
+        ),
+        "cgroup_procs": _native_identity_record(
+            procs_path,
+            reported_path=native_root / "cgroup.procs",
+            directory=False,
+            label="ComfyUI cgroup.procs",
+        ),
+        "cgroup_events": _native_identity_record(
+            events_path,
+            reported_path=native_root / "cgroup.events",
+            directory=False,
+            label="ComfyUI cgroup.events",
+        ),
+        "cgroup_type": cgroup_type,
+        "subtree_control": [],
+        "subtree_controllers_enabled": False,
+        "descendant_cgroups": 0,
+        "workload_delegation_capability": "pending_sandbox",
+        "current_pid_present": True,
+        "ok": True,
+    }
+
+
+def _build_host_transition_payload(
+    *,
+    nonce: str,
+    pid: int,
+    scope_path: str,
+    scope_fs: Path,
+    placement: Mapping[str, Any],
+    allowed_write_roots: Sequence[Path],
+) -> dict[str, Any]:
+    if (
+        placement.get("pid") != pid
+        or placement.get("actual_cgroup") != scope_path
+        or placement.get("campaign_cgroup") != scope_path
+        or placement.get("ok") is not True
+    ):
+        raise CgroupVerificationError(
+            "ComfyUI sandbox requires exact verified cgroup leaf placement"
+        )
+    native_root = Path(f"/sys/fs/cgroup{scope_path}")
+    exact_placement = {
+        **dict(placement),
+        "campaign_cgroup": scope_path,
+        "exact_leaf": True,
+        "ok": True,
+    }
+    return {
+        "schema_version": HOST_TRANSITION_SCHEMA_VERSION,
+        "nonce": nonce,
+        "pid": pid,
+        "role": "comfyui",
+        "cgroup_path": scope_path,
+        "leaf_identity": _host_transition_leaf_identity(
+            scope_fs=scope_fs,
+            scope_path=scope_path,
+            pid=pid,
+        ),
+        "process": {
+            "pid": pid,
+            "start_ticks": int(placement["start_ticks"]),
+            "boot_id": str(placement["boot_id"]),
+            "cgroup_path": scope_path,
+        },
+        "placement": exact_placement,
+        "cgroup_write": {
+            "target": str(native_root / "cgroup.procs"),
+            "attempted": True,
+            "completed": True,
+            "verified_after_write": True,
+            "written_pid": pid,
+        },
+        "allowed_write_roots": _sandbox_write_root_records(
+            allowed_write_roots
+        ),
+        "created_monotonic_ns": time.monotonic_ns(),
+        "actual_execution": True,
+        "simulated": False,
+        "ok": True,
+    }
 
 
 @dataclass(frozen=True)
@@ -110,25 +346,34 @@ class ScopeIdentity:
 class CampaignCgroupLimits:
     """Required hard limits for the formal campaign scope."""
 
-    memory_high_bytes: int = 7 * GIB
-    memory_max_bytes: int = 8 * GIB
-    memory_swap_max_bytes: int = 1 * GIB
-    cpu_quota_percent: int = 600
-    tasks_max: int = 768
+    memory_high_bytes: int = 5 * GIB
+    memory_max_bytes: int = 6 * GIB
+    memory_swap_max_bytes: int = 512 * MIB
+    cpu_quota_percent: int = 300
+    tasks_max: int = 384
+    io_weight: int = DEFAULT_IO_WEIGHT
 
     def __post_init__(self) -> None:
+        if isinstance(self.io_weight, bool) or not isinstance(self.io_weight, int):
+            raise ValueError("io_weight must be an integer")
         values = {
             "memory_high_bytes": self.memory_high_bytes,
             "memory_max_bytes": self.memory_max_bytes,
             "memory_swap_max_bytes": self.memory_swap_max_bytes,
             "cpu_quota_percent": self.cpu_quota_percent,
             "tasks_max": self.tasks_max,
+            "io_weight": self.io_weight,
         }
         invalid = [name for name, value in values.items() if isinstance(value, bool) or int(value) <= 0]
         if invalid:
             raise ValueError("cgroup limits must be positive integers: " + ", ".join(invalid))
         if self.memory_high_bytes > self.memory_max_bytes:
             raise ValueError("memory_high_bytes cannot exceed memory_max_bytes")
+        if not SYSTEMD_IO_WEIGHT_MIN <= int(self.io_weight) <= SYSTEMD_IO_WEIGHT_MAX:
+            raise ValueError(
+                "io_weight must be within systemd's inclusive range "
+                f"{SYSTEMD_IO_WEIGHT_MIN}..{SYSTEMD_IO_WEIGHT_MAX}"
+            )
 
     def systemd_properties(self) -> tuple[str, ...]:
         return (
@@ -138,6 +383,7 @@ class CampaignCgroupLimits:
             f"MemorySwapMax={self.memory_swap_max_bytes}",
             f"CPUQuota={self.cpu_quota_percent}%",
             f"TasksMax={self.tasks_max}",
+            f"IOWeight={self.io_weight}",
         )
 
     def expected_files(self) -> dict[str, int]:
@@ -146,6 +392,7 @@ class CampaignCgroupLimits:
             "memory.max": self.memory_max_bytes,
             "memory.swap.max": self.memory_swap_max_bytes,
             "pids.max": self.tasks_max,
+            "io.weight": self.io_weight,
         }
 
 
@@ -332,6 +579,7 @@ class CampaignCgroup:
         runner: Any | None = None,
         systemd_run: str = "systemd-run",
         systemctl: str = "systemctl",
+        ionice: str = "ionice",
         python_executable: str = sys.executable,
         module_path: Path | None = None,
         start_timeout: float = 15.0,
@@ -342,6 +590,7 @@ class CampaignCgroup:
         managed_stdout: Path | None = None,
         activation_gate: Path | None = None,
         managed_environment: Mapping[str, str] | None = None,
+        allow_idle_io_fallback: bool = False,
     ) -> None:
         safe_id = _SCOPE_ID_RE.sub("-", str(campaign_id or "").strip()).strip(".-")
         if not safe_id:
@@ -355,6 +604,8 @@ class CampaignCgroup:
         self.runner = runner or SubprocessRunner()
         self.systemd_run = str(systemd_run)
         self.systemctl = str(systemctl)
+        self.ionice = str(ionice)
+        self.allow_idle_io_fallback = bool(allow_idle_io_fallback)
         self.python_executable = str(python_executable)
         self.module_path = Path(module_path or __file__).expanduser().resolve(strict=False)
         self.start_timeout = max(0.01, float(start_timeout))
@@ -380,6 +631,7 @@ class CampaignCgroup:
         self.stopped = False
         self.registered_pids: dict[str, set[int]] = {}
         self.registered_identities: dict[str, dict[int, ProcessIdentity]] = {}
+        self.managed_leaves: dict[str, dict[str, Any]] = {}
         self.events: list[dict[str, Any]] = []
         self.anchor_pid_file = self.evidence_root / "scope_anchor.pid"
         self.anchor_ready_file = self.evidence_root / "scope_anchor.ready.json"
@@ -410,6 +662,111 @@ class CampaignCgroup:
         self.managed_cwd = Path(cwd).expanduser().resolve(strict=False)
         self.managed_stdout = Path(stdout).expanduser().resolve(strict=False)
         self.managed_environment = {str(key): str(value) for key, value in (environment or {}).items()}
+
+    def _write_managed_command(self) -> None:
+        if not self.managed_command:
+            raise CampaignCgroupError("managed command is unavailable")
+        payload = {
+            "schema_version": CGROUP_SCHEMA_VERSION,
+            "command": list(self.managed_command),
+            "cwd": str(self.managed_cwd),
+            "stdout": str(self.managed_stdout),
+            "environment": self.managed_environment,
+        }
+        _atomic_write_json(self.managed_command_file, payload)
+        try:
+            readback = json.loads(self.managed_command_file.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise CampaignCgroupError(
+                f"managed command readback failed: {exc.__class__.__name__}: {exc}"
+            ) from exc
+        if readback != payload:
+            raise CampaignCgroupError("managed command readback differs from its authority")
+
+    def update_managed_environment_before_activation(
+        self,
+        values: Mapping[str, str],
+    ) -> dict[str, Any]:
+        """Add reviewed non-secret values before releasing the managed anchor.
+
+        The anchor reads ``managed_command.json`` only after the activation
+        gate appears.  This narrow API lets the supervisor bind a newly
+        launched dependency PID into the runner environment without placing
+        credentials in argv or adopting an external process.
+        """
+
+        if not self.created or self.stopped or self.anchor_process is None:
+            raise CampaignCgroupError(
+                "managed environment can only change in an active campaign scope"
+            )
+        if self.activation_gate.exists() or self.anchor_process.poll() is not None:
+            raise CampaignCgroupError(
+                "managed environment cannot change after activation or anchor exit"
+            )
+        updates = {str(key): str(value) for key, value in values.items()}
+        unexpected = sorted(set(updates) - LATE_BOUND_MANAGED_ENVIRONMENT_KEYS)
+        if unexpected:
+            raise CampaignCgroupError(
+                "managed environment update contains unreviewed keys: "
+                + ", ".join(unexpected)
+            )
+        invalid = sorted(
+            key
+            for key, value in updates.items()
+            if not re.fullmatch(r"[A-Z][A-Z0-9_]{0,127}", key)
+            or "\x00" in value
+            or "\x00" in key
+        )
+        if invalid:
+            raise CampaignCgroupError(
+                "managed environment update contains invalid names/values: "
+                + ", ".join(invalid)
+            )
+        self.managed_environment.update(updates)
+        self._write_managed_command()
+        return self._record(
+            "update_managed_environment_before_activation",
+            ok=True,
+            environment_keys=sorted(updates),
+            # Values are intentionally excluded from cgroup lifecycle logs.
+            values_logged=False,
+        )
+
+    def release_managed_command(self) -> dict[str, Any]:
+        """Release the in-scope anchor to exec the still-gated runner."""
+
+        if not self.created or self.stopped or self.anchor_process is None:
+            raise CampaignCgroupError(
+                "managed command can only be released in an active campaign scope"
+            )
+        if self.anchor_process.poll() is not None:
+            raise CampaignCgroupError("managed anchor exited before command release")
+        if self.activation_gate.exists():
+            raise CampaignCgroupError("managed command release gate already exists")
+        if not self.managed_command_file.is_file():
+            raise CampaignCgroupError("managed command authority is unavailable")
+        payload = {
+            "schema_version": CGROUP_SCHEMA_VERSION,
+            "released_at": utc_now(),
+            "anchor_pid": self.anchor_pid,
+            "managed_command_sha256": _sha256_file(self.managed_command_file),
+            "ok": True,
+        }
+        _atomic_write_json(self.activation_gate, payload)
+        try:
+            readback = json.loads(self.activation_gate.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise CampaignCgroupError(
+                f"managed command release readback failed: {exc.__class__.__name__}: {exc}"
+            ) from exc
+        if readback != payload:
+            raise CampaignCgroupError("managed command release readback differs")
+        return self._record(
+            "release_managed_command",
+            ok=True,
+            gate=str(self.activation_gate),
+            managed_command_sha256=payload["managed_command_sha256"],
+        )
 
     def _record(self, action: str, **payload: Any) -> dict[str, Any]:
         event = {"action": action, "at": utc_now(), **payload}
@@ -453,8 +810,13 @@ class CampaignCgroup:
             "expected_limits": {
                 **self.limits.expected_files(),
                 "cpu.quota_percent": self.limits.cpu_quota_percent,
+                "allow_idle_io_fallback": self.allow_idle_io_fallback,
             },
             "registered_pids": {role: sorted(pids) for role, pids in sorted(self.registered_pids.items())},
+            "managed_leaves": {
+                role: dict(evidence)
+                for role, evidence in sorted(self.managed_leaves.items())
+            },
             "events": self.events,
             "updated_at": utc_now(),
         }
@@ -498,7 +860,7 @@ class CampaignCgroup:
             controllers = set(controllers_path.read_text(encoding="utf-8").split())
         except Exception as exc:
             raise CgroupUnavailableError(f"cgroup v2 is unavailable at {self.cgroup_root}: {exc}") from exc
-        required = {"cpu", "memory", "pids"}
+        required = {"cpu", "io", "memory", "pids"}
         missing = sorted(required - controllers)
         if missing:
             raise CgroupUnavailableError("mandatory cgroup v2 controllers unavailable: " + ", ".join(missing))
@@ -519,8 +881,10 @@ class CampaignCgroup:
         ]
         for prop in self.limits.systemd_properties():
             command.extend(["--property", prop])
+        command.append("--")
+        if self.allow_idle_io_fallback:
+            command.extend([self.ionice, "-c", "3"])
         command.extend([
-            "--",
             self.python_executable,
             str(self.module_path),
             "_anchor",
@@ -560,6 +924,7 @@ class CampaignCgroup:
             "--property=ControlGroup",
             "--property=InvocationID",
             "--property=Delegate",
+            "--property=IOWeight",
             timeout=min(5.0, self.start_timeout),
         )
         if completed.returncode != 0:
@@ -571,6 +936,24 @@ class CampaignCgroup:
             name, value = row.split("=", 1)
             result[name.strip()] = value.strip()
         return result
+
+    def _validated_systemd_io_weight(
+        self,
+        properties: Mapping[str, str],
+    ) -> int:
+        raw = properties.get("IOWeight")
+        try:
+            actual = int(str(raw))
+        except (TypeError, ValueError) as exc:
+            raise CgroupVerificationError(
+                f"systemd IOWeight authority is invalid: {raw!r}"
+            ) from exc
+        if actual != self.limits.io_weight:
+            raise CgroupVerificationError(
+                "systemd IOWeight authority mismatch: "
+                f"expected {self.limits.io_weight}, got {actual}"
+            )
+        return actual
 
     def _control_group(self) -> str:
         properties = self._query_unit_properties()
@@ -585,6 +968,10 @@ class CampaignCgroup:
             errors.append(f"ActiveState={properties.get('ActiveState')!r}")
         if properties.get("Delegate", "").lower() not in {"yes", "true"}:
             errors.append(f"Delegate={properties.get('Delegate')!r}")
+        try:
+            self._validated_systemd_io_weight(properties)
+        except CgroupVerificationError as exc:
+            errors.append(str(exc))
         invocation_id = properties.get("InvocationID", "")
         if not _INVOCATION_ID_RE.fullmatch(invocation_id):
             errors.append(f"InvocationID={invocation_id!r}")
@@ -626,13 +1013,7 @@ class CampaignCgroup:
             except FileNotFoundError:
                 pass
         if self.managed_command:
-            _atomic_write_json(self.managed_command_file, {
-                "schema_version": CGROUP_SCHEMA_VERSION,
-                "command": list(self.managed_command),
-                "cwd": str(self.managed_cwd),
-                "stdout": str(self.managed_stdout),
-                "environment": self.managed_environment,
-            })
+            self._write_managed_command()
         controller_evidence: dict[str, Any] = {}
         command = self._scope_command()
         try:
@@ -649,17 +1030,30 @@ class CampaignCgroup:
                     start_new_session=True,
                 )
             deadline = time.monotonic() + self.start_timeout
+            last_scope_error: CgroupVerificationError | None = None
             while time.monotonic() < deadline:
                 if self.anchor_process.poll() is not None:
                     raise CgroupUnavailableError(
                         f"systemd-run exited before the campaign scope became ready: returncode={self.anchor_process.poll()}"
                     )
                 if not self.scope_path:
-                    self.scope_path = self._control_group()
+                    try:
+                        self.scope_path = self._control_group()
+                    except CgroupVerificationError as exc:
+                        # systemd can briefly expose an inactive placeholder
+                        # before Delegate, IOWeight, InvocationID, and the
+                        # ControlGroup are committed.  Keep the campaign inert
+                        # and retry only inside the bounded startup deadline.
+                        last_scope_error = exc
                 if self.scope_path and self.anchor_pid_file.exists() and self.anchor_ready_file.exists():
                     break
                 time.sleep(self.poll_interval)
             if not self.scope_path:
+                if last_scope_error is not None:
+                    raise CgroupVerificationError(
+                        "systemd did not establish a verified campaign scope "
+                        f"before the startup deadline: {last_scope_error}"
+                    ) from last_scope_error
                 raise CgroupUnavailableError("systemd did not expose a ControlGroup for the campaign scope")
             try:
                 self.anchor_pid = int(self.anchor_pid_file.read_text(encoding="utf-8").strip())
@@ -716,6 +1110,61 @@ class CampaignCgroup:
                 raise
             raise CgroupUnavailableError(f"failed to create campaign cgroup: {exc}") from exc
 
+    @staticmethod
+    def _parse_io_weight_authority(raw: str) -> int:
+        rows = raw.splitlines()
+        if len(rows) != 1:
+            raise ValueError(
+                "io.weight must contain exactly one default authority row"
+            )
+        fields = rows[0].split()
+        if len(fields) != 2 or fields[0] != "default":
+            raise ValueError(
+                "io.weight authority must use the exact 'default WEIGHT' format"
+            )
+        weight = int(fields[1])
+        if not SYSTEMD_IO_WEIGHT_MIN <= weight <= SYSTEMD_IO_WEIGHT_MAX:
+            raise ValueError(
+                "io.weight authority is outside systemd's valid range"
+            )
+        return weight
+
+    def _verify_anchor_idle_io_priority(self) -> dict[str, Any]:
+        if self.anchor_pid <= 0:
+            return {
+                "ok": False,
+                "pid": self.anchor_pid,
+                "error": "scope anchor pid is unavailable",
+            }
+        try:
+            completed = self.runner.run(
+                [self.ionice, "-p", str(self.anchor_pid)],
+                text=True,
+                capture_output=True,
+                timeout=min(5.0, self.start_timeout),
+                check=False,
+            )
+        except Exception as exc:
+            return {
+                "ok": False,
+                "pid": self.anchor_pid,
+                "error": f"{exc.__class__.__name__}: {exc}",
+            }
+        stdout = str(completed.stdout or "").strip()
+        stderr = str(completed.stderr or "").strip()
+        idle = completed.returncode == 0 and bool(
+            re.search(r"(?:^|\s)idle(?:\s|:|$)", stdout, flags=re.IGNORECASE)
+        )
+        return {
+            "ok": idle,
+            "pid": self.anchor_pid,
+            "command": [self.ionice, "-p", str(self.anchor_pid)],
+            "returncode": completed.returncode,
+            "stdout": stdout[:500],
+            "stderr": stderr[:500],
+            "expected_class": "idle",
+        }
+
     def verify_limits(self) -> dict[str, Any]:
         """Read actual cgroup v2 files and prove every configured limit."""
 
@@ -724,15 +1173,47 @@ class CampaignCgroup:
         scope = self._scope_fs_path()
         checks: dict[str, dict[str, Any]] = {}
         errors: list[str] = []
+        io_safety_mode = ""
         for filename, expected in self.limits.expected_files().items():
             path = scope / filename
             try:
                 raw = path.read_text(encoding="utf-8").strip()
-                actual = int(raw)
+                actual = (
+                    self._parse_io_weight_authority(raw)
+                    if filename == "io.weight"
+                    else int(raw)
+                )
                 ok = actual == expected
                 checks[filename] = {"expected": expected, "actual": actual, "raw": raw, "ok": ok}
                 if not ok:
                     errors.append(f"{filename}: expected {expected}, got {raw}")
+                elif filename == "io.weight":
+                    io_safety_mode = "cgroup_weight"
+            except FileNotFoundError as exc:
+                if filename == "io.weight" and self.allow_idle_io_fallback:
+                    fallback = self._verify_anchor_idle_io_priority()
+                    fallback_ok = fallback.get("ok") is True
+                    checks[filename] = {
+                        "expected": expected,
+                        "actual": None,
+                        "ok": fallback_ok,
+                        "cgroup_controller_available": False,
+                        "fallback": fallback,
+                    }
+                    if fallback_ok:
+                        io_safety_mode = "process_idle"
+                    else:
+                        errors.append(
+                            "io.weight: unavailable and live idle I/O priority is not proven"
+                        )
+                    continue
+                checks[filename] = {
+                    "expected": expected,
+                    "actual": None,
+                    "ok": False,
+                    "error": str(exc),
+                }
+                errors.append(f"{filename}: {exc}")
             except Exception as exc:
                 checks[filename] = {"expected": expected, "actual": None, "ok": False, "error": str(exc)}
                 errors.append(f"{filename}: {exc}")
@@ -799,6 +1280,7 @@ class CampaignCgroup:
             "cgroup_path": self.scope_path,
             "checks": checks,
             "missing_or_mismatched": errors,
+            "io_safety_mode": io_safety_mode,
             "hard_limit_state": "verified" if not errors else "unverified",
             "ok": not errors,
         }
@@ -944,6 +1426,9 @@ class CampaignCgroup:
             "active_state": self.unit_properties.get("ActiveState"),
             "sub_state": self.unit_properties.get("SubState"),
             "delegate": self.unit_properties.get("Delegate"),
+            "io_weight": self._validated_systemd_io_weight(
+                self.unit_properties
+            ),
             "ok": True,
         }
 
@@ -1076,7 +1561,269 @@ class CampaignCgroup:
             raise CgroupVerificationError("campaign PID placement is not proven: " + "; ".join(errors))
         return evidence
 
-    def wrap_command(self, command: Sequence[str], *, role: str) -> list[str]:
+    def _managed_leaf_path(self, role: str) -> Path:
+        role_name = str(role).strip().lower()
+        evidence = self.managed_leaves.get(role_name)
+        if not isinstance(evidence, Mapping):
+            raise CgroupVerificationError(
+                f"managed cgroup leaf is unavailable for role {role_name!r}"
+            )
+        path = Path(str(evidence.get("fs_path") or ""))
+        expected = self._scope_fs_path() / role_name
+        if path != expected:
+            raise CgroupVerificationError(
+                f"managed cgroup leaf path escaped its pinned scope for {role_name}"
+            )
+        try:
+            metadata = path.lstat()
+        except Exception as exc:
+            raise CgroupVerificationError(
+                f"managed cgroup leaf disappeared for {role_name}: {exc}"
+            ) from exc
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or stat.S_ISLNK(metadata.st_mode)
+            or int(metadata.st_dev) != int(evidence.get("device") or -1)
+            or int(metadata.st_ino) != int(evidence.get("inode") or -1)
+        ):
+            raise CgroupVerificationError(
+                f"managed cgroup leaf identity changed for {role_name}"
+            )
+        return path
+
+    def create_managed_leaf(self, role: str) -> dict[str, Any]:
+        """Create and pin a factual workload leaf below the delegated scope.
+
+        The leaf inherits the campaign limits.  At this host stage it proves
+        only that no subtree controllers or descendant cgroups exist;
+        delegation capability remains pending until the ComfyUI sandbox has
+        completed.  The leaf still gives teardown a kernel-owned
+        PID/populated authority when descendants call ``setsid`` or scrub
+        their environments.
+        """
+
+        if not self.created or self.stopped:
+            raise CampaignCgroupError(
+                "managed leaf requires an active verified campaign scope"
+            )
+        role_name = str(role).strip().lower()
+        if not _ROLE_RE.fullmatch(role_name):
+            raise ValueError(f"invalid campaign process role: {role!r}")
+        if role_name in self.managed_leaves:
+            raise CampaignCgroupError(
+                f"managed cgroup leaf already exists for {role_name}"
+            )
+        self._assert_pinned_scope_identity()
+        scope = self._scope_fs_path()
+        leaf = scope / role_name
+        try:
+            leaf.mkdir(mode=0o755)
+            metadata = leaf.lstat()
+            required_files = {
+                "cgroup.procs",
+                "cgroup.events",
+                "cgroup.kill",
+                "cgroup.type",
+                "cgroup.subtree_control",
+            }
+            missing = sorted(
+                filename
+                for filename in required_files
+                if not (leaf / filename).is_file()
+            )
+            if missing:
+                raise CgroupVerificationError(
+                    "managed cgroup leaf lacks kernel controls: "
+                    + ", ".join(missing)
+                )
+            subtree_control = (leaf / "cgroup.subtree_control").read_text(
+                encoding="utf-8"
+            ).strip()
+            if subtree_control:
+                raise CgroupVerificationError(
+                    "managed cgroup leaf unexpectedly delegates subtree controllers"
+                )
+            cgroup_type = (leaf / "cgroup.type").read_text(
+                encoding="utf-8"
+            ).strip()
+            if cgroup_type not in {"domain", "domain threaded"}:
+                raise CgroupVerificationError(
+                    f"managed cgroup leaf has unsupported type {cgroup_type!r}"
+                )
+            if (leaf / "cgroup.procs").read_text(encoding="utf-8").strip():
+                raise CgroupVerificationError(
+                    "managed cgroup leaf was populated before launch"
+                )
+            events = self._parse_counter_file(leaf / "cgroup.events")
+            if int(events.get("populated", -1)) != 0:
+                raise CgroupVerificationError(
+                    "managed cgroup leaf populated state is not zero before launch"
+                )
+            descendant_cgroups = _count_native_cgroup_descendants(leaf)
+            if descendant_cgroups:
+                raise CgroupVerificationError(
+                    "managed cgroup leaf has descendants before launch"
+                )
+            cgroup_path = _normalise_cgroup_path(
+                f"{self.scope_path.rstrip('/')}/{role_name}",
+                label=f"{role_name} managed cgroup leaf",
+            )
+            evidence = {
+                "role": role_name,
+                "cgroup_path": cgroup_path,
+                "fs_path": str(leaf),
+                "device": int(metadata.st_dev),
+                "inode": int(metadata.st_ino),
+                "cgroup_type": cgroup_type,
+                "subtree_control": [],
+                "subtree_controllers_enabled": False,
+                "descendant_cgroups": 0,
+                "workload_delegation_capability": "pending_sandbox",
+                "initial_populated": 0,
+                "ok": True,
+            }
+            self.managed_leaves[role_name] = evidence
+            return self._record("create_managed_leaf", **evidence)
+        except Exception as exc:
+            try:
+                leaf.rmdir()
+            except Exception:
+                pass
+            self._record(
+                "create_managed_leaf",
+                role=role_name,
+                fs_path=str(leaf),
+                ok=False,
+                error=f"{exc.__class__.__name__}: {exc}",
+            )
+            if isinstance(exc, CampaignCgroupError):
+                raise
+            raise CgroupVerificationError(
+                f"cannot create managed cgroup leaf for {role_name}: {exc}"
+            ) from exc
+
+    def managed_leaf_pids(self, role: str) -> set[int]:
+        """Return all PIDs in the pinned leaf and any unexpected descendants."""
+
+        leaf = self._managed_leaf_path(role)
+        pids: set[int] = set()
+        files = list(leaf.rglob("cgroup.procs"))
+        if not files or len(files) > 1024:
+            raise CgroupVerificationError(
+                f"managed cgroup leaf PID authority is invalid for {role}"
+            )
+        for path in files:
+            try:
+                for row in path.read_text(encoding="utf-8").splitlines():
+                    if row.strip():
+                        pid = int(row.strip())
+                        if pid <= 0:
+                            raise ValueError(pid)
+                        pids.add(pid)
+            except Exception as exc:
+                raise CgroupVerificationError(
+                    f"cannot enumerate managed cgroup leaf PIDs for {role}: {exc}"
+                ) from exc
+        return pids
+
+    def managed_leaf_state(self, role: str) -> dict[str, Any]:
+        role_name = str(role).strip().lower()
+        leaf = self._managed_leaf_path(role_name)
+        pids = self.managed_leaf_pids(role_name)
+        events = self._parse_counter_file(leaf / "cgroup.events")
+        populated = int(events.get("populated", -1))
+        if populated not in {0, 1}:
+            raise CgroupVerificationError(
+                f"managed cgroup leaf populated value is invalid for {role_name}"
+            )
+        subtree_control = (leaf / "cgroup.subtree_control").read_text(
+            encoding="utf-8"
+        ).strip()
+        cgroup_procs_files = list(leaf.rglob("cgroup.procs"))
+        descendant_cgroups = max(0, len(cgroup_procs_files) - 1)
+        consistent = bool(populated == (1 if pids else 0))
+        topology_intact = not subtree_control and descendant_cgroups == 0
+        return {
+            "role": role_name,
+            "cgroup_path": self.managed_leaves[role_name]["cgroup_path"],
+            "pids": sorted(pids),
+            "populated": populated,
+            "consistent": consistent,
+            "subtree_control": subtree_control.split() if subtree_control else [],
+            "subtree_controllers_enabled": bool(subtree_control),
+            "descendant_cgroups": descendant_cgroups,
+            "topology_intact": topology_intact,
+            "workload_delegation_capability": "pending_sandbox",
+            "ok": bool(consistent and topology_intact),
+        }
+
+    def kill_managed_leaf(self, role: str) -> dict[str, Any]:
+        """Kill the pinned leaf and prove recursive PID/populated emptiness."""
+
+        role_name = str(role).strip().lower()
+        leaf = self._managed_leaf_path(role_name)
+        before = self.managed_leaf_state(role_name)
+        controls: list[dict[str, Any]] = []
+        freeze = leaf / "cgroup.freeze"
+        if freeze.is_file():
+            try:
+                freeze.write_text("1", encoding="utf-8")
+                controls.append({"control": "cgroup.freeze", "ok": True})
+            except Exception as exc:
+                controls.append({
+                    "control": "cgroup.freeze",
+                    "ok": False,
+                    "error": f"{exc.__class__.__name__}: {exc}",
+                })
+        try:
+            (leaf / "cgroup.kill").write_text("1", encoding="utf-8")
+            controls.append({"control": "cgroup.kill", "ok": True})
+        except Exception as exc:
+            controls.append({
+                "control": "cgroup.kill",
+                "ok": False,
+                "error": f"{exc.__class__.__name__}: {exc}",
+            })
+            raise CgroupVerificationError(
+                f"managed cgroup leaf kill failed for {role_name}: {exc}"
+            ) from exc
+        deadline = time.monotonic() + self.stop_timeout
+        after = self.managed_leaf_state(role_name)
+        while time.monotonic() < deadline and (
+            after["pids"] or after["populated"] != 0
+        ):
+            time.sleep(self.poll_interval)
+            after = self.managed_leaf_state(role_name)
+        ok = bool(
+            not after["pids"]
+            and after["populated"] == 0
+            and after["consistent"] is True
+            and all(row.get("ok") for row in controls)
+        )
+        evidence = self._record(
+            "kill_managed_leaf",
+            role=role_name,
+            before=before,
+            after=after,
+            controls=controls,
+            ok=ok,
+        )
+        if not ok:
+            raise CgroupVerificationError(
+                f"managed cgroup leaf is not empty after kill for {role_name}"
+            )
+        return evidence
+
+    def wrap_command(
+        self,
+        command: Sequence[str],
+        *,
+        role: str,
+        managed_leaf: str | None = None,
+        sandbox_allow_write_roots: Sequence[Path] | None = None,
+        sandbox_proof_fd: int | None = None,
+        sandbox_nonce: str | None = None,
+    ) -> list[str]:
         """Return an argv that enters the scope before execing ``command``."""
 
         if not self.created or self.stopped or not self.scope_path:
@@ -1087,7 +1834,15 @@ class CampaignCgroup:
         argv = [str(value) for value in command]
         if not argv:
             raise ValueError("managed command cannot be empty")
-        return [
+        target_scope = self.scope_path
+        leaf_role: str | None = None
+        if managed_leaf is not None:
+            leaf_role = str(managed_leaf).strip().lower()
+            self._managed_leaf_path(leaf_role)
+            target_scope = str(
+                self.managed_leaves[leaf_role].get("cgroup_path") or ""
+            )
+        wrapper = [
             self.python_executable,
             str(self.module_path),
             "_exec",
@@ -1096,14 +1851,41 @@ class CampaignCgroup:
             "--proc-root",
             str(self.proc_root),
             "--scope-path",
-            self.scope_path,
+            target_scope,
             "--role",
             role_name,
             "--evidence-dir",
             str(self.entry_evidence_dir),
-            "--",
-            *argv,
         ]
+        sandbox_requested = any((
+            sandbox_allow_write_roots is not None,
+            sandbox_proof_fd is not None,
+            sandbox_nonce is not None,
+        ))
+        if sandbox_requested:
+            if (
+                role_name != "comfyui"
+                or leaf_role != role_name
+                or not sandbox_allow_write_roots
+                or not isinstance(sandbox_proof_fd, int)
+                or isinstance(sandbox_proof_fd, bool)
+                or sandbox_proof_fd < 3
+                or not isinstance(sandbox_nonce, str)
+                or not re.fullmatch(r"[0-9a-f]{32}", sandbox_nonce)
+            ):
+                raise ValueError(
+                    "ComfyUI sandbox wrapper requires its managed leaf, write roots, "
+                    "proof fd, and 128-bit hexadecimal nonce"
+                )
+            wrapper.extend([
+                "--sandbox-proof-fd",
+                str(sandbox_proof_fd),
+                "--sandbox-nonce",
+                sandbox_nonce,
+            ])
+            for path in sandbox_allow_write_roots:
+                wrapper.extend(["--sandbox-allow-write", str(path)])
+        return [*wrapper, "--", *argv]
 
     def _assert_pinned_scope_identity(self) -> dict[str, Any]:
         identity = self.scope_identity
@@ -1134,6 +1916,7 @@ class CampaignCgroup:
             )
             if control_group != identity.cgroup_path:
                 raise CgroupVerificationError("systemd ControlGroup changed before cgroup action")
+            self._validated_systemd_io_weight(properties)
         return {
             "unit_name": identity.unit_name,
             "invocation_id": identity.invocation_id,
@@ -1141,6 +1924,11 @@ class CampaignCgroup:
             "device": identity.device,
             "inode": identity.inode,
             "active_state": properties.get("ActiveState") if properties else "not_found",
+            "io_weight": (
+                self._validated_systemd_io_weight(properties)
+                if properties
+                else None
+            ),
             "ok": True,
         }
 
@@ -1180,12 +1968,18 @@ class CampaignCgroup:
         while time.monotonic() < deadline and not self._scope_empty():
             time.sleep(self.poll_interval)
         empty = self._scope_empty()
+        terminal_population = self._scope_terminal_population()
         result = {
             "sample_schema_version": CGROUP_SCHEMA_VERSION,
             "identity": identity,
             "actions": actions,
             "cgroup_empty": empty,
-            "ok": empty and all(row.get("ok") for row in actions),
+            "terminal_population": terminal_population,
+            "ok": (
+                empty
+                and terminal_population.get("ok") is True
+                and all(row.get("ok") for row in actions)
+            ),
         }
         self._record("force_kill_scope", **result)
         if not result["ok"]:
@@ -1193,6 +1987,87 @@ class CampaignCgroup:
                 f"pinned cgroup.kill did not empty campaign scope: cgroup_empty={empty}"
             )
         return result
+
+    def emergency_kill_scope_without_durable_evidence(self) -> dict[str, Any]:
+        """Kill the pinned scope without invoking systemd or artifact writers.
+
+        This narrow path is reserved for a host-I/O hard-limit trip.  Writes
+        are limited to cgroup-v2 kernel control files; no evidence file,
+        subprocess, journal query, or filesystem fsync is performed.
+        """
+
+        if not self.scope_path:
+            return {
+                "ok": True,
+                "stopped": True,
+                "not_created": True,
+                "durable_writes_performed": False,
+            }
+        identity = self.scope_identity
+        if identity is None:
+            raise CgroupVerificationError(
+                "campaign cgroup directory identity was not pinned"
+            )
+        if (
+            identity.unit_name != self.unit_name
+            or identity.cgroup_path != self.scope_path
+        ):
+            raise CgroupVerificationError(
+                "campaign cgroup identity contract changed"
+            )
+        scope = self._scope_fs_path()
+        metadata = scope.lstat()
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or stat.S_ISLNK(metadata.st_mode)
+            or int(metadata.st_dev) != identity.device
+            or int(metadata.st_ino) != identity.inode
+        ):
+            raise CgroupVerificationError(
+                "campaign cgroup directory device/inode identity changed"
+            )
+        actions: list[dict[str, Any]] = []
+        for filename in ("cgroup.freeze", "cgroup.kill"):
+            descriptor = -1
+            try:
+                descriptor = os.open(
+                    scope / filename,
+                    os.O_WRONLY
+                    | getattr(os, "O_CLOEXEC", 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
+                )
+                written = os.write(descriptor, b"1")
+                actions.append({
+                    "control": filename,
+                    "written": written,
+                    "ok": written == 1,
+                })
+            except Exception as exc:
+                actions.append({
+                    "control": filename,
+                    "written": 0,
+                    "ok": False,
+                    "error_code": exc.__class__.__name__,
+                })
+            finally:
+                if descriptor >= 0:
+                    os.close(descriptor)
+        deadline = time.monotonic() + min(2.0, max(0.1, self.stop_timeout))
+        while time.monotonic() < deadline and not self._scope_empty():
+            time.sleep(min(self.poll_interval, 0.1))
+        empty = self._scope_empty()
+        kill_succeeded = any(
+            row.get("control") == "cgroup.kill" and row.get("ok") is True
+            for row in actions
+        )
+        return {
+            "ok": bool(empty and kill_succeeded),
+            "stopped": bool(empty),
+            "cgroup_empty": bool(empty),
+            "actions": actions,
+            "identity_revalidated": True,
+            "durable_writes_performed": False,
+        }
 
     def _scope_empty(self) -> bool:
         try:
@@ -1208,6 +2083,36 @@ class CampaignCgroup:
             return True
         except Exception:
             return False
+
+    def _scope_terminal_population(self) -> dict[str, Any]:
+        """Prove terminal population from cgroup.events or scope removal."""
+
+        scope = self._scope_fs_path()
+        if not scope.exists():
+            return {
+                "path": self.scope_path,
+                "scope_path_absent": True,
+                "populated": 0,
+                "ok": True,
+            }
+        try:
+            events = self._parse_counter_file(scope / "cgroup.events")
+            populated = int(events.get("populated", -1))
+        except Exception as exc:
+            return {
+                "path": self.scope_path,
+                "scope_path_absent": False,
+                "populated": -1,
+                "error": f"{exc.__class__.__name__}: {exc}",
+                "ok": False,
+            }
+        return {
+            "path": self.scope_path,
+            "scope_path_absent": False,
+            "populated": populated,
+            "events": events,
+            "ok": populated == 0,
+        }
 
     def _best_effort_stop(self) -> dict[str, Any]:
         details: dict[str, Any] = {"unit_name": self.unit_name, "ok": False}
@@ -1291,6 +2196,7 @@ class CampaignCgroup:
                     "error": f"{exc.__class__.__name__}: {exc}",
                 }
             empty = self._scope_empty()
+        terminal_population = self._scope_terminal_population()
         process = self.anchor_process
         if process is not None and process.poll() is None:
             try:
@@ -1303,7 +2209,7 @@ class CampaignCgroup:
         unit_already_gone = completed.returncode == 5 and empty and (
             self.anchor_process is None or self.anchor_process.poll() is not None
         )
-        ok = empty and (
+        ok = empty and terminal_population.get("ok") is True and (
             completed.returncode == 0
             or unit_already_gone
             or fallback.get("ok") is True
@@ -1316,6 +2222,7 @@ class CampaignCgroup:
             systemctl_stdout=str(completed.stdout or "")[-1000:],
             systemctl_stderr=str(completed.stderr or "")[-1000:],
             cgroup_empty=empty,
+            terminal_population=terminal_population,
             unit_already_gone=unit_already_gone,
             identity=identity_evidence,
             pinned_kill_fallback=fallback,
@@ -1387,6 +2294,16 @@ def _exec_main(args: argparse.Namespace) -> int:
     if not _ROLE_RE.fullmatch(role):
         print(f"campaign cgroup exec wrapper: invalid role {role!r}", file=sys.stderr)
         return EXEC_FAILURE
+    sandbox_proof_fd = getattr(args, "sandbox_proof_fd", None)
+    sandbox_nonce = getattr(args, "sandbox_nonce", None)
+    sandbox_allow_write = [
+        Path(value) for value in (getattr(args, "sandbox_allow_write", None) or [])
+    ]
+    sandbox_requested = any((
+        sandbox_proof_fd is not None,
+        sandbox_nonce is not None,
+        bool(sandbox_allow_write),
+    ))
     cgroup_root = Path(args.cgroup_root).expanduser().resolve(strict=False)
     proc_root = Path(args.proc_root).expanduser().resolve(strict=False)
     try:
@@ -1397,11 +2314,12 @@ def _exec_main(args: argparse.Namespace) -> int:
         if not (cgroup_root / "cgroup.controllers").is_file():
             raise CgroupUnavailableError("cgroup v2 controller file is unavailable")
         pid = os.getpid()
+        cgroup_write_target = scope_fs / "cgroup.procs"
         try:
-            (scope_fs / "cgroup.procs").write_text(str(pid), encoding="utf-8")
+            cgroup_write_target.write_text(str(pid), encoding="utf-8")
         except Exception as exc:
             raise CgroupVerificationError(
-                f"cannot move {role} pid {pid} into {scope_fs / 'cgroup.procs'}: "
+                f"cannot move {role} pid {pid} into {cgroup_write_target}: "
                 f"{exc.__class__.__name__}: {exc}"
             ) from exc
         placement = _assert_pid_placement(
@@ -1412,17 +2330,115 @@ def _exec_main(args: argparse.Namespace) -> int:
             role=role,
             expected_inside=True,
         )
+        host_transition: dict[str, Any] | None = None
+        sandbox_argv: list[str] | None = None
+        sandbox_python = ""
+        if sandbox_requested:
+            if (
+                role != "comfyui"
+                or sandbox_proof_fd is None
+                or isinstance(sandbox_proof_fd, bool)
+                or int(sandbox_proof_fd) < 3
+                or not isinstance(sandbox_nonce, str)
+                or not re.fullmatch(r"[0-9a-f]{32}", sandbox_nonce)
+                or not sandbox_allow_write
+                or scope_path.rsplit("/", 1)[-1] != role
+            ):
+                raise CgroupVerificationError(
+                    "ComfyUI sandbox arguments are incomplete or do not target its exact leaf"
+                )
+            if (
+                cgroup_root != DEFAULT_CGROUP_ROOT.resolve(strict=True)
+                or proc_root != DEFAULT_PROC_ROOT.resolve(strict=True)
+            ):
+                raise CgroupVerificationError(
+                    "ComfyUI host transition requires the native cgroupfs and procfs roots"
+                )
+            if placement.get("actual_cgroup") != scope_path:
+                raise CgroupVerificationError(
+                    "ComfyUI sandbox launcher is not in the exact managed leaf"
+                )
+            host_transition = _build_host_transition_payload(
+                nonce=sandbox_nonce,
+                pid=pid,
+                scope_path=scope_path,
+                scope_fs=scope_fs,
+                placement=placement,
+                allowed_write_roots=sandbox_allow_write,
+            )
+            encoded_transition = json.dumps(
+                host_transition,
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            if len(encoded_transition.encode("utf-8")) > MAX_HOST_TRANSITION_JSON_BYTES:
+                raise CgroupVerificationError(
+                    "ComfyUI host transition receipt exceeds the sandbox bound"
+                )
+            sandbox_module = Path(__file__).with_name(
+                COMFYUI_SANDBOX_MODULE_NAME
+            ).resolve(strict=True)
+            module_metadata = sandbox_module.lstat()
+            if (
+                stat.S_ISLNK(module_metadata.st_mode)
+                or not stat.S_ISREG(module_metadata.st_mode)
+            ):
+                raise CgroupVerificationError(
+                    "ComfyUI sandbox module is not a canonical regular file"
+                )
+            sandbox_python_path = Path(sys.executable).resolve(strict=True)
+            python_metadata = sandbox_python_path.lstat()
+            if (
+                stat.S_ISLNK(python_metadata.st_mode)
+                or not stat.S_ISREG(python_metadata.st_mode)
+                or not python_metadata.st_mode & 0o111
+            ):
+                raise CgroupVerificationError(
+                    "ComfyUI sandbox interpreter is not a canonical executable"
+                )
+            sandbox_cwd = Path.cwd()
+            if sandbox_cwd != sandbox_cwd.resolve(strict=True):
+                raise CgroupVerificationError(
+                    "ComfyUI sandbox working directory is not canonical"
+                )
+            sandbox_python = str(sandbox_python_path)
+            sandbox_argv = [
+                sandbox_python,
+                str(sandbox_module),
+                "--host-transition-json",
+                encoded_transition,
+                "--nonce",
+                sandbox_nonce,
+                "--expected-cgroup-path",
+                scope_path,
+            ]
+            for path in sandbox_allow_write:
+                sandbox_argv.extend(["--allow-write-root", str(path)])
+            sandbox_argv.extend([
+                "--cwd",
+                str(sandbox_cwd),
+                "--proof-fd",
+                str(int(sandbox_proof_fd)),
+                "--",
+                *command,
+            ])
         evidence_dir = Path(args.evidence_dir).expanduser().resolve(strict=False)
+        entry_evidence: dict[str, Any] = {
+            "sample_schema_version": CGROUP_SCHEMA_VERSION,
+            "entered_at": utc_now(),
+            "placement": placement,
+            "command_executable": command[0],
+            "ok": True,
+        }
+        if host_transition is not None:
+            entry_evidence["host_transition"] = host_transition
         _atomic_write_json(
             evidence_dir / f"{role}_{pid}.json",
-            {
-                "sample_schema_version": CGROUP_SCHEMA_VERSION,
-                "entered_at": utc_now(),
-                "placement": placement,
-                "command_executable": command[0],
-                "ok": True,
-            },
+            entry_evidence,
         )
+        if sandbox_argv is not None:
+            os.execve(sandbox_python, sandbox_argv, os.environ.copy())
         os.execvpe(command[0], command, os.environ.copy())
     except Exception as exc:
         print(f"campaign cgroup exec wrapper refused to launch {role}: {exc.__class__.__name__}: {exc}", file=sys.stderr)
@@ -1447,6 +2463,9 @@ def build_parser() -> argparse.ArgumentParser:
     execute.add_argument("--scope-path", required=True)
     execute.add_argument("--role", required=True)
     execute.add_argument("--evidence-dir", required=True)
+    execute.add_argument("--sandbox-proof-fd", type=int)
+    execute.add_argument("--sandbox-nonce")
+    execute.add_argument("--sandbox-allow-write", action="append", default=[])
     execute.add_argument("command", nargs=argparse.REMAINDER)
     return parser
 

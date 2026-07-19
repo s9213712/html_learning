@@ -55,52 +55,98 @@ def run(base_url: str, username: str, password: str) -> dict:
                 try { body = text ? JSON.parse(text) : {}; } catch (err) { body = {raw: text.slice(0, 500)}; }
                 return {status: response.status, ok: response.ok, body};
               };
-              const login = await api('POST', '/api/login', {username, password});
-              if (!login.ok || !login.body.ok) return {ok: false, step: 'login', login};
-              await api('GET', '/api/csrf-token');
-              const settings = await api('GET', '/api/admin/settings');
-              const previousChatEnabled = Boolean(settings.body?.settings?.feature_chat_enabled);
-              const enabled = await api('PUT', '/api/admin/settings', {feature_chat_enabled: true});
-              if (!enabled.ok || !enabled.body.ok) return {ok: false, step: 'enable_chat', enabled};
-              const rooms = await api('GET', '/api/chat/rooms');
-              if (!rooms.ok || !rooms.body.ok) return {ok: false, step: 'rooms', rooms};
-              let room = (rooms.body.rooms || [])[0];
-              if (!room) {
-                const created = await api('POST', '/api/chat/rooms', {name: `share link probe ${Date.now()}`});
-                if (!created.ok || !created.body.ok) return {ok: false, step: 'create_room', created};
-                room = created.body.room;
-              }
-              const sent = await api('POST', `/api/chat/rooms/${encodeURIComponent(room.id)}/messages`, {
-                content: `影音分享 ${link}`
-              });
-              if (!sent.ok || !sent.body.ok) return {ok: false, step: 'send', sent};
-              const messages = await api('GET', `/api/chat/rooms/${encodeURIComponent(room.id)}/messages?limit=20`);
-              if (!messages.ok || !messages.body.ok) return {ok: false, step: 'read', messages};
-              const message = (messages.body.messages || []).find(item => Number(item.id) === Number(sent.body.message_id));
-              if (!message || !String(message.content || '').includes('/shared/videos/')) {
-                return {ok: false, step: 'message_content', message};
-              }
-              let target = document.getElementById('chat-room-messages');
-              if (!target) {
-                target = document.createElement('div');
-                target.id = 'chat-room-messages';
-                document.body.appendChild(target);
-              }
-              renderChatMessages([message]);
-              const anchor = target.querySelector('a.chat-inline-link');
-              const href = anchor ? anchor.href : '';
-              const text = anchor ? anchor.textContent : '';
-              if (!previousChatEnabled) {
-                await api('PUT', '/api/admin/settings', {feature_chat_enabled: false});
-              }
-              return {
-                ok: Boolean(anchor && href.includes('/shared/videos/probeToken_ABC-123') && href.includes('#vk=probe-fragment_456')),
-                step: 'render',
-                href,
-                text,
-                message_id: sent.body.message_id,
-                room_id: room.id,
+              const state = {
+                roomId: null,
+                messageId: null,
+                previousChatEnabled: null,
+                settingsLoaded: false,
               };
+              const result = {ok: false, step: 'start', cleanup: {}};
+              try {
+                const login = await api('POST', '/api/login', {username, password});
+                if (!login.ok || !login.body.ok) throw new Error('login_failed');
+                await api('GET', '/api/csrf-token');
+                const settings = await api('GET', '/api/admin/settings');
+                if (!settings.ok || !settings.body?.ok) throw new Error('settings_read_failed');
+                state.previousChatEnabled = Boolean(settings.body?.settings?.feature_chat_enabled);
+                state.settingsLoaded = true;
+                const enabled = await api('PUT', '/api/admin/settings', {feature_chat_enabled: true});
+                if (!enabled.ok || !enabled.body.ok) throw new Error('enable_chat_failed');
+                const created = await api('POST', '/api/chat/rooms', {name: `formal share link probe ${Date.now()}`});
+                if (!created.ok || !created.body.ok || !created.body.room?.id) throw new Error('create_room_failed');
+                state.roomId = Number(created.body.room.id);
+                const sent = await api('POST', `/api/chat/rooms/${encodeURIComponent(state.roomId)}/messages`, {
+                  content: `影音分享 ${link}`
+                });
+                if (!sent.ok || !sent.body.ok || !sent.body.message_id) throw new Error('send_failed');
+                state.messageId = Number(sent.body.message_id);
+                const messages = await api('GET', `/api/chat/rooms/${encodeURIComponent(state.roomId)}/messages?limit=20`);
+                if (!messages.ok || !messages.body.ok) throw new Error('read_failed');
+                const message = (messages.body.messages || []).find(item => Number(item.id) === state.messageId);
+                if (!message || !String(message.content || '').includes('/shared/videos/')) throw new Error('message_content_failed');
+                let target = document.getElementById('chat-room-messages');
+                if (!target) {
+                  target = document.createElement('div');
+                  target.id = 'chat-room-messages';
+                  document.body.appendChild(target);
+                }
+                renderChatMessages([message]);
+                const anchor = target.querySelector('a.chat-inline-link');
+                const href = anchor ? anchor.href : '';
+                const text = anchor ? anchor.textContent : '';
+                result.ok = Boolean(anchor && href.includes('/shared/videos/probeToken_ABC-123') && href.includes('#vk=probe-fragment_456'));
+                result.step = 'render';
+                result.href = href;
+                result.text = text;
+                result.message_id = state.messageId;
+                result.room_id = state.roomId;
+              } catch (err) {
+                result.step = String(err?.message || err || 'probe_failed');
+                result.error = String(err?.stack || err || 'probe_failed').slice(0, 1000);
+              } finally {
+                if (state.messageId !== null) {
+                  const deletedMessage = await api('DELETE', `/api/chat/messages/${encodeURIComponent(state.messageId)}`);
+                  result.cleanup.message_deleted = Boolean(deletedMessage.ok && deletedMessage.body?.ok);
+                  result.cleanup.message_delete_status = deletedMessage.status;
+                } else {
+                  result.cleanup.message_deleted = false;
+                }
+                if (state.roomId !== null) {
+                  const deletedRoom = await api('DELETE', `/api/chat/rooms/${encodeURIComponent(state.roomId)}`);
+                  result.cleanup.room_deleted = Boolean(deletedRoom.ok && deletedRoom.body?.ok);
+                  result.cleanup.room_delete_status = deletedRoom.status;
+                  const roomsAfter = await api('GET', '/api/chat/rooms');
+                  result.cleanup.room_absent = Boolean(
+                    roomsAfter.ok
+                    && roomsAfter.body?.ok
+                    && !(roomsAfter.body.rooms || []).some(item => Number(item.id) === state.roomId)
+                  );
+                } else {
+                  result.cleanup.room_deleted = false;
+                  result.cleanup.room_absent = false;
+                }
+                if (state.settingsLoaded) {
+                  const restored = await api('PUT', '/api/admin/settings', {feature_chat_enabled: state.previousChatEnabled});
+                  const settingsAfter = await api('GET', '/api/admin/settings');
+                  result.cleanup.setting_restored = Boolean(
+                    restored.ok
+                    && restored.body?.ok
+                    && settingsAfter.ok
+                    && settingsAfter.body?.ok
+                    && Boolean(settingsAfter.body?.settings?.feature_chat_enabled) === state.previousChatEnabled
+                  );
+                } else {
+                  result.cleanup.setting_restored = false;
+                }
+              }
+              result.ok = Boolean(
+                result.ok
+                && result.cleanup.message_deleted
+                && result.cleanup.room_deleted
+                && result.cleanup.room_absent
+                && result.cleanup.setting_restored
+              );
+              return result;
             }""",
             {"username": username, "password": password, "link": link},
         )

@@ -1,4 +1,5 @@
 import json
+from collections.abc import Mapping
 from datetime import datetime
 import hashlib
 import io
@@ -79,6 +80,7 @@ AI_AGENT_WRITE_TOOL_SPECS = {
             "outpaint_right", "outpaint_bottom", "outpaint_feathering",
             "workflow", "workflow_id", "official_workflow_id", "template_id", "lora",
             "loras", "vae", "vae_name", "timeout_seconds", "confirm_billing",
+            "gguf_profile", "gguf_variant", "diffusers_gguf_profile", "diffusers_gguf_variant",
             "backend_url", "comfyui_backend_url", "qwen_edit_profile", "qwen_controlnet_profile", "qwen_profile",
             "profile", "qwen_reference_mode", "qwen_reference_image2", "qwen_reference_force_image2",
             "agent_review_required", "agent_review_mode", "agent_review_strategy",
@@ -262,7 +264,14 @@ AI_AGENT_WRITE_TOOL_SPECS = {
         "method": "POST",
         "path": "/api/trading/bots",
         "path_params": {},
-        "body_fields": {"name", "bot_type", "market_symbol", "strategy", "enabled", "budget_points", "order_size_points", "interval_minutes", "max_runs", "parameters", "config"},
+        "body_fields": {
+            "name", "bot_type", "market_symbol", "strategy", "enabled",
+            "budget_points", "order_size_points", "interval_minutes", "max_runs",
+            "parameters", "config", "side", "order_type", "quantity",
+            "limit_price_points", "trigger_type", "trigger_price_points",
+            "cooldown_seconds", "interval_hours", "workflow", "workflow_json",
+            "stop_loss_percent", "take_profit_percent", "share_parameters",
+        },
         "required": {"market_symbol"},
         "write": True,
     },
@@ -934,12 +943,12 @@ AI_AGENT_WRITE_TOOL_SPECS.update({
     },
     "write_appeal_create": {
         "label": "建立申訴",
-        "description": "提交站內申訴或覆核請求。",
+        "description": "針對自己的最新或指定違規紀錄提交申覆。",
         "method": "POST",
         "path": "/api/appeals",
         "path_params": {},
-        "body_fields": {"appeal_type", "subject", "content", "target_type", "target_id", "evidence"},
-        "required": {"subject", "content"},
+        "body_fields": {"reason", "violation_id"},
+        "required": {"reason"},
         "write": True,
     },
     "write_appeal_review": {
@@ -4342,6 +4351,33 @@ def register_ai_agent_routes(app, deps):
 
     def _dispatch_official_comfyui_workflow(body):
         workflow_id = _official_workflow_id_from_body(body)
+        gguf_profile = str(
+            (body or {}).get("gguf_profile")
+            or (body or {}).get("diffusers_gguf_profile")
+            or ""
+        ).strip()
+        gguf_variant = str(
+            (body or {}).get("gguf_variant")
+            or (body or {}).get("diffusers_gguf_variant")
+            or ""
+        ).strip()
+        if bool(gguf_profile) != bool(gguf_variant):
+            return 400, {
+                "ok": False,
+                "msg": "GGUF workflow 必須同時指定官方 profile 與 variant",
+                "stage": "gguf_workflow_validation",
+            }
+        if (gguf_profile or gguf_variant) and workflow_id != "origin_sdxl_gguf_txt2img":
+            return 400, {
+                "ok": False,
+                "msg": "指定的官方 workflow 不支援 SDXL GGUF profile override",
+                "stage": "gguf_workflow_validation",
+            }
+        gguf_override = bool(
+            workflow_id == "origin_sdxl_gguf_txt2img"
+            and gguf_profile
+            and gguf_variant
+        )
         status_code, workflows_payload = _dispatch_internal_api("GET", "/api/comfyui/workflows", None)
         if not (200 <= int(status_code or 500) < 400) or not isinstance(workflows_payload, dict) or not workflows_payload.get("ok"):
             return status_code, workflows_payload
@@ -4361,7 +4397,11 @@ def register_ai_agent_routes(app, deps):
             return detail_status, detail_payload
         preset = detail_payload.get("preset") if isinstance(detail_payload.get("preset"), dict) else {}
         dependency_error = _workflow_dependency_error(preset)
-        if dependency_error:
+        # The checked-in GGUF template may reference a different installed
+        # variant.  When an explicit official profile+variant is supplied, the
+        # workflow /run endpoint applies it before its strict final dependency
+        # gate.  Do not reject that exact override based on stale defaults.
+        if dependency_error and not gguf_override:
             return 409, dependency_error
         mode = str((body or {}).get("generation_mode") or "").strip().lower()
         if mode in {"img2img", "inpaint", "outpaint"} and not _source_image_filename(body):
@@ -4384,6 +4424,11 @@ def register_ai_agent_routes(app, deps):
             "run_count": body.get("batch_size") or body.get("run_count") or 1,
             "seed_after_generate": "fixed",
         }
+        if gguf_override:
+            run_body["gguf_workflow"] = {
+                "profile_id": gguf_profile,
+                "variant_id": gguf_variant,
+            }
         for key in ("backend_url", "comfyui_backend_url"):
             if body.get(key) not in (None, ""):
                 run_body[key] = body.get(key)
@@ -5279,6 +5324,62 @@ def register_ai_agent_routes(app, deps):
         if not spec:
             _audit_agent_event("AI_AGENT_WRITE_TOOL", actor, success=False, detail=f"tool={tool_name or '-'},error=unsupported_tool")
             return json_resp({"ok": False, "msg": "不支援的 write tool"}), 400
+        current_mode = ""
+        mode_read_error = ""
+        if server_mode_service is None:
+            mode_read_error = "service_unavailable"
+        else:
+            try:
+                mode_payload = server_mode_service.get_current_mode()
+                if isinstance(mode_payload, Mapping):
+                    mode_value = next(
+                        (
+                            mode_payload.get(key)
+                            for key in ("current_mode", "mode", "name")
+                            if mode_payload.get(key) not in (None, "")
+                        ),
+                        "",
+                    )
+                else:
+                    mode_value = mode_payload
+                current_mode = str(mode_value or "").strip().lower()
+                if not current_mode:
+                    mode_read_error = "empty_mode"
+            except Exception:
+                mode_read_error = "read_failed"
+        if mode_read_error:
+            _audit_agent_event(
+                "AI_AGENT_WRITE_TOOL",
+                actor,
+                success=False,
+                detail=f"tool={tool_name},error=server_mode_{mode_read_error}",
+            )
+            return json_resp({
+                "ok": False,
+                "msg": "無法確認伺服器安全模式，AI Agent write-tools 已暫停",
+                "blocked_by": "server_mode_unavailable",
+            }), 503
+        if tool_name == "write_incident_resolve" and not _actor_is_super_admin(actor):
+            _audit_agent_event(
+                "AI_AGENT_WRITE_TOOL",
+                actor,
+                success=False,
+                detail="tool=write_incident_resolve,error=super_admin_required",
+            )
+            return json_resp({"ok": False, "msg": "解除事故封鎖僅限 super admin"}), 403
+        if current_mode == "incident_lockdown" and tool_name != "write_incident_resolve":
+            _audit_agent_event(
+                "AI_AGENT_WRITE_TOOL",
+                actor,
+                success=False,
+                detail=f"tool={tool_name},error=incident_recovery_tool_denied",
+            )
+            return json_resp({
+                "ok": False,
+                "msg": "事故封鎖模式中，AI Agent 僅允許 root 執行解除事故工具",
+                "server_mode": current_mode,
+                "allowed_tool": "write_incident_resolve",
+            }), 503
         if spec.get("write"):
             guard_denied = _ai_agent_write_guard_denied(actor, endpoint="execute")
             if guard_denied:

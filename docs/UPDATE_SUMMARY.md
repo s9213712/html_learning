@@ -1,6 +1,23 @@
 # Update Summary
 
-Release ID: `05_2026.07.12-003`
+Release ID: `05_2026.07.15-001`
+
+## 05_2026.07.15-001
+
+- Completed the fail-closed qualification path for the 24-hour operational
+  campaign: verified cgroup leaves and namespace confinement, an external
+  watchdog, hard-stop state transitions, continuous-active-time accounting,
+  exact source freeze, field-complete resource samples, and sealed evidence
+  authority are now enforced by the supervisor.
+- Added live, terminal-state scenario contracts for AI Agent operations,
+  Cloud Drive and long-video/HLS sharing, BT, ComfyUI workflows, trading and
+  background trading, governance, restart, backup/restore, incident response,
+  mobile/browser UX, and the complete 41-role evidence projection. A result
+  cannot be promoted to PASS after a runner or supervisor failure.
+- Hardened AI Agent compound read/write intent and reversible cleanup, ComfyUI
+  model/input binding and managed-backend ownership, supervised restart and
+  snapshot compatibility, artifact reopening, credential scanning, and
+  orphan-process/listener detection.
 
 ## 05_2026.07.12-003
 

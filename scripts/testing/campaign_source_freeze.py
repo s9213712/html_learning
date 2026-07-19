@@ -19,11 +19,14 @@ import weakref
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 
 SOURCE_FREEZE_SCHEMA_VERSION = "hackme.source-freeze.v3"
 SOURCE_DRIFT_SCHEMA_VERSION = "hackme.source-drift.v4"
+FULL_CONTENT_EVIDENCE = "full_sha256"
+METADATA_CONTENT_EVIDENCE = "metadata_identity"
+CONTENT_EVIDENCE_MODES = frozenset({FULL_CONTENT_EVIDENCE, METADATA_CONTENT_EVIDENCE})
 
 # These gitignored files directly alter how the server is launched.  They are
 # reviewed source authority, not disposable runtime output, so a broad
@@ -61,6 +64,21 @@ _INOTIFY_MUTATION_MASK = (
 _INOTIFY_EVENT = struct.Struct("iIII")
 _MAX_RUNTIME_EVENTS_PER_CHECK = 20_000
 _DEFAULT_METADATA_RECONCILE_SECONDS = 300.0
+_IO_CHECKPOINT_BATCH_SIZE = 16
+_GIT_SERIAL_INDEX_CONFIG = ("-c", "core.preloadindex=false")
+_SOURCE_WATCH_PRUNE_NAMES = frozenset({
+    ".git",
+    ".hg",
+    ".svn",
+    ".pytest_cache",
+    ".venv",
+    "__pycache__",
+    "node_modules",
+    "output",
+    "runtime",
+    "venv",
+})
+_SOURCE_WATCH_PRUNE_PATHS = frozenset({"docs/AGENTS/reports"})
 
 
 def utc_now() -> str:
@@ -234,7 +252,13 @@ class _RuntimeDriftMonitor:
             for root in self._git_authority_roots():
                 self._add_tree(root, "git")
             self._self_test()
-        except Exception as exc:
+        except BaseException as exc:
+            if self.owner._checkpoint_failure is exc:
+                self.close()
+                raise
+            if not isinstance(exc, Exception):
+                self.close()
+                raise
             self._error(f"inotify initialization failed: {exc.__class__.__name__}: {exc}")
             self.close()
             self.mode = "metadata_fallback"
@@ -281,10 +305,16 @@ class _RuntimeDriftMonitor:
                 roots.append(path)
         return roots
 
-    def _add_watch(self, path: Path, source: str) -> None:
+    def _add_watch(
+        self,
+        path: Path,
+        source: str,
+        *,
+        already_resolved: bool = False,
+    ) -> None:
         if self.fd < 0 or self.libc is None:
             return
-        resolved = path.resolve()
+        resolved = path if already_resolved else path.resolve()
         key = (source, str(resolved))
         if key in self.paths_to_watch:
             return
@@ -311,15 +341,40 @@ class _RuntimeDriftMonitor:
         def on_walk_error(exc: OSError) -> None:
             self._error(f"cannot enumerate watch tree {source}:{root}: [{exc.errno}] {exc.strerror}")
 
+        directories_seen = 0
         for directory, names, _files in os.walk(
             root,
             topdown=True,
             onerror=on_walk_error,
             followlinks=False,
         ):
+            directory_path = Path(directory).resolve()
             if source == "source":
-                names[:] = [name for name in names if name != ".git"]
-            self._add_watch(Path(directory), source)
+                try:
+                    relative_directory = directory_path.relative_to(
+                        self.owner.repo_root
+                    )
+                except ValueError:
+                    relative_directory = Path(".")
+                kept: list[str] = []
+                for name in names:
+                    candidate = relative_directory / name
+                    relative = candidate.as_posix().removeprefix("./")
+                    if name in _SOURCE_WATCH_PRUNE_NAMES:
+                        continue
+                    if relative in _SOURCE_WATCH_PRUNE_PATHS:
+                        continue
+                    kept.append(name)
+                names[:] = kept
+            self._add_watch(directory_path, source, already_resolved=True)
+            directories_seen += 1
+            if directories_seen % _IO_CHECKPOINT_BATCH_SIZE == 0:
+                self.owner._io_checkpoint(
+                    f"monitor_walk:{source}:{directories_seen}"
+                )
+        self.owner._io_checkpoint(
+            f"monitor_walk:{source}:complete:{directories_seen}"
+        )
 
     def add_source_tree(self, path: Path) -> None:
         if self.mode == "inotify" and path.is_dir():
@@ -472,7 +527,15 @@ class _RuntimeDriftMonitor:
 class GitSourceFreezer:
     """Captures both Git authority and a full tracked working-tree manifest."""
 
-    def __init__(self, repo_root: Path, artifact_root: Path, *, untracked_allowlist: Iterable[str] = ()):
+    def __init__(
+        self,
+        repo_root: Path,
+        artifact_root: Path,
+        *,
+        untracked_allowlist: Iterable[str] = (),
+        content_evidence_mode: str = FULL_CONTENT_EVIDENCE,
+        io_safety_checkpoint: Callable[[str], None] | None = None,
+    ):
         self.repo_root = Path(repo_root).resolve()
         self.artifact_root = Path(artifact_root).resolve()
         try:
@@ -482,6 +545,13 @@ class GitSourceFreezer:
         else:
             raise SourceFreezeError("source-freeze artifacts must be outside the repository root")
         self.untracked_allowlist = tuple(str(pattern) for pattern in untracked_allowlist)
+        if content_evidence_mode not in CONTENT_EVIDENCE_MODES:
+            raise SourceFreezeError(
+                f"unsupported source content evidence mode: {content_evidence_mode}"
+            )
+        self.content_evidence_mode = str(content_evidence_mode)
+        self._io_safety_checkpoint = io_safety_checkpoint
+        self._checkpoint_failure: BaseException | None = None
         self.protected_ignored_paths = tuple(REVIEWED_PROTECTED_IGNORED_PATHS)
         for relative in self.protected_ignored_paths:
             self._repo_path(relative)
@@ -494,6 +564,24 @@ class GitSourceFreezer:
         self._runtime_incident: dict[str, Any] | None = None
         self._ignored_runtime_prefixes: set[str] = set()
         self._baseline_parent_directories: set[str] = set()
+
+    def _io_checkpoint(self, stage: str) -> None:
+        """Yield between bounded I/O batches and fail closed on host risk."""
+
+        callback = self._io_safety_checkpoint
+        if callback is None:
+            return
+        try:
+            callback(str(stage))
+        except BaseException as exc:
+            self._checkpoint_failure = exc
+            self.baseline = None
+            self._baseline_entries.clear()
+            self._baseline_untracked_entries.clear()
+            self._baseline_protected_ignored_entries.clear()
+            self._baseline_parent_directories.clear()
+            self.close()
+            raise
 
     def _refresh_baseline_parent_directories(self) -> None:
         parents: set[str] = set()
@@ -518,7 +606,13 @@ class GitSourceFreezer:
     def _git_bytes(self, *args: str, timeout: int = 60) -> bytes:
         try:
             completed = subprocess.run(
-                ["git", "-C", str(self.repo_root), *args],
+                [
+                    "git",
+                    "-C",
+                    str(self.repo_root),
+                    *_GIT_SERIAL_INDEX_CONFIG,
+                    *args,
+                ],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
@@ -547,15 +641,22 @@ class GitSourceFreezer:
                 continue
             text = item.decode("utf-8", errors="surrogateescape")
             if len(text) < 4:
-                rows.append({"status": "??", "path": text})
-                continue
+                raise SourceFreezeError(
+                    "malformed git status porcelain v1 record"
+                )
             status_code = text[:2]
             path = text[3:]
             row = {"status": status_code, "path": path}
             if "R" in status_code or "C" in status_code:
-                if index < len(items) and items[index]:
-                    row["source_path"] = items[index].decode("utf-8", errors="surrogateescape")
-                    index += 1
+                if index >= len(items) or not items[index]:
+                    raise SourceFreezeError(
+                        "rename/copy status record is missing its source path"
+                    )
+                row["source_path"] = items[index].decode(
+                    "utf-8",
+                    errors="surrogateescape",
+                )
+                index += 1
             rows.append(row)
         return rows
 
@@ -570,6 +671,61 @@ class GitSourceFreezer:
 
     def _status_rows(self) -> list[dict[str, str]]:
         return self._parse_status_rows(self._status_bytes())
+
+    @staticmethod
+    def _tracked_status_projection(
+        status_rows: Iterable[Mapping[str, str]],
+    ) -> tuple[bytes, int]:
+        """Canonical tracked-change evidence derived from porcelain v1."""
+
+        tracked_rows: list[dict[str, str]] = []
+        for source in status_rows:
+            status_code = str(source.get("status") or "")
+            path = str(source.get("path") or "")
+            if len(status_code) != 2 or not path:
+                raise SourceFreezeError(
+                    "invalid tracked status projection input"
+                )
+            if status_code in {"??", "!!"}:
+                continue
+            if any(character not in " MTADRCU?m" for character in status_code):
+                raise SourceFreezeError(
+                    f"unsupported git status code in tracked projection: {status_code!r}"
+                )
+            row = {
+                "path": path,
+                "status": status_code,
+            }
+            source_path = str(source.get("source_path") or "")
+            rename_or_copy = "R" in status_code or "C" in status_code
+            if rename_or_copy != bool(source_path):
+                raise SourceFreezeError(
+                    "rename/copy tracked projection path authority is incomplete"
+                )
+            if source_path:
+                row["source_path"] = source_path
+            tracked_rows.append(row)
+        tracked_rows.sort(key=lambda row: (
+            row["path"],
+            row["status"],
+            row.get("source_path", ""),
+        ))
+        payload = {
+            "schema_version": "hackme.git-tracked-status-projection.v1",
+            "source": "git_status_porcelain_v1_z",
+            "tracked_row_count": len(tracked_rows),
+            "tracked_rows": tracked_rows,
+        }
+        serialized = (
+            json.dumps(
+                payload,
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("ascii")
+            + b"\n"
+        )
+        return serialized, len(tracked_rows)
 
     def _status_policy(self, rows: Iterable[Mapping[str, str]]) -> dict[str, Any]:
         allowed: list[dict[str, str]] = []
@@ -586,8 +742,8 @@ class GitSourceFreezer:
             "clean": not blocked,
         }
 
-    def _index_rows(self) -> list[tuple[str, str, int, str]]:
-        raw = self._git_bytes("ls-files", "-s", "-z")
+    @staticmethod
+    def _parse_index_rows(raw: bytes) -> list[tuple[str, str, int, str]]:
         rows: list[tuple[str, str, int, str]] = []
         for item in raw.split(b"\0"):
             if not item:
@@ -596,6 +752,9 @@ class GitSourceFreezer:
             mode, oid, stage = metadata.decode("ascii").split()
             rows.append((mode, oid, int(stage), path_bytes.decode("utf-8", errors="surrogateescape")))
         return rows
+
+    def _index_rows(self) -> list[tuple[str, str, int, str]]:
+        return self._parse_index_rows(self._git_bytes("ls-files", "-s", "-z"))
 
     def _untracked_paths(self) -> list[str]:
         raw = self._git_bytes("ls-files", "--others", "--exclude-standard", "-z")
@@ -624,10 +783,38 @@ class GitSourceFreezer:
             "device": int(info.st_dev),
         }
 
+    @staticmethod
+    def _metadata_identity_digest(
+        *,
+        kind: str,
+        info: os.stat_result,
+        authority: Iterable[str] = (),
+    ) -> str:
+        payload = {
+            "authority": list(authority),
+            "ctime_ns": int(info.st_ctime_ns),
+            "device": int(info.st_dev),
+            "filesystem_mode": int(stat.S_IMODE(info.st_mode)),
+            "inode": int(info.st_ino),
+            "kind": str(kind),
+            "mtime_ns": int(info.st_mtime_ns),
+            "size": int(info.st_size),
+        }
+        return sha256_bytes(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("ascii")
+        )
+
     def _submodule_head(self, path: Path) -> str:
         try:
             completed = subprocess.run(
-                ["git", "-C", str(path), "rev-parse", "HEAD"],
+                [
+                    "git",
+                    "-C",
+                    str(path),
+                    *_GIT_SERIAL_INDEX_CONFIG,
+                    "rev-parse",
+                    "HEAD",
+                ],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
@@ -641,9 +828,21 @@ class GitSourceFreezer:
         value = completed.stdout.decode("ascii", errors="replace").strip()
         return value if re_full_sha(value) else ""
 
-    def tracked_entries(self) -> list[TrackedEntry]:
+    def tracked_entries(
+        self,
+        *,
+        index_raw: bytes | None = None,
+    ) -> list[TrackedEntry]:
         entries: list[TrackedEntry] = []
-        for mode, oid, stage, relative in self._index_rows():
+        index_rows = (
+            self._parse_index_rows(index_raw)
+            if index_raw is not None
+            else self._index_rows()
+        )
+        for position, (mode, oid, stage, relative) in enumerate(
+            index_rows,
+            start=1,
+        ):
             path = self._repo_path(relative)
             try:
                 info = path.lstat()
@@ -653,11 +852,16 @@ class GitSourceFreezer:
                     "submodule_missing" if mode == "160000" else "missing",
                     "", "", "", -1, -1, -1, -1, -1, -1,
                 ))
+                if position % _IO_CHECKPOINT_BATCH_SIZE == 0:
+                    self._io_checkpoint(f"tracked_lstat:{position}")
                 continue
             if mode == "160000":
                 target = ""
                 kind = "submodule"
                 submodule_head = self._submodule_head(path)
+                self._io_checkpoint(
+                    f"git_authority:submodule-head:{relative}"
+                )
                 digest = sha256_bytes(f"{oid}\0{submodule_head}".encode("ascii"))
             elif stat.S_ISLNK(info.st_mode):
                 target = os.readlink(path)
@@ -668,7 +872,15 @@ class GitSourceFreezer:
                 target = ""
                 kind = "file"
                 submodule_head = ""
-                digest = sha256_file(path)
+                digest = (
+                    sha256_file(path)
+                    if self.content_evidence_mode == FULL_CONTENT_EVIDENCE
+                    else self._metadata_identity_digest(
+                        kind=kind,
+                        info=info,
+                        authority=(mode, oid, str(stage)),
+                    )
+                )
             else:
                 target = ""
                 kind = "other"
@@ -686,16 +898,27 @@ class GitSourceFreezer:
                 submodule_head=submodule_head,
                 **stat_values,
             ))
+            if position % _IO_CHECKPOINT_BATCH_SIZE == 0:
+                self._io_checkpoint(f"tracked_lstat:{position}")
+        if entries and len(entries) % _IO_CHECKPOINT_BATCH_SIZE:
+            self._io_checkpoint(f"tracked_lstat:complete:{len(entries)}")
         return entries
 
-    def untracked_entries(self) -> list[UntrackedEntry]:
+    def untracked_entries(
+        self,
+        *,
+        paths: Iterable[str] | None = None,
+    ) -> list[UntrackedEntry]:
         entries: list[UntrackedEntry] = []
-        for relative in self._untracked_paths():
+        untracked_paths = self._untracked_paths() if paths is None else list(paths)
+        for position, relative in enumerate(untracked_paths, start=1):
             path = self._repo_path(relative)
             try:
                 info = path.lstat()
             except FileNotFoundError:
                 entries.append(UntrackedEntry(relative, "missing", "", "", -1, -1, -1, -1, -1, -1))
+                if position % _IO_CHECKPOINT_BATCH_SIZE == 0:
+                    self._io_checkpoint(f"untracked_lstat:{position}")
                 continue
             if stat.S_ISLNK(info.st_mode):
                 target = os.readlink(path)
@@ -704,7 +927,11 @@ class GitSourceFreezer:
             elif stat.S_ISREG(info.st_mode):
                 target = ""
                 kind = "file"
-                digest = sha256_file(path)
+                digest = (
+                    sha256_file(path)
+                    if self.content_evidence_mode == FULL_CONTENT_EVIDENCE
+                    else self._metadata_identity_digest(kind=kind, info=info)
+                )
             else:
                 target = ""
                 kind = "other"
@@ -716,18 +943,28 @@ class GitSourceFreezer:
                 symlink_target=target,
                 **self._entry_stat(info),
             ))
+            if position % _IO_CHECKPOINT_BATCH_SIZE == 0:
+                self._io_checkpoint(f"untracked_lstat:{position}")
+        if entries and len(entries) % _IO_CHECKPOINT_BATCH_SIZE:
+            self._io_checkpoint(f"untracked_lstat:complete:{len(entries)}")
         return entries
 
     def protected_ignored_entries(self) -> list[UntrackedEntry]:
         """Snapshot reviewed ignored launcher inputs, including their absence."""
 
         entries: list[UntrackedEntry] = []
-        for relative in self.protected_ignored_paths:
+        for position, relative in enumerate(
+            self.protected_ignored_paths,
+            start=1,
+        ):
             path = self._repo_path(relative)
             try:
                 info = path.lstat()
             except FileNotFoundError:
                 entries.append(UntrackedEntry(relative, "missing", "", "", -1, -1, -1, -1, -1, -1))
+                self._io_checkpoint(
+                    f"protected_ignored_lstat:{position}"
+                )
                 continue
             if stat.S_ISLNK(info.st_mode):
                 target = os.readlink(path)
@@ -748,6 +985,10 @@ class GitSourceFreezer:
                 symlink_target=target,
                 **self._entry_stat(info),
             ))
+            self._io_checkpoint(f"protected_ignored_lstat:{position}")
+        self._io_checkpoint(
+            f"protected_ignored_lstat:complete:{len(entries)}"
+        )
         return entries
 
     def _protected_ignored_policy(self) -> dict[str, Any]:
@@ -755,7 +996,17 @@ class GitSourceFreezer:
         for relative in self.protected_ignored_paths:
             try:
                 completed = subprocess.run(
-                    ["git", "-C", str(self.repo_root), "check-ignore", "-q", "--no-index", "--", relative],
+                    [
+                        "git",
+                        "-C",
+                        str(self.repo_root),
+                        *_GIT_SERIAL_INDEX_CONFIG,
+                        "check-ignore",
+                        "-q",
+                        "--no-index",
+                        "--",
+                        relative,
+                    ],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.PIPE,
                     env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
@@ -778,6 +1029,7 @@ class GitSourceFreezer:
                 "git_ignored": completed.returncode == 0,
                 "authority_class": "protected_ignored_launcher_input",
             })
+            self._io_checkpoint(f"git_authority:check-ignore:{relative}")
         return {
             "policy": "explicit_reviewed_list",
             "broad_ignored_runtime_is_excluded": True,
@@ -832,45 +1084,119 @@ class GitSourceFreezer:
 
     def _authority_snapshot(self) -> dict[str, Any]:
         status_raw = self._status_bytes()
-        return {
-            "commit": self._git_text("rev-parse", "HEAD").strip(),
-            "branch": self._git_text("rev-parse", "--abbrev-ref", "HEAD").strip(),
-            "status_raw": status_raw,
-            "status_rows": self._parse_status_rows(status_raw),
-            "diff_binary": self._git_bytes(
+        status_rows = self._parse_status_rows(status_raw)
+        self._io_checkpoint("git_authority:status")
+        if self.content_evidence_mode == FULL_CONTENT_EVIDENCE:
+            diff_mode = "binary_patch"
+            diff_source = "git_diff_head_binary"
+            diff_bytes = self._git_bytes(
                 "diff", "--no-ext-diff", "--binary", "--ignore-submodules=none", "HEAD", "--", timeout=120,
-            ),
-            "ls_files": self._git_bytes("ls-files", "-s", "-z"),
-            "submodule": self._git_bytes("submodule", "status", "--recursive", timeout=120),
+            )
+            diff_has_changes = bool(diff_bytes)
+            self._io_checkpoint("git_authority:diff")
+        else:
+            # Smoke metadata evidence already binds the index, per-path
+            # metadata identity, and the complete porcelain status.  Reuse
+            # that captured status projection instead of traversing the same
+            # working tree again with ``git diff``; the pre-armed inotify
+            # monitor and the second authority endpoint still prove that the
+            # projection was stable throughout capture.
+            diff_mode = "tracked_status_porcelain_v1_projection"
+            diff_source = "derived_from_git_status_porcelain_v1_z"
+            diff_bytes, tracked_change_count = self._tracked_status_projection(
+                status_rows
+            )
+            diff_has_changes = tracked_change_count > 0
+            self._io_checkpoint("git_authority:diff-projection")
+        commit = self._git_text("rev-parse", "HEAD").strip()
+        self._io_checkpoint("git_authority:commit")
+        branch = self._git_text("rev-parse", "--abbrev-ref", "HEAD").strip()
+        self._io_checkpoint("git_authority:branch")
+        ls_files = self._git_bytes("ls-files", "-s", "-z")
+        self._io_checkpoint("git_authority:ls-files")
+        has_gitlinks = any(
+            mode == "160000"
+            for mode, _oid, _stage, _path in self._parse_index_rows(ls_files)
+        )
+        if self.content_evidence_mode == FULL_CONTENT_EVIDENCE or has_gitlinks:
+            submodule = self._git_bytes(
+                "submodule",
+                "status",
+                "--recursive",
+                timeout=120,
+            )
+            submodule_evidence_mode = "recursive_git_submodule_status"
+            self._io_checkpoint("git_authority:submodule")
+        else:
+            submodule = b""
+            submodule_evidence_mode = "not_applicable_no_gitlinks"
+            self._io_checkpoint("git_authority:submodule-not-applicable")
+        return {
+            "commit": commit,
+            "branch": branch,
+            "status_raw": status_raw,
+            "status_rows": status_rows,
+            "diff_binary": diff_bytes,
+            "diff_has_changes": diff_has_changes,
+            "diff_evidence_mode": diff_mode,
+            "diff_evidence_source": diff_source,
+            "ls_files": ls_files,
+            "submodule": submodule,
+            "submodule_evidence_mode": submodule_evidence_mode,
         }
 
     @staticmethod
     def _authority_digests(snapshot: Mapping[str, Any]) -> dict[str, str]:
-        return {
+        digests = {
             "commit": str(snapshot["commit"]),
             "branch": str(snapshot["branch"]),
             "git_status_sha256": sha256_bytes(snapshot["status_raw"]),
-            "git_diff_binary_sha256": sha256_bytes(snapshot["diff_binary"]),
+            "git_change_evidence_sha256": sha256_bytes(snapshot["diff_binary"]),
             "git_ls_files_sha256": sha256_bytes(snapshot["ls_files"]),
             "git_submodule_status_sha256": sha256_bytes(snapshot["submodule"]),
         }
+        if snapshot.get("diff_evidence_mode") == "binary_patch":
+            digests["git_diff_binary_sha256"] = digests[
+                "git_change_evidence_sha256"
+            ]
+        return digests
 
-    @staticmethod
-    def _write_manifest(path: Path, entries: Iterable[TrackedEntry | UntrackedEntry]) -> None:
+    def _write_manifest(
+        self,
+        path: Path,
+        entries: Iterable[TrackedEntry | UntrackedEntry],
+    ) -> None:
+        sorted_entries = sorted(entries, key=lambda item: item.path)
         with path.open("w", encoding="utf-8") as handle:
-            for entry in sorted(entries, key=lambda item: item.path):
+            for position, entry in enumerate(sorted_entries, start=1):
                 handle.write(json.dumps(entry.to_dict(), ensure_ascii=True, sort_keys=True) + "\n")
+                if position % _IO_CHECKPOINT_BATCH_SIZE == 0:
+                    handle.flush()
+                    self._io_checkpoint(
+                        f"manifest_write:{path.name}:{position}"
+                    )
+            handle.flush()
+        self._io_checkpoint(
+            f"manifest_write:{path.name}:complete:{len(sorted_entries)}"
+        )
 
     @staticmethod
     def _write_authority_artifacts(destination: Path, snapshot: Mapping[str, Any]) -> dict[str, str]:
+        change_evidence_path = destination / (
+            "git_diff_binary.patch"
+            if snapshot.get("diff_evidence_mode") == "binary_patch"
+            else "git_tracked_change_evidence.json"
+        )
         paths = {
             "git_status": destination / "git_status_porcelain_v1.zlist",
-            "git_diff_binary": destination / "git_diff_binary.patch",
+            "git_change_evidence": change_evidence_path,
             "git_ls_files": destination / "git_ls_files_s.zlist",
             "git_submodule_status": destination / "git_submodule_status.txt",
         }
+        if snapshot.get("diff_evidence_mode") == "binary_patch":
+            paths["git_diff_binary"] = change_evidence_path
         paths["git_status"].write_bytes(snapshot["status_raw"])
-        paths["git_diff_binary"].write_bytes(snapshot["diff_binary"])
+        paths["git_change_evidence"].write_bytes(snapshot["diff_binary"])
         paths["git_ls_files"].write_bytes(snapshot["ls_files"])
         paths["git_submodule_status"].write_bytes(snapshot["submodule"])
         return {name: str(path) for name, path in paths.items()}
@@ -878,29 +1204,79 @@ class GitSourceFreezer:
     def capture(self, *, label: str = "H0", require_clean: bool = True) -> dict[str, Any]:
         destination = self.artifact_root / str(label)
         destination.mkdir(parents=True, exist_ok=True)
-        before = self._authority_snapshot()
-        entries_before = self.tracked_entries()
-        untracked_before = self.untracked_entries()
-        protected_ignored_before = self.protected_ignored_entries()
-        entries = self.tracked_entries()
-        untracked = self.untracked_entries()
-        protected_ignored = self.protected_ignored_entries()
-        authority = self._authority_snapshot()
-        protected_ignored_after_authority = self.protected_ignored_entries()
-        authority_stable = self._authority_digests(before) == self._authority_digests(authority)
-        manifests_stable = bool(
-            self.manifest_digest(entries_before) == self.manifest_digest(entries)
-            and self.untracked_manifest_digest(untracked_before) == self.untracked_manifest_digest(untracked)
-            and self.untracked_manifest_digest(protected_ignored_before)
-            == self.untracked_manifest_digest(protected_ignored)
-            == self.untracked_manifest_digest(protected_ignored_after_authority)
+        metadata_h0_monitor_prearmed = bool(
+            label == "H0"
+            and self.content_evidence_mode == METADATA_CONTENT_EVIDENCE
         )
+        capture_monitor_events: list[RuntimeMutationEvent] = []
+        capture_monitor_health: dict[str, Any] = {}
+        if metadata_h0_monitor_prearmed:
+            self._start_runtime_monitor()
+            assert self._runtime_monitor is not None
+        before = self._authority_snapshot()
+        if metadata_h0_monitor_prearmed:
+            entries_before = self.tracked_entries(index_raw=before["ls_files"])
+            untracked_before = self.untracked_entries(paths=(
+                str(row.get("path") or "")
+                for row in before["status_rows"]
+                if row.get("status") == "??"
+            ))
+        else:
+            entries_before = self.tracked_entries()
+            untracked_before = self.untracked_entries()
+        protected_ignored_before = self.protected_ignored_entries()
+        if metadata_h0_monitor_prearmed:
+            entries = entries_before
+            untracked = untracked_before
+            protected_ignored = protected_ignored_before
+        else:
+            entries = self.tracked_entries()
+            untracked = self.untracked_entries()
+            protected_ignored = self.protected_ignored_entries()
+        authority = self._authority_snapshot()
+        protected_ignored_after_authority = (
+            protected_ignored
+            if metadata_h0_monitor_prearmed
+            else self.protected_ignored_entries()
+        )
+        authority_stable = self._authority_digests(before) == self._authority_digests(authority)
+        if metadata_h0_monitor_prearmed:
+            manifest_capture_mode = "single_pass_prearmed_inotify"
+            manifests_stable = True
+        else:
+            manifest_capture_mode = "double_pass_manifest_comparison"
+            manifests_stable = bool(
+                self.manifest_digest(entries_before) == self.manifest_digest(entries)
+                and self.untracked_manifest_digest(untracked_before)
+                == self.untracked_manifest_digest(untracked)
+                and self.untracked_manifest_digest(protected_ignored_before)
+                == self.untracked_manifest_digest(protected_ignored)
+                == self.untracked_manifest_digest(protected_ignored_after_authority)
+            )
         protected_ignored = protected_ignored_after_authority
-        capture_stable = authority_stable and manifests_stable
+        capture_monitor_stable = True
+        if metadata_h0_monitor_prearmed:
+            assert self._runtime_monitor is not None
+            capture_monitor_events = [
+                event
+                for event in self._runtime_monitor.drain()
+                if event.source != "probe"
+            ]
+            capture_monitor_health = self._runtime_monitor.health()
+            capture_monitor_stable = bool(
+                not capture_monitor_events
+                and capture_monitor_health.get("machine_verified") is True
+            )
+        capture_stable = (
+            authority_stable
+            and manifests_stable
+            and capture_monitor_stable
+        )
         commit = str(authority["commit"])
         branch = str(authority["branch"])
         status_raw = authority["status_raw"]
         diff_binary = authority["diff_binary"]
+        diff_has_changes = bool(authority["diff_has_changes"])
         ls_files = authority["ls_files"]
         submodule = authority["submodule"]
         status_rows = authority["status_rows"]
@@ -931,6 +1307,7 @@ class GitSourceFreezer:
         untracked_path_consistent = status_untracked_paths == manifest_untracked_paths
 
         artifacts = self._write_authority_artifacts(destination, authority)
+        self._io_checkpoint("manifest_write:authority_artifacts")
         tracked_manifest_path = destination / "tracked_manifest.jsonl"
         untracked_manifest_path = destination / "untracked_manifest.jsonl"
         protected_ignored_manifest_path = destination / "protected_ignored_manifest.jsonl"
@@ -950,7 +1327,7 @@ class GitSourceFreezer:
             re_full_sha(commit)
             and capture_stable
             and (not status_rows or not require_clean)
-            and (not diff_binary or not require_clean)
+            and (not diff_has_changes or not require_clean)
             and not missing
             and not missing_untracked
             and not unsupported
@@ -970,16 +1347,38 @@ class GitSourceFreezer:
             "branch": branch,
             "verified": verified,
             "require_clean": bool(require_clean),
+            "content_evidence_mode": self.content_evidence_mode,
+            "git_change_evidence_mode": str(authority["diff_evidence_mode"]),
+            "git_change_evidence_source": str(authority["diff_evidence_source"]),
             "capture_stable": capture_stable,
             "authority_stable": authority_stable,
             "manifests_stable": manifests_stable,
+            "manifest_capture_mode": manifest_capture_mode,
+            "tracked_path_authority": (
+                "first_authority_ls_files"
+                if metadata_h0_monitor_prearmed
+                else "independent_git_ls_files"
+            ),
+            "untracked_path_authority": (
+                "first_authority_status_rows"
+                if metadata_h0_monitor_prearmed
+                else "independent_git_ls_files_others"
+            ),
+            "capture_monitor_prearmed": metadata_h0_monitor_prearmed,
+            "capture_monitor_stable": capture_monitor_stable,
+            "capture_monitor_events": [
+                event.to_dict() for event in capture_monitor_events
+            ],
             "status": status_policy,
             "git_status_empty": not status_rows,
             "git_status_sha256": sha256_bytes(status_raw),
-            "git_diff_binary_empty": not diff_binary,
-            "git_diff_binary_sha256": sha256_bytes(diff_binary),
+            "git_change_evidence_empty": not diff_has_changes,
+            "git_change_evidence_sha256": sha256_bytes(diff_binary),
             "git_ls_files_sha256": sha256_bytes(ls_files),
             "git_submodule_status_sha256": sha256_bytes(submodule),
+            "git_submodule_evidence_mode": str(
+                authority["submodule_evidence_mode"]
+            ),
             "submodule_dirty": submodule_dirty,
             "submodule_worktree_changes": submodule_worktree_changes,
             "tracked_file_count": len(entries),
@@ -1005,6 +1404,13 @@ class GitSourceFreezer:
             "artifact_root": str(destination),
             "artifacts": artifacts,
         }
+        if authority["diff_evidence_mode"] == "binary_patch":
+            result.update({
+                "git_diff_evidence_mode": str(authority["diff_evidence_mode"]),
+                "git_diff_evidence_source": str(authority["diff_evidence_source"]),
+                "git_diff_binary_empty": not diff_has_changes,
+                "git_diff_binary_sha256": sha256_bytes(diff_binary),
+            })
         if label == "H0" and verified:
             self.baseline = result
             self._baseline_entries = {entry.path: entry for entry in entries}
@@ -1013,7 +1419,11 @@ class GitSourceFreezer:
                 entry.path: entry for entry in protected_ignored
             }
             self._refresh_baseline_parent_directories()
-            self._start_runtime_monitor()
+            if metadata_h0_monitor_prearmed:
+                assert self._runtime_monitor is not None
+                self._runtime_monitor.mark_reconciled()
+            else:
+                self._start_runtime_monitor()
             assert self._runtime_monitor is not None
             monitor_health = self._runtime_monitor.health()
             result["runtime_monitor"] = monitor_health
@@ -1042,7 +1452,7 @@ class GitSourceFreezer:
             raise SourceFreezeError(
                 "source freeze verification failed: "
                 f"status_rows={len(status_rows)}, blocked={len(status_policy['blocked_changes'])}, "
-                f"diff={bool(diff_binary)}, capture_stable={capture_stable}, "
+                f"diff={diff_has_changes}, capture_stable={capture_stable}, "
                 f"missing={len(missing) + len(missing_untracked)}, "
                 f"unsupported={len(unsupported) + len(unsupported_untracked)}, "
                 f"unsafe_protected_ignored={len(unsafe_protected_ignored)}, "
@@ -1065,6 +1475,12 @@ class GitSourceFreezer:
             raise SourceFreezeError("H0 source freeze was not machine-verified")
         if Path(str(payload.get("repo_root") or "")).resolve() != self.repo_root:
             raise SourceFreezeError("H0 source freeze belongs to a different repository root")
+        baseline_evidence_mode = str(
+            payload.get("content_evidence_mode") or FULL_CONTENT_EVIDENCE
+        )
+        if baseline_evidence_mode not in CONTENT_EVIDENCE_MODES:
+            raise SourceFreezeError("H0 source content evidence mode is unsupported")
+        self.content_evidence_mode = baseline_evidence_mode
         baseline_allowlist = tuple(str(item) for item in ((payload.get("status") or {}).get("untracked_allowlist") or ()))
         if baseline_allowlist != self.untracked_allowlist:
             raise SourceFreezeError("H0 untracked allowlist does not match campaign policy")
@@ -1090,10 +1506,38 @@ class GitSourceFreezer:
 
         authority_hashes = {
             "git_status": "git_status_sha256",
-            "git_diff_binary": "git_diff_binary_sha256",
             "git_ls_files": "git_ls_files_sha256",
             "git_submodule_status": "git_submodule_status_sha256",
         }
+        if artifact_values.get("git_change_evidence"):
+            authority_hashes["git_change_evidence"] = (
+                "git_change_evidence_sha256"
+            )
+        elif artifact_values.get("git_diff_binary"):
+            authority_hashes["git_diff_binary"] = "git_diff_binary_sha256"
+        else:
+            raise SourceFreezeError("H0 change-evidence artifact is missing")
+        expected_change_mode = (
+            "binary_patch"
+            if baseline_evidence_mode == FULL_CONTENT_EVIDENCE
+            else "tracked_status_porcelain_v1_projection"
+        )
+        change_mode = str(
+            payload.get("git_change_evidence_mode")
+            or payload.get("git_diff_evidence_mode")
+            or ""
+        )
+        if change_mode != expected_change_mode:
+            raise SourceFreezeError(
+                "H0 change-evidence mode does not match source evidence policy"
+            )
+        if (
+            baseline_evidence_mode == FULL_CONTENT_EVIDENCE
+            and not artifact_values.get("git_diff_binary")
+        ):
+            raise SourceFreezeError(
+                "full-content H0 is missing binary diff authority"
+            )
         for artifact_name, digest_name in authority_hashes.items():
             path = artifact_path(artifact_name)
             if sha256_file(path) != payload.get(digest_name):
@@ -1280,7 +1724,24 @@ class GitSourceFreezer:
             digest = sha256_bytes(target.encode("utf-8", errors="surrogateescape"))
         elif kind == "file":
             target = ""
-            digest = sha256_file(path)
+            if (
+                self.content_evidence_mode == FULL_CONTENT_EVIDENCE
+                or relative in self.protected_ignored_paths
+            ):
+                digest = sha256_file(path)
+            else:
+                authority: tuple[str, ...] = ()
+                if isinstance(baseline, TrackedEntry):
+                    authority = (
+                        baseline.index_mode,
+                        baseline.index_oid,
+                        str(baseline.stage),
+                    )
+                digest = self._metadata_identity_digest(
+                    kind=kind,
+                    info=info,
+                    authority=authority,
+                )
         elif kind == "submodule" and isinstance(baseline, TrackedEntry):
             target = ""
             digest = sha256_bytes(
@@ -1355,7 +1816,17 @@ class GitSourceFreezer:
                 return True
         try:
             completed = subprocess.run(
-                ["git", "-C", str(self.repo_root), "check-ignore", "-q", "--no-index", "--", relative],
+                [
+                    "git",
+                    "-C",
+                    str(self.repo_root),
+                    *_GIT_SERIAL_INDEX_CONFIG,
+                    "check-ignore",
+                    "-q",
+                    "--no-index",
+                    "--",
+                    relative,
+                ],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
                 env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
@@ -1511,7 +1982,10 @@ class GitSourceFreezer:
                 "commit": digests["commit"] == self.baseline.get("commit"),
                 "branch": digests["branch"] == self.baseline.get("branch"),
                 "status": digests["git_status_sha256"] == self.baseline.get("git_status_sha256"),
-                "diff": digests["git_diff_binary_sha256"] == self.baseline.get("git_diff_binary_sha256"),
+                "diff": digests["git_change_evidence_sha256"] == (
+                    self.baseline.get("git_change_evidence_sha256")
+                    or self.baseline.get("git_diff_binary_sha256")
+                ),
                 "ls_files": digests["git_ls_files_sha256"] == self.baseline.get("git_ls_files_sha256"),
                 "submodules": (
                     digests["git_submodule_status_sha256"]
@@ -1551,7 +2025,10 @@ class GitSourceFreezer:
             "commit": digests["commit"] == self.baseline.get("commit"),
             "branch": digests["branch"] == self.baseline.get("branch"),
             "status": digests["git_status_sha256"] == self.baseline.get("git_status_sha256"),
-            "diff": digests["git_diff_binary_sha256"] == self.baseline.get("git_diff_binary_sha256"),
+            "diff": digests["git_change_evidence_sha256"] == (
+                self.baseline.get("git_change_evidence_sha256")
+                or self.baseline.get("git_diff_binary_sha256")
+            ),
             "ls_files": digests["git_ls_files_sha256"] == self.baseline.get("git_ls_files_sha256"),
             "submodules": digests["git_submodule_status_sha256"] == self.baseline.get("git_submodule_status_sha256"),
             "protected_ignored": (
@@ -1806,7 +2283,10 @@ class GitSourceFreezer:
                 "commit": self.baseline.get("commit"),
                 "branch": self.baseline.get("branch"),
                 "git_status_sha256": self.baseline.get("git_status_sha256"),
-                "git_diff_binary_sha256": self.baseline.get("git_diff_binary_sha256"),
+                "git_change_evidence_sha256": (
+                    self.baseline.get("git_change_evidence_sha256")
+                    or self.baseline.get("git_diff_binary_sha256")
+                ),
                 "git_ls_files_sha256": self.baseline.get("git_ls_files_sha256"),
                 "git_submodule_status_sha256": self.baseline.get("git_submodule_status_sha256"),
                 "status_unchanged": True,
@@ -1887,7 +2367,10 @@ class GitSourceFreezer:
             "git_ls_files": final["git_ls_files_sha256"] == self.baseline["git_ls_files_sha256"],
             "submodules": final["git_submodule_status_sha256"] == self.baseline["git_submodule_status_sha256"],
             "status_unchanged": final["git_status_sha256"] == self.baseline["git_status_sha256"],
-            "diff_unchanged": final["git_diff_binary_sha256"] == self.baseline["git_diff_binary_sha256"],
+            "diff_unchanged": final["git_change_evidence_sha256"] == (
+                self.baseline.get("git_change_evidence_sha256")
+                or self.baseline.get("git_diff_binary_sha256")
+            ),
         }
         if require_clean:
             comparisons["status_clean"] = bool(final["git_status_empty"])

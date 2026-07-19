@@ -219,6 +219,52 @@ subprocess.Popen([python_exe, script_path], cwd=base_dir, close_fds=True, start_
 """
 
 
+def write_supervised_restart_request(*, reason, delay_seconds, request_path, request_root):
+    """Durably publish one restart request for an external supervisor.
+
+    This path is opt-in and is used by the formal campaign so the product can
+    request a restart without spawning an untracked detached server.  The
+    supervisor remains responsible for the real stop/start and readiness
+    proof.  Existing request files are never overwritten.
+    """
+
+    root = os.path.realpath(str(request_root or ""))
+    target = os.path.realpath(str(request_path or ""))
+    if not root or not target or not os.path.isabs(root) or not os.path.isabs(target):
+        raise ValueError("supervised restart request paths must be absolute")
+    if root == os.path.sep or not (target == root or target.startswith(root + os.path.sep)):
+        raise ValueError("supervised restart request path escapes its request root")
+    os.makedirs(root, mode=0o700, exist_ok=True)
+    if os.path.isdir(target):
+        raise ValueError("supervised restart request target must be a file")
+    payload = {
+        "schema_version": "hackme.supervised-restart-request/v1",
+        "requested_at_unix_ns": time.time_ns(),
+        "requesting_pid": os.getpid(),
+        "reason": str(reason or "")[:500],
+        "delay_seconds": float(delay_seconds),
+        "nonce": uuid.uuid4().hex,
+    }
+    encoded = (json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
+    descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        offset = 0
+        while offset < len(encoded):
+            written = os.write(descriptor, encoded[offset:])
+            if written <= 0:
+                raise OSError("supervised restart request write made no progress")
+            offset += written
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    directory_fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+    return payload
+
+
 def register_system_admin_routes(app, deps):
     ANCHOR_DIR = deps["ANCHOR_DIR"]
     module_base_dir = os.path.realpath(os.path.join(os.path.dirname(__file__), ".."))
@@ -338,6 +384,31 @@ def register_system_admin_routes(app, deps):
     def default_schedule_server_restart(*, reason, delay_seconds=1.25):
         if app.testing:
             return {"mode": "testing", "pid": os.getpid(), "reason": reason}
+
+        supervised_request_path = str(
+            os.environ.get("HACKME_SUPERVISED_RESTART_REQUEST_FILE") or ""
+        ).strip()
+        supervised_request_root = str(
+            os.environ.get("HACKME_SUPERVISED_RESTART_REQUEST_ROOT") or ""
+        ).strip()
+        if supervised_request_path or supervised_request_root:
+            if not supervised_request_path or not supervised_request_root:
+                raise RuntimeError("supervised restart requires both request file and request root")
+            receipt = write_supervised_restart_request(
+                reason=reason,
+                delay_seconds=delay_seconds,
+                request_path=supervised_request_path,
+                request_root=supervised_request_root,
+            )
+            return {
+                "mode": "supervised-request",
+                "pid": os.getpid(),
+                "reason": reason,
+                "delay_seconds": delay_seconds,
+                "requires_supervisor_restart": True,
+                "request_schema_version": receipt["schema_version"],
+                "request_nonce": receipt["nonce"],
+            }
 
         script_path = os.path.join(BASE_DIR, "server.py")
         python_exe = sys.executable or "python3"

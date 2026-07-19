@@ -153,6 +153,7 @@ def test_restart_shortcut_pins_effective_runtime_root():
 
     assert 'append_arg_if_value restart_args --runtime-root "$RUNTIME_ROOT"' in body
     assert 'append_arg_if_value restart_args --runtime-root "$CUSTOM_RUNTIME_ROOT"' not in body
+    assert '--server-mode "$SERVER_MODE"' in body
 
 
 def test_develop_launcher_refuses_source_runtime_layouts():
@@ -162,3 +163,61 @@ def test_develop_launcher_refuses_source_runtime_layouts():
     assert "runtime root must stay outside the source checkout" in body
     assert "run root must resolve below /tmp" in body
     assert "Retired unsafe aliases" in body
+
+
+def test_develop_bootstrap_preserves_open_incident_before_any_dev_mutation():
+    text = SCRIPT.read_text(encoding="utf-8")
+    start = text.index("HACKME_RUNTIME_OUTPUT_CAPTURE=0 timeout")
+    end = text.index("\nPY\nif [[ \"$BOOTSTRAP_STATUS\"", start)
+    bootstrap = text[start:end]
+
+    assert bootstrap.index("detect_persisted_incident_before_server_import") < bootstrap.index("import server")
+    assert "preserve_existing_runtime=preserve_existing_runtime" in bootstrap
+    reconcile = bootstrap.index("reconcile_open_incident_on_startup")
+    save_settings = bootstrap.index("server.save_settings(feature_updates)")
+    selected_mode = bootstrap.index("apply_selected_server_mode(conn)")
+    evidence_delete = bootstrap.index('conn.execute("DELETE FROM security_events")')
+    assert reconcile < save_settings < selected_mode < evidence_delete
+    assert "if not incident_lockdown_preserved:\n    server.save_settings(feature_updates)" in bootstrap
+    assert (
+        "if not incident_lockdown_preserved:\n"
+        "        try:\n"
+        "            apply_selected_server_mode(conn)"
+    ) in bootstrap
+    assert (
+        '        conn.execute("DELETE FROM ip_blocks")\n'
+        '        conn.execute("DELETE FROM security_events")\n'
+        '        conn.execute("DELETE FROM notifications WHERE type=\'root_security_alert\'")'
+    ) in bootstrap
+    assert "if not incident_lockdown_preserved:\n        for key, value in trading_setting_updates" in bootstrap
+    assert (
+        "not incident_lockdown_preserved\n"
+        "    and selected_server_mode in {\"test\", \"internal_test\"}"
+    ) in bootstrap
+    assert '"reason": "incident_lockdown_preserved"' in bootstrap
+
+    shell_after_bootstrap = text[end:]
+    marker_read = shell_after_bootstrap.index('IFS= read -r STARTUP_INCIDENT_STATE')
+    foreground = shell_after_bootstrap.index('if [[ "$FOREGROUND" == "1" ]]')
+    assert marker_read < foreground
+    for guarded_setting in (
+        'BTC_TRADE_AUTOSTART=0',
+        'BACKTEST_PROBE_ON_STARTUP=0',
+        'TRADING_BACKGROUND_DEV_READY=0',
+        'export HACKME_DEV_SERVER_MODE="incident_lockdown"',
+        'export HTML_LEARNING_TRADING_BACKTEST_PROBE_ON_STARTUP=0',
+    ):
+        assert guarded_setting in shell_after_bootstrap[marker_read:foreground]
+    marker_block = shell_after_bootstrap[marker_read:foreground]
+    for requested_setting in (
+        '\n    SERVER_MODE="incident_lockdown"',
+        '\n    BTC_TRADE_AUTOSTART=0',
+        '\n    BACKTEST_PROBE_ON_STARTUP=0',
+        '\n    TRADING_BACKGROUND_DEV_READY=0',
+        '\n    CLOUDFLARE_TUNNEL=0',
+        '\n    CLOUDFLARE_TUNNEL_INSTALL=0',
+    ):
+        assert requested_setting not in marker_block
+    assert 'if [[ "$INCIDENT_LOCKDOWN_PRESERVED" != "1" ]]; then\n  start_cloudflare_quick_tunnel_if_requested' in shell_after_bootstrap
+    assert 'if [[ "$INCIDENT_LOCKDOWN_PRESERVED" != "1" && -n "$SERVER_URL" && "$BTC_TRADE_AUTOSTART" == "1" ]]; then' in shell_after_bootstrap
+    assert 'if [[ "$INCIDENT_LOCKDOWN_PRESERVED" != "1" ]]; then\n  migrate_legacy_runtime_storage_to_cloud_drive_root' in shell_after_bootstrap

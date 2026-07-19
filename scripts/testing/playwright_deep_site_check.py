@@ -792,8 +792,8 @@ def check_ui_quality(rec: Recorder, page, label: str, *, mobile: bool = False) -
                 if (!isVisible(el)) return;
                 const box = el.getBoundingClientRect();
                 const name = (el.id || el.getAttribute('aria-label') || el.textContent || el.name || el.tagName).trim().slice(0, 80);
-                if (mobile && (box.width < 44 || box.height < 32) && el.tagName !== 'INPUT') {
-                    warnings.push(`small mobile target ${name} ${Math.round(box.width)}x${Math.round(box.height)}`);
+                if (mobile && (box.width < 44 || box.height < 44)) {
+                    problems.push(`mobile target below 44x44 ${name} ${Math.round(box.width)}x${Math.round(box.height)}`);
                 }
                 if (mobile && (box.left < -6 || box.right > window.innerWidth + 6)) {
                     problems.push(`control outside viewport ${name} left=${Math.round(box.left)} right=${Math.round(box.right)}`);
@@ -2762,11 +2762,18 @@ def play_exp4_chess(rec: Recorder, page, max_human_moves: int) -> dict[str, Any]
     return summary
 
 
-def write_reports(runtime_root: Path, stamp: str, summary: dict[str, Any]) -> tuple[Path, Path]:
+def write_reports(
+    runtime_root: Path,
+    stamp: str,
+    summary: dict[str, Any],
+    *,
+    json_out: str = "",
+) -> tuple[Path, Path]:
     report_dir = runtime_root / "reports" / "qa"
     report_dir.mkdir(parents=True, exist_ok=True)
-    json_path = report_dir / f"playwright_deep_site_check_{stamp}.json"
-    md_path = report_dir / f"playwright_deep_site_check_{stamp}.md"
+    json_path = Path(json_out).expanduser().resolve() if json_out else report_dir / f"playwright_deep_site_check_{stamp}.json"
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    md_path = json_path.with_suffix(".md") if json_out else report_dir / f"playwright_deep_site_check_{stamp}.md"
     json_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
     lines = [
         "# Playwright Deep Site Check",
@@ -2802,6 +2809,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--runtime-root", default="")
     parser.add_argument("--base-url", default="", help="Reuse an already running isolated server instead of starting another one")
+    parser.add_argument("--json-out", default="", help="Write the machine-readable report to this exact path")
     parser.add_argument("--keep-server", action="store_true")
     parser.add_argument("--headed", action="store_true")
     parser.add_argument(
@@ -2993,7 +3001,7 @@ def main() -> int:
         "chess": chess_summary,
         "optional_comfyui": optional_comfyui.safe_summary(),
     }
-    json_path, md_path = write_reports(runtime_root, stamp, summary)
+    json_path, md_path = write_reports(runtime_root, stamp, summary, json_out=args.json_out)
     summary["json_report"] = str(json_path)
     summary["markdown_report"] = str(md_path)
     print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))

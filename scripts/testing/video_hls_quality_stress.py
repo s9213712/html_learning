@@ -54,6 +54,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 TERMINAL_JOB_STATUSES = {"succeeded", "failed", "cancelled", "expired"}
+BROWSER_LATENCY_SCHEMA_VERSION = "hackme.browser-video-latency/v1"
+BROWSER_FIRST_FRAME_SLA_MS = 8_000.0
+BROWSER_SEEK_SLA_MS = 5_000.0
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
@@ -264,6 +267,7 @@ def upload_video(
         result["error"] = "login_failed"
         return result
     title = f"stress-{username}-{utc_ms()}"
+    upload_started_at_ms = utc_ms()
     started = time.perf_counter()
     mime_type = mimetypes.guess_type(video_path.name)[0] or "application/octet-stream"
     fields = {
@@ -301,6 +305,8 @@ def upload_video(
             "ok": response.status_code == 200 and isinstance(payload, dict) and bool(payload.get("ok")),
             "status": response.status_code,
             "elapsed_s": elapsed,
+            "upload_started_at_ms": upload_started_at_ms,
+            "upload_finished_at_ms": utc_ms(),
             "payload": payload,
         })
         if isinstance(payload, dict):
@@ -319,6 +325,8 @@ def upload_video(
     except Exception as exc:
         result.update({
             "elapsed_s": time.perf_counter() - started,
+            "upload_started_at_ms": upload_started_at_ms,
+            "upload_finished_at_ms": utc_ms(),
             "error": exc.__class__.__name__,
             "message": str(exc),
         })
@@ -1109,10 +1117,29 @@ def browser_seek_shared_video(
         return {"ok": False, "error": f"playwright_import_failed:{exc}"}
     viewport = {"width": 390, "height": 844} if mobile else {"width": 1366, "height": 768}
     errors: list[str] = []
-    result: dict[str, Any] = {"ok": False, "viewport": "mobile" if mobile else "desktop"}
+    result: dict[str, Any] = {
+        "schema_version": BROWSER_LATENCY_SCHEMA_VERSION,
+        "ok": False,
+        "viewport": "mobile" if mobile else "desktop",
+        "emulation": {
+            "is_mobile": bool(mobile),
+            "has_touch": bool(mobile),
+            "viewport": viewport,
+        },
+        "latency_thresholds_ms": {
+            "first_frame": BROWSER_FIRST_FRAME_SLA_MS,
+            "random_seek_terminal": BROWSER_SEEK_SLA_MS,
+        },
+    }
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
-        context = browser.new_context(ignore_https_errors=True, viewport=viewport)
+        context = browser.new_context(
+            ignore_https_errors=True,
+            viewport=viewport,
+            is_mobile=mobile,
+            has_touch=mobile,
+            device_scale_factor=2 if mobile else 1,
+        )
         page = context.new_page()
         page.on("pageerror", lambda error: errors.append(f"pageerror:{error}"))
         page.on(
@@ -1123,10 +1150,14 @@ def browser_seek_shared_video(
         )
         try:
             target = f"{base_url}{share_url}" if share_url.startswith("/") else share_url
+            latency_origin = "share_page_navigation"
+            first_frame_origin_started = time.perf_counter()
             page.goto(target, wait_until="domcontentloaded", timeout=60_000)
             page.wait_for_selector("#share-password-form:not(.hidden), #player-host:not(.hidden)", timeout=30_000)
             if page.locator("#share-password-form:not(.hidden)").count():
                 page.fill("#share-password", share_password)
+                latency_origin = "unlock_submit"
+                first_frame_origin_started = time.perf_counter()
                 page.locator("#share-password-form button[type=submit]").click()
             page.wait_for_selector("#player-host:not(.hidden) #shared-player", timeout=60_000)
             page.wait_for_function(
@@ -1137,36 +1168,151 @@ def browser_seek_shared_video(
                 arg=max(1.0, float(minimum_duration_seconds)),
                 timeout=90_000,
             )
+            first_frame = page.evaluate(
+                """async ({ timeoutMs }) => {
+                    const video = document.querySelector('#shared-player');
+                    const startedAt = performance.now();
+                    let playingObserved = false;
+                    let frameObserved = false;
+                    let frameMetadata = null;
+                    let playError = '';
+                    let terminalEvent = 'timeout';
+                    let resolveTerminal;
+                    const terminal = new Promise(resolve => { resolveTerminal = resolve; });
+                    const maybeFinish = () => {
+                        if (!playingObserved || !frameObserved) return;
+                        terminalEvent = 'playing_and_video_frame';
+                        resolveTerminal();
+                    };
+                    const frameCallbackSupported = typeof video.requestVideoFrameCallback === 'function';
+                    video.addEventListener('playing', () => {
+                        playingObserved = true;
+                        if (frameCallbackSupported) {
+                            video.requestVideoFrameCallback((_now, metadata) => {
+                                frameObserved = true;
+                                frameMetadata = {
+                                    mediaTime: Number(metadata?.mediaTime || 0),
+                                    presentedFrames: Number(metadata?.presentedFrames || 0),
+                                    width: Number(metadata?.width || 0),
+                                    height: Number(metadata?.height || 0),
+                                };
+                                maybeFinish();
+                            });
+                        }
+                        maybeFinish();
+                    }, { once: true });
+                    const timer = setTimeout(() => resolveTerminal(), timeoutMs);
+                    video.muted = true;
+                    try {
+                        const playResult = video.play();
+                        if (playResult && typeof playResult.catch === 'function') {
+                            playResult.catch(error => { playError = String(error?.message || error); });
+                        }
+                    } catch (error) {
+                        playError = String(error?.message || error);
+                    }
+                    await terminal;
+                    clearTimeout(timer);
+                    return {
+                        terminal_event: terminalEvent,
+                        playing_observed: playingObserved,
+                        frame_observed: frameObserved,
+                        frame_observation_method: frameCallbackSupported ? 'requestVideoFrameCallback' : 'unsupported',
+                        frame_metadata: frameMetadata,
+                        play_to_frame_latency_ms: Math.round((performance.now() - startedAt) * 100) / 100,
+                        current_time: Number(video.currentTime || 0),
+                        ready_state: Number(video.readyState || 0),
+                        network_state: Number(video.networkState || 0),
+                        paused: !!video.paused,
+                        play_error: playError,
+                    };
+                }""",
+                {"timeoutMs": 12_000},
+            )
+            first_frame["origin"] = latency_origin
+            first_frame["elapsed_ms"] = round(
+                (time.perf_counter() - first_frame_origin_started) * 1000,
+                2,
+            )
             seek = page.evaluate(
                 """async () => {
                     const video = document.querySelector('#shared-player');
                     video.muted = true;
                     const before = Number(video.currentTime || 0);
                     const duration = Number(video.duration || 0);
-                    const target = Math.max(5, Math.min(duration - 2, duration * 0.62));
-                    let event = 'timeout';
-                    const waited = new Promise(resolve => {
-                        const finish = value => { event = value; resolve(); };
-                        video.addEventListener('seeked', () => finish('seeked'), {once: true});
-                        video.addEventListener('timeupdate', () => {
-                            if (Math.abs(Number(video.currentTime || 0) - target) < 12) finish('timeupdate');
-                        }, {once: true});
-                        setTimeout(() => resolve(), 30000);
-                    });
-                    video.currentTime = target;
+                    const randomValues = new Uint32Array(1);
+                    crypto.getRandomValues(randomValues);
+                    const randomUnit = Number(randomValues[0]) / 0xffffffff;
+                    const targetRatio = 0.15 + (randomUnit * 0.70);
+                    const target = Math.max(5, Math.min(duration - 2, duration * targetRatio));
+                    const startedAt = performance.now();
+                    let terminalEvent = 'timeout';
+                    let seekedObserved = false;
+                    let frameObserved = false;
+                    let frameMetadata = null;
                     let playError = '';
-                    try { await video.play(); } catch (error) { playError = String(error?.message || error); }
+                    let terminalSettled = false;
+                    let resolveTerminal;
+                    const waited = new Promise(resolve => { resolveTerminal = resolve; });
+                    const frameCallbackSupported = typeof video.requestVideoFrameCallback === 'function';
+                    const waitForTargetFrame = () => {
+                        if (!frameCallbackSupported || terminalSettled) return;
+                        video.requestVideoFrameCallback((_now, metadata) => {
+                            if (terminalSettled) return;
+                            const current = Number(video.currentTime || 0);
+                            if (Math.abs(current - target) < 20) {
+                                frameObserved = true;
+                                frameMetadata = {
+                                    mediaTime: Number(metadata?.mediaTime || 0),
+                                    presentedFrames: Number(metadata?.presentedFrames || 0),
+                                    width: Number(metadata?.width || 0),
+                                    height: Number(metadata?.height || 0),
+                                };
+                                terminalEvent = 'seeked_and_video_frame';
+                                terminalSettled = true;
+                                resolveTerminal();
+                                return;
+                            }
+                            waitForTargetFrame();
+                        });
+                    };
+                    video.addEventListener('seeked', () => {
+                        seekedObserved = true;
+                        waitForTargetFrame();
+                    }, {once: true});
+                    const timer = setTimeout(() => {
+                        terminalSettled = true;
+                        resolveTerminal();
+                    }, 30_000);
+                    video.currentTime = target;
+                    if (video.paused) {
+                        try {
+                            const playResult = video.play();
+                            if (playResult && typeof playResult.catch === 'function') {
+                                playResult.catch(error => { playError = String(error?.message || error); });
+                            }
+                        } catch (error) { playError = String(error?.message || error); }
+                    }
                     await waited;
+                    clearTimeout(timer);
                     return {
                         before,
                         duration,
                         target,
+                        target_ratio: targetRatio,
+                        random_source: 'crypto.getRandomValues',
+                        random_sample_uint32: Number(randomValues[0]),
                         currentTime: Number(video.currentTime || 0),
                         readyState: Number(video.readyState || 0),
                         networkState: Number(video.networkState || 0),
                         paused: !!video.paused,
-                        event,
-                        playError,
+                        terminal_event: terminalEvent,
+                        terminal_latency_ms: Math.round((performance.now() - startedAt) * 100) / 100,
+                        seeked_observed: seekedObserved,
+                        frame_observed: frameObserved,
+                        frame_observation_method: frameCallbackSupported ? 'requestVideoFrameCallback' : 'unsupported',
+                        frame_metadata: frameMetadata,
+                        play_error: playError,
                     };
                 }"""
             )
@@ -1178,11 +1324,39 @@ def browser_seek_shared_video(
                     playerHeight: Math.round(document.querySelector('#shared-player')?.getBoundingClientRect().height || 0),
                 })"""
             )
-            fatal_errors = [item for item in errors if "status of 5" in item or item.startswith("pageerror:")]
+            fatal_errors = list(errors)
+            first_frame_metadata = first_frame.get("frame_metadata") or {}
+            first_frame_ok = (
+                first_frame.get("terminal_event") == "playing_and_video_frame"
+                and first_frame.get("playing_observed") is True
+                and first_frame.get("frame_observed") is True
+                and first_frame.get("frame_observation_method") == "requestVideoFrameCallback"
+                and 0 < float(first_frame.get("elapsed_ms") or 0) <= BROWSER_FIRST_FRAME_SLA_MS
+                and 0 < float(first_frame.get("play_to_frame_latency_ms") or 0) <= BROWSER_FIRST_FRAME_SLA_MS
+                and int(first_frame.get("ready_state") or 0) >= 2
+                and first_frame.get("paused") is False
+                and int(first_frame_metadata.get("presentedFrames") or 0) > 0
+                and int(first_frame_metadata.get("width") or 0) > 0
+                and int(first_frame_metadata.get("height") or 0) > 0
+                and not str(first_frame.get("play_error") or "")
+            )
+            seek_frame_metadata = seek.get("frame_metadata") or {}
             seek_ok = (
                 float(seek.get("duration") or 0) >= max(1.0, float(minimum_duration_seconds))
                 and abs(float(seek.get("currentTime") or 0) - float(seek.get("target") or 0)) < 20
-                and int(seek.get("readyState") or 0) >= 1
+                and int(seek.get("readyState") or 0) >= 2
+                and seek.get("terminal_event") == "seeked_and_video_frame"
+                and seek.get("seeked_observed") is True
+                and seek.get("frame_observed") is True
+                and seek.get("frame_observation_method") == "requestVideoFrameCallback"
+                and seek.get("random_source") == "crypto.getRandomValues"
+                and 0.15 <= float(seek.get("target_ratio") or -1) <= 0.85
+                and 0 < float(seek.get("terminal_latency_ms") or 0) <= BROWSER_SEEK_SLA_MS
+                and seek.get("paused") is False
+                and int(seek_frame_metadata.get("presentedFrames") or 0) > 0
+                and int(seek_frame_metadata.get("width") or 0) > 0
+                and int(seek_frame_metadata.get("height") or 0) > 0
+                and not str(seek.get("play_error") or "")
             )
             layout_ok = (
                 int(layout.get("playerWidth") or 0) > 0
@@ -1190,7 +1364,8 @@ def browser_seek_shared_video(
                 and int(layout.get("scrollWidth") or 0) <= int(layout.get("viewportWidth") or 0) + 2
             )
             result.update({
-                "ok": bool(seek_ok and layout_ok and not fatal_errors),
+                "ok": bool(first_frame_ok and seek_ok and layout_ok and not fatal_errors),
+                "first_frame": first_frame,
                 "seek": seek,
                 "layout": layout,
                 "fatal_errors": fatal_errors[:20],

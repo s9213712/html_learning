@@ -15,6 +15,12 @@ import pytest
 
 from scripts.testing import campaign_qualification_capture as capture_module
 from scripts.testing import campaign_gate_bundle as gate_module
+from scripts.testing import campaign_scenario_binding as scenario_binding
+from scripts.testing import audit_evidence_triad
+from scripts.testing.audit_evidence_triad import (
+    INVARIANT_NAMES as AUDIT_EVIDENCE_INVARIANTS,
+    SCHEMA_VERSION as AUDIT_EVIDENCE_SCHEMA_VERSION,
+)
 from scripts.testing.campaign_gate_bundle import (
     GATE_RAW_SPECS,
     RAW_ARTIFACT_BINDING_SCHEMA_VERSION,
@@ -27,6 +33,8 @@ from scripts.testing.campaign_qualification_capture import (
     capture_gate_evidence as _capture_gate_evidence,
 )
 from scripts.testing.campaign_source_freeze import SOURCE_FREEZE_SCHEMA_VERSION
+from services.server.database import get_audit_db
+from services.system import audit as audit_service
 
 
 COMMIT = "a" * 40
@@ -110,6 +118,7 @@ def _security_report(*, ok: bool = True) -> dict[str, object]:
         "production_security_controls",
         "audit_log_chain",
         "cross_worker_session_consistency",
+        "audit_evidence_triad_online",
     }
     denied_statuses = {
         "anonymous_root_denied": 403,
@@ -140,6 +149,15 @@ def _security_report(*, ok: bool = True) -> dict[str, object]:
             }
         elif name == "cross_worker_session_consistency":
             detail = {"requests": 4, "statuses": [200, 200, 200, 200]}
+        elif name == "audit_evidence_triad_online":
+            detail = {
+                "receipt_schema_version": AUDIT_EVIDENCE_SCHEMA_VERSION,
+                "mode": "online",
+                "target": "security_sentinel",
+                "artifact_files_verified": True,
+                "validation_classification": "PASS",
+                "validation_errors": [],
+            }
         checks.append(
             {
                 "name": name,
@@ -148,16 +166,171 @@ def _security_report(*, ok: bool = True) -> dict[str, object]:
                 "detail": detail,
             }
         )
+    receipt = {
+        "schema_version": AUDIT_EVIDENCE_SCHEMA_VERSION,
+        "target": "security_sentinel",
+        "mode": "online",
+        "captured_at": "2026-07-13T07:57:00.000+00:00",
+        "completed_at": "2026-07-13T07:57:01.000+00:00",
+        "ok": True,
+        "verdict": "PASS",
+        "capture": {
+            "mutation_lock_wait_ms": 0.0,
+            "head_anchor": {"attempted": False, "performed": False},
+            "sqlite_backup_api": True,
+            "immutable_validation": True,
+        },
+        "artifacts": {
+            "database": {
+                "state": "present", "path": "audit_snapshot.sqlite3",
+                "size": 4096, "sha256": "1" * 64,
+            },
+            "audit_log": {"state": "absent", "path": None, "size": 0, "sha256": None},
+            "anchor_history": {"state": "absent", "path": None, "size": 0, "sha256": None},
+            "anchor_latest": {"state": "absent", "path": None, "size": 0, "sha256": None},
+        },
+        "counts": {
+            "db_rows": 0, "log_entries": 0,
+            "anchor_history_entries": 0, "rows_after_latest": 0,
+        },
+        "heads": {"database": None, "audit_log": None, "anchor_latest": None},
+        "invariants": {name: True for name in AUDIT_EVIDENCE_INVARIANTS},
+        "errors": [],
+        "secret_handling": {
+            "integrity_key": "memory_only",
+            "chain_seed": "memory_only",
+            "secret_files_copied": False,
+            "secret_values_in_receipt": False,
+        },
+    }
+    receipt_bytes = (
+        json.dumps(
+            receipt,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+    receipt_sha256 = hashlib.sha256(receipt_bytes).hexdigest()
+    for check in checks:
+        if check["name"] == "audit_evidence_triad_online":
+            check["detail"].update({
+                "receipt_sha256": receipt_sha256,
+                "receipt_size_bytes": len(receipt_bytes),
+            })
     return {
         "schema_version": "hackme.production-security-sentinel.v1",
         "ok": ok,
+        "classification": "PASS" if ok else "FAIL_PRODUCT",
         "failed_checks": [] if ok else ["transport"],
         "checks": checks,
+        "audit_evidence": {
+            "schema_version": "hackme.audit-evidence-triad-reference/v1",
+            "receipt_schema_version": AUDIT_EVIDENCE_SCHEMA_VERSION,
+            "mode": "online",
+            "target": "security_sentinel",
+            "receipt_path": "/tmp/security-sentinel/audit-evidence/receipt.json",
+            "receipt_sha256": receipt_sha256,
+            "receipt_size_bytes": len(receipt_bytes),
+            "receipt": receipt,
+            "validation": {
+                "schema_version": "hackme.audit-evidence-triad-validation/v1",
+                "ok": True,
+                "classification": "PASS",
+                "errors": [],
+                "validated_invariants": sorted(AUDIT_EVIDENCE_INVARIANTS),
+                "artifact_files_verified": True,
+            },
+        },
     }
 
 
 def _security_native(tmp_path: Path, *, ok: bool = True) -> Path:
-    return _write_private_json(tmp_path / "security-native.json", _security_report(ok=ok))
+    runtime = tmp_path / "security-audit-runtime"
+    for directory in (
+        runtime / "database",
+        runtime / "logs",
+        runtime / "anchors",
+    ):
+        directory.mkdir(parents=True, exist_ok=True)
+    seed = "ac" * 24
+    key = b"q" * 32
+    (runtime / ".chain_seed").write_text(seed, encoding="utf-8")
+    (runtime / ".integrity_key").write_bytes(key)
+    database = runtime / "database" / "audit.db"
+    audit_service.configure_audit_service(
+        get_db=lambda: get_audit_db(str(database)),
+        chain_seed=seed,
+        integrity_key=key,
+        audit_log_path=str(runtime / "logs" / "audit.log"),
+        audit_anchor_path=str(runtime / "anchors" / "audit_head.jsonl"),
+        audit_anchor_latest_path=str(runtime / "anchors" / "audit_head_latest.json"),
+        audit_anchor_interval_seconds=60,
+    )
+    audit_service._last_audit_anchor_at = 0.0
+    audit_service.audit(
+        "qualification_security_fixture",
+        "127.0.0.1",
+        user="root",
+        success=True,
+        ua="pytest",
+        detail="online-triad",
+    )
+    triad_root = tmp_path / "security-audit-triad"
+    receipt = audit_evidence_triad.capture_audit_evidence(
+        paths=audit_evidence_triad.AuditEvidencePaths.for_runtime(runtime),
+        output_dir=triad_root,
+        target="security_sentinel",
+        mode="online",
+    )
+    archive_path = tmp_path / "security-audit-triad.tar"
+    archive = audit_evidence_triad.create_audit_evidence_archive(
+        output_dir=triad_root,
+        archive_path=archive_path,
+    )
+    archive_validation = audit_evidence_triad.validate_audit_evidence_archive(
+        archive_path,
+        required_mode="online",
+        required_target="security_sentinel",
+        expected_sha256=str(archive["sha256"]),
+        expected_size=int(archive["size"]),
+    )
+    assert receipt["ok"] is True and archive_validation["ok"] is True
+    receipt_bytes = (triad_root / "receipt.json").read_bytes()
+    report = _security_report(ok=ok)
+    reference = report["audit_evidence"]
+    reference.update({
+        "receipt_path": str((triad_root / "receipt.json").resolve()),
+        "receipt_sha256": hashlib.sha256(receipt_bytes).hexdigest(),
+        "receipt_size_bytes": len(receipt_bytes),
+        "receipt": receipt,
+        "archive_schema_version": audit_evidence_triad.ARCHIVE_SCHEMA_VERSION,
+        "archive_path": str(archive_path.resolve()),
+        "archive_sha256": archive["sha256"],
+        "archive_size_bytes": archive["size"],
+        "archive_validation": archive_validation,
+    })
+    for check in report["checks"]:
+        if check["name"] == "audit_evidence_triad_online":
+            check["detail"].update({
+                "receipt_sha256": reference["receipt_sha256"],
+                "receipt_size_bytes": reference["receipt_size_bytes"],
+                "archive_schema_version": audit_evidence_triad.ARCHIVE_SCHEMA_VERSION,
+                "archive_sha256": archive["sha256"],
+                "archive_size_bytes": archive["size"],
+                "archive_validation_classification": "PASS",
+                "archive_validation_errors": [],
+            })
+    return _write_private_json(tmp_path / "security-native.json", report)
+
+
+def _security_native_paths(tmp_path: Path, report: Path) -> dict[str, Path]:
+    return {
+        "security_sentinel": report.resolve(),
+        "audit_evidence_archive": (tmp_path / "security-audit-triad.tar").resolve(),
+    }
 
 
 def _read_json(path: Path) -> dict[str, object]:
@@ -272,7 +445,7 @@ def test_public_capture_adds_exact_binding_and_returns_only_validated_pass(
         attempt_root=attempt,
         context=context,
         gate_name="production_security_sentinel_verified",
-        native_artifact_paths={"security_sentinel": native.resolve()},
+        native_artifact_paths=_security_native_paths(tmp_path, native),
     )
 
     assert result["status"] == "PASS"
@@ -302,7 +475,7 @@ def test_public_capture_adds_exact_binding_and_returns_only_validated_pass(
     captured = Path(reference["path"])
     captured_payload = _read_json(captured)
     binding = captured_payload.pop("formal_binding")
-    assert captured_payload == _security_report()
+    assert captured_payload == _read_json(native)
     assert binding == context.formal_binding(
         gate_name="production_security_sentinel_verified",
         artifact_role="security_sentinel",
@@ -672,6 +845,279 @@ def _native_stub_set(
     return result
 
 
+def _rehearsal_path_contract_fixture(
+    tmp_path: Path,
+    *,
+    context: QualificationContext,
+    attempt: Path,
+) -> tuple[dict[str, Path], dict[str, capture_module.FileIdentity], dict[str, Path]]:
+    gate = "60_minute_rehearsal_passed"
+    native_root = tmp_path / "rehearsal-native"
+    native_root.mkdir()
+    native = _native_stub_set(native_root, gate)
+    plan = capture_module.planned_capture_paths(
+        attempt,
+        gate_name=gate,
+        native_artifact_paths=native,
+        qualification_campaign_uuid=context.qualification_campaign_uuid,
+    )
+    common = {
+        "qualification_campaign_uuid": context.qualification_campaign_uuid,
+        "campaign_uuid": "rehearsal-campaign-0001",
+        "campaign_attempt_uuid": "rehearsal-attempt-0001",
+        "native_invocation_id": f"native:{gate}:pytest",
+        "commit": context.commit,
+        "source_digest": context.source_digest,
+        "protected_source_digest": context.protected_source_digest,
+        "started_at": "2026-07-14T00:00:00Z",
+        "finished_at": "2026-07-14T01:00:00Z",
+        "started_monotonic_ns": 10_000_000_000,
+        "finished_monotonic_ns": 3_610_000_000_000,
+    }
+    scenarios = tuple(
+        role.removeprefix("scenario_")
+        for role in GATE_RAW_SPECS[gate]
+        if role.startswith("scenario_")
+        and not role.startswith("scenario_bundle_")
+        and not role.startswith("scenario_archive_")
+    )
+    scenario_index: dict[str, object] = {}
+    for index, scenario_id in enumerate(scenarios, start=1):
+        receipt_role = f"scenario_{scenario_id}"
+        bundle_role = f"scenario_bundle_{scenario_id}"
+        archive_role = f"scenario_archive_{scenario_id}"
+        archive_payload = f"sealed-archive-{scenario_id}-{index}".encode("utf-8")
+        _write_private_bytes(native[archive_role], archive_payload)
+        archive_sha = _sha256(native[archive_role])
+        authority = {
+            **common,
+            "scenario_attempt_uuid": f"scenario-attempt-{index:04d}-{scenario_id}",
+            "native_invocation_id": f"scenario-invocation-{index:04d}-{scenario_id}",
+            "started_at": "2026-07-14T00:00:01Z",
+            "finished_at": "2026-07-14T00:00:02Z",
+            "started_monotonic_ns": 11_000_000_000 + index,
+            "finished_monotonic_ns": 12_000_000_000 + index,
+        }
+        bundle = {
+            "schema_version": scenario_binding.NATIVE_ARTIFACT_BUNDLE_SCHEMA_VERSION,
+            "authority": authority,
+            "artifact_archive": {
+                "artifact_id": f"native.artifact.archive.{scenario_id}",
+                "content_schema_version": scenario_binding.NATIVE_ARTIFACT_ARCHIVE_SCHEMA_VERSION,
+                "path": str(plan[archive_role]),
+                "sha256": archive_sha,
+                "size_bytes": len(archive_payload),
+                "media_type": "application/x-tar",
+            },
+        }
+        _write_private_json(native[bundle_role], bundle)
+        bundle_projection = capture_module.project_bound_json_identity(
+            context=context,
+            gate_name=gate,
+            role=bundle_role,
+            native_path=native[bundle_role],
+        )
+        receipt = {
+            "schema_version": scenario_binding.RUNTIME_RECEIPT_SCHEMA_VERSION,
+            "authority": authority,
+            "artifact_bundle": {
+                "path": str(plan[bundle_role]),
+                "sha256": bundle_projection["sha256"],
+                "size_bytes": bundle_projection["size_bytes"],
+                "artifact_archive_sha256": archive_sha,
+                "artifact_archive_size_bytes": len(archive_payload),
+            },
+        }
+        _write_private_json(native[receipt_role], receipt)
+        receipt_projection = capture_module.project_bound_json_identity(
+            context=context,
+            gate_name=gate,
+            role=receipt_role,
+            native_path=native[receipt_role],
+        )
+        scenario_index[scenario_id] = {
+            "scenario_attempt_uuid": authority["scenario_attempt_uuid"],
+            "native_invocation_id": authority["native_invocation_id"],
+            "receipt": {
+                "path": str(plan[receipt_role]),
+                "sha256": receipt_projection["sha256"],
+                "size_bytes": receipt_projection["size_bytes"],
+            },
+            "artifact_bundle": {
+                "path": str(plan[bundle_role]),
+                "sha256": bundle_projection["sha256"],
+                "size_bytes": bundle_projection["size_bytes"],
+            },
+            "artifact_archive": {
+                "path": str(plan[archive_role]),
+                "sha256": archive_sha,
+                "size_bytes": len(archive_payload),
+            },
+        }
+    runner = {
+        "schema_version": GATE_RAW_SPECS[gate]["runner_result"].content_schema_version,
+        **common,
+        "scenario_receipts": scenario_index,
+    }
+    _write_private_json(native["runner_result"], runner)
+    runner_projection = capture_module.project_bound_json_identity(
+        context=context,
+        gate_name=gate,
+        role="runner_result",
+        native_path=native["runner_result"],
+    )
+    supervisor = {
+        "schema_version": GATE_RAW_SPECS[gate]["supervisor_result"].content_schema_version,
+        **common,
+        "runner_report": {
+            "path": str(plan["runner_result"]),
+            "sha256": runner_projection["sha256"],
+            "size_bytes": runner_projection["size_bytes"],
+        },
+    }
+    _write_private_json(native["supervisor_result"], supervisor)
+    identities = {
+        role: capture_module._inspect_native(
+            path,
+            label=f"rehearsal fixture {role}",
+        )
+        for role, path in native.items()
+    }
+    return native, identities, plan
+
+
+def test_rehearsal_path_contract_accepts_only_the_exact_bottom_up_chain(
+    tmp_path: Path,
+) -> None:
+    context, _authority = _context(tmp_path)
+    attempt = (tmp_path / "attempt-rehearsal-contract").resolve()
+    native, identities, plan = _rehearsal_path_contract_fixture(
+        tmp_path,
+        context=context,
+        attempt=attempt,
+    )
+
+    capture_module._validate_rehearsal_path_contract(
+        context=context,
+        sources=native,
+        identities=identities,
+        destinations=plan,
+    )
+
+
+def test_rehearsal_path_contract_rejects_cross_attempt_bundle_substitution(
+    tmp_path: Path,
+) -> None:
+    context, _authority = _context(tmp_path)
+    attempt = (tmp_path / "attempt-rehearsal-cross-attempt").resolve()
+    native, identities, plan = _rehearsal_path_contract_fixture(
+        tmp_path,
+        context=context,
+        attempt=attempt,
+    )
+    first, second = tuple(
+        role.removeprefix("scenario_bundle_")
+        for role in native
+        if role.startswith("scenario_bundle_")
+    )[:2]
+    first_role = f"scenario_bundle_{first}"
+    second_role = f"scenario_bundle_{second}"
+    substituted_sources = dict(native)
+    substituted_identities = dict(identities)
+    substituted_sources[first_role] = native[second_role]
+    substituted_identities[first_role] = identities[second_role]
+
+    with pytest.raises(
+        QualificationCaptureError,
+        match="projected bound raw authority|authority mismatch",
+    ):
+        capture_module._validate_rehearsal_path_contract(
+            context=context,
+            sources=substituted_sources,
+            identities=substituted_identities,
+            destinations=plan,
+        )
+
+
+def test_rehearsal_path_contract_rejects_bundle_destination_alias(
+    tmp_path: Path,
+) -> None:
+    context, _authority = _context(tmp_path)
+    attempt = (tmp_path / "attempt-rehearsal-path-alias").resolve()
+    native, identities, plan = _rehearsal_path_contract_fixture(
+        tmp_path,
+        context=context,
+        attempt=attempt,
+    )
+    bundle_roles = [role for role in native if role.startswith("scenario_bundle_")]
+    aliased_plan = dict(plan)
+    aliased_plan[bundle_roles[0]] = plan[bundle_roles[1]]
+
+    with pytest.raises(QualificationCaptureError, match="producer-bound to planned raw path"):
+        capture_module._validate_rehearsal_path_contract(
+            context=context,
+            sources=native,
+            identities=identities,
+            destinations=aliased_plan,
+        )
+
+
+def test_rehearsal_archive_mutation_fails_before_any_raw_copy(
+    tmp_path: Path,
+) -> None:
+    context, _authority = _context(tmp_path)
+    attempt = (tmp_path / "attempt-rehearsal-archive-mutation").resolve()
+    native, _identities, _plan = _rehearsal_path_contract_fixture(
+        tmp_path,
+        context=context,
+        attempt=attempt,
+    )
+    archive_role = next(
+        role for role in native if role.startswith("scenario_archive_")
+    )
+    native[archive_role].write_bytes(b"mutated-stale-archive-copy")
+    native[archive_role].chmod(0o600)
+
+    with pytest.raises(QualificationCaptureError, match="archive hash/size mismatch"):
+        capture_gate_evidence(
+            attempt_root=attempt,
+            context=context,
+            gate_name="60_minute_rehearsal_passed",
+            native_artifact_paths=native,
+        )
+
+    _assert_preserved_failure(attempt)
+    assert list((attempt / "raw").iterdir()) == []
+
+
+def test_rehearsal_archive_symlink_is_rejected_before_capture(
+    tmp_path: Path,
+) -> None:
+    context, _authority = _context(tmp_path)
+    attempt = (tmp_path / "attempt-rehearsal-archive-symlink").resolve()
+    native, _identities, _plan = _rehearsal_path_contract_fixture(
+        tmp_path,
+        context=context,
+        attempt=attempt,
+    )
+    archive_roles = [role for role in native if role.startswith("scenario_archive_")]
+    first_path = native[archive_roles[0]]
+    target_path = native[archive_roles[1]]
+    first_path.unlink()
+    first_path.symlink_to(target_path)
+
+    with pytest.raises(QualificationCaptureError, match="symlink"):
+        capture_gate_evidence(
+            attempt_root=attempt,
+            context=context,
+            gate_name="60_minute_rehearsal_passed",
+            native_artifact_paths=native,
+        )
+
+    _assert_preserved_failure(attempt)
+    assert list((attempt / "raw").iterdir()) == []
+
+
 def test_worktree_native_paths_must_be_producer_bound_before_copy(tmp_path: Path) -> None:
     context, _authority = _context(tmp_path)
     gate = "worktree_clean_and_frozen"
@@ -971,7 +1417,10 @@ def test_public_capture_rejects_unsafe_native_files_and_preserves_attempt(
             attempt_root=attempt,
             context=context,
             gate_name="production_security_sentinel_verified",
-            native_artifact_paths={"security_sentinel": supplied.absolute()},
+            native_artifact_paths={
+                **_security_native_paths(tmp_path, safe_native),
+                "security_sentinel": supplied.absolute(),
+            },
         )
 
     assert caught.value.attempt_root == attempt
@@ -992,7 +1441,7 @@ def test_preexisting_attempt_root_is_rejected_without_touching_it(tmp_path: Path
             attempt_root=attempt,
             context=context,
             gate_name="production_security_sentinel_verified",
-            native_artifact_paths={"security_sentinel": native.resolve()},
+            native_artifact_paths=_security_native_paths(tmp_path, native),
         )
 
     assert (marker.stat().st_ino, marker.stat().st_mtime_ns, marker.read_bytes()) == before
@@ -1011,13 +1460,13 @@ def test_native_toctou_change_invalidates_and_preserves_attempt(
 
     def capture_then_mutate(**kwargs):
         result = original(**kwargs)
-        changed = _security_report()
+        changed = _read_json(native)
         changed["post_capture_mutation"] = True
         _write_private_json(native, changed)
         return result
 
     monkeypatch.setattr(writer, "_capture_json", capture_then_mutate)
-    native_paths = {"security_sentinel": native.resolve()}
+    native_paths = _security_native_paths(tmp_path, native)
     receipt = _write_native_execution_receipt(
         attempt_root=attempt,
         context=context,
@@ -1033,7 +1482,10 @@ def test_native_toctou_change_invalidates_and_preserves_attempt(
         )
 
     failure = _assert_preserved_failure(attempt)
-    assert failure["captured_roles"] == ["security_sentinel"]
+    assert failure["captured_roles"] == [
+        "security_sentinel",
+        "audit_evidence_archive",
+    ]
     assert (attempt / "evidence" / "production_security_sentinel_verified.json").exists() is False
 
 
@@ -1042,7 +1494,8 @@ def test_oversized_json_is_rejected_before_binding_and_attempt_is_preserved(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     context, _authority = _context(tmp_path)
-    native_payload = _security_report()
+    source_native = _security_native(tmp_path)
+    native_payload = _read_json(source_native)
     native_payload["padding"] = "x" * 4096
     native = _write_private_json(tmp_path / "security-native.json", native_payload)
     attempt = (tmp_path / "attempt-oversized-json").resolve()
@@ -1053,7 +1506,7 @@ def test_oversized_json_is_rejected_before_binding_and_attempt_is_preserved(
             attempt_root=attempt,
             context=context,
             gate_name="production_security_sentinel_verified",
-            native_artifact_paths={"security_sentinel": native.resolve()},
+            native_artifact_paths=_security_native_paths(tmp_path, native),
         )
 
     _assert_preserved_failure(attempt)
@@ -1061,7 +1514,8 @@ def test_oversized_json_is_rejected_before_binding_and_attempt_is_preserved(
 
 def test_overdeep_native_json_is_rejected_before_snapshot(tmp_path: Path) -> None:
     context, _authority = _context(tmp_path)
-    payload = _security_report()
+    source_native = _security_native(tmp_path)
+    payload = _read_json(source_native)
     nested: dict[str, object] = {}
     payload["nested"] = nested
     for _index in range(capture_module.MAX_JSON_DEPTH + 2):
@@ -1076,7 +1530,7 @@ def test_overdeep_native_json_is_rejected_before_snapshot(tmp_path: Path) -> Non
             attempt_root=attempt,
             context=context,
             gate_name="production_security_sentinel_verified",
-            native_artifact_paths={"security_sentinel": native.resolve()},
+            native_artifact_paths=_security_native_paths(tmp_path, native),
         )
 
     _assert_preserved_failure(attempt)
@@ -1173,7 +1627,7 @@ def test_bound_json_cannot_exceed_structured_gate_aggregate(
             attempt_root=attempt,
             context=context,
             gate_name="production_security_sentinel_verified",
-            native_artifact_paths={"security_sentinel": native.resolve()},
+            native_artifact_paths=_security_native_paths(tmp_path, native),
         )
 
     _assert_preserved_failure(attempt)
@@ -1181,7 +1635,8 @@ def test_bound_json_cannot_exceed_structured_gate_aggregate(
 
 def test_prebound_json_is_rejected_instead_of_repromoted(tmp_path: Path) -> None:
     context, _authority = _context(tmp_path)
-    payload = _security_report()
+    source_native = _security_native(tmp_path)
+    payload = _read_json(source_native)
     payload["formal_binding"] = {
         "actual_execution": True,
         "simulated": False,
@@ -1195,7 +1650,7 @@ def test_prebound_json_is_rejected_instead_of_repromoted(tmp_path: Path) -> None
             attempt_root=attempt,
             context=context,
             gate_name="production_security_sentinel_verified",
-            native_artifact_paths={"security_sentinel": native.resolve()},
+            native_artifact_paths=_security_native_paths(tmp_path, native),
         )
 
     _assert_preserved_failure(attempt)
@@ -1216,7 +1671,7 @@ def test_semantic_validator_failure_never_returns_or_names_final_pass(
             attempt_root=attempt,
             context=context,
             gate_name="production_security_sentinel_verified",
-            native_artifact_paths={"security_sentinel": native.resolve()},
+            native_artifact_paths=_security_native_paths(tmp_path, native),
         )
 
     failure = _assert_preserved_failure(attempt)
@@ -1249,7 +1704,7 @@ def test_second_public_validation_failure_quarantines_final_name(
             attempt_root=attempt,
             context=context,
             gate_name="production_security_sentinel_verified",
-            native_artifact_paths={"security_sentinel": native.resolve()},
+            native_artifact_paths=_security_native_paths(tmp_path, native),
         )
 
     assert calls == 2
@@ -1273,7 +1728,7 @@ def test_changed_live_producer_identity_fails_closed(
             attempt_root=attempt,
             context=context,
             gate_name="production_security_sentinel_verified",
-            native_artifact_paths={"security_sentinel": native.resolve()},
+            native_artifact_paths=_security_native_paths(tmp_path, native),
         )
 
     _assert_preserved_failure(attempt)
@@ -1304,7 +1759,10 @@ def test_planning_rejects_native_dotdot_alias_and_keeps_role_caps_aligned(
         capture_module.planned_capture_paths(
             (tmp_path / "attempt-alias-plan").resolve(),
             gate_name="production_security_sentinel_verified",
-            native_artifact_paths={"security_sentinel": native_alias},
+            native_artifact_paths={
+                **_security_native_paths(tmp_path, native),
+                "security_sentinel": Path(native_alias),
+            },
             qualification_campaign_uuid=CAMPAIGN_UUID,
         )
 

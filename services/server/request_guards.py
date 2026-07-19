@@ -110,6 +110,11 @@ def path_is_root_recovery_allowed_during_lockdown(path):
         "/api/version",
         "/api/site-config",
         "/api/captcha/challenge",
+        # The AI action gateway is admitted only so an authenticated root can
+        # dispatch the dedicated incident-resolve tool.  The route itself
+        # fail-closes every other tool while incident lockdown is active, and
+        # the internally dispatched recovery endpoint is guarded again.
+        "/api/ai-agent/write-tools/execute",
     }
     if path in allowed_exact:
         return True

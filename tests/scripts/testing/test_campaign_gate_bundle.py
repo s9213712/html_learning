@@ -14,6 +14,8 @@ import pytest
 
 from scripts.testing import campaign_gate_bundle as gate_module
 from scripts.testing import (
+    audit_evidence_triad,
+    campaign_artifacts,
     campaign_cgroup,
     campaign_dependency_preflight,
     campaign_observability,
@@ -40,6 +42,8 @@ from scripts.testing.campaign_gate_bundle import (
     sha256_bytes,
     validate_gate_bundle,
 )
+from services.server.database import get_audit_db
+from services.system import audit as audit_service
 
 
 COMMIT = "a" * 40
@@ -92,6 +96,11 @@ PROTECTED_SOURCE_DIGEST = gate_module.protected_source_identity_digest(
 )
 CAMPAIGN_UUID = "qualification-0001"
 NOW = datetime(2026, 7, 13, 8, 0, tzinfo=timezone.utc)
+REHEARSAL_CAMPAIGN_UUID = "rehearsal-campaign-0001"
+REHEARSAL_ATTEMPT_UUID = "rehearsal-attempt-0001"
+REHEARSAL_NATIVE_INVOCATION_ID = (
+    "native:60_minute_rehearsal_passed:semantic-fixture"
+)
 PNG_BYTES = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 )
@@ -279,7 +288,128 @@ def _source_payload(label: str, digest: str, *, verified: bool = True) -> dict[s
     }
 
 
-def _security_report() -> dict[str, object]:
+def _online_audit_triad_receipt() -> dict[str, object]:
+    entry_hash = "8" * 64
+    chain_hash = "9" * 64
+    head = {
+        "audit_id": 3,
+        "entry_hash": entry_hash,
+        "chain_hash": chain_hash,
+    }
+    return {
+        "schema_version": audit_evidence_triad.SCHEMA_VERSION,
+        "target": "security_sentinel",
+        "mode": "online",
+        "captured_at": "2026-07-13T07:57:00.000+00:00",
+        "completed_at": "2026-07-13T07:57:01.000+00:00",
+        "ok": True,
+        "verdict": "PASS",
+        "capture": {
+            "mutation_lock_wait_ms": 0.25,
+            "head_anchor": {"attempted": False, "performed": False},
+            "sqlite_backup_api": True,
+            "immutable_validation": True,
+        },
+        "artifacts": {
+            "database": {
+                "state": "present", "path": "audit_snapshot.sqlite3",
+                "size": 4096, "sha256": "1" * 64,
+            },
+            "audit_log": {
+                "state": "present", "path": "audit.log",
+                "size": 512, "sha256": "2" * 64,
+            },
+            "anchor_history": {
+                "state": "present", "path": "audit_head.jsonl",
+                "size": 256, "sha256": "3" * 64,
+            },
+            "anchor_latest": {
+                "state": "present", "path": "audit_head_latest.json",
+                "size": 256, "sha256": "4" * 64,
+            },
+        },
+        "counts": {
+            "db_rows": 3,
+            "log_entries": 3,
+            "anchor_history_entries": 1,
+            "rows_after_latest": 2,
+        },
+        "heads": {
+            "database": head,
+            "audit_log": dict(head),
+            "anchor_latest": {
+                "ts": "2026-07-13T07:56:00.000+00:00",
+                "audit_id": 1,
+                "entry_hash": "6" * 64,
+                "chain_hash": "7" * 64,
+                "reason": "interval",
+            },
+        },
+        "invariants": {
+            name: True for name in audit_evidence_triad.INVARIANT_NAMES
+        },
+        "errors": [],
+        "secret_handling": {
+            "integrity_key": "memory_only",
+            "chain_seed": "memory_only",
+            "secret_files_copied": False,
+            "secret_values_in_receipt": False,
+        },
+    }
+
+
+def _security_report(root: Path) -> tuple[dict[str, object], Path]:
+    runtime = root / "security-audit-runtime"
+    for directory in (
+        runtime / "database",
+        runtime / "logs",
+        runtime / "anchors",
+    ):
+        directory.mkdir(parents=True, exist_ok=True)
+    seed = "ab" * 24
+    key = b"k" * 32
+    (runtime / ".chain_seed").write_text(seed, encoding="utf-8")
+    (runtime / ".integrity_key").write_bytes(key)
+    database = runtime / "database" / "audit.db"
+    audit_service.configure_audit_service(
+        get_db=lambda: get_audit_db(str(database)),
+        chain_seed=seed,
+        integrity_key=key,
+        audit_log_path=str(runtime / "logs" / "audit.log"),
+        audit_anchor_path=str(runtime / "anchors" / "audit_head.jsonl"),
+        audit_anchor_latest_path=str(runtime / "anchors" / "audit_head_latest.json"),
+        audit_anchor_interval_seconds=60,
+    )
+    audit_service._last_audit_anchor_at = 0.0
+    audit_service.audit(
+        "production_security_gate_fixture",
+        "127.0.0.1",
+        user="root",
+        success=True,
+        ua="pytest",
+        detail="online-triad",
+    )
+    triad_root = root / "security-audit-triad"
+    receipt = audit_evidence_triad.capture_audit_evidence(
+        paths=audit_evidence_triad.AuditEvidencePaths.for_runtime(runtime),
+        output_dir=triad_root,
+        target="security_sentinel",
+        mode="online",
+    )
+    archive_path = root / "security-audit-triad.tar"
+    archive = audit_evidence_triad.create_audit_evidence_archive(
+        output_dir=triad_root,
+        archive_path=archive_path,
+    )
+    archive_validation = audit_evidence_triad.validate_audit_evidence_archive(
+        archive_path,
+        required_mode="online",
+        required_target="security_sentinel",
+        expected_sha256=str(archive["sha256"]),
+        expected_size=int(archive["size"]),
+    )
+    assert receipt["ok"] is True and archive_validation["ok"] is True
+    encoded = (triad_root / "receipt.json").read_bytes()
     names = {
         "production_launcher_contract", "transport", "anonymous_root_denied",
         "login_missing_csrf_denied", "root_login", "manager_login", "user_login",
@@ -287,6 +417,7 @@ def _security_report() -> dict[str, object]:
         "user_root_boundary_denied", "authenticated_missing_csrf_denied",
         "dangerous_confirmation_required", "production_security_controls",
         "audit_log_chain", "cross_worker_session_consistency",
+        "audit_evidence_triad_online",
     }
     checks: list[dict[str, object]] = []
     denied_statuses = {
@@ -315,8 +446,52 @@ def _security_report() -> dict[str, object]:
             }
         elif name == "cross_worker_session_consistency":
             detail = {"requests": 4, "statuses": [200, 200, 200, 200]}
+        elif name == "audit_evidence_triad_online":
+            detail = {
+                "receipt_schema_version": audit_evidence_triad.SCHEMA_VERSION,
+                "mode": "online",
+                "target": "security_sentinel",
+                "receipt_sha256": hashlib.sha256(encoded).hexdigest(),
+                "receipt_size_bytes": len(encoded),
+                "artifact_files_verified": True,
+                "validation_classification": "PASS",
+                "validation_errors": [],
+                "archive_schema_version": audit_evidence_triad.ARCHIVE_SCHEMA_VERSION,
+                "archive_sha256": archive["sha256"],
+                "archive_size_bytes": archive["size"],
+                "archive_validation_classification": "PASS",
+                "archive_validation_errors": [],
+            }
         checks.append({"name": name, "ok": True, "status": denied_statuses.get(name, 200), "detail": detail})
-    return {"ok": True, "failed_checks": [], "checks": checks}
+    return {
+        "ok": True,
+        "classification": "PASS",
+        "failed_checks": [],
+        "checks": checks,
+        "audit_evidence": {
+            "schema_version": "hackme.audit-evidence-triad-reference/v1",
+            "receipt_schema_version": audit_evidence_triad.SCHEMA_VERSION,
+            "mode": "online",
+            "target": "security_sentinel",
+            "receipt_path": "/tmp/security-sentinel/audit-evidence/receipt.json",
+            "receipt_sha256": hashlib.sha256(encoded).hexdigest(),
+            "receipt_size_bytes": len(encoded),
+            "receipt": receipt,
+            "validation": {
+                "schema_version": "hackme.audit-evidence-triad-validation/v1",
+                "ok": True,
+                "classification": "PASS",
+                "errors": [],
+                "validated_invariants": sorted(audit_evidence_triad.INVARIANT_NAMES),
+                "artifact_files_verified": True,
+            },
+            "archive_schema_version": audit_evidence_triad.ARCHIVE_SCHEMA_VERSION,
+            "archive_path": str(archive_path.resolve()),
+            "archive_sha256": archive["sha256"],
+            "archive_size_bytes": archive["size"],
+            "archive_validation": archive_validation,
+        },
+    }, archive_path
 
 
 def _external_receipt(dependency: str, evidence: dict[str, object]) -> dict[str, object]:
@@ -354,7 +529,58 @@ def _supervisor(level: str) -> dict[str, object]:
     }
 
 
-def _scenario_receipt(scenario_id: str) -> dict[str, object]:
+def _artifact_link(reference: dict[str, object]) -> dict[str, object]:
+    return {
+        "path": reference["path"],
+        "sha256": reference["sha256"],
+        "size_bytes": reference["size_bytes"],
+    }
+
+
+def _rehearsal_authority(
+    *,
+    started_offset_seconds: float,
+    finished_offset_seconds: float,
+    scenario_attempt_uuid: str | None = None,
+) -> dict[str, object]:
+    native_started = NOW - timedelta(minutes=1, seconds=3602)
+    native_started_ns = 10_000_000_000_000 - 3_601_000_000_000
+    started = native_started + timedelta(seconds=started_offset_seconds)
+    finished = native_started + timedelta(seconds=finished_offset_seconds)
+    authority: dict[str, object] = {
+        "qualification_campaign_uuid": CAMPAIGN_UUID,
+        "campaign_uuid": REHEARSAL_CAMPAIGN_UUID,
+        "campaign_attempt_uuid": REHEARSAL_ATTEMPT_UUID,
+        "native_invocation_id": REHEARSAL_NATIVE_INVOCATION_ID,
+        "commit": COMMIT,
+        "source_digest": SOURCE_DIGEST,
+        "protected_source_digest": PROTECTED_SOURCE_DIGEST,
+        "started_at": format_utc(started),
+        "finished_at": format_utc(finished),
+        "started_monotonic_ns": native_started_ns
+        + int(started_offset_seconds * 1_000_000_000),
+        "finished_monotonic_ns": native_started_ns
+        + int(finished_offset_seconds * 1_000_000_000),
+    }
+    if scenario_attempt_uuid is not None:
+        authority["scenario_attempt_uuid"] = scenario_attempt_uuid
+        authority["native_invocation_id"] = (
+            f"scenario-invocation:{scenario_attempt_uuid}"
+        )
+    return authority
+
+
+def _scenario_receipt(
+    scenario_id: str,
+    *,
+    authority: dict[str, object],
+    bundle_reference: dict[str, object],
+    manifest_sha256: str,
+    member_inventory: list[dict[str, object]],
+    archive_reference: dict[str, object],
+    evidence_adapter_results: dict[str, dict[str, object]],
+    validator_results: dict[str, dict[str, object]],
+) -> dict[str, object]:
     binding = campaign_scenario_binding.FORMAL_SCENARIO_BINDINGS[scenario_id]
     return {
         "schema_version": campaign_scenario_binding.RUNTIME_RECEIPT_SCHEMA_VERSION,
@@ -362,21 +588,351 @@ def _scenario_receipt(scenario_id: str) -> dict[str, object]:
         "runner_id": binding.runner_id,
         "status": "PASS",
         "terminal_state": "success",
+        "authority": authority,
         "evidence_receipts": {
             evidence_id: {
                 "evidence_id": evidence_id,
                 "adapter_id": adapter_id,
-                "validated": True,
-                "native_observation_ids": [f"observation.{scenario_id}.{evidence_id}"],
+                "validated": evidence_adapter_results[evidence_id]["validated"],
+                "native_observation_ids": evidence_adapter_results[evidence_id][
+                    "native_observation_ids"
+                ],
             }
             for evidence_id, adapter_id in binding.evidence_adapter_ids.items()
         },
-        "terminal_validator_results": {name: True for name in binding.terminal_validator_ids},
-        "cleanup_validator_results": {name: True for name in binding.cleanup_validator_ids},
-        "artifact_validator_results": {name: True for name in binding.artifact_validator_ids},
+        "terminal_validator_results": {
+            name: validator_results[name]["passed"]
+            for name in binding.terminal_validator_ids
+        },
+        "cleanup_validator_results": {
+            name: validator_results[name]["passed"]
+            for name in binding.cleanup_validator_ids
+        },
+        "artifact_validator_results": {
+            name: validator_results[name]["passed"]
+            for name in binding.artifact_validator_ids
+        },
         "artifact_ids": [f"native.artifact.bundle.{scenario_id}"],
+        "artifact_bundle": {
+            "artifact_id": f"native.artifact.bundle.{scenario_id}",
+            "content_schema_version": (
+                campaign_scenario_binding.NATIVE_ARTIFACT_BUNDLE_SCHEMA_VERSION
+            ),
+            **_artifact_link(bundle_reference),
+            "manifest_sha256": manifest_sha256,
+            "member_inventory_sha256": (
+                campaign_scenario_binding.scenario_member_inventory_sha256(
+                    member_inventory
+                )
+            ),
+            "member_count": len(member_inventory),
+            "artifact_archive_id": f"native.artifact.archive.{scenario_id}",
+            "artifact_archive_sha256": archive_reference["sha256"],
+            "artifact_archive_size_bytes": archive_reference["size_bytes"],
+        },
         "diagnostics": [],
     }
+
+
+def _tar_bytes(members: dict[str, bytes]) -> bytes:
+    output = io.BytesIO()
+    with tarfile.open(
+        fileobj=output,
+        mode="w",
+        format=tarfile.USTAR_FORMAT,
+    ) as archive:
+        for member_path, content in sorted(members.items()):
+            info = tarfile.TarInfo(member_path)
+            info.size = len(content)
+            info.mode = 0o600
+            info.mtime = 1
+            archive.addfile(info, io.BytesIO(content))
+    return output.getvalue()
+
+
+def _validated_artifact_record(
+    *,
+    artifact_id: str,
+    scenario_id: str,
+    path: Path,
+    content: bytes,
+    artifact_type: str = "json",
+) -> dict[str, object]:
+    return {
+        "schema_version": campaign_artifacts.ARTIFACT_RECORD_SCHEMA_VERSION,
+        "artifact_id": artifact_id,
+        "scenario_id": scenario_id,
+        "path": str(path),
+        "created_at": "2026-07-13T07:00:00Z",
+        "type": artifact_type,
+        "mandatory": True,
+        "scenario_link_valid": True,
+        "within_artifact_root": True,
+        "exists": True,
+        "regular_file": True,
+        "size": len(content),
+        "minimum_size_bytes": 1,
+        "nonzero": True,
+        "validation_snapshot_stable": True,
+        "sha256": sha256_bytes(content),
+        "expected_sha256": "",
+        "sha256_verified": True,
+        "format_validation": {
+            "ok": True,
+            "method": "fixture-reparse",
+            "details": {"size": len(content)},
+            "errors": [],
+        },
+        "secret_scan": {
+            "schema_version": campaign_artifacts.SECRET_SCAN_SCHEMA_VERSION,
+            "performed": True,
+            "coverage_complete": True,
+            "ok": True,
+            "scanned_bytes": len(content),
+            "source_count": 1,
+            "pattern_count": 1,
+            "finding_count": 0,
+            "findings": [],
+            "collector_errors": [],
+        },
+        "validated": True,
+        "errors": [],
+    }
+
+
+def _write_rehearsal_scenario(
+    root: Path,
+    gate: str,
+    scenario_id: str,
+    index: int,
+) -> tuple[dict[str, dict[str, object]], dict[str, object]]:
+    binding = campaign_scenario_binding.FORMAL_SCENARIO_BINDINGS[scenario_id]
+    proof_id = f"native.artifact.{scenario_id}.proof"
+    summary_id = f"native.summary.{scenario_id}"
+    manifest_id = f"native.manifest.{scenario_id}"
+    proof_path = "artifacts/proof.json"
+    summary_path = "artifacts/native_evidence_summary.json"
+    manifest_path = "manifest/evidence.json"
+    proof_payload = {"scenario_id": scenario_id, "terminal_state": "success"}
+    proof_content = json.dumps(proof_payload, sort_keys=True).encode("utf-8")
+    summary_payload = {
+        "schema_version": (
+            campaign_scenario_binding.NATIVE_EVIDENCE_SUMMARY_SCHEMA_VERSION
+        ),
+        "scenario_id": scenario_id,
+        "source_artifact_sha256": {proof_id: sha256_bytes(proof_content)},
+        "scenario_assertions": {
+            evidence_id: True for evidence_id in binding.evidence_adapter_ids
+        },
+        "terminal_assertions": {"domain_terminal_success": True},
+        "cleanup_assertions": {"fixture_cleanup_complete": True},
+        "details": {"source_kind": "runtime_probe"},
+    }
+    summary_content = json.dumps(summary_payload, sort_keys=True).encode("utf-8")
+
+    def pointer_token(value: str) -> str:
+        return value.replace("~", "~0").replace("/", "~1")
+
+    def summary_observation(pointer: str) -> dict[str, object]:
+        return {
+            "source_artifact_id": summary_id,
+            "json_pointer": pointer,
+            "predicate": "is_true",
+            "expected": None,
+        }
+
+    manifest_payload = {
+        "schema_version": (
+            campaign_scenario_binding.NATIVE_EVIDENCE_MANIFEST_SCHEMA_VERSION
+        ),
+        "scenario_id": scenario_id,
+        "artifact_ids": [proof_id, summary_id],
+        "evidence": {
+            evidence_id: [summary_observation(
+                f"/scenario_assertions/{pointer_token(evidence_id)}"
+            )]
+            for evidence_id in binding.evidence_adapter_ids
+        },
+        "terminal": {
+            "state": "success",
+            "observations": [summary_observation(
+                "/terminal_assertions/domain_terminal_success"
+            )],
+        },
+        "cleanup": {
+            "state": "clean",
+            "observations": [summary_observation(
+                "/cleanup_assertions/fixture_cleanup_complete"
+            )],
+        },
+    }
+    manifest_content = json.dumps(manifest_payload, sort_keys=True).encode("utf-8")
+    members = {
+        proof_path: proof_content,
+        summary_path: summary_content,
+        manifest_path: manifest_content,
+    }
+    member_inventory = [
+        {
+            "artifact_id": proof_id,
+            "member_path": proof_path,
+            "sha256": sha256_bytes(proof_content),
+            "size_bytes": len(proof_content),
+            "artifact_type": "json",
+        },
+        {
+            "artifact_id": summary_id,
+            "member_path": summary_path,
+            "sha256": sha256_bytes(summary_content),
+            "size_bytes": len(summary_content),
+            "artifact_type": "json",
+        },
+        {
+            "artifact_id": manifest_id,
+            "member_path": manifest_path,
+            "sha256": sha256_bytes(manifest_content),
+            "size_bytes": len(manifest_content),
+            "artifact_type": "json",
+        },
+    ]
+    archive_role = f"scenario_archive_{scenario_id}"
+    archive_reference = _write_bytes_raw(
+        root,
+        gate,
+        archive_role,
+        "application/x-tar",
+        campaign_scenario_binding.NATIVE_ARTIFACT_ARCHIVE_SCHEMA_VERSION,
+        _tar_bytes(members),
+    )
+    authority = _rehearsal_authority(
+        started_offset_seconds=1.0 + (index * 2),
+        finished_offset_seconds=2.0 + (index * 2),
+        scenario_attempt_uuid=f"scenario-attempt-{index:04d}",
+    )
+    native_member_root = (root / gate / "native-members" / scenario_id).resolve()
+    artifact_records = {
+        proof_id: _validated_artifact_record(
+            artifact_id=proof_id,
+            scenario_id=scenario_id,
+            path=native_member_root / "proof.json",
+            content=proof_content,
+        ),
+        summary_id: _validated_artifact_record(
+            artifact_id=summary_id,
+            scenario_id=scenario_id,
+            path=native_member_root / "native_evidence_summary.json",
+            content=summary_content,
+        ),
+    }
+    manifest_record = _validated_artifact_record(
+        artifact_id=manifest_id,
+        scenario_id=scenario_id,
+        path=native_member_root / "evidence.json",
+        content=manifest_content,
+    )
+    artifact_payloads = {
+        proof_id: proof_payload,
+        summary_id: summary_payload,
+    }
+    artifact_sha256 = {
+        proof_id: sha256_bytes(proof_content),
+        summary_id: sha256_bytes(summary_content),
+    }
+    adapters = campaign_scenario_binding.build_strict_native_adapter_registry(
+        bindings={scenario_id: binding}
+    )
+    validators = campaign_scenario_binding.build_strict_native_validator_registry(
+        bindings={scenario_id: binding}
+    )
+    evidence_adapter_results = {}
+    for evidence_id, adapter_id in binding.evidence_adapter_ids.items():
+        registration = adapters[adapter_id]
+        evidence_adapter_results[evidence_id] = dict(registration.handler(
+            registration=registration,
+            manifest=manifest_payload,
+            artifact_payloads=artifact_payloads,
+            artifact_sha256=artifact_sha256,
+        ))
+    validator_results = {}
+    for validator_id in (
+        binding.terminal_validator_ids
+        + binding.cleanup_validator_ids
+        + binding.artifact_validator_ids
+    ):
+        registration = validators[validator_id]
+        validator_results[validator_id] = dict(registration.handler(
+            registration=registration,
+            manifest=manifest_payload,
+            artifact_payloads=artifact_payloads,
+            artifact_sha256=artifact_sha256,
+            artifact_records=artifact_records,
+            manifest_record=manifest_record,
+        ))
+    bundle_role = f"scenario_bundle_{scenario_id}"
+    bundle_reference = _write_json_raw(
+        root,
+        gate,
+        bundle_role,
+        campaign_scenario_binding.NATIVE_ARTIFACT_BUNDLE_SCHEMA_VERSION,
+        {
+            "pipeline_schema_version": (
+                campaign_scenario_binding.NATIVE_RUNTIME_PIPELINE_SCHEMA_VERSION
+            ),
+            "scenario_id": scenario_id,
+            "runner_id": binding.runner_id,
+            "candidate_status": "PASS",
+            "authority": authority,
+            "artifact_records": artifact_records,
+            "manifest_record": manifest_record,
+            "artifact_archive": {
+                "artifact_id": f"native.artifact.archive.{scenario_id}",
+                "content_schema_version": (
+                    campaign_scenario_binding.NATIVE_ARTIFACT_ARCHIVE_SCHEMA_VERSION
+                ),
+                **_artifact_link(archive_reference),
+                "media_type": "application/x-tar",
+            },
+            "member_inventory": member_inventory,
+            "member_inventory_sha256": (
+                campaign_scenario_binding.scenario_member_inventory_sha256(
+                    member_inventory
+                )
+            ),
+            "evidence_adapter_results": evidence_adapter_results,
+            "validator_results": validator_results,
+            "diagnostics": [],
+        },
+    )
+    receipt_role = f"scenario_{scenario_id}"
+    receipt_reference = _write_json_raw(
+        root,
+        gate,
+        receipt_role,
+        campaign_scenario_binding.RUNTIME_RECEIPT_SCHEMA_VERSION,
+        _scenario_receipt(
+            scenario_id,
+            authority=authority,
+            bundle_reference=bundle_reference,
+            manifest_sha256=str(manifest_record["sha256"]),
+            member_inventory=member_inventory,
+            archive_reference=archive_reference,
+            evidence_adapter_results=evidence_adapter_results,
+            validator_results=validator_results,
+        ),
+    )
+    raw = {
+        receipt_role: receipt_reference,
+        bundle_role: bundle_reference,
+        archive_role: archive_reference,
+    }
+    runner_index = {
+        "scenario_attempt_uuid": authority["scenario_attempt_uuid"],
+        "native_invocation_id": authority["native_invocation_id"],
+        "receipt": _artifact_link(receipt_reference),
+        "artifact_bundle": _artifact_link(bundle_reference),
+        "artifact_archive": _artifact_link(archive_reference),
+    }
+    return raw, runner_index
 
 
 def _set_nested(target: dict[str, object], dotted: str, value: object) -> None:
@@ -419,16 +975,17 @@ def _formal_resource_row(index: int) -> dict[str, object]:
 def _gate_raw(root: Path, gate: str) -> dict[str, dict[str, object]]:
     if gate == "cgroup_limits_verified":
         limits = {
-            "memory.high": 7 * 1024**3,
-            "memory.max": 8 * 1024**3,
-            "memory.swap.max": 1 * 1024**3,
-            "cpu.quota_percent": 600,
-            "pids.max": 768,
+            "memory.high": 5 * 1024**3,
+            "memory.max": 6 * 1024**3,
+            "memory.swap.max": 512 * 1024**2,
+            "cpu.quota_percent": 300,
+            "pids.max": 384,
+            "io.weight": campaign_cgroup.DEFAULT_IO_WEIGHT,
         }
-        readback = _write_json_raw(root, gate, "cgroup_readback", "hackme.campaign-cgroup/v1", {
+        readback = _write_json_raw(root, gate, "cgroup_readback", campaign_cgroup.CGROUP_SCHEMA_VERSION, {
             "campaign_id": "native-cgroup-campaign", "created": True,
             "cgroup_path": "/user.slice/formal.scope", "expected_limits": limits,
-            "actual_limits": limits, "controllers_verified": ["cpu", "memory", "pids"],
+            "actual_limits": limits, "controllers_verified": ["cpu", "io", "memory", "pids"],
         })
         placements = [
             {"role": role, "pid": 5000 + index, "inside_scope": True, "cgroup_path": "/user.slice/formal.scope"}
@@ -544,7 +1101,24 @@ def _gate_raw(root: Path, gate: str) -> dict[str, dict[str, object]]:
         }
 
     if gate == "production_security_sentinel_verified":
-        return {"security_sentinel": _write_json_raw(root, gate, "security_sentinel", "hackme.production-security-sentinel.v1", _security_report())}
+        report, archive_path = _security_report(root / gate)
+        return {
+            "security_sentinel": _write_json_raw(
+                root,
+                gate,
+                "security_sentinel",
+                "hackme.production-security-sentinel.v1",
+                report,
+            ),
+            "audit_evidence_archive": _write_bytes_raw(
+                root,
+                gate,
+                "audit_evidence_archive",
+                "application/x-tar",
+                audit_evidence_triad.ARCHIVE_SCHEMA_VERSION,
+                archive_path.read_bytes(),
+            ),
+        }
 
     if gate == "all_mandatory_dependencies_verified":
         browser_refs: dict[str, dict[str, object]] = {}
@@ -871,26 +1445,64 @@ def _gate_raw(root: Path, gate: str) -> dict[str, dict[str, object]]:
             "server_emergency_incident", "media_proxy_cross_browser",
             "community_governance_operations", "final_ui_mobile_prelaunch",
         )
-        result = {
-            "supervisor_result": _write_json_raw(root, gate, "supervisor_result", "hackme.campaign-supervisor.v1", _supervisor("rehearsal")),
-            "runner_result": _write_json_raw(root, gate, "runner_result", "hackme.campaign-operational-result/v1", {
-                "ok": True, "verdict": "PASS", "classification": "PASS",
-                "required_active_test_seconds": 3600, "active_test_seconds": 3600.5,
-                "invalid_seconds": 0, "scenario_scope": "mandatory_full_feature_matrix",
-                "mandatory_features_executed": [
-                    "planned_restart", "runtime_backup_restore", "comfyui_real_workflow",
-                    "bt_terminal_download", "cross_browser_mobile_ui",
-                ],
-                "skips": [], "fallbacks": [], "expected_gaps": [],
-            }),
-        }
-        result.update({
-            f"scenario_{scenario}": _write_json_raw(
-                root, gate, f"scenario_{scenario}",
-                "hackme.campaign.native-scenario-receipt/v1", _scenario_receipt(scenario),
+        result: dict[str, dict[str, object]] = {}
+        scenario_index: dict[str, object] = {}
+        for index, scenario in enumerate(scenarios):
+            scenario_raw, index_entry = _write_rehearsal_scenario(
+                root,
+                gate,
+                scenario,
+                index,
             )
-            for scenario in scenarios
-        })
+            result.update(scenario_raw)
+            scenario_index[scenario] = index_entry
+        runner_authority = _rehearsal_authority(
+            started_offset_seconds=0.2,
+            finished_offset_seconds=3600.8,
+        )
+        runner_reference = _write_json_raw(
+            root,
+            gate,
+            "runner_result",
+            "hackme.campaign-operational-result/v1",
+            {
+                **runner_authority,
+                "ok": True,
+                "verdict": "PASS",
+                "classification": "PASS",
+                "required_active_test_seconds": 3600,
+                "active_test_seconds": 3600.5,
+                "invalid_seconds": 0,
+                "scenario_scope": "mandatory_full_feature_matrix",
+                "mandatory_features_executed": [
+                    "planned_restart",
+                    "runtime_backup_restore",
+                    "comfyui_real_workflow",
+                    "bt_terminal_download",
+                    "cross_browser_mobile_ui",
+                ],
+                "skips": [],
+                "fallbacks": [],
+                "expected_gaps": [],
+                "scenario_receipts": scenario_index,
+            },
+        )
+        supervisor = {
+            **_supervisor("rehearsal"),
+            **_rehearsal_authority(
+                started_offset_seconds=0.1,
+                finished_offset_seconds=3600.9,
+            ),
+            "runner_report": _artifact_link(runner_reference),
+        }
+        result["runner_result"] = runner_reference
+        result["supervisor_result"] = _write_json_raw(
+            root,
+            gate,
+            "supervisor_result",
+            "hackme.campaign-supervisor.v1",
+            supervisor,
+        )
         return result
 
     if gate == "worktree_clean_and_frozen":
@@ -1003,6 +1615,53 @@ def _refresh_raw_reference(evidence_path: Path, role: str, raw_path: Path) -> No
     )
 
 
+def _raw_reference(evidence_path: Path, role: str) -> dict[str, object]:
+    payload = json.loads(evidence_path.read_text(encoding="utf-8"))
+    return dict(payload["raw_artifacts"][role])
+
+
+def _refresh_rehearsal_runner_and_supervisor_links(
+    evidence_path: Path,
+    *,
+    scenario_id: str | None = None,
+) -> None:
+    runner_reference = _raw_reference(evidence_path, "runner_result")
+    runner_path = Path(str(runner_reference["path"]))
+    if scenario_id is not None:
+        receipt_role = f"scenario_{scenario_id}"
+        bundle_role = f"scenario_bundle_{scenario_id}"
+        archive_role = f"scenario_archive_{scenario_id}"
+
+        def relink_scenario(payload: dict[str, object]) -> None:
+            entry = payload["scenario_receipts"][scenario_id]
+            entry["receipt"] = _artifact_link(
+                _raw_reference(evidence_path, receipt_role)
+            )
+            entry["artifact_bundle"] = _artifact_link(
+                _raw_reference(evidence_path, bundle_role)
+            )
+            entry["artifact_archive"] = _artifact_link(
+                _raw_reference(evidence_path, archive_role)
+            )
+
+        _rewrite_json(runner_path, relink_scenario)
+        _refresh_raw_reference(evidence_path, "runner_result", runner_path)
+        runner_reference = _raw_reference(evidence_path, "runner_result")
+    supervisor_reference = _raw_reference(evidence_path, "supervisor_result")
+    supervisor_path = Path(str(supervisor_reference["path"]))
+    _rewrite_json(
+        supervisor_path,
+        lambda payload: payload.update(
+            {"runner_report": _artifact_link(runner_reference)}
+        ),
+    )
+    _refresh_raw_reference(
+        evidence_path,
+        "supervisor_result",
+        supervisor_path,
+    )
+
+
 def test_private_semantic_fixtures_rederive_and_public_api_rejects_loose_evidence(
     tmp_path: Path,
 ) -> None:
@@ -1058,7 +1717,11 @@ def test_native_raw_specs_track_current_producer_schema_constants() -> None:
     rehearsal_specs = specs["60_minute_rehearsal_passed"]
     assert rehearsal_specs["supervisor_result"].content_schema_version == operational_campaign_supervisor.SUPERVISOR_SCHEMA_VERSION
     for role, spec in rehearsal_specs.items():
-        if role.startswith("scenario_"):
+        if role.startswith("scenario_bundle_"):
+            assert spec.content_schema_version == campaign_scenario_binding.NATIVE_ARTIFACT_BUNDLE_SCHEMA_VERSION
+        elif role.startswith("scenario_archive_"):
+            assert spec.content_schema_version == campaign_scenario_binding.NATIVE_ARTIFACT_ARCHIVE_SCHEMA_VERSION
+        elif role.startswith("scenario_"):
             assert spec.content_schema_version == campaign_scenario_binding.RUNTIME_RECEIPT_SCHEMA_VERSION
 
 
@@ -1581,6 +2244,45 @@ def test_handwritten_boolean_and_number_claims_cannot_manufacture_green(tmp_path
         )
 
 
+def test_cgroup_io_weight_authority_is_exact_and_fail_closed(
+    tmp_path: Path,
+) -> None:
+    evidence = write_evidence_set(tmp_path)
+    evidence_path = evidence["cgroup_limits_verified"]
+    raw_path = Path(str(_raw_reference(evidence_path, "cgroup_readback")["path"]))
+    original = json.loads(raw_path.read_text(encoding="utf-8"))
+    cases = (
+        (
+            lambda payload: payload["expected_limits"].pop("io.weight"),
+            "cgroup expected limits were weakened",
+        ),
+        (
+            lambda payload: payload["actual_limits"].update(
+                {"io.weight": 100}
+            ),
+            "cgroup kernel limit readback mismatch",
+        ),
+        (
+            lambda payload: payload["controllers_verified"].remove("io"),
+            "cgroup controller proof is incomplete",
+        ),
+    )
+    for mutate, error in cases:
+        payload = json.loads(json.dumps(original))
+        mutate(payload)
+        raw_path.write_text(
+            json.dumps(payload, sort_keys=True),
+            encoding="utf-8",
+        )
+        _refresh_raw_reference(evidence_path, "cgroup_readback", raw_path)
+
+        with pytest.raises(GateBundleError, match=error):
+            _validate_semantic_fixture(
+                evidence_path,
+                "cgroup_limits_verified",
+            )
+
+
 @pytest.mark.parametrize("field,value,match", (
     ("simulated", True, "simulated evidence"),
     ("component_only", True, "component-only evidence"),
@@ -1623,6 +2325,108 @@ def test_raw_component_or_wrong_campaign_binding_is_rejected(tmp_path: Path) -> 
             evidence["cgroup_limits_verified"],
             "cgroup_limits_verified",
         )
+
+
+def test_security_gate_rederives_online_triad_invariants_instead_of_trusting_ok(
+    tmp_path: Path,
+) -> None:
+    gate = "production_security_sentinel_verified"
+    evidence = write_evidence_set(tmp_path)
+    evidence_path = evidence[gate]
+    raw_path = Path(
+        json.loads(evidence_path.read_text(encoding="utf-8"))["raw_artifacts"]
+        ["security_sentinel"]["path"]
+    )
+
+    def tamper(payload: dict[str, object]) -> None:
+        reference = payload["audit_evidence"]
+        assert isinstance(reference, dict)
+        receipt = reference["receipt"]
+        assert isinstance(receipt, dict)
+        invariants = receipt["invariants"]
+        assert isinstance(invariants, dict)
+        invariants["audit_log_db_bijection"] = False
+        encoded = (
+            json.dumps(
+                receipt,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            + "\n"
+        ).encode("utf-8")
+        reference["receipt_sha256"] = hashlib.sha256(encoded).hexdigest()
+        reference["receipt_size_bytes"] = len(encoded)
+        checks = payload["checks"]
+        assert isinstance(checks, list)
+        detail = next(
+            row["detail"]
+            for row in checks
+            if isinstance(row, dict)
+            and row.get("name") == "audit_evidence_triad_online"
+        )
+        assert isinstance(detail, dict)
+        detail["receipt_sha256"] = reference["receipt_sha256"]
+        detail["receipt_size_bytes"] = reference["receipt_size_bytes"]
+
+    _rewrite_json(raw_path, tamper)
+    raw_path.chmod(0o600)
+    _refresh_raw_reference(evidence_path, "security_sentinel", raw_path)
+
+    with pytest.raises(GateBundleError, match="independent validation"):
+        _validate_semantic_fixture(evidence_path, gate)
+
+
+def test_security_gate_rejects_contract_valid_report_receipt_not_in_pinned_archive(
+    tmp_path: Path,
+) -> None:
+    gate = "production_security_sentinel_verified"
+    evidence = write_evidence_set(tmp_path)
+    evidence_path = evidence[gate]
+    raw_path = Path(
+        json.loads(evidence_path.read_text(encoding="utf-8"))["raw_artifacts"]
+        ["security_sentinel"]["path"]
+    )
+
+    def replace_with_different_contract_valid_receipt(
+        payload: dict[str, object],
+    ) -> None:
+        reference = payload["audit_evidence"]
+        assert isinstance(reference, dict)
+        receipt = reference["receipt"]
+        assert isinstance(receipt, dict)
+        receipt["captured_at"] = "2026-01-02T03:04:05.678+00:00"
+        encoded = (
+            json.dumps(
+                receipt,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            + "\n"
+        ).encode("utf-8")
+        reference["receipt_sha256"] = hashlib.sha256(encoded).hexdigest()
+        reference["receipt_size_bytes"] = len(encoded)
+        checks = payload["checks"]
+        assert isinstance(checks, list)
+        detail = next(
+            row["detail"]
+            for row in checks
+            if isinstance(row, dict)
+            and row.get("name") == "audit_evidence_triad_online"
+        )
+        assert isinstance(detail, dict)
+        detail["receipt_sha256"] = reference["receipt_sha256"]
+        detail["receipt_size_bytes"] = reference["receipt_size_bytes"]
+
+    _rewrite_json(raw_path, replace_with_different_contract_valid_receipt)
+    raw_path.chmod(0o600)
+    _refresh_raw_reference(evidence_path, "security_sentinel", raw_path)
+
+    with pytest.raises(GateBundleError, match="pinned audit archive receipt"):
+        _validate_semantic_fixture(evidence_path, gate)
 
 
 def test_tampered_missing_and_wrong_type_raw_artifacts_fail_closed(tmp_path: Path) -> None:
@@ -1743,6 +2547,562 @@ def test_rehearsal_receipt_requires_reviewed_ids_and_success_terminal(
     _rewrite_json(raw_path, lambda payload: payload.update({field: value}))
     _refresh_raw_reference(evidence_path, role, raw_path)
     with pytest.raises(GateBundleError, match=expected):
+        _validate_semantic_fixture(evidence_path, "60_minute_rehearsal_passed")
+
+
+def test_rehearsal_rejects_stale_receipt_from_another_scenario_attempt(
+    tmp_path: Path,
+) -> None:
+    evidence = write_evidence_set(tmp_path)
+    evidence_path = evidence["60_minute_rehearsal_passed"]
+    scenario_id = "media_long_hls_share"
+    role = f"scenario_{scenario_id}"
+    receipt_path = Path(str(_raw_reference(evidence_path, role)["path"]))
+    _rewrite_json(
+        receipt_path,
+        lambda payload: payload["authority"].update(
+            {"scenario_attempt_uuid": "stale-scenario-attempt-9999"}
+        ),
+    )
+    _refresh_raw_reference(evidence_path, role, receipt_path)
+    _refresh_rehearsal_runner_and_supervisor_links(
+        evidence_path,
+        scenario_id=scenario_id,
+    )
+
+    with pytest.raises(GateBundleError, match="runner scenario attempt mismatch"):
+        _validate_semantic_fixture(evidence_path, "60_minute_rehearsal_passed")
+
+
+def test_rehearsal_rejects_inner_receipt_from_another_campaign(
+    tmp_path: Path,
+) -> None:
+    evidence = write_evidence_set(tmp_path)
+    evidence_path = evidence["60_minute_rehearsal_passed"]
+    scenario_id = "media_long_hls_share"
+    role = f"scenario_{scenario_id}"
+    receipt_path = Path(str(_raw_reference(evidence_path, role)["path"]))
+    _rewrite_json(
+        receipt_path,
+        lambda payload: payload["authority"].update(
+            {"campaign_uuid": "other-rehearsal-campaign-0002"}
+        ),
+    )
+    _refresh_raw_reference(evidence_path, role, receipt_path)
+    _refresh_rehearsal_runner_and_supervisor_links(
+        evidence_path,
+        scenario_id=scenario_id,
+    )
+
+    with pytest.raises(GateBundleError, match="scenario authority mismatch"):
+        _validate_semantic_fixture(evidence_path, "60_minute_rehearsal_passed")
+
+
+def test_rehearsal_rejects_reused_scenario_native_invocation(
+    tmp_path: Path,
+) -> None:
+    evidence = write_evidence_set(tmp_path)
+    evidence_path = evidence["60_minute_rehearsal_passed"]
+    first = "media_long_hls_share"
+    second = "cloud_drive_share_stream"
+    first_receipt = Path(
+        str(_raw_reference(evidence_path, f"scenario_{first}")["path"])
+    )
+    reused = json.loads(first_receipt.read_text(encoding="utf-8"))[
+        "authority"
+    ]["native_invocation_id"]
+    second_bundle_role = f"scenario_bundle_{second}"
+    second_bundle = Path(
+        str(_raw_reference(evidence_path, second_bundle_role)["path"])
+    )
+    _rewrite_json(
+        second_bundle,
+        lambda payload: payload["authority"].update(
+            {"native_invocation_id": reused}
+        ),
+    )
+    _refresh_raw_reference(evidence_path, second_bundle_role, second_bundle)
+    second_receipt_role = f"scenario_{second}"
+    second_receipt = Path(
+        str(_raw_reference(evidence_path, second_receipt_role)["path"])
+    )
+
+    def reuse_receipt_invocation(payload: dict[str, object]) -> None:
+        payload["authority"]["native_invocation_id"] = reused
+        payload["artifact_bundle"].update(
+            _artifact_link(_raw_reference(evidence_path, second_bundle_role))
+        )
+
+    _rewrite_json(second_receipt, reuse_receipt_invocation)
+    _refresh_raw_reference(evidence_path, second_receipt_role, second_receipt)
+    runner_path = Path(
+        str(_raw_reference(evidence_path, "runner_result")["path"])
+    )
+    _rewrite_json(
+        runner_path,
+        lambda payload: payload["scenario_receipts"][second].update(
+            {"native_invocation_id": reused}
+        ),
+    )
+    _refresh_raw_reference(evidence_path, "runner_result", runner_path)
+    _refresh_rehearsal_runner_and_supervisor_links(
+        evidence_path,
+        scenario_id=second,
+    )
+
+    with pytest.raises(GateBundleError, match="native invocation IDs are reused"):
+        _validate_semantic_fixture(evidence_path, "60_minute_rehearsal_passed")
+
+
+def test_rehearsal_rejects_scenario_interval_outside_runner_authority(
+    tmp_path: Path,
+) -> None:
+    evidence = write_evidence_set(tmp_path)
+    evidence_path = evidence["60_minute_rehearsal_passed"]
+    scenario_id = "media_long_hls_share"
+    receipt_role = f"scenario_{scenario_id}"
+    bundle_role = f"scenario_bundle_{scenario_id}"
+    receipt_path = Path(str(_raw_reference(evidence_path, receipt_role)["path"]))
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    authority = dict(receipt["authority"])
+    authority["started_at"] = format_utc(
+        gate_module.parse_utc(
+            authority["started_at"],
+            label="test scenario start",
+        ) - timedelta(seconds=1)
+    )
+    authority["finished_at"] = format_utc(
+        gate_module.parse_utc(
+            authority["finished_at"],
+            label="test scenario finish",
+        ) - timedelta(seconds=1)
+    )
+    authority["started_monotonic_ns"] -= 1_000_000_000
+    authority["finished_monotonic_ns"] -= 1_000_000_000
+
+    bundle_path = Path(str(_raw_reference(evidence_path, bundle_role)["path"]))
+    _rewrite_json(
+        bundle_path,
+        lambda payload: payload.update({"authority": authority}),
+    )
+    _refresh_raw_reference(evidence_path, bundle_role, bundle_path)
+    bundle_reference = _raw_reference(evidence_path, bundle_role)
+
+    def move_receipt(payload: dict[str, object]) -> None:
+        payload["authority"] = authority
+        payload["artifact_bundle"].update(_artifact_link(bundle_reference))
+
+    _rewrite_json(receipt_path, move_receipt)
+    _refresh_raw_reference(evidence_path, receipt_role, receipt_path)
+    _refresh_rehearsal_runner_and_supervisor_links(
+        evidence_path,
+        scenario_id=scenario_id,
+    )
+
+    with pytest.raises(
+        GateBundleError,
+        match="(wall|monotonic) interval escapes its parent",
+    ):
+        _validate_semantic_fixture(evidence_path, "60_minute_rehearsal_passed")
+
+
+def test_rehearsal_authority_must_match_outer_native_invocation(
+    tmp_path: Path,
+) -> None:
+    evidence = write_evidence_set(tmp_path)
+    evidence_path = evidence["60_minute_rehearsal_passed"]
+    capture_authority = _capture_authority(
+        "60_minute_rehearsal_passed",
+        evidence_path,
+    )
+    other_invocation = "native:60_minute_rehearsal_passed:other-invocation"
+    capture_authority["native_execution"]["invocation_id"] = other_invocation
+    capture_authority["native_execution"]["producer"]["invocation_id"] = (
+        other_invocation
+    )
+
+    with pytest.raises(GateBundleError, match="native invocation mismatch"):
+        gate_module._validate_unsealed_gate_evidence(
+            evidence_path,
+            gate_name="60_minute_rehearsal_passed",
+            commit=COMMIT,
+            source_digest=SOURCE_DIGEST,
+            protected_source_digest=PROTECTED_SOURCE_DIGEST,
+            qualification_campaign_uuid=CAMPAIGN_UUID,
+            now=NOW,
+            capture_authority=capture_authority,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid_value"),
+    (
+        ("path", "/tmp/substituted-rehearsal-bundle.json"),
+        ("sha256", "0" * 64),
+        ("size_bytes", 1),
+    ),
+)
+def test_rehearsal_rejects_runner_bundle_link_substitution(
+    tmp_path: Path,
+    field: str,
+    invalid_value: object,
+) -> None:
+    evidence = write_evidence_set(tmp_path)
+    evidence_path = evidence["60_minute_rehearsal_passed"]
+    scenario_id = "media_long_hls_share"
+    runner_reference = _raw_reference(evidence_path, "runner_result")
+    runner_path = Path(str(runner_reference["path"]))
+
+    def substitute(payload: dict[str, object]) -> None:
+        payload["scenario_receipts"][scenario_id]["artifact_bundle"][field] = (
+            invalid_value
+        )
+
+    _rewrite_json(runner_path, substitute)
+    _refresh_raw_reference(evidence_path, "runner_result", runner_path)
+    _refresh_rehearsal_runner_and_supervisor_links(evidence_path)
+
+    with pytest.raises(
+        GateBundleError,
+        match="runner scenario bundle .* path/hash/size mismatch",
+    ):
+        _validate_semantic_fixture(evidence_path, "60_minute_rehearsal_passed")
+
+
+def test_rehearsal_reopens_archive_and_rejects_resealed_member_mutation(
+    tmp_path: Path,
+) -> None:
+    evidence = write_evidence_set(tmp_path)
+    evidence_path = evidence["60_minute_rehearsal_passed"]
+    scenario_id = "media_long_hls_share"
+    archive_role = f"scenario_archive_{scenario_id}"
+    bundle_role = f"scenario_bundle_{scenario_id}"
+    receipt_role = f"scenario_{scenario_id}"
+    archive_path = Path(str(_raw_reference(evidence_path, archive_role)["path"]))
+    with tarfile.open(archive_path, mode="r:") as archive:
+        members = {
+            member.name: archive.extractfile(member).read()
+            for member in archive.getmembers()
+            if member.isfile()
+        }
+    members["artifacts/proof.json"] = members["artifacts/proof.json"].replace(
+        b'"success"',
+        b'"failure"',
+    )
+    archive_path.write_bytes(_tar_bytes(members))
+    _refresh_raw_reference(evidence_path, archive_role, archive_path)
+    archive_reference = _raw_reference(evidence_path, archive_role)
+
+    bundle_path = Path(str(_raw_reference(evidence_path, bundle_role)["path"]))
+    _rewrite_json(
+        bundle_path,
+        lambda payload: payload["artifact_archive"].update(
+            _artifact_link(archive_reference)
+        ),
+    )
+    _refresh_raw_reference(evidence_path, bundle_role, bundle_path)
+    bundle_reference = _raw_reference(evidence_path, bundle_role)
+
+    receipt_path = Path(str(_raw_reference(evidence_path, receipt_role)["path"]))
+
+    def relink_receipt(payload: dict[str, object]) -> None:
+        payload["artifact_bundle"].update(_artifact_link(bundle_reference))
+        payload["artifact_bundle"].update(
+            {
+                "artifact_archive_sha256": archive_reference["sha256"],
+                "artifact_archive_size_bytes": archive_reference["size_bytes"],
+            }
+        )
+
+    _rewrite_json(receipt_path, relink_receipt)
+    _refresh_raw_reference(evidence_path, receipt_role, receipt_path)
+    _refresh_rehearsal_runner_and_supervisor_links(
+        evidence_path,
+        scenario_id=scenario_id,
+    )
+
+    with pytest.raises(
+        GateBundleError,
+        match="archive member inventory/content mismatch",
+    ):
+        _validate_semantic_fixture(evidence_path, "60_minute_rehearsal_passed")
+
+
+def test_rehearsal_rejects_receipt_bundle_evidence_result_mismatch(
+    tmp_path: Path,
+) -> None:
+    evidence = write_evidence_set(tmp_path)
+    evidence_path = evidence["60_minute_rehearsal_passed"]
+    scenario_id = "media_long_hls_share"
+    bundle_role = f"scenario_bundle_{scenario_id}"
+    receipt_role = f"scenario_{scenario_id}"
+    binding = campaign_scenario_binding.FORMAL_SCENARIO_BINDINGS[scenario_id]
+    evidence_id = next(iter(binding.evidence_adapter_ids))
+    bundle_path = Path(str(_raw_reference(evidence_path, bundle_role)["path"]))
+    _rewrite_json(
+        bundle_path,
+        lambda payload: payload["evidence_adapter_results"][evidence_id].update(
+            {"native_observation_ids": ["observation.from.other.attempt"]}
+        ),
+    )
+    _refresh_raw_reference(evidence_path, bundle_role, bundle_path)
+    bundle_reference = _raw_reference(evidence_path, bundle_role)
+    receipt_path = Path(str(_raw_reference(evidence_path, receipt_role)["path"]))
+    _rewrite_json(
+        receipt_path,
+        lambda payload: payload["artifact_bundle"].update(
+            _artifact_link(bundle_reference)
+        ),
+    )
+    _refresh_raw_reference(evidence_path, receipt_role, receipt_path)
+    _refresh_rehearsal_runner_and_supervisor_links(
+        evidence_path,
+        scenario_id=scenario_id,
+    )
+
+    with pytest.raises(GateBundleError, match="receipt/bundle evidence result mismatch"):
+        _validate_semantic_fixture(evidence_path, "60_minute_rehearsal_passed")
+
+
+def test_rehearsal_rejects_pass_receipt_bound_to_failed_bundle(
+    tmp_path: Path,
+) -> None:
+    evidence = write_evidence_set(tmp_path)
+    evidence_path = evidence["60_minute_rehearsal_passed"]
+    scenario_id = "media_long_hls_share"
+    bundle_role = f"scenario_bundle_{scenario_id}"
+    receipt_role = f"scenario_{scenario_id}"
+    bundle_path = Path(str(_raw_reference(evidence_path, bundle_role)["path"]))
+    _rewrite_json(
+        bundle_path,
+        lambda payload: payload.update({
+            "candidate_status": "FAIL_HARNESS",
+            "diagnostics": ["injected_bundle_failure"],
+        }),
+    )
+    _refresh_raw_reference(evidence_path, bundle_role, bundle_path)
+    bundle_reference = _raw_reference(evidence_path, bundle_role)
+    receipt_path = Path(str(_raw_reference(evidence_path, receipt_role)["path"]))
+    _rewrite_json(
+        receipt_path,
+        lambda payload: payload["artifact_bundle"].update(
+            _artifact_link(bundle_reference)
+        ),
+    )
+    _refresh_raw_reference(evidence_path, receipt_role, receipt_path)
+    _refresh_rehearsal_runner_and_supervisor_links(
+        evidence_path,
+        scenario_id=scenario_id,
+    )
+
+    with pytest.raises(
+        GateBundleError,
+        match="receipt/bundle status or diagnostics mismatch",
+    ):
+        _validate_semantic_fixture(evidence_path, "60_minute_rehearsal_passed")
+
+
+def test_rehearsal_rederives_synchronized_observation_ids_from_archive(
+    tmp_path: Path,
+) -> None:
+    evidence = write_evidence_set(tmp_path)
+    evidence_path = evidence["60_minute_rehearsal_passed"]
+    scenario_id = "media_long_hls_share"
+    binding = campaign_scenario_binding.FORMAL_SCENARIO_BINDINGS[scenario_id]
+    evidence_id = next(iter(binding.evidence_adapter_ids))
+    bundle_role = f"scenario_bundle_{scenario_id}"
+    receipt_role = f"scenario_{scenario_id}"
+    forged_ids = ["native.observation." + ("0" * 64)]
+    bundle_path = Path(str(_raw_reference(evidence_path, bundle_role)["path"]))
+    _rewrite_json(
+        bundle_path,
+        lambda payload: payload["evidence_adapter_results"][evidence_id].update(
+            {"native_observation_ids": forged_ids}
+        ),
+    )
+    _refresh_raw_reference(evidence_path, bundle_role, bundle_path)
+    bundle_reference = _raw_reference(evidence_path, bundle_role)
+    receipt_path = Path(str(_raw_reference(evidence_path, receipt_role)["path"]))
+
+    def synchronize_receipt(payload: dict[str, object]) -> None:
+        payload["artifact_bundle"].update(_artifact_link(bundle_reference))
+        payload["evidence_receipts"][evidence_id]["native_observation_ids"] = (
+            forged_ids
+        )
+
+    _rewrite_json(receipt_path, synchronize_receipt)
+    _refresh_raw_reference(evidence_path, receipt_role, receipt_path)
+    _refresh_rehearsal_runner_and_supervisor_links(
+        evidence_path,
+        scenario_id=scenario_id,
+    )
+
+    with pytest.raises(
+        GateBundleError,
+        match="sealed evidence re-derivation mismatch",
+    ):
+        _validate_semantic_fixture(evidence_path, "60_minute_rehearsal_passed")
+
+
+def test_rehearsal_rederives_semantics_after_coherently_resealed_archive(
+    tmp_path: Path,
+) -> None:
+    evidence = write_evidence_set(tmp_path)
+    evidence_path = evidence["60_minute_rehearsal_passed"]
+    scenario_id = "media_long_hls_share"
+    binding = campaign_scenario_binding.FORMAL_SCENARIO_BINDINGS[scenario_id]
+    evidence_id = next(iter(binding.evidence_adapter_ids))
+    archive_role = f"scenario_archive_{scenario_id}"
+    bundle_role = f"scenario_bundle_{scenario_id}"
+    receipt_role = f"scenario_{scenario_id}"
+    archive_path = Path(str(_raw_reference(evidence_path, archive_role)["path"]))
+    with tarfile.open(archive_path, mode="r:") as archive:
+        members = {
+            member.name: archive.extractfile(member).read()
+            for member in archive.getmembers()
+            if member.isfile()
+        }
+    summary_member_path = "artifacts/native_evidence_summary.json"
+    summary_payload = json.loads(members[summary_member_path])
+    summary_payload["scenario_assertions"][evidence_id] = False
+    members[summary_member_path] = json.dumps(
+        summary_payload,
+        sort_keys=True,
+    ).encode("utf-8")
+    archive_path.write_bytes(_tar_bytes(members))
+    _refresh_raw_reference(evidence_path, archive_role, archive_path)
+    archive_reference = _raw_reference(evidence_path, archive_role)
+
+    bundle_path = Path(str(_raw_reference(evidence_path, bundle_role)["path"]))
+    bundle_payload = json.loads(bundle_path.read_text(encoding="utf-8"))
+    summary_id = f"native.summary.{scenario_id}"
+    manifest_id = f"native.manifest.{scenario_id}"
+    summary_content = members[summary_member_path]
+    summary_sha256 = sha256_bytes(summary_content)
+    for item in bundle_payload["member_inventory"]:
+        if item["artifact_id"] == summary_id:
+            item["sha256"] = summary_sha256
+            item["size_bytes"] = len(summary_content)
+    summary_record = bundle_payload["artifact_records"][summary_id]
+    summary_record["sha256"] = summary_sha256
+    summary_record["size"] = len(summary_content)
+    summary_record["format_validation"]["details"]["size"] = len(summary_content)
+    summary_record["secret_scan"]["scanned_bytes"] = len(summary_content)
+    bundle_payload["artifact_archive"].update(_artifact_link(archive_reference))
+    bundle_payload["member_inventory_sha256"] = (
+        campaign_scenario_binding.scenario_member_inventory_sha256(
+            bundle_payload["member_inventory"]
+        )
+    )
+    manifest_payload = json.loads(members["manifest/evidence.json"])
+    artifact_payloads = {}
+    artifact_sha256 = {}
+    for item in bundle_payload["member_inventory"]:
+        artifact_id = item["artifact_id"]
+        if artifact_id == manifest_id:
+            continue
+        artifact_payloads[artifact_id] = json.loads(members[item["member_path"]])
+        artifact_sha256[artifact_id] = item["sha256"]
+    validators = campaign_scenario_binding.build_strict_native_validator_registry(
+        bindings={scenario_id: binding}
+    )
+    for validator_id in (
+        binding.terminal_validator_ids
+        + binding.cleanup_validator_ids
+        + binding.artifact_validator_ids
+    ):
+        registration = validators[validator_id]
+        bundle_payload["validator_results"][validator_id] = dict(
+            registration.handler(
+                registration=registration,
+                manifest=manifest_payload,
+                artifact_payloads=artifact_payloads,
+                artifact_sha256=artifact_sha256,
+                artifact_records=bundle_payload["artifact_records"],
+                manifest_record=bundle_payload["manifest_record"],
+            )
+        )
+    bundle_path.write_text(
+        json.dumps(bundle_payload, sort_keys=True),
+        encoding="utf-8",
+    )
+    _refresh_raw_reference(evidence_path, bundle_role, bundle_path)
+    bundle_reference = _raw_reference(evidence_path, bundle_role)
+
+    receipt_path = Path(str(_raw_reference(evidence_path, receipt_role)["path"]))
+
+    def relink_receipt(payload: dict[str, object]) -> None:
+        payload["artifact_bundle"].update(_artifact_link(bundle_reference))
+        payload["artifact_bundle"].update({
+            "member_inventory_sha256": bundle_payload[
+                "member_inventory_sha256"
+            ],
+            "artifact_archive_sha256": archive_reference["sha256"],
+            "artifact_archive_size_bytes": archive_reference["size_bytes"],
+        })
+
+    _rewrite_json(receipt_path, relink_receipt)
+    _refresh_raw_reference(evidence_path, receipt_role, receipt_path)
+    _refresh_rehearsal_runner_and_supervisor_links(
+        evidence_path,
+        scenario_id=scenario_id,
+    )
+
+    with pytest.raises(
+        GateBundleError,
+        match="sealed evidence re-derivation mismatch",
+    ):
+        _validate_semantic_fixture(evidence_path, "60_minute_rehearsal_passed")
+
+
+def test_rehearsal_rejects_incomplete_artifact_record_schema(
+    tmp_path: Path,
+) -> None:
+    evidence = write_evidence_set(tmp_path)
+    evidence_path = evidence["60_minute_rehearsal_passed"]
+    scenario_id = "media_long_hls_share"
+    bundle_role = f"scenario_bundle_{scenario_id}"
+    receipt_role = f"scenario_{scenario_id}"
+    bundle_path = Path(str(_raw_reference(evidence_path, bundle_role)["path"]))
+
+    def remove_secret_scan(payload: dict[str, object]) -> None:
+        artifact_id = next(iter(payload["artifact_records"]))
+        payload["artifact_records"][artifact_id].pop("secret_scan")
+
+    _rewrite_json(bundle_path, remove_secret_scan)
+    _refresh_raw_reference(evidence_path, bundle_role, bundle_path)
+    bundle_reference = _raw_reference(evidence_path, bundle_role)
+    receipt_path = Path(str(_raw_reference(evidence_path, receipt_role)["path"]))
+    _rewrite_json(
+        receipt_path,
+        lambda payload: payload["artifact_bundle"].update(
+            _artifact_link(bundle_reference)
+        ),
+    )
+    _refresh_raw_reference(evidence_path, receipt_role, receipt_path)
+    _refresh_rehearsal_runner_and_supervisor_links(
+        evidence_path,
+        scenario_id=scenario_id,
+    )
+
+    with pytest.raises(GateBundleError, match="record_shape_mismatch"):
+        _validate_semantic_fixture(evidence_path, "60_minute_rehearsal_passed")
+
+
+def test_rehearsal_rejects_symlinked_archive_even_when_target_is_unchanged(
+    tmp_path: Path,
+) -> None:
+    evidence = write_evidence_set(tmp_path)
+    evidence_path = evidence["60_minute_rehearsal_passed"]
+    role = "scenario_archive_media_long_hls_share"
+    archive_path = Path(str(_raw_reference(evidence_path, role)["path"]))
+    target = archive_path.with_name("archive-target.tar")
+    target.write_bytes(archive_path.read_bytes())
+    target.chmod(0o600)
+    archive_path.unlink()
+    archive_path.symlink_to(target)
+
+    with pytest.raises(GateBundleError, match="symlink|regular file"):
         _validate_semantic_fixture(evidence_path, "60_minute_rehearsal_passed")
 
 

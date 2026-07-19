@@ -14,11 +14,43 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
-import requests
+
+class _LazyRequests:
+    """Keep dormant admission free of third-party imports until HTTP is used."""
+
+    @staticmethod
+    def get(*args, **kwargs):
+        from requests import get
+
+        return get(*args, **kwargs)
+
+
+requests = _LazyRequests()
 
 
 RESOURCE_SAMPLE_SCHEMA_VERSION = "hackme.resource-sample.v1"
+HOST_SAFETY_SCHEMA_VERSION = "hackme.host-safety-preflight.v1"
+MIB = 1024**2
 GIB = 1024**3
+DEFAULT_MINIMUM_HOST_MEM_AVAILABLE_BYTES = 3 * GIB
+DEFAULT_MAXIMUM_HOST_LOAD1_PER_CPU = 1.0
+DEFAULT_MAXIMUM_HOST_CPU_PRESSURE_SOME_AVG10 = 80.0
+DEFAULT_MAXIMUM_HOST_MEMORY_PRESSURE_FULL_AVG10 = 5.0
+DEFAULT_MAXIMUM_HOST_IO_PRESSURE_FULL_AVG10 = 10.0
+DEFAULT_MAXIMUM_HOST_IO_PRESSURE_FULL_AVG60 = 10.0
+STARTUP_MAXIMUM_HOST_IO_PRESSURE_FULL_AVG10 = 3.0
+STARTUP_MAXIMUM_HOST_IO_PRESSURE_FULL_AVG60 = 3.0
+DEFAULT_MAXIMUM_HOST_SWAP_USED_BYTES = 512 * MIB
+STARTUP_BLOCK_IO_MINIMUM_WINDOW_SECONDS = 4.0
+STARTUP_BLOCK_IO_MAXIMUM_WINDOW_SECONDS = 7.5
+STARTUP_BLOCK_IO_MAXIMUM_READ_AWAIT_MS = 60.0
+STARTUP_BLOCK_IO_MAXIMUM_WRITE_AWAIT_MS = 60.0
+STARTUP_BLOCK_IO_MAXIMUM_FLUSH_AWAIT_MS = 100.0
+STARTUP_BLOCK_IO_MAXIMUM_AVERAGE_QUEUE_DEPTH = 0.25
+WAITABLE_HOST_SAFETY_REASONS = frozenset({
+    "HOST_IO_PRESSURE_HIGH",
+    "HOST_BLOCK_DEVICE_NOT_QUIET",
+})
 
 
 def utc_now() -> str:
@@ -76,6 +108,521 @@ def _parse_psi(path: Path) -> dict[str, Any]:
             row[key] = int(raw) if key == "total" else float(raw)
         result[parts[0]] = row
     return result
+
+
+def _finite_number(value: Any) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and float(value) == float(value)
+        and float(value) not in {float("inf"), float("-inf")}
+    )
+
+
+def _host_safety_checks(
+    host: Mapping[str, Any],
+    *,
+    minimum_host_mem_available_bytes: int,
+    maximum_host_load1_per_cpu: float,
+    maximum_host_cpu_pressure_some_avg10: float,
+    maximum_host_memory_pressure_full_avg10: float,
+    maximum_host_io_pressure_full_avg10: float,
+    maximum_host_io_pressure_full_avg60: float,
+    maximum_host_swap_used_bytes: int,
+) -> dict[str, dict[str, Any]]:
+    load1 = _nested_get(host, "load.load1")
+    memory_available = _nested_get(host, "memory.available_bytes")
+    cpu_pressure = _nested_get(host, "psi.cpu.some.avg10")
+    memory_pressure = _nested_get(host, "psi.memory.full.avg10")
+    io_pressure = _nested_get(host, "psi.io.full.avg10")
+    io_pressure_avg60 = _nested_get(host, "psi.io.full.avg60")
+    swap_used = _nested_get(host, "swap.used_bytes")
+    cpu_count = max(1, int(os.cpu_count() or 1))
+    maximum_load1 = float(maximum_host_load1_per_cpu) * cpu_count
+
+    return {
+        "host_mem_available": {
+            "ok": _finite_number(memory_available)
+            and int(memory_available) >= int(minimum_host_mem_available_bytes),
+            "value": memory_available,
+            "minimum": int(minimum_host_mem_available_bytes),
+            "reason_code": "HOST_MEMORY_AVAILABLE_LOW",
+        },
+        "host_load1": {
+            "ok": _finite_number(load1) and float(load1) <= maximum_load1,
+            "value": load1,
+            "maximum": maximum_load1,
+            "cpu_count": cpu_count,
+            "reason_code": "HOST_LOAD1_HIGH",
+        },
+        "host_cpu_pressure": {
+            "ok": _finite_number(cpu_pressure)
+            and float(cpu_pressure) <= float(maximum_host_cpu_pressure_some_avg10),
+            "value": cpu_pressure,
+            "maximum": float(maximum_host_cpu_pressure_some_avg10),
+            "reason_code": "HOST_CPU_PRESSURE_HIGH",
+        },
+        "host_memory_pressure": {
+            "ok": _finite_number(memory_pressure)
+            and float(memory_pressure) <= float(maximum_host_memory_pressure_full_avg10),
+            "value": memory_pressure,
+            "maximum": float(maximum_host_memory_pressure_full_avg10),
+            "reason_code": "HOST_MEMORY_PRESSURE_HIGH",
+        },
+        "host_io_pressure": {
+            "ok": _finite_number(io_pressure)
+            and _finite_number(io_pressure_avg60)
+            and float(io_pressure) <= float(maximum_host_io_pressure_full_avg10)
+            and float(io_pressure_avg60) <= float(maximum_host_io_pressure_full_avg60),
+            "value": {"avg10": io_pressure, "avg60": io_pressure_avg60},
+            "maximum": {
+                "avg10": float(maximum_host_io_pressure_full_avg10),
+                "avg60": float(maximum_host_io_pressure_full_avg60),
+            },
+            "reason_code": "HOST_IO_PRESSURE_HIGH",
+        },
+        "host_swap_used": {
+            "ok": _finite_number(swap_used)
+            and int(swap_used) <= int(maximum_host_swap_used_bytes),
+            "value": swap_used,
+            "maximum": int(maximum_host_swap_used_bytes),
+            "reason_code": "HOST_SWAP_USAGE_HIGH",
+        },
+    }
+
+
+def collect_host_safety_preflight(
+    *,
+    proc_root: Path = Path("/proc"),
+    minimum_host_mem_available_bytes: int = DEFAULT_MINIMUM_HOST_MEM_AVAILABLE_BYTES,
+    maximum_host_load1_per_cpu: float = DEFAULT_MAXIMUM_HOST_LOAD1_PER_CPU,
+    maximum_host_cpu_pressure_some_avg10: float = DEFAULT_MAXIMUM_HOST_CPU_PRESSURE_SOME_AVG10,
+    maximum_host_memory_pressure_full_avg10: float = DEFAULT_MAXIMUM_HOST_MEMORY_PRESSURE_FULL_AVG10,
+    maximum_host_io_pressure_full_avg10: float = DEFAULT_MAXIMUM_HOST_IO_PRESSURE_FULL_AVG10,
+    maximum_host_io_pressure_full_avg60: float = DEFAULT_MAXIMUM_HOST_IO_PRESSURE_FULL_AVG60,
+    maximum_host_swap_used_bytes: int = DEFAULT_MAXIMUM_HOST_SWAP_USED_BYTES,
+) -> dict[str, Any]:
+    """Read only small procfs files and fail closed before campaign startup."""
+
+    proc_root = Path(proc_root)
+    errors: dict[str, str] = {}
+    host: dict[str, Any] = {}
+    try:
+        load = _read_text(proc_root / "loadavg").split()
+        host["load"] = {
+            "load1": float(load[0]),
+            "load5": float(load[1]),
+            "load15": float(load[2]),
+        }
+    except Exception as exc:
+        errors["host.load"] = f"{exc.__class__.__name__}: {exc}"
+        host["load"] = {}
+    try:
+        mem = _meminfo(proc_root / "meminfo")
+        swap_total = int(mem.get("SwapTotal", 0))
+        swap_free = int(mem.get("SwapFree", 0))
+        host["memory"] = {
+            "available_bytes": int(mem.get("MemAvailable", 0)),
+            "total_bytes": int(mem.get("MemTotal", 0)),
+        }
+        host["swap"] = {
+            "used_bytes": max(0, swap_total - swap_free),
+            "total_bytes": swap_total,
+        }
+    except Exception as exc:
+        errors["host.memory"] = f"{exc.__class__.__name__}: {exc}"
+        host["memory"] = {}
+        host["swap"] = {}
+    for name in ("cpu", "memory", "io"):
+        try:
+            host.setdefault("psi", {})[name] = _parse_psi(
+                proc_root / "pressure" / name
+            )
+        except Exception as exc:
+            errors[f"host.psi.{name}"] = f"{exc.__class__.__name__}: {exc}"
+            host.setdefault("psi", {})[name] = {}
+
+    checks = _host_safety_checks(
+        host,
+        minimum_host_mem_available_bytes=minimum_host_mem_available_bytes,
+        maximum_host_load1_per_cpu=maximum_host_load1_per_cpu,
+        maximum_host_cpu_pressure_some_avg10=maximum_host_cpu_pressure_some_avg10,
+        maximum_host_memory_pressure_full_avg10=maximum_host_memory_pressure_full_avg10,
+        maximum_host_io_pressure_full_avg10=maximum_host_io_pressure_full_avg10,
+        maximum_host_io_pressure_full_avg60=maximum_host_io_pressure_full_avg60,
+        maximum_host_swap_used_bytes=maximum_host_swap_used_bytes,
+    )
+    tripped = [row["reason_code"] for row in checks.values() if not row["ok"]]
+    if errors:
+        tripped.append("HOST_SAFETY_TELEMETRY_INCOMPLETE")
+    return {
+        "schema_version": HOST_SAFETY_SCHEMA_VERSION,
+        "at": utc_now(),
+        "host": host,
+        "checks": checks,
+        "errors": errors,
+        "tripped": tripped,
+        "ok": not tripped,
+    }
+
+
+def _with_host_io_hard_limit(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalize the non-waitable 10/10 ceiling from raw PSI evidence."""
+
+    result = dict(evidence)
+    checks = dict(result.get("checks") or {})
+    io_check = checks.get("host_io_pressure") or {}
+    value = io_check.get("value") or {}
+    avg10 = value.get("avg10")
+    avg60 = value.get("avg60")
+    hard_limit_evaluated = _finite_number(avg10) and _finite_number(avg60)
+    hard_limit_exceeded = (
+        (
+            float(avg10) > DEFAULT_MAXIMUM_HOST_IO_PRESSURE_FULL_AVG10
+            or float(avg60) > DEFAULT_MAXIMUM_HOST_IO_PRESSURE_FULL_AVG60
+        )
+        if hard_limit_evaluated
+        else None
+    )
+    checks["host_io_pressure_hard_limit"] = {
+        "ok": bool(hard_limit_evaluated and not hard_limit_exceeded),
+        "evaluated": hard_limit_evaluated,
+        "exceeded": hard_limit_exceeded,
+        "value": {"avg10": avg10, "avg60": avg60},
+        "maximum": {
+            "avg10": DEFAULT_MAXIMUM_HOST_IO_PRESSURE_FULL_AVG10,
+            "avg60": DEFAULT_MAXIMUM_HOST_IO_PRESSURE_FULL_AVG60,
+        },
+        "reason_code": "HOST_IO_PRESSURE_HARD_LIMIT_EXCEEDED",
+    }
+    result["checks"] = checks
+    if hard_limit_exceeded is True:
+        result["tripped"] = list(dict.fromkeys([
+            *(result.get("tripped") or []),
+            "HOST_IO_PRESSURE_HARD_LIMIT_EXCEEDED",
+        ]))
+        result["ok"] = False
+    return result
+
+
+def collect_host_startup_safety_preflight(
+    *,
+    proc_root: Path = Path("/proc"),
+) -> dict[str, Any]:
+    """Require cold-start I/O headroom without tightening runtime hard stops."""
+
+    return _with_host_io_hard_limit(collect_host_safety_preflight(
+        proc_root=proc_root,
+        maximum_host_io_pressure_full_avg10=(
+            STARTUP_MAXIMUM_HOST_IO_PRESSURE_FULL_AVG10
+        ),
+        maximum_host_io_pressure_full_avg60=(
+            STARTUP_MAXIMUM_HOST_IO_PRESSURE_FULL_AVG60
+        ),
+    ))
+
+
+class HostStartupBlockIoSampler:
+    """Stateful, read-only startup gate for delayed block-device pressure."""
+
+    def __init__(
+        self,
+        *,
+        data_root: Path = Path("/"),
+        proc_root: Path = Path("/proc"),
+        device_major_minor: tuple[int, int] | None = None,
+        read_text: Callable[[Path], str] | None = None,
+        clock: Callable[[], float] | None = None,
+    ) -> None:
+        self.data_root = Path(data_root)
+        self.proc_root = Path(proc_root)
+        self._device_major_minor = device_major_minor
+        self._read_text = read_text or _read_text
+        self._clock = clock or time.monotonic
+        self._history: list[dict[str, Any]] = []
+
+    def _resolve_device(self) -> tuple[int, int]:
+        if self._device_major_minor is None:
+            device = os.stat(self.data_root).st_dev
+            self._device_major_minor = (os.major(device), os.minor(device))
+        return self._device_major_minor
+
+    def _snapshot(self) -> dict[str, Any]:
+        wanted = self._resolve_device()
+        for line in self._read_text(self.proc_root / "diskstats").splitlines():
+            fields = line.split()
+            if len(fields) < 20:
+                continue
+            if (int(fields[0]), int(fields[1])) != wanted:
+                continue
+            return {
+                "monotonic": float(self._clock()),
+                "major": wanted[0],
+                "minor": wanted[1],
+                "device": fields[2],
+                "reads": int(fields[3]),
+                "read_ms": int(fields[6]),
+                "writes": int(fields[7]),
+                "write_ms": int(fields[10]),
+                "in_flight": int(fields[11]),
+                "weighted_io_ms": int(fields[13]),
+                "flushes": int(fields[18]),
+                "flush_ms": int(fields[19]),
+            }
+        raise RuntimeError("whole block device diskstats record unavailable")
+
+    @staticmethod
+    def _pending(snapshot: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            "status": "pending",
+            "safe": False,
+            "reason_codes": ["block_io_baseline_pending"],
+            "device_major_minor": (
+                f"{int(snapshot['major'])}:{int(snapshot['minor'])}"
+            ),
+            "device": snapshot.get("device"),
+            "interval_seconds": None,
+            "metrics": {},
+        }
+
+    def _evaluate(self, current: dict[str, Any]) -> dict[str, Any]:
+        if self._history and (
+            self._history[-1].get("major"),
+            self._history[-1].get("minor"),
+            self._history[-1].get("device"),
+        ) != (
+            current.get("major"),
+            current.get("minor"),
+            current.get("device"),
+        ):
+            self._history = [current]
+            return {
+                **self._pending(current),
+                "status": "unavailable",
+                "reason_codes": ["block_io_device_changed"],
+            }
+        self._history.append(current)
+        while (
+            len(self._history) > 1
+            and current["monotonic"] - self._history[1]["monotonic"]
+            >= STARTUP_BLOCK_IO_MINIMUM_WINDOW_SECONDS
+        ):
+            self._history.pop(0)
+        previous = self._history[0]
+        elapsed_seconds = current["monotonic"] - previous["monotonic"]
+        if elapsed_seconds < STARTUP_BLOCK_IO_MINIMUM_WINDOW_SECONDS:
+            return self._pending(current)
+        if elapsed_seconds > STARTUP_BLOCK_IO_MAXIMUM_WINDOW_SECONDS:
+            self._history = [current]
+            return self._pending(current)
+
+        counter_names = (
+            "reads",
+            "read_ms",
+            "writes",
+            "write_ms",
+            "weighted_io_ms",
+            "flushes",
+            "flush_ms",
+        )
+        if any(current[name] < previous[name] for name in counter_names):
+            self._history = [current]
+            return {
+                **self._pending(current),
+                "status": "unavailable",
+                "reason_codes": ["block_io_counter_reset"],
+            }
+
+        completed_reads = current["reads"] - previous["reads"]
+        read_milliseconds = current["read_ms"] - previous["read_ms"]
+        completed_writes = current["writes"] - previous["writes"]
+        write_milliseconds = current["write_ms"] - previous["write_ms"]
+        completed_flushes = current["flushes"] - previous["flushes"]
+        flush_milliseconds = current["flush_ms"] - previous["flush_ms"]
+        weighted_milliseconds = (
+            current["weighted_io_ms"] - previous["weighted_io_ms"]
+        )
+        if (
+            (completed_reads == 0 and read_milliseconds != 0)
+            or (completed_writes == 0 and write_milliseconds != 0)
+            or (completed_flushes == 0 and flush_milliseconds != 0)
+        ):
+            self._history = [current]
+            return {
+                **self._pending(current),
+                "status": "unavailable",
+                "reason_codes": ["block_io_counter_inconsistent"],
+            }
+
+        read_await_ms = (
+            read_milliseconds / completed_reads if completed_reads else 0.0
+        )
+        write_await_ms = (
+            write_milliseconds / completed_writes if completed_writes else 0.0
+        )
+        flush_await_ms = (
+            flush_milliseconds / completed_flushes
+            if completed_flushes
+            else 0.0
+        )
+        average_queue_depth = weighted_milliseconds / (elapsed_seconds * 1000.0)
+        metrics = {
+            "in_flight_start": int(previous["in_flight"]),
+            "in_flight_end": int(current["in_flight"]),
+            "read_await_ms": round(read_await_ms, 6),
+            "write_await_ms": round(write_await_ms, 6),
+            "flush_await_ms": round(flush_await_ms, 6),
+            "average_queue_depth": round(average_queue_depth, 6),
+        }
+        reason_codes: list[str] = []
+        if previous["in_flight"] != 0 or current["in_flight"] != 0:
+            reason_codes.append("block_io_in_flight_nonzero")
+        if read_await_ms > STARTUP_BLOCK_IO_MAXIMUM_READ_AWAIT_MS:
+            reason_codes.append("block_io_read_await_high")
+        if write_await_ms > STARTUP_BLOCK_IO_MAXIMUM_WRITE_AWAIT_MS:
+            reason_codes.append("block_io_write_await_high")
+        if flush_await_ms > STARTUP_BLOCK_IO_MAXIMUM_FLUSH_AWAIT_MS:
+            reason_codes.append("block_io_flush_await_high")
+        if average_queue_depth > STARTUP_BLOCK_IO_MAXIMUM_AVERAGE_QUEUE_DEPTH:
+            reason_codes.append("block_io_average_queue_high")
+        return {
+            "status": "safe" if not reason_codes else "unsafe",
+            "safe": not reason_codes,
+            "reason_codes": reason_codes,
+            "device_major_minor": f"{current['major']}:{current['minor']}",
+            "device": current["device"],
+            "interval_seconds": round(elapsed_seconds, 6),
+            "metrics": metrics,
+            "maximum": {
+                "read_await_ms": STARTUP_BLOCK_IO_MAXIMUM_READ_AWAIT_MS,
+                "write_await_ms": STARTUP_BLOCK_IO_MAXIMUM_WRITE_AWAIT_MS,
+                "flush_await_ms": STARTUP_BLOCK_IO_MAXIMUM_FLUSH_AWAIT_MS,
+                "average_queue_depth": (
+                    STARTUP_BLOCK_IO_MAXIMUM_AVERAGE_QUEUE_DEPTH
+                ),
+            },
+        }
+
+    def sample(self) -> dict[str, Any]:
+        try:
+            return self._evaluate(self._snapshot())
+        except Exception as exc:
+            self._history.clear()
+            return {
+                "status": "unavailable",
+                "safe": False,
+                "reason_codes": ["block_io_telemetry_unavailable"],
+                "device_major_minor": None,
+                "device": None,
+                "interval_seconds": None,
+                "metrics": {},
+                "error_type": exc.__class__.__name__,
+            }
+
+
+def wait_for_host_safety_preflight(
+    *,
+    timeout_seconds: float = 30.0,
+    poll_seconds: float = 1.0,
+    required_consecutive_safe: int = 2,
+    collector: Callable[[], dict[str, Any]] = collect_host_safety_preflight,
+    block_io_sampler: HostStartupBlockIoSampler | None = None,
+    clock: Callable[[], float] = time.monotonic,
+    sleeper: Callable[[float], None] = time.sleep,
+) -> dict[str, Any]:
+    """Wait only for transient I/O pressure before any campaign work begins.
+
+    The large runner module can briefly fault source pages into memory.  This
+    admission wait performs no repository scan or server action and never
+    relaxes a threshold.  All non-I/O failures remain immediate fail-closed.
+    """
+
+    if timeout_seconds < 0 or poll_seconds <= 0 or required_consecutive_safe < 1:
+        raise ValueError("invalid host safety admission wait configuration")
+    started = clock()
+    safe_streak = 0
+    samples: list[dict[str, Any]] = []
+    while True:
+        evidence = _with_host_io_hard_limit(collector())
+        if block_io_sampler is not None:
+            block_io = block_io_sampler.sample()
+            evidence = dict(evidence)
+            evidence["block_io"] = block_io
+            checks = dict(evidence.get("checks") or {})
+            block_reason = (
+                "HOST_BLOCK_DEVICE_TELEMETRY_INCOMPLETE"
+                if block_io.get("status") == "unavailable"
+                else "HOST_BLOCK_DEVICE_NOT_QUIET"
+            )
+            checks["host_block_io"] = {
+                "ok": block_io.get("safe") is True,
+                "value": block_io,
+                "reason_code": block_reason,
+            }
+            evidence["checks"] = checks
+            if block_io.get("safe") is not True:
+                evidence["tripped"] = list(dict.fromkeys([
+                    *(evidence.get("tripped") or []),
+                    block_reason,
+                ]))
+                evidence["ok"] = False
+        tripped = [str(item) for item in evidence.get("tripped") or ()]
+        samples.append({
+            "at": evidence.get("at"),
+            "ok": evidence.get("ok") is True,
+            "tripped": tripped,
+            "host_io_pressure": (
+                (evidence.get("checks") or {})
+                .get("host_io_pressure", {})
+                .get("value")
+            ),
+        })
+        if evidence.get("ok") is True:
+            safe_streak += 1
+            if safe_streak >= required_consecutive_safe:
+                result = dict(evidence)
+                result["admission_wait"] = {
+                    "ok": True,
+                    "waited_seconds": round(max(0.0, clock() - started), 6),
+                    "sample_count": len(samples),
+                    "required_consecutive_safe": required_consecutive_safe,
+                    "samples": samples,
+                }
+                return result
+        else:
+            safe_streak = 0
+            non_waitable = [
+                reason
+                for reason in tripped
+                if reason not in WAITABLE_HOST_SAFETY_REASONS
+            ]
+            if non_waitable:
+                result = dict(evidence)
+                result["admission_wait"] = {
+                    "ok": False,
+                    "waited_seconds": round(max(0.0, clock() - started), 6),
+                    "sample_count": len(samples),
+                    "required_consecutive_safe": required_consecutive_safe,
+                    "non_waitable": non_waitable,
+                    "samples": samples,
+                }
+                return result
+        elapsed = max(0.0, clock() - started)
+        if elapsed >= timeout_seconds:
+            result = dict(evidence)
+            timeout_reason = "HOST_SAFETY_ADMISSION_TIMEOUT"
+            result["tripped"] = list(dict.fromkeys([*tripped, timeout_reason]))
+            result["ok"] = False
+            result["admission_wait"] = {
+                "ok": False,
+                "waited_seconds": round(elapsed, 6),
+                "sample_count": len(samples),
+                "required_consecutive_safe": required_consecutive_safe,
+                "timeout": True,
+                "samples": samples,
+            }
+            return result
+        sleeper(min(poll_seconds, max(0.0, timeout_seconds - elapsed)))
 
 
 def _nested_get(payload: Mapping[str, Any], path: str) -> Any:
@@ -289,14 +836,25 @@ class ResourceCollectorConfig:
     )
     comfyui_queue_url: str = ""
     require_comfyui_queue: bool = False
-    minimum_host_mem_available_bytes: int = GIB
+    # Leave enough headroom for WSL, the database, the watchdog, and the
+    # desktop host.  The campaign must stop before global reclaim or swap can
+    # make the machine unresponsive; a cgroup OOM limit alone is too late.
+    minimum_host_mem_available_bytes: int = DEFAULT_MINIMUM_HOST_MEM_AVAILABLE_BYTES
     minimum_disk_free_bytes: int = 20 * GIB
+    maximum_host_load1_per_cpu: float = DEFAULT_MAXIMUM_HOST_LOAD1_PER_CPU
+    maximum_host_cpu_pressure_some_avg10: float = DEFAULT_MAXIMUM_HOST_CPU_PRESSURE_SOME_AVG10
+    maximum_host_memory_pressure_full_avg10: float = DEFAULT_MAXIMUM_HOST_MEMORY_PRESSURE_FULL_AVG10
+    maximum_host_io_pressure_full_avg10: float = DEFAULT_MAXIMUM_HOST_IO_PRESSURE_FULL_AVG10
+    maximum_host_io_pressure_full_avg60: float = DEFAULT_MAXIMUM_HOST_IO_PRESSURE_FULL_AVG60
+    maximum_host_swap_used_bytes: int = DEFAULT_MAXIMUM_HOST_SWAP_USED_BYTES
+    maximum_gpu_vram_ratio: float = 0.85
+    maximum_gpu_temperature_c: float = 80.0
     expected_cgroup_limits: Mapping[str, str] = field(default_factory=lambda: {
-        "memory.high": str(7 * GIB),
-        "memory.max": str(8 * GIB),
-        "memory.swap.max": str(GIB),
-        "cpu.max": "600000 100000",
-        "pids.max": "768",
+        "memory.high": str(5 * GIB),
+        "memory.max": str(6 * GIB),
+        "memory.swap.max": str(512 * MIB),
+        "cpu.max": "300000 100000",
+        "pids.max": "384",
     })
     expected_process_cgroup: str = ""
     cgroup_event_baseline: Mapping[str, Mapping[str, int]] = field(default_factory=dict)
@@ -323,7 +881,10 @@ class ResourceCollector:
         "host.block_io.util_percent",
         "host.psi.cpu.some.avg10",
         "host.psi.memory.some.avg10",
+        "host.psi.memory.full.avg10",
         "host.psi.io.some.avg10",
+        "host.psi.io.full.avg10",
+        "host.psi.io.full.avg60",
         "cgroup.cpu.usage_usec",
         "cgroup.cpu.nr_throttled",
         "cgroup.memory.current_bytes",
@@ -752,13 +1313,18 @@ class ResourceCollector:
             for role, row in process_role_rows.items()
             if isinstance(row, Mapping) and row.get("identity_errors")
         }
-        checks = {
-            "host_mem_available": {
-                "ok": int(_nested_get(sample, "host.memory.available_bytes") or 0) >= self.config.minimum_host_mem_available_bytes,
-                "value": _nested_get(sample, "host.memory.available_bytes"),
-                "minimum": self.config.minimum_host_mem_available_bytes,
-                "reason_code": "HOST_MEMORY_AVAILABLE_LOW",
-            },
+        host = sample.get("host") if isinstance(sample.get("host"), Mapping) else {}
+        checks = _host_safety_checks(
+            host,
+            minimum_host_mem_available_bytes=self.config.minimum_host_mem_available_bytes,
+            maximum_host_load1_per_cpu=self.config.maximum_host_load1_per_cpu,
+            maximum_host_cpu_pressure_some_avg10=self.config.maximum_host_cpu_pressure_some_avg10,
+            maximum_host_memory_pressure_full_avg10=self.config.maximum_host_memory_pressure_full_avg10,
+            maximum_host_io_pressure_full_avg10=self.config.maximum_host_io_pressure_full_avg10,
+            maximum_host_io_pressure_full_avg60=self.config.maximum_host_io_pressure_full_avg60,
+            maximum_host_swap_used_bytes=self.config.maximum_host_swap_used_bytes,
+        )
+        checks.update({
             "disk_free": {
                 "ok": int(_nested_get(sample, "host.disk.free_bytes") or 0) >= self.config.minimum_disk_free_bytes,
                 "value": _nested_get(sample, "host.disk.free_bytes"),
@@ -781,7 +1347,7 @@ class ResourceCollector:
                 "value": containment_errors,
                 "reason_code": "PROCESS_CONTAINMENT_VIOLATION",
             },
-        }
+        })
         health = sample.get("health") if isinstance(sample.get("health"), Mapping) else {}
         for label in sorted(self.config.health_targets):
             row = health.get(label) if isinstance(health, Mapping) else None
@@ -793,11 +1359,18 @@ class ResourceCollector:
         if self.config.require_gpu:
             gpu_rows = sample.get("gpu") if isinstance(sample.get("gpu"), list) else []
             ratios = [float(row.get("memory_used_mib") or 0) / max(1.0, float(row.get("memory_total_mib") or 0)) for row in gpu_rows]
+            temperatures = [float(row.get("temperature_c") or 0) for row in gpu_rows]
             checks["gpu_vram"] = {
-                "ok": bool(ratios) and max(ratios) <= 0.92,
+                "ok": bool(ratios) and max(ratios) <= self.config.maximum_gpu_vram_ratio,
                 "value": max(ratios) if ratios else None,
-                "maximum": 0.92,
+                "maximum": self.config.maximum_gpu_vram_ratio,
                 "reason_code": "GPU_VRAM_PRESSURE",
+            }
+            checks["gpu_temperature"] = {
+                "ok": bool(temperatures) and max(temperatures) <= self.config.maximum_gpu_temperature_c,
+                "value": max(temperatures) if temperatures else None,
+                "maximum": self.config.maximum_gpu_temperature_c,
+                "reason_code": "GPU_TEMPERATURE_HIGH",
             }
         tripped = [row["reason_code"] for row in checks.values() if not row["ok"]]
         return {"ok": not tripped, "tripped": tripped, "checks": checks}

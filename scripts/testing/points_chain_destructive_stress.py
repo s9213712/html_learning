@@ -1186,6 +1186,7 @@ def main() -> int:
     payload = {
         "ok": not findings,
         "prefix": prefix,
+        "fixture_usernames": [str(item.get("username") or "") for item in users],
         "base_url": args.base_url,
         "runtime_root": args.runtime_root,
         "database": str(database),
@@ -1198,6 +1199,19 @@ def main() -> int:
         "direct_transfer_completed": direct_transfer_completed,
         "direct_transfer_errors": direct_transfer_errors,
         "external_transfer_count": external_transfer_count,
+        "idempotency_probe": {
+            "first_transaction_hash": str(dup_first.get("transaction_hash") or ""),
+            "second_transaction_hash": str(dup_second.get("transaction_hash") or ""),
+            "second_created": dup_second.get("created"),
+        },
+        "overspend_probe": {
+            "attempt_count": len(overspend_results),
+            "insufficient_balance_rejection_count": sum(
+                1 for item in overspend_results if int(item.get("status") or 0) == 409
+            ),
+            "balance_before": rich_balance,
+            "balance_after": rich_after_overspend.get("balance"),
+        },
         "direct_latency": numeric_latency_summary(direct_latency_values),
         "direct_status_counts": dict(direct_status_counts),
         "forced_grants": forced_grants,

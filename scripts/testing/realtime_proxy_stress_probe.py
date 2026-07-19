@@ -361,6 +361,17 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
             os.environ.pop("HACKME_MEDIA_REALTIME_PROXY_LOCK_DIR", None)
         else:
             os.environ["HACKME_MEDIA_REALTIME_PROXY_LOCK_DIR"] = previous_lock_dir
+        runtime_status = media_streaming.realtime_proxy_runtime_status()
+        result["cleanup"] = {
+            "active_slots_released": int(runtime_status.get("active") or 0) == 0,
+            "held_slots_released": not bool(media_streaming._REALTIME_PROXY_HELD_SLOTS),
+            "environment_restored": all((
+                os.environ.get("HACKME_MEDIA_REALTIME_PROXY_MAX_CONCURRENT") == previous_limit,
+                os.environ.get("HACKME_MEDIA_REALTIME_PROXY_TIMEOUT_SECONDS") == previous_timeout,
+                os.environ.get("HACKME_MEDIA_REALTIME_PROXY_LIMIT_SCOPE") == previous_scope,
+                os.environ.get("HACKME_MEDIA_REALTIME_PROXY_LOCK_DIR") == previous_lock_dir,
+            )),
+        }
 
     write_reports(result, json_path=json_path, md_path=md_path)
     result["json"] = str(json_path)

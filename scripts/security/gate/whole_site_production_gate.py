@@ -530,11 +530,12 @@ def module_to_dict(module: ModuleResult) -> dict:
     }
 
 
-def write_reports(report: dict, out_dir: Path) -> tuple[Path, Path]:
+def write_reports(report: dict, out_dir: Path, *, json_out: str = "") -> tuple[Path, Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    json_path = out_dir / f"whole_site_production_gate_{stamp}.json"
-    md_path = out_dir / f"whole_site_production_gate_{stamp}.md"
+    json_path = Path(json_out).expanduser().resolve() if json_out else out_dir / f"whole_site_production_gate_{stamp}.json"
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    md_path = json_path.with_suffix(".md") if json_out else out_dir / f"whole_site_production_gate_{stamp}.md"
     json_path.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
 
     summary = report["WHOLE_SITE_PRODUCTION_GATE_SUMMARY"]
@@ -597,6 +598,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Run whole-site production gate for hackme_web.")
     parser.add_argument("--base-url", default=os.environ.get("WHOLE_SITE_GATE_BASE_URL", "http://127.0.0.1:5000"))
     parser.add_argument("--out", default=str(security_reports_root()))
+    parser.add_argument("--json-out", default="", help="Write the machine-readable gate report to this exact path")
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
     parser.add_argument(
         "--full-pytest-timeout",
@@ -633,7 +635,7 @@ def main() -> int:
         "WHOLE_SITE_PRODUCTION_GATE_SUMMARY": summary,
         "modules": [module_to_dict(module) for module in modules],
     }
-    json_path, md_path = write_reports(report, Path(args.out))
+    json_path, md_path = write_reports(report, Path(args.out), json_out=args.json_out)
     print(json.dumps({
         "ok": summary["production_readiness"] == "YES",
         "summary": summary,

@@ -14,7 +14,7 @@
     "batch_size": 1,
     "cfg": 1,
     "checkpoint": "ltx-2.3-22b-dev-fp8.safetensors",
-    "clip": "",
+    "clip": "gemma_3_12B_it_fp4_mixed.safetensors",
     "controlnet": null,
     "denoise_strength": 0,
     "diffusion_model": "",
@@ -57,6 +57,10 @@
     {
       "kind": "checkpoint",
       "name": "ltx-2.3-22b-dev-fp8.safetensors"
+    },
+    {
+      "kind": "clip",
+      "name": "gemma_3_12B_it_fp4_mixed.safetensors"
     },
     {
       "kind": "latent_upscale",

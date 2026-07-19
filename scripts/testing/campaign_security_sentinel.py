@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import time
 from dataclasses import dataclass
@@ -13,6 +14,16 @@ from typing import Any, Callable, Mapping
 
 import requests
 import urllib3
+
+from scripts.testing.audit_evidence_triad import (
+    ARCHIVE_SCHEMA_VERSION as AUDIT_EVIDENCE_ARCHIVE_SCHEMA_VERSION,
+    SCHEMA_VERSION as AUDIT_EVIDENCE_SCHEMA_VERSION,
+    AuditEvidencePaths,
+    capture_audit_evidence,
+    create_audit_evidence_archive,
+    validate_audit_evidence_archive,
+    validate_audit_evidence_receipt,
+)
 
 
 SECURITY_SENTINEL_SCHEMA_VERSION = "hackme.production-security-sentinel.v1"
@@ -33,6 +44,8 @@ class SecuritySentinelConfig:
     launcher_command: tuple[str, ...]
     timeout_seconds: float = 15.0
     cross_worker_requests: int = 12
+    audit_evidence_output_dir: Path | None = None
+    audit_evidence_target: str = "security_sentinel"
 
 
 class _Client:
@@ -175,6 +188,136 @@ class ProductionSecuritySentinel:
             session_factory=self.session_factory,
         )
 
+    def _online_audit_evidence(self) -> tuple[dict[str, Any], dict[str, Any]]:
+        output_dir = self.config.audit_evidence_output_dir
+        if output_dir is None:
+            raise RuntimeError("online audit evidence output directory is not configured")
+        try:
+            capture_audit_evidence(
+                paths=AuditEvidencePaths.for_runtime(self.config.runtime_root),
+                output_dir=output_dir,
+                target=self.config.audit_evidence_target,
+                mode="online",
+            )
+            receipt_path = Path(output_dir) / "receipt.json"
+            receipt_bytes = receipt_path.read_bytes()
+            receipt = json.loads(receipt_bytes)
+            if not isinstance(receipt, Mapping):
+                raise RuntimeError("audit evidence receipt root is not an object")
+            validation = validate_audit_evidence_receipt(
+                receipt,
+                required_mode="online",
+                required_target=self.config.audit_evidence_target,
+                artifact_root=Path(output_dir),
+            )
+            archive_path = Path(output_dir).with_name(
+                f"{Path(output_dir).name}.tar"
+            )
+            archive = create_audit_evidence_archive(
+                output_dir=Path(output_dir),
+                archive_path=archive_path,
+            )
+            archive_validation = validate_audit_evidence_archive(
+                archive_path,
+                required_mode="online",
+                required_target=self.config.audit_evidence_target,
+                expected_sha256=str(archive.get("sha256") or ""),
+                expected_size=int(archive.get("size") or 0),
+            )
+            reference = {
+                "schema_version": "hackme.audit-evidence-triad-reference/v1",
+                "receipt_schema_version": AUDIT_EVIDENCE_SCHEMA_VERSION,
+                "mode": "online",
+                "target": self.config.audit_evidence_target,
+                "receipt_path": str(receipt_path.resolve(strict=True)),
+                "receipt_sha256": hashlib.sha256(receipt_bytes).hexdigest(),
+                "receipt_size_bytes": len(receipt_bytes),
+                "receipt": dict(receipt),
+                "validation": validation,
+                "archive_schema_version": AUDIT_EVIDENCE_ARCHIVE_SCHEMA_VERSION,
+                "archive_path": str(archive_path.resolve(strict=True)),
+                "archive_sha256": archive.get("sha256"),
+                "archive_size_bytes": archive.get("size"),
+                "archive_validation": archive_validation,
+            }
+            check = {
+                "name": "audit_evidence_triad_online",
+                "ok": validation.get("ok") is True,
+                "status": 200,
+                "elapsed_ms": 0.0,
+                "error": "",
+                "detail": {
+                    "receipt_schema_version": AUDIT_EVIDENCE_SCHEMA_VERSION,
+                    "mode": "online",
+                    "target": self.config.audit_evidence_target,
+                    "receipt_sha256": reference["receipt_sha256"],
+                    "receipt_size_bytes": reference["receipt_size_bytes"],
+                    "artifact_files_verified": validation.get("artifact_files_verified"),
+                    "validation_classification": validation.get("classification"),
+                    "validation_errors": validation.get("errors"),
+                    "archive_schema_version": AUDIT_EVIDENCE_ARCHIVE_SCHEMA_VERSION,
+                    "archive_sha256": archive.get("sha256"),
+                    "archive_size_bytes": archive.get("size"),
+                    "archive_validation_classification": archive_validation.get(
+                        "classification"
+                    ),
+                    "archive_validation_errors": archive_validation.get("errors"),
+                },
+            }
+            if archive_validation.get("ok") is not True:
+                check["ok"] = False
+            return reference, check
+        except Exception as exc:
+            validation = {
+                "schema_version": "hackme.audit-evidence-triad-validation/v1",
+                "ok": False,
+                "classification": "FAIL_HARNESS",
+                "errors": [f"capture_failed:{exc.__class__.__name__}"],
+                "artifact_files_verified": False,
+            }
+            return {
+                "schema_version": "hackme.audit-evidence-triad-reference/v1",
+                "receipt_schema_version": AUDIT_EVIDENCE_SCHEMA_VERSION,
+                "mode": "online",
+                "target": self.config.audit_evidence_target,
+                "receipt_path": "",
+                "receipt_sha256": "",
+                "receipt_size_bytes": 0,
+                "receipt": None,
+                "validation": validation,
+                "archive_schema_version": AUDIT_EVIDENCE_ARCHIVE_SCHEMA_VERSION,
+                "archive_path": "",
+                "archive_sha256": "",
+                "archive_size_bytes": 0,
+                "archive_validation": {
+                    "schema_version": "hackme.audit-evidence-triad-archive-validation/v1",
+                    "ok": False,
+                    "classification": "FAIL_HARNESS",
+                    "errors": [f"capture_failed:{exc.__class__.__name__}"],
+                },
+            }, {
+                "name": "audit_evidence_triad_online",
+                "ok": False,
+                "status": 0,
+                "elapsed_ms": 0.0,
+                "error": f"{exc.__class__.__name__}: {exc}",
+                "detail": {
+                    "receipt_schema_version": AUDIT_EVIDENCE_SCHEMA_VERSION,
+                    "mode": "online",
+                    "target": self.config.audit_evidence_target,
+                    "receipt_sha256": "",
+                    "receipt_size_bytes": 0,
+                    "artifact_files_verified": False,
+                    "validation_classification": "FAIL_HARNESS",
+                    "validation_errors": validation["errors"],
+                    "archive_schema_version": AUDIT_EVIDENCE_ARCHIVE_SCHEMA_VERSION,
+                    "archive_sha256": "",
+                    "archive_size_bytes": 0,
+                    "archive_validation_classification": "FAIL_HARNESS",
+                    "archive_validation_errors": validation["errors"],
+                },
+            }
+
     def run_once(self) -> dict[str, Any]:
         checks: list[dict[str, Any]] = [self._launcher_contract()]
         anonymous = self._client()
@@ -227,8 +370,12 @@ class ProductionSecuritySentinel:
         checks.append(self._check("dangerous_confirmation_required", wrong_confirmation, expected_statuses={400}))
 
         security_center = clients["root"].request("GET", "/api/admin/security-center")
-        security_payload = (security_center.get("body") or {}).get("security_center") or {}
-        settings = security_payload.get("settings") or {}
+        security_body = security_center.get("body")
+        security_body = security_body if isinstance(security_body, Mapping) else {}
+        security_payload_raw = security_body.get("security_center")
+        security_payload = security_payload_raw if isinstance(security_payload_raw, Mapping) else {}
+        settings_raw = security_payload.get("settings")
+        settings = settings_raw if isinstance(settings_raw, Mapping) else {}
         required_settings = {
             "audit_chain_enabled": True,
             "feature_audit_log_enabled": True,
@@ -236,13 +383,34 @@ class ProductionSecuritySentinel:
             "rate_limit_violation_enabled": True,
         }
         settings_ok = all(settings.get(name) is expected for name, expected in required_settings.items())
-        audit_integrity = security_payload.get("audit_integrity") or {}
+        audit_integrity_raw = security_payload.get("audit_integrity")
+        audit_integrity = audit_integrity_raw if isinstance(audit_integrity_raw, Mapping) else {}
+        audit_integrity_required_fields = ("enabled", "ok", "broken_at")
+        audit_integrity_missing_fields = [
+            field for field in audit_integrity_required_fields if field not in audit_integrity
+        ]
+        audit_integrity_valid = bool(
+            isinstance(audit_integrity_raw, Mapping)
+            and not audit_integrity_missing_fields
+            and audit_integrity.get("enabled") is True
+            and audit_integrity.get("ok") is True
+            and audit_integrity.get("broken_at") is None
+        )
         checks.append({
             **self._check("production_security_controls", security_center, expected_statuses={200}),
-            "ok": int(security_center.get("status") or 0) == 200 and settings_ok and audit_integrity.get("ok") is not False,
+            "ok": (
+                int(security_center.get("status") or 0) == 200
+                and settings_ok
+                and audit_integrity_valid
+            ),
             "detail": {
                 "required_settings": {name: settings.get(name) for name in required_settings},
+                "audit_integrity_required_fields": list(audit_integrity_required_fields),
+                "audit_integrity_missing_fields": audit_integrity_missing_fields,
+                "audit_integrity_enabled": audit_integrity.get("enabled"),
                 "audit_integrity_ok": audit_integrity.get("ok"),
+                "audit_integrity_broken_at": audit_integrity.get("broken_at"),
+                "audit_integrity_valid": audit_integrity_valid,
                 "reported_mode": security_payload.get("mode"),
             },
         })
@@ -265,14 +433,44 @@ class ProductionSecuritySentinel:
             "detail": {"requests": len(session_statuses), "statuses": session_statuses},
         })
 
+        audit_evidence: dict[str, Any] | None = None
+        if self.config.audit_evidence_output_dir is not None:
+            audit_evidence, audit_check = self._online_audit_evidence()
+            checks.append(audit_check)
+
+        failed_checks = [item["name"] for item in checks if not item.get("ok")]
+        classification = "PASS"
+        if failed_checks:
+            validation = (
+                audit_evidence.get("validation")
+                if isinstance(audit_evidence, Mapping)
+                else None
+            )
+            archive_validation = (
+                audit_evidence.get("archive_validation")
+                if isinstance(audit_evidence, Mapping)
+                else None
+            )
+            classification = (
+                str(archive_validation.get("classification"))
+                if isinstance(archive_validation, Mapping)
+                and archive_validation.get("ok") is not True
+                else
+                str(validation.get("classification"))
+                if isinstance(validation, Mapping) and validation.get("ok") is not True
+                else "FAIL_PRODUCT"
+            )
+
         return {
             "schema_version": SECURITY_SENTINEL_SCHEMA_VERSION,
             "checked_at": utc_now(),
             "target": self.config.base_url.rstrip("/"),
             "runtime_root": str(self.config.runtime_root),
             "checks": checks,
-            "failed_checks": [item["name"] for item in checks if not item.get("ok")],
-            "ok": bool(checks) and all(item.get("ok") for item in checks),
+            "failed_checks": failed_checks,
+            "audit_evidence": audit_evidence,
+            "classification": classification,
+            "ok": bool(checks) and not failed_checks,
         }
 
 

@@ -682,6 +682,7 @@ def init_db(
     ensure_official_chat_room,
     hash_password,
     ensure_points_economy_schema=None,
+    preserve_existing_runtime=False,
 ):
     conn = _STATE["get_db"]()
     schema_path = _STATE.get("schema_path") or (_STATE["db_path"] + '.schema.sql')
@@ -719,6 +720,21 @@ def init_db(
     conn.commit()
     if migration_plan["applied"] and int(migration_plan.get("previous") or 0) > 0:
         _STATE["audit"]("DB_SCHEMA_MIGRATION", "127.0.0.1", user="system", detail=f"schema migrated from v{migration_plan['previous']} to v{migration_plan['current']}")
+
+    if preserve_existing_runtime:
+        # A persisted incident may span a controlled process restart.  Schema
+        # repair/migrations above are required to make recovery possible, but
+        # legacy imports, special-account normalization, password bookkeeping,
+        # and official-room seeding below are unrelated state mutations.  The
+        # launcher has already detected the authoritative control-DB incident,
+        # so stop here and leave all existing account/evidence rows untouched.
+        _STATE["refresh_system_settings"]()
+        conn.commit()
+        conn.close()
+        return {
+            "preserved_existing_runtime": True,
+            "migration": migration_plan,
+        }
 
     migration_summary = migrate_legacy_json_artifacts(conn)
     if migration_summary["settings_imported"] or migration_summary["security_events_imported"] or migration_summary["secure_audit_imported"]:

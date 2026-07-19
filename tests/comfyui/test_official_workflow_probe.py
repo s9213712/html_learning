@@ -2,6 +2,8 @@ import importlib.util
 from types import SimpleNamespace
 from pathlib import Path
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PROBE_PATH = REPO_ROOT / "scripts" / "comfyui" / "official_workflow_probe.py"
@@ -126,7 +128,7 @@ def test_preflight_reports_literal_missing_comfyui_gguf_unet_inputs():
     ]
 
 
-def test_preflight_reads_combo_options_from_object_info_dict_shape():
+def test_preflight_does_not_treat_loadvideo_media_as_a_model_dependency():
     probe = _load_probe_module()
     object_info = {
         "LoadVideo": {
@@ -146,8 +148,8 @@ def test_preflight_reads_combo_options_from_object_info_dict_shape():
 
     result = probe._preflight("missing_video", workflow, object_info)
 
-    assert result["runnable"] is False
-    assert result["missing_models"][0]["value"] == "missing.mp4"
+    assert result["runnable"] is True
+    assert result["missing_models"] == []
 
 
 def test_preflight_reports_model_input_when_comfyui_option_list_is_empty():
@@ -179,6 +181,39 @@ def test_preflight_reports_model_input_when_comfyui_option_list_is_empty():
             "value": "ltx-2.3-spatial-upscaler-x2-1.1.safetensors",
         },
     ]
+
+
+def test_preflight_reports_missing_ltx_text_encoder_dependency():
+    probe = _load_probe_module()
+    object_info = {
+        "LTXAVTextEncoderLoader": {
+            "input": {
+                "required": {
+                    "text_encoder": [["available-gemma.safetensors"], {}],
+                    "ckpt_name": [["available-ltx.safetensors"], {}],
+                },
+            },
+        },
+    }
+    workflow = {
+        "303": {
+            "class_type": "LTXAVTextEncoderLoader",
+            "inputs": {
+                "text_encoder": "missing-gemma.safetensors",
+                "ckpt_name": "available-ltx.safetensors",
+            },
+        },
+    }
+
+    result = probe._preflight("missing_ltx_text_encoder", workflow, object_info)
+
+    assert result["runnable"] is False
+    assert result["missing_models"] == [{
+        "node_id": "303",
+        "class_type": "LTXAVTextEncoderLoader",
+        "input": "text_encoder",
+        "value": "missing-gemma.safetensors",
+    }]
 
 
 def test_preflight_accepts_equivalent_subfolder_model_paths():
@@ -424,3 +459,164 @@ def test_prompt_safety_allows_explicit_adult_non_minor_prompt():
     }
 
     assert probe._prompt_safety_issue(workflow) == ""
+
+
+@pytest.mark.parametrize(
+    ("node_class", "input_name", "custom_arg"),
+    (
+        ("CheckpointLoaderSimple", "ckpt_name", "custom_checkpoint_model"),
+        ("UNETLoader", "unet_name", "custom_diffusion_model"),
+    ),
+)
+def test_run_probe_preflights_custom_model_override_not_checked_in_default(
+    monkeypatch,
+    node_class,
+    input_name,
+    custom_arg,
+):
+    probe = _load_probe_module()
+
+    class FakeClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def get_object_info(self):
+            return {
+                node_class: {
+                    "input": {
+                        "required": {
+                            input_name: [["approved-safe-model"], {}],
+                        },
+                    },
+                },
+            }
+
+        def upload_image_bytes(self, _data, filename, **_kwargs):
+            raise AssertionError(f"preflight-only must not upload {filename}")
+
+    monkeypatch.setattr(probe, "ComfyUIClient", FakeClient)
+    monkeypatch.setattr(probe, "SYSTEM_WORKFLOW_IDS", ("patched_preflight",))
+    monkeypatch.setattr(
+        probe,
+        "_load_workflow",
+        lambda _bundle_id: {
+            "1": {
+                "class_type": node_class,
+                "inputs": {input_name: "missing-checked-in-default"},
+            },
+        },
+    )
+    dependency_kind = "checkpoint" if node_class == "CheckpointLoaderSimple" else "diffusion_model"
+    monkeypatch.setattr(
+        probe,
+        "_load_manifest",
+        lambda _bundle_id: {
+            "required_models": [{
+                "kind": dependency_kind,
+                "name": "missing-checked-in-default",
+            }],
+            "required_loras": [],
+            "required_controlnets": [],
+            "required_custom_nodes": [],
+        },
+    )
+    args = SimpleNamespace(
+        comfyui_url="http://127.0.0.1:8188",
+        request_timeout=5,
+        image_size=8,
+        only="",
+        custom_params=True,
+        custom_param_file="",
+        custom_param_json="",
+        formal_params=False,
+        preflight_only=True,
+        force_run=False,
+        continue_on_fail=False,
+        include_heavy=False,
+        width=None,
+        height=None,
+        steps=None,
+        prompt=None,
+        negative_prompt=None,
+        checkpoint_model="",
+        no_fetch_outputs=False,
+        acceptance_only=False,
+        **{custom_arg: "approved-safe-model"},
+    )
+
+    report = probe.run_probe(args)
+
+    assert report["ok"] is True
+    assert report["results"][0]["status"] == "preflight_pass"
+    assert report["results"][0]["preflight"]["missing_models"] == []
+    assert report["results"][0]["preflight"]["source_dependency_contract_valid"] is True
+
+
+def test_run_probe_never_force_runs_invalid_source_dependency_contract(monkeypatch):
+    probe = _load_probe_module()
+
+    class FakeClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def get_object_info(self):
+            return {
+                "CheckpointLoaderSimple": {
+                    "input": {"required": {"ckpt_name": [["model.safetensors"], {}]}},
+                },
+            }
+
+        def generate_from_workflow(self, *_args, **_kwargs):
+            raise AssertionError("an invalid source contract must never be queued")
+
+    workflow = {
+        "1": {
+            "class_type": "CheckpointLoaderSimple",
+            "inputs": {"ckpt_name": "model.safetensors"},
+        },
+    }
+    monkeypatch.setattr(probe, "ComfyUIClient", FakeClient)
+    monkeypatch.setattr(probe, "SYSTEM_WORKFLOW_IDS", ("invalid_contract",))
+    monkeypatch.setattr(probe, "_load_workflow", lambda _bundle_id: workflow)
+    monkeypatch.setattr(
+        probe,
+        "_load_manifest",
+        lambda _bundle_id: {
+            "required_models": [],
+            "required_loras": [],
+            "required_controlnets": [],
+            "required_custom_nodes": [],
+        },
+    )
+    args = SimpleNamespace(
+        comfyui_url="http://127.0.0.1:8188",
+        request_timeout=5,
+        image_size=8,
+        only="",
+        custom_params=False,
+        custom_param_file="",
+        custom_param_json="",
+        formal_params=False,
+        preflight_only=False,
+        force_run=True,
+        continue_on_fail=False,
+        include_heavy=True,
+        width=None,
+        height=None,
+        steps=None,
+        prompt=None,
+        negative_prompt=None,
+        checkpoint_model="",
+        no_fetch_outputs=False,
+        acceptance_only=False,
+        custom_checkpoint_model="",
+        custom_diffusion_model="",
+    )
+
+    report = probe.run_probe(args)
+
+    assert report["ok"] is False
+    assert report["results"][0]["status"] == "preflight_failed"
+    contract = report["results"][0]["preflight"]["dependency_contract"]
+    assert contract["ok"] is False
+    assert contract["differences"]["models"]["missing_from_manifest"]

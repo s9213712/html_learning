@@ -1,0 +1,192 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hackme.local/schemas/audit-evidence-triad-v1.json",
+  "title": "hackme audit evidence triad receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "target",
+    "mode",
+    "captured_at",
+    "completed_at",
+    "ok",
+    "verdict",
+    "capture",
+    "artifacts",
+    "counts",
+    "heads",
+    "invariants",
+    "errors",
+    "secret_handling"
+  ],
+  "properties": {
+    "schema_version": {"const": "hackme.audit-evidence-triad/v1"},
+    "target": {"type": "string", "minLength": 1, "maxLength": 128},
+    "mode": {"enum": ["online", "sealed"]},
+    "captured_at": {"type": "string", "format": "date-time"},
+    "completed_at": {"type": "string", "format": "date-time"},
+    "ok": {"type": "boolean"},
+    "verdict": {"enum": ["PASS", "FAIL_PRODUCT", "FAIL_HARNESS"]},
+    "capture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mutation_lock_wait_ms", "head_anchor", "sqlite_backup_api", "immutable_validation"],
+      "properties": {
+        "mutation_lock_wait_ms": {"type": ["number", "null"], "minimum": 0},
+        "head_anchor": {
+          "type": "object",
+          "required": ["attempted", "performed"],
+          "properties": {
+            "attempted": {"type": "boolean"},
+            "performed": {"type": "boolean"},
+            "reason": {"type": "string"},
+            "audit_id": {"type": "integer", "minimum": 1},
+            "entry_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "chain_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          }
+        },
+        "sqlite_backup_api": {"const": true},
+        "immutable_validation": {"const": true}
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": {"$ref": "#/$defs/artifact"}
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["db_rows", "log_entries", "anchor_history_entries", "rows_after_latest"],
+      "properties": {
+        "db_rows": {"type": "integer", "minimum": 0},
+        "log_entries": {"type": "integer", "minimum": 0},
+        "anchor_history_entries": {"type": "integer", "minimum": 0},
+        "rows_after_latest": {"type": "integer", "minimum": 0}
+      }
+    },
+    "heads": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["database", "audit_log", "anchor_latest"],
+      "properties": {
+        "database": {"$ref": "#/$defs/nullableHead"},
+        "audit_log": {"$ref": "#/$defs/nullableHead"},
+        "anchor_latest": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "required": ["ts", "audit_id", "entry_hash", "chain_hash", "reason"],
+              "additionalProperties": false,
+              "properties": {
+                "ts": {"type": "string"},
+                "audit_id": {"type": "integer", "minimum": 1},
+                "entry_hash": {"type": "string"},
+                "chain_hash": {"type": "string"},
+                "reason": {"type": "string"}
+              }
+            }
+          ]
+        }
+      }
+    },
+    "invariants": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "safe_paths",
+        "mutation_lock_acquired",
+        "capture_stable",
+        "sqlite_backup_complete",
+        "sqlite_quick_check",
+        "modern_audit_schema",
+        "db_ids_strictly_increasing",
+        "db_chain_valid",
+        "audit_log_valid",
+        "audit_log_db_bijection",
+        "anchor_history_valid",
+        "anchor_history_references_db",
+        "latest_matches_history_tail",
+        "mode_anchor_policy",
+        "secret_material_excluded_from_receipt"
+      ],
+      "properties": {
+        "safe_paths": {"type": "boolean"},
+        "mutation_lock_acquired": {"type": "boolean"},
+        "capture_stable": {"type": "boolean"},
+        "sqlite_backup_complete": {"type": "boolean"},
+        "sqlite_quick_check": {"type": "boolean"},
+        "modern_audit_schema": {"type": "boolean"},
+        "db_ids_strictly_increasing": {"type": "boolean"},
+        "db_chain_valid": {"type": "boolean"},
+        "audit_log_valid": {"type": "boolean"},
+        "audit_log_db_bijection": {"type": "boolean"},
+        "anchor_history_valid": {"type": "boolean"},
+        "anchor_history_references_db": {"type": "boolean"},
+        "latest_matches_history_tail": {"type": "boolean"},
+        "mode_anchor_policy": {"type": "boolean"},
+        "secret_material_excluded_from_receipt": {"type": "boolean"}
+      }
+    },
+    "errors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "domain", "message"],
+        "properties": {
+          "code": {"type": "string", "minLength": 1},
+          "domain": {"type": "string", "minLength": 1},
+          "message": {"type": "string", "minLength": 1},
+          "audit_id": {"type": "integer", "minimum": 1}
+        }
+      }
+    },
+    "secret_handling": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["integrity_key", "chain_seed", "secret_files_copied", "secret_values_in_receipt"],
+      "properties": {
+        "integrity_key": {"const": "memory_only"},
+        "chain_seed": {"const": "memory_only"},
+        "secret_files_copied": {"const": false},
+        "secret_values_in_receipt": {"const": false}
+      }
+    }
+  },
+  "$defs": {
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "path", "size", "sha256"],
+      "properties": {
+        "state": {"enum": ["present", "absent"]},
+        "path": {"type": ["string", "null"]},
+        "size": {"type": "integer", "minimum": 0},
+        "sha256": {
+          "oneOf": [
+            {"type": "null"},
+            {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          ]
+        }
+      }
+    },
+    "head": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["audit_id", "entry_hash", "chain_hash"],
+      "properties": {
+        "audit_id": {"type": "integer", "minimum": 1},
+        "entry_hash": {"type": "string"},
+        "chain_hash": {"type": "string"}
+      }
+    },
+    "nullableHead": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/head"}
+      ]
+    }
+  }
+}

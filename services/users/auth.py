@@ -859,9 +859,19 @@ def _normalize_session_allowed_features(allowed_features):
 def db_save_session(user_id, token, ip, ua, *, auth_scope="", allowed_features=None):
     now = datetime.now().isoformat()
     expires = (datetime.now() + timedelta(seconds=effective_session_ttl_seconds())).isoformat()
+    # Sessions may live in a dedicated auth database, while the security epoch
+    # is authoritative in the main control database.  Reading the epoch from
+    # the auth connection silently returned zero after incident/maintenance
+    # rotation, so a successful root login was revoked on its very next
+    # request.  Capture the authoritative epoch before writing auth state.
+    main_conn = _main_db()
+    try:
+        session_epoch = _current_security_epoch(main_conn)
+    finally:
+        main_conn.close()
+
     def _write(conn):
         cols = {row["name"] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
-        session_epoch = _current_security_epoch(conn)
         auth_scope_value = str(auth_scope or "").strip()
         allowed_features_json = json.dumps(_normalize_session_allowed_features(allowed_features), ensure_ascii=True, sort_keys=True)
         optional_cols = []

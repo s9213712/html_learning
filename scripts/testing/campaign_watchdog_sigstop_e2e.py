@@ -21,14 +21,18 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import signal
+import socket
+import stat
 import subprocess
 import sys
 import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Iterator, Mapping, Sequence
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -36,10 +40,22 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.testing.campaign_cgroup import (  # noqa: E402
+    DEFAULT_IO_WEIGHT,
     GIB,
     CampaignCgroup,
     CampaignCgroupError,
     CampaignCgroupLimits,
+)
+from scripts.testing.campaign_control_channel import (  # noqa: E402
+    ControlChannelError,
+    PeerIdentity,
+    authenticate_connection,
+    create_server,
+    derive_runner_auth_key,
+    send_hello,
+    sign_authenticated_payload,
+    socket_permissions,
+    verify_authenticated_payload,
 )
 from scripts.testing.campaign_state import (  # noqa: E402
     CampaignState,
@@ -56,33 +72,42 @@ from scripts.testing.campaign_watchdog import (  # noqa: E402
     build_watchdog_command,
     capture_process_identity,
     load_json,
+    locked_path,
 )
 
 
-SCHEMA_VERSION = "hackme.watchdog-sigstop-e2e.v1"
+SCHEMA_VERSION = "hackme.watchdog-sigstop-e2e.v2"
 ARTIFACT_INDEX_SCHEMA_VERSION = "hackme.watchdog-sigstop-artifacts.v1"
-ORCHESTRATOR_FIXTURE_SCHEMA_VERSION = "hackme.watchdog-sigstop-fixture.v1"
+ORCHESTRATOR_FIXTURE_SCHEMA_VERSION = "hackme.watchdog-sigstop-fixture.v2"
 CHECKPOINT_SCHEMA_VERSION = "hackme.watchdog-sigstop-checkpoint.v1"
 CONTROL_SCHEMA_VERSION = "hackme.campaign-control.v1"
 EXACT_STALE_SECONDS = 120.0
 INCIDENT_WAIT_SECONDS = 150.0
 READY_WAIT_SECONDS = 20.0
 PROCESS_STOP_WAIT_SECONDS = 15.0
+AUTHENTICATION_WAIT_SECONDS = 20.0
+WATCHDOG_LIVENESS_MAX_AGE_SECONDS = 10.0
 
 EXPECTED_LIMITS = {
-    "memory.high": 7 * GIB,
-    "memory.max": 8 * GIB,
-    "memory.swap.max": 1 * GIB,
-    "cpu.quota_percent": 600,
-    "pids.max": 768,
+    "memory.high": 5 * GIB,
+    "memory.max": 6 * GIB,
+    "memory.swap.max": 512 * 1024**2,
+    "cpu.quota_percent": 300,
+    "pids.max": 384,
+    "io.weight": DEFAULT_IO_WEIGHT,
 }
 
 REQUIRED_ASSERTIONS = (
     "source_at_commit_clean",
     "exact_cgroup_limits",
+    "supervisor_outside_scope",
     "orchestrator_in_scope",
     "load_in_scope",
     "watchdog_outside_scope",
+    "authenticated_control_channel",
+    "role_separated_auth_keys",
+    "signed_runner_streams",
+    "reciprocal_watchdog_liveness",
     "sigstop_delivered",
     "stale_timeout_120_observed",
     "admission_closed",
@@ -104,6 +129,280 @@ class SigstopE2EError(RuntimeError):
 
 class SigstopE2EInfraError(SigstopE2EError):
     """The real host cannot supply a required process/cgroup capability."""
+
+
+class SigstopE2ELivenessError(SigstopE2EError):
+    """The external watchdog identity or signed liveness became untrustworthy."""
+
+
+class AuthenticatedControlRuntime:
+    """Private, pinned one-shot control server for the Level-0 E2E driver.
+
+    The driver is the supervisor for this standalone harness.  It delivers the
+    derived runner key only to the exact in-scope orchestrator PID and the
+    master watchdog key only to the exact out-of-scope watchdog PID.  Neither
+    key is placed in argv, environment variables, files, logs, or evidence.
+    """
+
+    def __init__(self, campaign_uuid: str):
+        digest = hashlib.sha256(str(campaign_uuid).encode("utf-8")).hexdigest()[:20]
+        self.campaign_uuid = str(campaign_uuid)
+        self.directory = Path("/tmp") / f".hws-fi-{digest}"
+        self.path = self.directory / "control.sock"
+        self.server: socket.socket | None = None
+        self.socket_fd: int | None = None
+        self.directory_fd: int | None = None
+        self.socket_evidence: dict[str, Any] = {}
+        self.rejections: list[dict[str, str]] = []
+        self.watchdog_auth_key = secrets.token_bytes(32)
+        self.runner_auth_key = derive_runner_auth_key(self.watchdog_auth_key)
+        if secrets.compare_digest(self.runner_auth_key, self.watchdog_auth_key):
+            raise SigstopE2EError("runner and watchdog authentication keys are not separated")
+
+    def open(self) -> dict[str, Any]:
+        if self.server is not None or self.directory.exists() or self.directory.is_symlink():
+            raise SigstopE2EError("authenticated control socket path is already in use")
+        if not hasattr(os, "O_PATH"):
+            raise SigstopE2EInfraError("authenticated control channel requires Linux O_PATH pinning")
+        self.directory.mkdir(mode=0o700)
+        os.chmod(self.directory, 0o700)
+        metadata = self.directory.lstat()
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or stat.S_ISLNK(metadata.st_mode)
+            or int(metadata.st_uid) != os.getuid()
+            or int(metadata.st_gid) != os.getgid()
+            or stat.S_IMODE(metadata.st_mode) != 0o700
+        ):
+            raise SigstopE2EError("authenticated control socket directory is not private and owned")
+        try:
+            directory_flags = (
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+            )
+            self.directory_fd = os.open(self.directory, directory_flags)
+            pinned_directory = os.fstat(self.directory_fd)
+            if (
+                int(pinned_directory.st_dev) != int(metadata.st_dev)
+                or int(pinned_directory.st_ino) != int(metadata.st_ino)
+            ):
+                raise SigstopE2EError("authenticated control directory changed while pinning")
+            self.server = create_server(self.path)
+            socket_metadata = self.path.lstat()
+            socket_flags = (
+                os.O_PATH
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+            )
+            self.socket_fd = os.open(self.path, socket_flags)
+            pinned_socket = os.fstat(self.socket_fd)
+            if (
+                int(pinned_socket.st_dev) != int(socket_metadata.st_dev)
+                or int(pinned_socket.st_ino) != int(socket_metadata.st_ino)
+            ):
+                raise SigstopE2EError("authenticated control socket changed while pinning")
+            self.socket_evidence = {
+                **socket_permissions(self.path),
+                "directory_mode": "0o700",
+                "directory_device": int(metadata.st_dev),
+                "directory_inode": int(metadata.st_ino),
+                "directory_path_pinned": True,
+                "socket_path_pinned": True,
+                "ok": True,
+            }
+            return dict(self.socket_evidence)
+        except Exception:
+            self.close()
+            raise
+
+    def authenticate(
+        self,
+        *,
+        process: subprocess.Popen[Any],
+        expected_identity: Any,
+        role: str,
+        session_secret: bytes,
+        placement_check: Callable[[int, Any], Mapping[str, Any]],
+        expected_inside: bool,
+        timeout: float = AUTHENTICATION_WAIT_SECONDS,
+    ) -> dict[str, Any]:
+        server = self.server
+        if server is None:
+            raise SigstopE2EError("authenticated control server is not listening")
+        expected_peer = PeerIdentity(int(expected_identity.pid), os.getuid(), os.getgid())
+        deadline = time.monotonic() + float(timeout)
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                raise SigstopE2EError(
+                    f"{role} exited before authenticated handshake: returncode={process.returncode}"
+                )
+            remaining = max(0.01, deadline - time.monotonic())
+            server.settimeout(min(0.1, remaining))
+            try:
+                connection, _address = server.accept()
+            except socket.timeout:
+                continue
+            except OSError as exc:
+                raise SigstopE2EError("authenticated control socket accept failed") from exc
+            try:
+                handshake = authenticate_connection(
+                    connection,
+                    expected_campaign=self.campaign_uuid,
+                    expected_peer=expected_peer,
+                    expected_role=role,
+                    session_secret=session_secret,
+                    timeout=min(2.0, remaining),
+                )
+            except ControlChannelError as exc:
+                self.rejections.append({
+                    "role": role,
+                    "error_code": exc.__class__.__name__,
+                    "reason": str(exc)[:240],
+                })
+                continue
+            finally:
+                connection.close()
+
+            actual = capture_process_identity(expected_identity.pid)
+            identity_mismatches = [
+                field
+                for field in ("pid", "start_ticks", "boot_id", "cgroup_path")
+                if getattr(actual, field) != getattr(expected_identity, field)
+            ]
+            if identity_mismatches:
+                raise SigstopE2EError(
+                    f"{role} process identity changed after SO_PEERCRED handshake: "
+                    + ", ".join(identity_mismatches)
+                )
+            placement = dict(placement_check(actual.pid, actual))
+            placement_mismatches = [
+                field
+                for field, expected in (
+                    ("pid", actual.pid),
+                    ("start_ticks", actual.start_ticks),
+                    ("boot_id", actual.boot_id),
+                    ("actual_cgroup", actual.cgroup_path),
+                )
+                if placement.get(field) != expected
+            ]
+            if (
+                placement_mismatches
+                or placement.get("ok") is not True
+                or placement.get("inside_campaign_scope") is not expected_inside
+            ):
+                raise SigstopE2EError(
+                    f"{role} authenticated placement is not proven: "
+                    + ", ".join(placement_mismatches or ["scope_membership"])
+                )
+            expected_hash = hashlib.sha256(session_secret).hexdigest()
+            anti_replay = bool(
+                handshake.get("one_time") is True
+                and handshake.get("acknowledged") is True
+                and handshake.get("challenge_bytes") == 32
+                and handshake.get("client_nonce_bytes") == 32
+                and handshake.get("session_secret_delivered") is True
+                and handshake.get("session_secret_sha256") == expected_hash
+            )
+            if not anti_replay:
+                raise SigstopE2EError(f"{role} challenge/nonce/session proof is incomplete")
+            return {
+                "role": role,
+                "peer_credentials": {
+                    "pid": expected_peer.pid,
+                    "uid": expected_peer.uid,
+                    "gid": expected_peer.gid,
+                },
+                "process_identity": {
+                    "pid": actual.pid,
+                    "start_ticks": actual.start_ticks,
+                    "boot_id": actual.boot_id,
+                    "cgroup_path": actual.cgroup_path,
+                },
+                "placement": placement,
+                "handshake": handshake,
+                "session_secret_sha256": expected_hash,
+                "session_secret_persisted": False,
+                "anti_replay_verified": True,
+                "ok": True,
+            }
+        raise SigstopE2EError(f"{role} did not authenticate before timeout")
+
+    def close(self) -> dict[str, Any]:
+        errors: list[str] = []
+        if self.server is not None:
+            try:
+                self.server.close()
+            except Exception as exc:
+                errors.append(f"server_close:{exc.__class__.__name__}")
+            self.server = None
+        pinned_socket = None
+        if self.socket_fd is not None:
+            try:
+                pinned_socket = os.fstat(self.socket_fd)
+            except Exception as exc:
+                errors.append(f"socket_pin_stat:{exc.__class__.__name__}")
+        try:
+            metadata = self.path.lstat()
+            if (
+                pinned_socket is None
+                or not stat.S_ISSOCK(metadata.st_mode)
+                or int(metadata.st_dev) != int(pinned_socket.st_dev)
+                or int(metadata.st_ino) != int(pinned_socket.st_ino)
+            ):
+                errors.append("socket_identity_changed")
+            else:
+                self.path.unlink()
+        except FileNotFoundError:
+            if pinned_socket is not None:
+                errors.append("socket_missing")
+        except Exception as exc:
+            errors.append(f"socket_unlink:{exc.__class__.__name__}")
+        finally:
+            if self.socket_fd is not None:
+                try:
+                    os.close(self.socket_fd)
+                except Exception as exc:
+                    errors.append(f"socket_pin_close:{exc.__class__.__name__}")
+                self.socket_fd = None
+
+        pinned_directory = None
+        if self.directory_fd is not None:
+            try:
+                pinned_directory = os.fstat(self.directory_fd)
+            except Exception as exc:
+                errors.append(f"directory_pin_stat:{exc.__class__.__name__}")
+        try:
+            metadata = self.directory.lstat()
+            if (
+                pinned_directory is None
+                or not stat.S_ISDIR(metadata.st_mode)
+                or stat.S_ISLNK(metadata.st_mode)
+                or int(metadata.st_dev) != int(pinned_directory.st_dev)
+                or int(metadata.st_ino) != int(pinned_directory.st_ino)
+            ):
+                errors.append("socket_directory_identity_changed")
+            elif not self.path.exists() and not self.path.is_symlink():
+                self.directory.rmdir()
+        except FileNotFoundError:
+            if pinned_directory is not None:
+                errors.append("socket_directory_missing")
+        except Exception as exc:
+            errors.append(f"socket_directory_remove:{exc.__class__.__name__}")
+        finally:
+            if self.directory_fd is not None:
+                try:
+                    os.close(self.directory_fd)
+                except Exception as exc:
+                    errors.append(f"directory_pin_close:{exc.__class__.__name__}")
+                self.directory_fd = None
+        return {
+            "ok": not errors,
+            "socket_removed": not self.path.exists() and not self.path.is_symlink(),
+            "directory_removed": not self.directory.exists() and not self.directory.is_symlink(),
+            "errors": errors,
+        }
 
 
 def utc_now() -> str:
@@ -203,6 +502,208 @@ def _checkpoint_payload(*, campaign_uuid: str, revision: int, phase: str) -> dic
     }
 
 
+def _write_signed_runner_artifacts(
+    *,
+    heartbeat_path: Path,
+    checkpoint_path: Path,
+    campaign_uuid: str,
+    identity: Any,
+    revision: int,
+    runner_auth_key: bytes,
+) -> dict[str, Any]:
+    """Publish checkpoint before heartbeat so every admitted revision is durable."""
+
+    sequence = int(revision)
+    if sequence <= 0:
+        raise SigstopE2EError("runner artifact revision must be positive")
+    checkpoint_ns = time.monotonic_ns()
+    checkpoint = sign_authenticated_payload(
+        _checkpoint_payload(
+            campaign_uuid=campaign_uuid,
+            revision=sequence,
+            phase="ACTIVE",
+        ),
+        session_secret=runner_auth_key,
+        campaign_uuid=campaign_uuid,
+        stream="runner_checkpoint",
+        sequence=sequence,
+        monotonic_ns=checkpoint_ns,
+    )
+    atomic_write_json(checkpoint_path, checkpoint)
+    heartbeat_ns = time.monotonic_ns()
+    heartbeat = sign_authenticated_payload(
+        {
+            "schema_version": ORCHESTRATOR_FIXTURE_SCHEMA_VERSION,
+            "campaign_uuid": campaign_uuid,
+            "orchestrator_pid": int(identity.pid),
+            "orchestrator_start_ticks": int(identity.start_ticks),
+            "orchestrator_monotonic_ns": heartbeat_ns,
+            "checkpoint_revision": sequence,
+            "updated_at": utc_now(),
+        },
+        session_secret=runner_auth_key,
+        campaign_uuid=campaign_uuid,
+        stream="runner_heartbeat",
+        sequence=sequence,
+        monotonic_ns=heartbeat_ns,
+    )
+    atomic_write_json(heartbeat_path, heartbeat)
+    return {
+        "revision": sequence,
+        "checkpoint_authentication": dict(checkpoint["authentication"]),
+        "heartbeat_authentication": dict(heartbeat["authentication"]),
+        "ok": True,
+    }
+
+
+def _verify_signed_runner_artifacts(
+    *,
+    heartbeat_path: Path,
+    checkpoint_path: Path,
+    campaign_uuid: str,
+    expected_identity: Any,
+    runner_auth_key: bytes,
+) -> dict[str, Any]:
+    heartbeat = load_json(heartbeat_path)
+    checkpoint = load_json(checkpoint_path)
+    heartbeat_proof = verify_authenticated_payload(
+        heartbeat,
+        session_secret=runner_auth_key,
+        expected_campaign_uuid=campaign_uuid,
+        expected_stream="runner_heartbeat",
+    )
+    checkpoint_proof = verify_authenticated_payload(
+        checkpoint,
+        session_secret=runner_auth_key,
+        expected_campaign_uuid=campaign_uuid,
+        expected_stream="runner_checkpoint",
+    )
+    expected = {
+        "orchestrator_pid": int(expected_identity.pid),
+        "orchestrator_start_ticks": int(expected_identity.start_ticks),
+    }
+    mismatches = [name for name, value in expected.items() if heartbeat.get(name) != value]
+    heartbeat_ns = int(heartbeat.get("orchestrator_monotonic_ns") or 0)
+    if int(heartbeat_proof.get("monotonic_ns") or 0) != heartbeat_ns:
+        mismatches.append("heartbeat_monotonic_binding")
+    heartbeat_revision = int(heartbeat.get("checkpoint_revision") or 0)
+    checkpoint_revision = int(checkpoint.get("revision") or 0)
+    if heartbeat_revision <= 0 or checkpoint_revision < heartbeat_revision:
+        mismatches.append("checkpoint_revision")
+    if mismatches:
+        raise SigstopE2EError(
+            "signed runner heartbeat/checkpoint contract mismatch: "
+            + ", ".join(sorted(set(mismatches)))
+        )
+    return {
+        "heartbeat": heartbeat_proof,
+        "checkpoint": checkpoint_proof,
+        "orchestrator_pid": int(expected_identity.pid),
+        "orchestrator_start_ticks": int(expected_identity.start_ticks),
+        "checkpoint_revision": checkpoint_revision,
+        "role_key": "runner_derived_key",
+        "ok": True,
+    }
+
+
+def _verify_watchdog_liveness(
+    *,
+    path: Path,
+    campaign_uuid: str,
+    expected_identity: Any,
+    watchdog_auth_key: bytes,
+    previous: Mapping[str, Any] | None = None,
+    require_live_process: bool = True,
+    require_fresh: bool = True,
+) -> dict[str, Any]:
+    payload = load_json(path)
+    earlier = previous or {}
+    authentication = verify_authenticated_payload(
+        payload,
+        session_secret=watchdog_auth_key,
+        expected_campaign_uuid=campaign_uuid,
+        expected_stream="watchdog_liveness",
+        previous_sequence=int(earlier.get("sequence") or 0),
+        previous_payload_sha256=str(earlier.get("payload_sha256") or ""),
+    )
+    watchdog = payload.get("watchdog")
+    if not isinstance(watchdog, Mapping):
+        raise SigstopE2EError("signed watchdog liveness identity is missing")
+    expected = {
+        "pid": int(expected_identity.pid),
+        "start_ticks": int(expected_identity.start_ticks),
+        "boot_id": str(expected_identity.boot_id),
+        "cgroup": str(expected_identity.cgroup_path),
+    }
+    mismatches = [name for name, value in expected.items() if watchdog.get(name) != value]
+    liveness_ns = int(watchdog.get("monotonic_ns") or 0)
+    if int(authentication.get("monotonic_ns") or 0) != liveness_ns:
+        mismatches.append("monotonic_binding")
+    now_ns = time.monotonic_ns()
+    if liveness_ns <= 0 or liveness_ns > now_ns:
+        age_seconds = float("inf")
+        mismatches.append("monotonic_range")
+    else:
+        age_seconds = (now_ns - liveness_ns) / 1_000_000_000
+        if require_fresh and age_seconds >= WATCHDOG_LIVENESS_MAX_AGE_SECONDS:
+            mismatches.append("stale")
+    if require_live_process:
+        actual = capture_process_identity(expected_identity.pid)
+        for field in ("pid", "start_ticks", "boot_id", "cgroup_path"):
+            if getattr(actual, field) != getattr(expected_identity, field):
+                mismatches.append(f"process_{field}")
+    if mismatches:
+        raise SigstopE2EError(
+            "authenticated watchdog liveness mismatch: "
+            + ", ".join(sorted(set(mismatches)))
+        )
+    return {
+        **authentication,
+        "watchdog": dict(watchdog),
+        "age_seconds": round(age_seconds, 6),
+        "deadline_seconds": WATCHDOG_LIVENESS_MAX_AGE_SECONDS,
+        "process_identity_reverified": bool(require_live_process),
+        "freshness_required": bool(require_fresh),
+        "role_key": "watchdog_master_key",
+        "ok": True,
+    }
+
+
+def _build_authenticated_watchdog_config(
+    *,
+    campaign_uuid: str,
+    paths: WatchdogPaths,
+    orchestrator_identity: Any,
+    scope_identity: Mapping[str, Any],
+    supervisor_identity: Any,
+    auth_socket: Path,
+) -> WatchdogConfig:
+    """Build the production-only contract used by the real SIGSTOP injection."""
+
+    return WatchdogConfig(
+        campaign_uuid=campaign_uuid,
+        paths=paths,
+        orchestrator_pid=int(orchestrator_identity.pid),
+        orchestrator_start_ticks=int(orchestrator_identity.start_ticks),
+        orchestrator_boot_id=str(orchestrator_identity.boot_id),
+        orchestrator_cgroup=str(orchestrator_identity.cgroup_path),
+        campaign_cgroup=CgroupIdentity(
+            path=str(scope_identity["path"]),
+            device=int(scope_identity["device"]),
+            inode=int(scope_identity["inode"]),
+        ),
+        stale_after_seconds=DEFAULT_STALE_SECONDS,
+        poll_seconds=1.0,
+        kill_verify_seconds=10.0,
+        production=True,
+        auth_socket=Path(auth_socket),
+        supervisor_pid=int(supervisor_identity.pid),
+        supervisor_start_ticks=int(supervisor_identity.start_ticks),
+        supervisor_boot_id=str(supervisor_identity.boot_id),
+        supervisor_cgroup=str(supervisor_identity.cgroup_path),
+    )
+
+
 def _wait_for_json(
     path: Path,
     predicate: Callable[[Mapping[str, Any]], bool],
@@ -225,6 +726,145 @@ def _wait_for_json(
             raise SigstopE2EError(f"{label} process exited early: returncode={process.returncode}; {last_error}")
         time.sleep(0.1)
     raise SigstopE2EError(f"timed out waiting for {label}: {last_error}")
+
+
+def _wait_for_watchdog_incident(
+    *,
+    status_path: Path,
+    liveness_path: Path,
+    process: subprocess.Popen[Any],
+    campaign_uuid: str,
+    expected_identity: Any,
+    watchdog_auth_key: bytes,
+    initial_liveness: Mapping[str, Any],
+    timeout: float,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Wait for the injected incident while continuously proving watchdog life."""
+
+    deadline = time.monotonic() + float(timeout)
+    previous = dict(initial_liveness)
+    first_sequence = int(previous.get("sequence") or 0)
+    samples_verified = 0
+    maximum_age = float(previous.get("age_seconds") or 0.0)
+    last_status_error = "status file not present"
+    while time.monotonic() < deadline:
+        try:
+            status = load_json(status_path)
+            if status.get("incident_id"):
+                if status.get("reason") != "HEARTBEAT_STALE":
+                    raise SigstopE2EError(
+                        "watchdog reported an unexpected incident while awaiting SIGSTOP proof: "
+                        + str(status.get("reason") or "reason_missing")
+                    )
+                monitor = {
+                    "samples_verified": samples_verified,
+                    "first_sequence": first_sequence,
+                    "last_sequence": int(previous.get("sequence") or 0),
+                    "maximum_age_seconds": round(maximum_age, 6),
+                    "deadline_seconds": WATCHDOG_LIVENESS_MAX_AGE_SECONDS,
+                    "fail_closed_on_invalid": True,
+                    "ok": True,
+                }
+                return status, previous, monitor
+            last_status_error = f"status not terminal: keys={sorted(status)}"
+        except FileNotFoundError:
+            last_status_error = "status file not present"
+        except SigstopE2EError:
+            raise
+        except Exception as exc:
+            last_status_error = f"{exc.__class__.__name__}: {exc}"
+
+        if process.poll() is not None:
+            try:
+                terminal = load_json(status_path)
+            except Exception:
+                terminal = {}
+            if terminal.get("incident_id") and terminal.get("reason") == "HEARTBEAT_STALE":
+                monitor = {
+                    "samples_verified": samples_verified,
+                    "first_sequence": first_sequence,
+                    "last_sequence": int(previous.get("sequence") or 0),
+                    "maximum_age_seconds": round(maximum_age, 6),
+                    "deadline_seconds": WATCHDOG_LIVENESS_MAX_AGE_SECONDS,
+                    "fail_closed_on_invalid": True,
+                    "ok": True,
+                }
+                return terminal, previous, monitor
+            raise SigstopE2ELivenessError(
+                "watchdog exited before durable stale-heartbeat evidence: "
+                f"returncode={process.returncode}; {last_status_error}"
+            )
+        try:
+            current = _verify_watchdog_liveness(
+                path=liveness_path,
+                campaign_uuid=campaign_uuid,
+                expected_identity=expected_identity,
+                watchdog_auth_key=watchdog_auth_key,
+                previous=previous,
+            )
+        except Exception as exc:
+            raise SigstopE2ELivenessError(
+                "watchdog reciprocal liveness failed closed while load was active: "
+                f"{exc.__class__.__name__}: {exc}"
+            ) from exc
+        previous = current
+        samples_verified += 1
+        maximum_age = max(maximum_age, float(current.get("age_seconds") or 0.0))
+        time.sleep(0.25)
+    raise SigstopE2EError(
+        "timed out waiting for 120-second stale-heartbeat incident while watchdog remained live: "
+        + last_status_error
+    )
+
+
+def _wait_for_process_identity(
+    process: subprocess.Popen[Any],
+    *,
+    expected_cgroup: str,
+    timeout: float,
+) -> Any:
+    """Wait until the cgroup entry helper has exec'd without trusting a new PID."""
+
+    deadline = time.monotonic() + float(timeout)
+    last_cgroup = ""
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise SigstopE2EError(
+                "managed process exited before exact cgroup identity capture: "
+                f"returncode={process.returncode}"
+            )
+        try:
+            identity = capture_process_identity(process.pid)
+            last_cgroup = str(identity.cgroup_path)
+            if last_cgroup == str(expected_cgroup):
+                return identity
+        except ProcessIdentityError:
+            pass
+        time.sleep(0.02)
+    raise SigstopE2EError(
+        "managed process did not enter the exact campaign cgroup before timeout: "
+        f"expected={expected_cgroup},actual={last_cgroup or 'unavailable'}"
+    )
+
+
+@contextmanager
+def _timed_path_lock(path: Path, *, timeout: float) -> Iterator[None]:
+    deadline = time.monotonic() + float(timeout)
+    lock_context: Any | None = None
+    while time.monotonic() < deadline:
+        candidate = locked_path(path, nonblocking=True)
+        try:
+            candidate.__enter__()
+            lock_context = candidate
+            break
+        except BlockingIOError:
+            time.sleep(0.02)
+    if lock_context is None:
+        raise SigstopE2EError("timed out acquiring the state lock before SIGSTOP")
+    try:
+        yield
+    finally:
+        lock_context.__exit__(None, None, None)
 
 
 def _wait_for_stopped_process(pid: int, start_ticks: int, *, timeout: float) -> bool:
@@ -314,6 +954,7 @@ def _limit_assertion(cgroup: Mapping[str, Any]) -> tuple[bool, dict[str, Any]]:
         "memory.swap.max": (checks.get("memory.swap.max") or {}).get("actual"),
         "pids.max": (checks.get("pids.max") or {}).get("actual"),
         "cpu.quota_percent": (checks.get("cpu.max") or {}).get("actual_percent"),
+        "io.weight": (checks.get("io.weight") or {}).get("actual"),
     }
     ok = bool(limits.get("ok")) and limits.get("hard_limit_state") == "verified" and actual == EXPECTED_LIMITS
     return ok, {"expected": EXPECTED_LIMITS, "actual": actual, "hard_limit_state": limits.get("hard_limit_state")}
@@ -329,6 +970,7 @@ def assess_e2e_evidence(
     source = evidence.get("source") if isinstance(evidence.get("source"), dict) else {}
     cgroup = evidence.get("cgroup") if isinstance(evidence.get("cgroup"), dict) else {}
     processes = evidence.get("processes") if isinstance(evidence.get("processes"), dict) else {}
+    authentication = evidence.get("authentication") if isinstance(evidence.get("authentication"), dict) else {}
     watchdog = evidence.get("watchdog") if isinstance(evidence.get("watchdog"), dict) else {}
     timings = evidence.get("timings") if isinstance(evidence.get("timings"), dict) else {}
     state = evidence.get("state") if isinstance(evidence.get("state"), dict) else {}
@@ -349,6 +991,21 @@ def assess_e2e_evidence(
     limits_ok, limits_evidence = _limit_assertion(cgroup)
     assertions["exact_cgroup_limits"] = _assertion(limits_ok, limits_evidence)
 
+    supervisor = processes.get("supervisor") if isinstance(processes.get("supervisor"), dict) else {}
+    supervisor_placement = supervisor.get("placement") if isinstance(supervisor.get("placement"), dict) else {}
+    supervisor_outside = (
+        supervisor_placement.get("ok") is True
+        and supervisor_placement.get("inside_campaign_scope") is False
+        and int(supervisor.get("pid") or 0) > 1
+        and int(supervisor.get("start_ticks") or 0) > 0
+        and bool(supervisor.get("boot_id"))
+        and bool(supervisor.get("cgroup"))
+    )
+    assertions["supervisor_outside_scope"] = _assertion(
+        supervisor_outside,
+        supervisor or {"role": "sigstop_e2e_supervisor", "reason": "missing"},
+    )
+
     for assertion_id, role in (("orchestrator_in_scope", "orchestrator"), ("load_in_scope", "load")):
         row = processes.get(role) if isinstance(processes.get(role), dict) else {}
         placement = row.get("placement") if isinstance(row.get("placement"), dict) else {}
@@ -368,11 +1025,216 @@ def assess_e2e_evidence(
         {"process": watchdog_process, "watchdog_startup": initial_watchdog},
     )
 
+    socket_proof = authentication.get("socket") if isinstance(authentication.get("socket"), dict) else {}
+    auth_cleanup = authentication.get("cleanup") if isinstance(authentication.get("cleanup"), dict) else {}
+    runner_auth = authentication.get("runner") if isinstance(authentication.get("runner"), dict) else {}
+    watchdog_auth = authentication.get("watchdog") if isinstance(authentication.get("watchdog"), dict) else {}
+    runner_client = (
+        authentication.get("runner_client")
+        if isinstance(authentication.get("runner_client"), dict)
+        else {}
+    )
+    watchdog_client = (
+        authentication.get("watchdog_client")
+        if isinstance(authentication.get("watchdog_client"), dict)
+        else {}
+    )
+    runner_auth_placement = (
+        runner_auth.get("placement") if isinstance(runner_auth.get("placement"), dict) else {}
+    )
+    watchdog_auth_placement = (
+        watchdog_auth.get("placement") if isinstance(watchdog_auth.get("placement"), dict) else {}
+    )
+    runner_server_process = (
+        runner_client.get("server_process")
+        if isinstance(runner_client.get("server_process"), dict)
+        else {}
+    )
+    watchdog_server_process = (
+        watchdog_client.get("server_process")
+        if isinstance(watchdog_client.get("server_process"), dict)
+        else {}
+    )
+    supervisor_contract = (
+        authentication.get("supervisor_identity")
+        if isinstance(authentication.get("supervisor_identity"), dict)
+        else {}
+    )
+    control_channel_ok = (
+        socket_proof.get("ok") is True
+        and socket_proof.get("transport") == "unix_sock_seqpacket"
+        and socket_proof.get("mode") == "0o600"
+        and socket_proof.get("directory_mode") == "0o700"
+        and socket_proof.get("directory_path_pinned") is True
+        and socket_proof.get("socket_path_pinned") is True
+        and runner_auth.get("ok") is True
+        and runner_auth.get("anti_replay_verified") is True
+        and (runner_auth.get("handshake") or {}).get("role") == "runner"
+        and runner_auth_placement.get("inside_campaign_scope") is True
+        and watchdog_auth.get("ok") is True
+        and watchdog_auth.get("anti_replay_verified") is True
+        and (watchdog_auth.get("handshake") or {}).get("role") == "watchdog"
+        and watchdog_auth_placement.get("inside_campaign_scope") is False
+        and runner_client.get("server_identity_verified") is True
+        and runner_client.get("session_secret_received") is True
+        and runner_client.get("role") == "runner"
+        and watchdog_client.get("server_identity_verified") is True
+        and watchdog_client.get("session_secret_received") is True
+        and watchdog_client.get("role") == "watchdog"
+        and initial_watchdog.get("verified") is True
+        and (initial_watchdog.get("initial_health") or {}).get("ok") is True
+        and supervisor_contract.get("pid") == supervisor.get("pid")
+        and supervisor_contract.get("start_ticks") == supervisor.get("start_ticks")
+        and supervisor_contract.get("boot_id") == supervisor.get("boot_id")
+        and supervisor_contract.get("cgroup_path") == supervisor.get("cgroup")
+        and runner_server_process.get("pid") == supervisor.get("pid")
+        and runner_server_process.get("start_ticks") == supervisor.get("start_ticks")
+        and runner_server_process.get("boot_id") == supervisor.get("boot_id")
+        and runner_server_process.get("cgroup_path") == supervisor.get("cgroup")
+        and watchdog_server_process.get("pid") == supervisor.get("pid")
+        and watchdog_server_process.get("start_ticks") == supervisor.get("start_ticks")
+        and watchdog_server_process.get("boot_id") == supervisor.get("boot_id")
+        and watchdog_server_process.get("cgroup_path") == supervisor.get("cgroup")
+        and auth_cleanup.get("ok") is True
+        and auth_cleanup.get("socket_removed") is True
+        and auth_cleanup.get("directory_removed") is True
+        and authentication.get("session_keys_persisted") is False
+    )
+    assertions["authenticated_control_channel"] = _assertion(
+        control_channel_ok,
+        {
+            "socket": socket_proof,
+            "supervisor_identity": supervisor_contract,
+            "runner": runner_auth,
+            "watchdog": watchdog_auth,
+            "runner_client": runner_client,
+            "watchdog_client": watchdog_client,
+            "cleanup": auth_cleanup,
+            "session_keys_persisted": authentication.get("session_keys_persisted"),
+        },
+    )
+
+    runner_key_hash = str(authentication.get("runner_key_sha256") or "")
+    watchdog_key_hash = str(authentication.get("watchdog_key_sha256") or "")
+    separated_keys_ok = (
+        authentication.get("role_separated_keys") is True
+        and bool(re.fullmatch(r"[0-9a-f]{64}", runner_key_hash))
+        and bool(re.fullmatch(r"[0-9a-f]{64}", watchdog_key_hash))
+        and runner_key_hash != watchdog_key_hash
+        and runner_auth.get("session_secret_sha256") == runner_key_hash
+        and runner_client.get("session_secret_sha256") == runner_key_hash
+        and watchdog_auth.get("session_secret_sha256") == watchdog_key_hash
+        and watchdog_client.get("session_secret_sha256") == watchdog_key_hash
+        and runner_auth.get("session_secret_persisted") is False
+        and watchdog_auth.get("session_secret_persisted") is False
+    )
+    assertions["role_separated_auth_keys"] = _assertion(
+        separated_keys_ok,
+        {
+            "runner_key_sha256": runner_key_hash,
+            "watchdog_key_sha256": watchdog_key_hash,
+            "role_separated_keys": authentication.get("role_separated_keys"),
+            "session_keys_persisted": authentication.get("session_keys_persisted"),
+        },
+    )
+
+    runner_streams = (
+        authentication.get("signed_runner_streams_at_sigstop")
+        if isinstance(authentication.get("signed_runner_streams_at_sigstop"), dict)
+        else authentication.get("signed_runner_streams")
+        if isinstance(authentication.get("signed_runner_streams"), dict)
+        else {}
+    )
+    heartbeat_auth = runner_streams.get("heartbeat") if isinstance(runner_streams.get("heartbeat"), dict) else {}
+    checkpoint_auth = runner_streams.get("checkpoint") if isinstance(runner_streams.get("checkpoint"), dict) else {}
+    signed_streams_ok = (
+        runner_streams.get("ok") is True
+        and runner_streams.get("role_key") == "runner_derived_key"
+        and heartbeat_auth.get("mac_verified") is True
+        and heartbeat_auth.get("replay_checked") is True
+        and heartbeat_auth.get("stream") == "runner_heartbeat"
+        and checkpoint_auth.get("mac_verified") is True
+        and checkpoint_auth.get("replay_checked") is True
+        and checkpoint_auth.get("stream") == "runner_checkpoint"
+        and int(runner_streams.get("orchestrator_pid") or 0) == int((processes.get("orchestrator") or {}).get("pid") or 0)
+        and int(runner_streams.get("orchestrator_start_ticks") or 0)
+        == int((processes.get("orchestrator") or {}).get("start_ticks") or 0)
+    )
+    assertions["signed_runner_streams"] = _assertion(
+        signed_streams_ok,
+        runner_streams or {"reason": "signed runner streams missing"},
+    )
+
+    initial_liveness = (
+        watchdog.get("liveness_initial")
+        if isinstance(watchdog.get("liveness_initial"), dict)
+        else {}
+    )
+    final_liveness = (
+        watchdog.get("liveness_final")
+        if isinstance(watchdog.get("liveness_final"), dict)
+        else {}
+    )
+    liveness_monitor = (
+        watchdog.get("liveness_monitor")
+        if isinstance(watchdog.get("liveness_monitor"), dict)
+        else {}
+    )
+    liveness_identity = initial_liveness.get("watchdog") if isinstance(initial_liveness.get("watchdog"), dict) else {}
+    reciprocal_liveness_ok = (
+        initial_liveness.get("ok") is True
+        and initial_liveness.get("mac_verified") is True
+        and initial_liveness.get("replay_checked") is True
+        and initial_liveness.get("stream") == "watchdog_liveness"
+        and initial_liveness.get("role_key") == "watchdog_master_key"
+        and initial_liveness.get("process_identity_reverified") is True
+        and float(
+            initial_liveness.get("age_seconds")
+            if initial_liveness.get("age_seconds") is not None
+            else WATCHDOG_LIVENESS_MAX_AGE_SECONDS
+        )
+        < WATCHDOG_LIVENESS_MAX_AGE_SECONDS
+        and final_liveness.get("ok") is True
+        and final_liveness.get("mac_verified") is True
+        and final_liveness.get("replay_checked") is True
+        and final_liveness.get("stream") == "watchdog_liveness"
+        and final_liveness.get("role_key") == "watchdog_master_key"
+        and int(final_liveness.get("sequence") or 0) > int(initial_liveness.get("sequence") or 0) > 0
+        and liveness_monitor.get("ok") is True
+        and liveness_monitor.get("fail_closed_on_invalid") is True
+        and int(liveness_monitor.get("samples_verified") or 0) >= 2
+        and int(liveness_monitor.get("first_sequence") or 0) == int(initial_liveness.get("sequence") or 0)
+        and int(liveness_monitor.get("last_sequence") or 0) == int(final_liveness.get("sequence") or 0)
+        and float(
+            liveness_monitor.get("maximum_age_seconds")
+            if liveness_monitor.get("maximum_age_seconds") is not None
+            else WATCHDOG_LIVENESS_MAX_AGE_SECONDS
+        )
+        < WATCHDOG_LIVENESS_MAX_AGE_SECONDS
+        and liveness_identity.get("pid") == watchdog_process.get("pid")
+        and liveness_identity.get("start_ticks") == watchdog_process.get("start_ticks")
+        and liveness_identity.get("cgroup") == watchdog_process.get("cgroup")
+        and watchdog_placement.get("inside_campaign_scope") is False
+    )
+    assertions["reciprocal_watchdog_liveness"] = _assertion(
+        reciprocal_liveness_ok,
+        {"initial": initial_liveness, "final": final_liveness, "monitor": liveness_monitor},
+    )
+
     signal_state = str((processes.get("orchestrator") or {}).get("state_after_sigstop") or "")
-    sigstop_ok = bool(timings.get("sigstop_monotonic_ns")) and signal_state in {"T", "t"}
+    sigstop_ok = (
+        bool(timings.get("sigstop_monotonic_ns"))
+        and signal_state in {"T", "t"}
+        and timings.get("state_lock_guarded_sigstop") is True
+    )
     assertions["sigstop_delivered"] = _assertion(
         sigstop_ok,
-        {"signal": "SIGSTOP", "observed_process_state": signal_state, "sent_at_ns": timings.get("sigstop_monotonic_ns")},
+        {
+            "signal": "SIGSTOP",
+            "observed_process_state": signal_state,
+            "sent_at_ns": timings.get("sigstop_monotonic_ns"),
+            "state_lock_guarded_sigstop": timings.get("state_lock_guarded_sigstop"),
+        },
     )
 
     observed_stale = float(timings.get("stale_observed_seconds") or 0.0)
@@ -520,10 +1382,35 @@ def _orchestrator_fixture(args: argparse.Namespace) -> int:
     identity = capture_process_identity(os.getpid())
     if not expected_scope or identity.cgroup_path != expected_scope:
         raise SigstopE2EError("orchestrator is not in the exact inherited campaign cgroup")
+    if (
+        not args.auth_socket
+        or int(args.supervisor_pid or 0) <= 1
+        or int(args.supervisor_start_ticks or 0) <= 0
+        or not args.supervisor_boot_id
+        or not args.supervisor_cgroup
+    ):
+        raise SigstopE2EError("orchestrator authenticated supervisor contract is incomplete")
+    authentication = send_hello(
+        Path(args.auth_socket),
+        campaign_uuid=campaign_uuid,
+        role="runner",
+        require_session_secret=True,
+        expected_server_peer=PeerIdentity(int(args.supervisor_pid), os.getuid(), os.getgid()),
+        expected_server_process={
+            "pid": int(args.supervisor_pid),
+            "start_ticks": int(args.supervisor_start_ticks),
+            "boot_id": str(args.supervisor_boot_id),
+            "cgroup_path": str(args.supervisor_cgroup),
+        },
+    )
+    if not isinstance(authentication, tuple):
+        raise SigstopE2EError("orchestrator control handshake did not deliver a runner key")
+    authentication_evidence, runner_auth_key = authentication
 
     state_path = root / "checkpoint" / "campaign.state.json"
     control_path = root / "checkpoint" / "campaign.control.json"
     checkpoint_path = root / "checkpoint" / "campaign.checkpoint.json"
+    heartbeat_path = root / "checkpoint" / "runner.heartbeat.json"
     ready_path = root / "checkpoint" / "orchestrator.ready.json"
     load_ready_path = root / "checkpoint" / "load.ready.json"
     machine = CampaignStateMachine(state_path)
@@ -583,14 +1470,18 @@ def _orchestrator_fixture(args: argparse.Namespace) -> int:
             process=load_process,
         )
         revision = 1
-        atomic_write_json(
-            checkpoint_path,
-            _checkpoint_payload(campaign_uuid=campaign_uuid, revision=revision, phase="ACTIVE"),
-        )
         machine.heartbeat(
             orchestrator_pid=os.getpid(),
             orchestrator_start_ticks=identity.start_ticks,
             checkpoint_revision=revision,
+        )
+        signed_artifacts = _write_signed_runner_artifacts(
+            heartbeat_path=heartbeat_path,
+            checkpoint_path=checkpoint_path,
+            campaign_uuid=campaign_uuid,
+            identity=identity,
+            revision=revision,
+            runner_auth_key=runner_auth_key,
         )
         atomic_write_json(ready_path, {
             "schema_version": ORCHESTRATOR_FIXTURE_SCHEMA_VERSION,
@@ -600,6 +1491,8 @@ def _orchestrator_fixture(args: argparse.Namespace) -> int:
             "start_ticks": identity.start_ticks,
             "cgroup": identity.cgroup_path,
             "load": load_ready,
+            "authenticated_control_channel": authentication_evidence,
+            "signed_runner_artifacts": signed_artifacts,
             "ready_at": utc_now(),
         })
         conditions = {
@@ -628,14 +1521,18 @@ def _orchestrator_fixture(args: argparse.Namespace) -> int:
             time.sleep(0.25)
             machine.tick_active(conditions)
             revision += 1
-            atomic_write_json(
-                checkpoint_path,
-                _checkpoint_payload(campaign_uuid=campaign_uuid, revision=revision, phase="ACTIVE"),
-            )
             machine.heartbeat(
                 orchestrator_pid=os.getpid(),
                 orchestrator_start_ticks=identity.start_ticks,
                 checkpoint_revision=revision,
+            )
+            _write_signed_runner_artifacts(
+                heartbeat_path=heartbeat_path,
+                checkpoint_path=checkpoint_path,
+                campaign_uuid=campaign_uuid,
+                identity=identity,
+                revision=revision,
+                runner_auth_key=runner_auth_key,
             )
     finally:
         if load_process.poll() is None:
@@ -689,6 +1586,21 @@ def _load_fixture(args: argparse.Namespace) -> int:
         time.sleep(0.25)
 
 
+def _write_fail_closed_control(
+    root: Path,
+    campaign_uuid: str,
+    reason: str,
+    *,
+    revision: int = 0,
+) -> None:
+    atomic_write_json(root / "checkpoint" / "campaign.control.json", _control_payload(
+        campaign_uuid=campaign_uuid,
+        revision=int(revision),
+        state="FAILED",
+        admit=False,
+    ) | {"reason": reason})
+
+
 def _force_fail_closed(root: Path, campaign_uuid: str, reason: str) -> None:
     state_path = root / "checkpoint" / "campaign.state.json"
     try:
@@ -715,12 +1627,12 @@ def _force_fail_closed(root: Path, campaign_uuid: str, reason: str) -> None:
     except Exception:
         revision = 0
     try:
-        atomic_write_json(root / "checkpoint" / "campaign.control.json", _control_payload(
-            campaign_uuid=campaign_uuid,
+        _write_fail_closed_control(
+            root,
+            campaign_uuid,
+            reason,
             revision=revision,
-            state="FAILED",
-            admit=False,
-        ))
+        )
     except Exception:
         pass
 
@@ -762,12 +1674,14 @@ def run_real_sigstop_e2e(
     campaign_uuid = f"watchdog-sigstop-{uuid.uuid4()}"
     report_path = root / "artifacts" / "watchdog_sigstop_e2e.json"
     cgroup: CampaignCgroup | None = None
+    auth_runtime: AuthenticatedControlRuntime | None = None
     orchestrator: subprocess.Popen[Any] | None = None
     watchdog_process: subprocess.Popen[Any] | None = None
     orchestrator_log_handle: Any | None = None
     watchdog_log_handle: Any | None = None
     errors: list[str] = []
     failure_classification = "FAIL_HARNESS"
+    failure_reason = "SIGSTOP_E2E_INCOMPLETE"
     evidence: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "campaign_uuid": campaign_uuid,
@@ -782,6 +1696,7 @@ def run_real_sigstop_e2e(
         "source": {},
         "cgroup": {},
         "processes": {},
+        "authentication": {},
         "watchdog": {},
         "timings": {},
         "state": {},
@@ -792,8 +1707,10 @@ def run_real_sigstop_e2e(
     state_path = root / "checkpoint" / "campaign.state.json"
     control_path = root / "checkpoint" / "campaign.control.json"
     checkpoint_path = root / "checkpoint" / "campaign.checkpoint.json"
+    heartbeat_path = root / "checkpoint" / "runner.heartbeat.json"
     orchestrator_ready_path = root / "checkpoint" / "orchestrator.ready.json"
     watchdog_status_path = root / "checkpoint" / "watchdog.status.json"
+    watchdog_liveness_path = root / "checkpoint" / "watchdog.liveness.json"
     orchestrator_log = root / "logs" / "orchestrator.log"
     watchdog_log = root / "logs" / "watchdog.log"
     incident_path: Path | None = None
@@ -819,6 +1736,38 @@ def run_real_sigstop_e2e(
             "cleanup": {},
         }
 
+        supervisor_identity = capture_process_identity(os.getpid())
+        supervisor_placement = cgroup.assert_pid_outside(
+            supervisor_identity.pid,
+            role="sigstop_e2e_supervisor",
+            expected_identity=supervisor_identity,
+        )
+        evidence["processes"]["supervisor"] = _process_payload(
+            supervisor_identity,
+            role="sigstop_e2e_supervisor",
+            placement=supervisor_placement,
+        )
+        auth_runtime = AuthenticatedControlRuntime(campaign_uuid)
+        evidence["authentication"] = {
+            "socket": auth_runtime.open(),
+            "supervisor_identity": {
+                "pid": supervisor_identity.pid,
+                "start_ticks": supervisor_identity.start_ticks,
+                "boot_id": supervisor_identity.boot_id,
+                "cgroup_path": supervisor_identity.cgroup_path,
+            },
+            "runner_key_sha256": hashlib.sha256(auth_runtime.runner_auth_key).hexdigest(),
+            "watchdog_key_sha256": hashlib.sha256(auth_runtime.watchdog_auth_key).hexdigest(),
+            "role_separated_keys": not secrets.compare_digest(
+                auth_runtime.runner_auth_key,
+                auth_runtime.watchdog_auth_key,
+            ),
+            "session_keys_persisted": False,
+            "runner": {},
+            "watchdog": {},
+            "cleanup": {},
+        }
+
         orchestrator_command = [
             sys.executable,
             str(Path(__file__).resolve()),
@@ -826,6 +1775,11 @@ def run_real_sigstop_e2e(
             "--expected-commit", str(expected_commit),
             "--campaign-uuid", campaign_uuid,
             "--internal-role", "orchestrator",
+            "--auth-socket", str(auth_runtime.path),
+            "--supervisor-pid", str(supervisor_identity.pid),
+            "--supervisor-start-ticks", str(supervisor_identity.start_ticks),
+            "--supervisor-boot-id", supervisor_identity.boot_id,
+            "--supervisor-cgroup", supervisor_identity.cgroup_path,
         ]
         orchestrator_log_handle = orchestrator_log.open("ab", buffering=0)
         orchestrator_environment = os.environ.copy()
@@ -840,6 +1794,24 @@ def run_real_sigstop_e2e(
             start_new_session=True,
             close_fds=True,
         )
+        orchestrator_identity = _wait_for_process_identity(
+            orchestrator,
+            expected_cgroup=cgroup.scope_path,
+            timeout=READY_WAIT_SECONDS,
+        )
+        runner_authentication = auth_runtime.authenticate(
+            process=orchestrator,
+            expected_identity=orchestrator_identity,
+            role="runner",
+            session_secret=auth_runtime.runner_auth_key,
+            placement_check=lambda pid, identity: cgroup.assert_pid_membership(
+                pid,
+                role="sigstop_e2e_runner_control_peer",
+                expected_identity=identity,
+            ),
+            expected_inside=True,
+        )
+        evidence["authentication"]["runner"] = runner_authentication
         ready = _wait_for_json(
             orchestrator_ready_path,
             lambda payload: payload.get("ready") is True and int(payload.get("pid") or 0) == orchestrator.pid,
@@ -847,7 +1819,27 @@ def run_real_sigstop_e2e(
             label="in-scope orchestrator",
             process=orchestrator,
         )
-        orchestrator_identity = capture_process_identity(orchestrator.pid)
+        ready_authentication = (
+            ready.get("authenticated_control_channel")
+            if isinstance(ready.get("authenticated_control_channel"), dict)
+            else {}
+        )
+        if (
+            ready_authentication.get("server_identity_verified") is not True
+            or ready_authentication.get("session_secret_received") is not True
+            or ready_authentication.get("session_secret_sha256")
+            != evidence["authentication"]["runner_key_sha256"]
+        ):
+            raise SigstopE2EError("runner reciprocal supervisor authentication proof is incomplete")
+        evidence["authentication"]["runner_client"] = ready_authentication
+        runner_stream_proof = _verify_signed_runner_artifacts(
+            heartbeat_path=heartbeat_path,
+            checkpoint_path=checkpoint_path,
+            campaign_uuid=campaign_uuid,
+            expected_identity=orchestrator_identity,
+            runner_auth_key=auth_runtime.runner_auth_key,
+        )
+        evidence["authentication"]["signed_runner_streams"] = runner_stream_proof
         load_ready = ready.get("load") if isinstance(ready.get("load"), dict) else {}
         load_pid = int(load_ready.get("pid") or 0)
         load_identity = capture_process_identity(load_pid)
@@ -865,33 +1857,24 @@ def run_real_sigstop_e2e(
         )
         evidence["cgroup"]["before_pids"] = _read_scope_pids(cgroup.cgroup_root, cgroup.scope_path)
 
-        supervisor_identity = capture_process_identity(os.getpid())
         watchdog_paths = WatchdogPaths(
             campaign_root=root,
             state=state_path,
             control=control_path,
-            heartbeat=state_path,
+            heartbeat=heartbeat_path,
             checkpoint=checkpoint_path,
             ready=watchdog_status_path,
             evidence=root / "artifacts" / "watchdog",
             process_lock=root / "checkpoint" / "watchdog.process.lock",
+            liveness=watchdog_liveness_path,
         )
-        watchdog_config = WatchdogConfig(
+        watchdog_config = _build_authenticated_watchdog_config(
             campaign_uuid=campaign_uuid,
             paths=watchdog_paths,
-            orchestrator_pid=orchestrator_identity.pid,
-            orchestrator_start_ticks=orchestrator_identity.start_ticks,
-            orchestrator_boot_id=orchestrator_identity.boot_id,
-            orchestrator_cgroup=orchestrator_identity.cgroup_path,
-            campaign_cgroup=CgroupIdentity(
-                path=str(scope_identity["path"]),
-                device=int(scope_identity["device"]),
-                inode=int(scope_identity["inode"]),
-            ),
-            stale_after_seconds=DEFAULT_STALE_SECONDS,
-            poll_seconds=1.0,
-            kill_verify_seconds=10.0,
-            production=True,
+            orchestrator_identity=orchestrator_identity,
+            scope_identity=scope_identity,
+            supervisor_identity=supervisor_identity,
+            auth_socket=auth_runtime.path,
         )
         watchdog_log_handle = watchdog_log.open("ab", buffering=0)
         watchdog_process = subprocess.Popen(
@@ -903,6 +1886,20 @@ def run_real_sigstop_e2e(
             start_new_session=True,
             close_fds=True,
         )
+        watchdog_identity = capture_process_identity(watchdog_process.pid)
+        watchdog_authentication = auth_runtime.authenticate(
+            process=watchdog_process,
+            expected_identity=watchdog_identity,
+            role="watchdog",
+            session_secret=auth_runtime.watchdog_auth_key,
+            placement_check=lambda pid, identity: cgroup.assert_pid_outside(
+                pid,
+                role="external_watchdog_control_peer",
+                expected_identity=identity,
+            ),
+            expected_inside=False,
+        )
+        evidence["authentication"]["watchdog"] = watchdog_authentication
         watchdog_initial = _wait_for_json(
             watchdog_status_path,
             lambda payload: payload.get("verified") is True and payload.get("initial_health", {}).get("ok") is True,
@@ -910,7 +1907,6 @@ def run_real_sigstop_e2e(
             label="external watchdog startup",
             process=watchdog_process,
         )
-        watchdog_identity = capture_process_identity(watchdog_process.pid)
         watchdog_placement = cgroup.assert_watchdog_outside(watchdog_process.pid)
         evidence["processes"]["watchdog"] = _process_payload(
             watchdog_identity,
@@ -918,23 +1914,65 @@ def run_real_sigstop_e2e(
             placement=watchdog_placement,
         )
         evidence["watchdog"]["initial"] = watchdog_initial
+        watchdog_client_authentication = (
+            watchdog_initial.get("authenticated_control_channel")
+            if isinstance(watchdog_initial.get("authenticated_control_channel"), dict)
+            else {}
+        )
+        if (
+            watchdog_client_authentication.get("server_identity_verified") is not True
+            or watchdog_client_authentication.get("session_secret_received") is not True
+            or watchdog_client_authentication.get("role") != "watchdog"
+            or watchdog_client_authentication.get("session_secret_sha256")
+            != evidence["authentication"]["watchdog_key_sha256"]
+        ):
+            raise SigstopE2EError("watchdog reciprocal supervisor authentication proof is incomplete")
+        evidence["authentication"]["watchdog_client"] = watchdog_client_authentication
+        watchdog_liveness = _verify_watchdog_liveness(
+            path=watchdog_liveness_path,
+            campaign_uuid=campaign_uuid,
+            expected_identity=watchdog_identity,
+            watchdog_auth_key=auth_runtime.watchdog_auth_key,
+        )
+        evidence["watchdog"]["liveness_initial"] = watchdog_liveness
+        evidence["authentication"]["rejected_connections"] = list(auth_runtime.rejections[-20:])
+        auth_cleanup = auth_runtime.close()
+        evidence["authentication"]["cleanup"] = auth_cleanup
+        if auth_cleanup.get("ok") is not True:
+            raise SigstopE2EError(
+                "authenticated control socket cleanup failed: "
+                + ", ".join(str(row) for row in auth_cleanup.get("errors") or [])
+            )
         if supervisor_identity.cgroup_path == cgroup.scope_path:
             raise SigstopE2EError("E2E driver unexpectedly entered the managed scope")
 
-        pre_signal = load_json(state_path)
-        pre_signal_heartbeat = pre_signal.get("heartbeat") if isinstance(pre_signal.get("heartbeat"), dict) else {}
-        if int(pre_signal_heartbeat.get("orchestrator_monotonic_ns") or 0) <= 0:
-            raise SigstopE2EError("orchestrator heartbeat lacks monotonic timestamp")
-        sigstop_ns = time.monotonic_ns()
-        os.kill(orchestrator.pid, signal.SIGSTOP)
-        stopped_identity = _wait_for_process_state(
-            orchestrator.pid,
-            orchestrator_identity.start_ticks,
-            {"T", "t"},
-            timeout=5.0,
-        )
+        state_lock_path = state_path.with_suffix(state_path.suffix + ".lock")
+        with _timed_path_lock(state_lock_path, timeout=5.0):
+            # Never SIGSTOP the runner while it owns the state flock.  Holding
+            # the same lock here forces any concurrent update to finish first
+            # and prevents the watchdog from deadlocking on a stranded lock.
+            pre_signal = load_json(heartbeat_path)
+            pre_signal_heartbeat = pre_signal
+            if int(pre_signal_heartbeat.get("orchestrator_monotonic_ns") or 0) <= 0:
+                raise SigstopE2EError("orchestrator heartbeat lacks monotonic timestamp")
+            sigstop_ns = time.monotonic_ns()
+            os.kill(orchestrator.pid, signal.SIGSTOP)
+            stopped_identity = _wait_for_process_state(
+                orchestrator.pid,
+                orchestrator_identity.start_ticks,
+                {"T", "t"},
+                timeout=5.0,
+            )
         state_at_sigstop = load_json(state_path)
-        stopped_heartbeat = state_at_sigstop.get("heartbeat") if isinstance(state_at_sigstop.get("heartbeat"), dict) else {}
+        stopped_runner_proof = _verify_signed_runner_artifacts(
+            heartbeat_path=heartbeat_path,
+            checkpoint_path=checkpoint_path,
+            campaign_uuid=campaign_uuid,
+            expected_identity=orchestrator_identity,
+            runner_auth_key=auth_runtime.runner_auth_key,
+        )
+        evidence["authentication"]["signed_runner_streams_at_sigstop"] = stopped_runner_proof
+        stopped_heartbeat = load_json(heartbeat_path)
         heartbeat_ns = int(stopped_heartbeat.get("orchestrator_monotonic_ns") or 0)
         sigstop_observed_ns = time.monotonic_ns()
         if heartbeat_ns <= 0 or heartbeat_ns > sigstop_observed_ns:
@@ -949,16 +1987,22 @@ def run_real_sigstop_e2e(
             "heartbeat_last_monotonic_ns": heartbeat_ns,
             "sigstop_monotonic_ns": sigstop_ns,
             "sigstop_observed_monotonic_ns": sigstop_observed_ns,
+            "state_lock_guarded_sigstop": True,
         })
         evidence["state"]["at_sigstop"] = state_at_sigstop
 
-        watchdog_final = _wait_for_json(
-            watchdog_status_path,
-            lambda payload: bool(payload.get("incident_id")) and payload.get("reason") == "HEARTBEAT_STALE",
-            timeout=INCIDENT_WAIT_SECONDS,
-            label="120-second stale-heartbeat incident",
+        watchdog_final, final_liveness, liveness_monitor = _wait_for_watchdog_incident(
+            status_path=watchdog_status_path,
+            liveness_path=watchdog_liveness_path,
             process=watchdog_process,
+            campaign_uuid=campaign_uuid,
+            expected_identity=watchdog_identity,
+            watchdog_auth_key=auth_runtime.watchdog_auth_key,
+            initial_liveness=watchdog_liveness,
+            timeout=INCIDENT_WAIT_SECONDS,
         )
+        evidence["watchdog"]["liveness_final"] = final_liveness
+        evidence["watchdog"]["liveness_monitor"] = liveness_monitor
         watchdog_returncode = watchdog_process.wait(timeout=PROCESS_STOP_WAIT_SECONDS)
         evidence["processes"]["watchdog"].update({
             "terminated_after_result": True,
@@ -1007,11 +2051,23 @@ def run_real_sigstop_e2e(
     except (PermissionError, subprocess.SubprocessError, OSError) as exc:
         failure_classification = "FAIL_INFRA"
         errors.append(f"{exc.__class__.__name__}: {exc}")
+    except SigstopE2ELivenessError as exc:
+        failure_reason = "WATCHDOG_LIVENESS_INVALID"
+        errors.append(f"{exc.__class__.__name__}: {exc}")
     except Exception as exc:
         errors.append(f"{exc.__class__.__name__}: {exc}")
     finally:
         if errors:
-            _force_fail_closed(root, campaign_uuid, "SIGSTOP_E2E_INCOMPLETE")
+            try:
+                # Close the mirror gate without taking the state lock.  The
+                # orchestrator may have been SIGSTOP'd while holding it.
+                _write_fail_closed_control(
+                    root,
+                    campaign_uuid,
+                    failure_reason,
+                )
+            except Exception as exc:
+                errors.append(f"close_admission_mirror: {exc.__class__.__name__}: {exc}")
         if orchestrator is not None and orchestrator.poll() is None:
             try:
                 os.kill(orchestrator.pid, signal.SIGCONT)
@@ -1024,6 +2080,10 @@ def run_real_sigstop_e2e(
                 evidence["cgroup"]["after_pids"] = _read_scope_pids(cgroup.cgroup_root, cgroup.scope_path)
             except Exception as exc:
                 errors.append(f"cleanup_cgroup: {exc.__class__.__name__}: {exc}")
+        if errors:
+            # Cgroup teardown releases any lock held by a stopped/dead worker;
+            # only then mutate the durable state so failure cleanup cannot hang.
+            _force_fail_closed(root, campaign_uuid, failure_reason)
         if watchdog_process is not None and watchdog_process.poll() is None:
             try:
                 watchdog_process.wait(timeout=3)
@@ -1037,6 +2097,22 @@ def run_real_sigstop_e2e(
         if orchestrator is not None and orchestrator.poll() is None:
             orchestrator.kill()
             orchestrator.wait(timeout=3)
+        if auth_runtime is not None and (
+            auth_runtime.server is not None
+            or auth_runtime.socket_fd is not None
+            or auth_runtime.directory_fd is not None
+            or auth_runtime.path.exists()
+            or auth_runtime.path.is_symlink()
+            or auth_runtime.directory.exists()
+            or auth_runtime.directory.is_symlink()
+        ):
+            authentication_cleanup = auth_runtime.close()
+            evidence.setdefault("authentication", {})["cleanup"] = authentication_cleanup
+            if authentication_cleanup.get("ok") is not True:
+                errors.append(
+                    "authenticated_control_cleanup: "
+                    + ",".join(str(row) for row in authentication_cleanup.get("errors") or [])
+                )
         if orchestrator_log_handle is not None:
             orchestrator_log_handle.close()
         if watchdog_log_handle is not None:
@@ -1047,10 +2123,12 @@ def run_real_sigstop_e2e(
             "campaign_state": state_path,
             "campaign_control": control_path,
             "campaign_checkpoint": checkpoint_path,
+            "runner_heartbeat": heartbeat_path,
             "orchestrator_ready": orchestrator_ready_path,
             "load_ready": root / "checkpoint" / "load.ready.json",
             "load_pulse": root / "checkpoint" / "load.pulse.json",
             "watchdog_status": watchdog_status_path,
+            "watchdog_liveness": watchdog_liveness_path,
             "watchdog_incident": incident_path or Path("/nonexistent"),
             "cgroup_scope": root / "artifacts" / "cgroup" / "cgroup_scope.json",
             "orchestrator_log": orchestrator_log,
@@ -1073,6 +2151,7 @@ def run_real_sigstop_e2e(
     evidence.update({
         "finished_at": utc_now(),
         "duration_seconds": round((finished_ns - started_ns) / 1_000_000_000, 6),
+        "failure_reason": failure_reason if errors else None,
         "collector_errors": errors,
     })
     atomic_write_json(report_path, evidence)
@@ -1086,6 +2165,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--expected-commit", required=True)
     parser.add_argument("--campaign-uuid", help=argparse.SUPPRESS)
     parser.add_argument("--internal-role", choices=("orchestrator", "load"), help=argparse.SUPPRESS)
+    parser.add_argument("--auth-socket", help=argparse.SUPPRESS)
+    parser.add_argument("--supervisor-pid", type=int, default=0, help=argparse.SUPPRESS)
+    parser.add_argument("--supervisor-start-ticks", type=int, default=0, help=argparse.SUPPRESS)
+    parser.add_argument("--supervisor-boot-id", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--supervisor-cgroup", default="", help=argparse.SUPPRESS)
     return parser
 
 

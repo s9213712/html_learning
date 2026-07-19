@@ -191,6 +191,28 @@ def ensure_appeal_columns(conn):
     for name, ddl in additions:
         if name not in cols:
             conn.execute(f"ALTER TABLE violation_appeals ADD COLUMN {name} {ddl}")
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(violation_appeals)").fetchall()}
+    if {"user_id", "latest_violation_id"}.issubset(cols):
+        duplicate = conn.execute(
+            """
+            SELECT user_id, latest_violation_id, COUNT(*) AS row_count
+            FROM violation_appeals
+            WHERE latest_violation_id IS NOT NULL
+            GROUP BY user_id, latest_violation_id
+            HAVING COUNT(*) > 1
+            LIMIT 1
+            """
+        ).fetchone()
+        if duplicate:
+            raise RuntimeError(
+                "duplicate violation appeals require explicit recovery before startup: "
+                f"user_id={duplicate['user_id']} violation_id={duplicate['latest_violation_id']} "
+                f"rows={duplicate['row_count']}"
+            )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_appeal_user_violation "
+            "ON violation_appeals(user_id, latest_violation_id)"
+        )
 
 
 def ensure_session_columns(conn):

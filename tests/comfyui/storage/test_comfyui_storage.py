@@ -1,6 +1,7 @@
 from tests.comfyui._integration_suite import (
     test_comfyui_discard_deletes_original_comfyui_file_in_local_mode,
     test_comfyui_discard_remote_mode_clears_preview_without_deleting_source,
+    test_comfyui_discard_remote_delete_requires_and_accepts_post_delete_404,
     test_comfyui_discard_tolerates_plain_text_history_response,
     test_comfyui_discard_without_file_delete_endpoint_clears_preview_with_warning,
     test_comfyui_frontend_is_wired,

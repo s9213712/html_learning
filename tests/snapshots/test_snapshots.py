@@ -4,6 +4,7 @@ import os
 import sqlite3
 import hashlib
 import tarfile
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -1457,6 +1458,720 @@ def test_mode_switch_checkpoint_failure_blocks_switch_and_logs_failure(tmp_path)
     assert current == "incident_lockdown"
     assert log["to_mode"] == "incident_lockdown"
     assert log["success"] == 1
+
+
+def test_split_db_incident_lifecycle_checkpoints_applies_and_exactly_restores_settings(tmp_path):
+    audit_log = []
+    service, db_path, _uploads = _service(tmp_path, audit_log)
+    control_db_path = tmp_path / "app" / "control.db"
+    actor = {"id": 1, "username": "root", "role": "super_admin"}
+    conn = _db(db_path)
+    conn.executemany(
+        "INSERT OR REPLACE INTO system_settings (key, value, updated_at, updated_by) VALUES (?, ?, ?, ?)",
+        [
+            ("feature_trading_enabled", "True", "2026-01-01T00:00:00", "test"),
+            ("audit_chain_enabled", "False", "2026-01-01T00:00:00", "test"),
+            ("server_security_epoch", "41", "2026-01-01T00:00:00", "test"),
+            ("preincident_custom", "preserve-me", "2026-01-01T00:00:00", "test"),
+        ],
+    )
+    conn.commit()
+    expected_before = {
+        row["key"]: row["value"]
+        for row in conn.execute("SELECT key, value FROM system_settings ORDER BY key").fetchall()
+    }
+    conn.close()
+    mode = ServerModeService(
+        snapshot_service=service,
+        get_db=lambda: _db(db_path),
+        get_control_db=lambda: _db(control_db_path),
+        audit=lambda *args, **kwargs: audit_log.append((args, kwargs)),
+    )
+
+    entered = mode.enter_incident_lockdown(
+        actor=actor,
+        trigger_type="manual_test",
+        reason="split-db incident lifecycle",
+        verification={"ticket": "INC-42"},
+    )
+
+    assert entered["ok"] is True
+    assert entered["checkpoint_ok"] is True, entered
+    assert entered["root_reauthentication_required"] is True
+    assert entered["mode"]["current_mode"] == "incident_lockdown"
+    conn = _db(db_path)
+    incident_settings = {
+        row["key"]: row["value"]
+        for row in conn.execute("SELECT key, value FROM system_settings ORDER BY key").fetchall()
+    }
+    main_mode = conn.execute("SELECT current_mode FROM server_modes WHERE id=1").fetchone()["current_mode"]
+    conn.execute(
+        "INSERT OR REPLACE INTO system_settings (key, value, updated_at, updated_by) VALUES ('incident_only', 'delete-me', '', 'test')"
+    )
+    conn.commit()
+    conn.close()
+    assert incident_settings["maintenance_mode"].lower() == "true"
+    assert incident_settings["feature_trading_enabled"].lower() == "false"
+    assert incident_settings["audit_chain_reseal_required"].lower() == "true"
+    assert incident_settings["server_security_epoch"] == "42"
+    assert main_mode == "incident_lockdown"
+    control = _db(control_db_path)
+    report = control.execute("SELECT * FROM incident_reports WHERE id=?", (entered["incident_id"],)).fetchone()
+    assert report["previous_mode"] == "dev_ready"
+    assert report["previous_settings_hash"]
+    assert report["checkpoint_id"] == entered["checkpoint"]["checkpoint_id"]
+    assert report["snapshot_id"] == entered["checkpoint"]["snapshot_id"]
+    assert json.loads(report["verification_json"])["ticket"] == "INC-42"
+    control.close()
+    public_status = mode.incident_status()["incident"]
+    assert public_status["previous_settings_present"] is True
+    assert public_status["previous_settings_count"] == len(expected_before)
+    assert "previous_settings_json" not in public_status
+    assert "previous_mode_json" not in public_status
+
+    resolved = mode.resolve_incident(
+        actor=actor,
+        confirm="RESOLVE_INCIDENT",
+        notes="verified and recovered",
+        verification={"ticket_closed": True},
+    )
+
+    assert resolved["ok"] is True
+    assert resolved["restored_mode"] == "dev_ready"
+    assert resolved["restore"]["session_epoch_preserved"] is True
+    assert resolved["restore"]["security_epoch_after_restore"] == 42
+    assert resolved["restore"]["evidence"]["audit_chain_valid"] is True
+    assert resolved["restore"]["evidence"]["entry_log_signature_valid"] is True
+    assert resolved["restore"]["evidence"]["checkpoint_verified"] is True
+    conn = _db(db_path)
+    restored_settings = {
+        row["key"]: row["value"]
+        for row in conn.execute("SELECT key, value FROM system_settings ORDER BY key").fetchall()
+    }
+    main_mode = conn.execute("SELECT current_mode FROM server_modes WHERE id=1").fetchone()["current_mode"]
+    conn.close()
+    expected_after = dict(expected_before)
+    expected_after["server_security_epoch"] = "42"
+    assert restored_settings == expected_after
+    assert "incident_only" not in restored_settings
+    assert main_mode == "dev_ready"
+    control = _db(control_db_path)
+    report = control.execute("SELECT * FROM incident_reports WHERE id=?", (entered["incident_id"],)).fetchone()
+    current_mode = control.execute("SELECT current_mode FROM server_modes WHERE id=1").fetchone()["current_mode"]
+    control.close()
+    assert report["status"] == "resolved"
+    assert report["entry_state"] == "resolved"
+    assert json.loads(report["verification_json"])["ticket"] == "INC-42"
+    assert json.loads(report["resolution_verification_json"])["ticket_closed"] is True
+    assert current_mode == "dev_ready"
+    assert any(call[0][0] == "SERVER_MODE_INCIDENT_LOCKDOWN_ENTER" and call[1]["success"] for call in audit_log)
+    assert any(call[0][0] == "SERVER_MODE_INCIDENT_RESOLVE" and call[1]["success"] for call in audit_log)
+
+
+def test_incident_resolve_failure_keeps_open_lockdown_and_records_failure(tmp_path, monkeypatch):
+    audit_log = []
+    service, db_path, _uploads = _service(tmp_path, audit_log)
+    control_db_path = tmp_path / "app" / "control.db"
+    actor = {"id": 1, "username": "root", "role": "super_admin"}
+    mode = ServerModeService(
+        snapshot_service=service,
+        get_db=lambda: _db(db_path),
+        get_control_db=lambda: _db(control_db_path),
+        audit=lambda *args, **kwargs: audit_log.append((args, kwargs)),
+    )
+    entered = mode.enter_incident_lockdown(
+        actor=actor,
+        trigger_type="manual_test",
+        reason="exercise restore failure",
+    )
+    assert entered["ok"] is True
+
+    def fail_restore(**kwargs):
+        raise RuntimeError("injected incident restore failure")
+
+    monkeypatch.setattr(mode, "_restore_incident_settings", fail_restore)
+    resolved = mode.resolve_incident(
+        actor=actor,
+        confirm="RESOLVE_INCIDENT",
+        notes="must remain locked",
+    )
+
+    assert resolved["ok"] is False
+    assert "維持 incident_lockdown" in resolved["msg"]
+    control = _db(control_db_path)
+    report = control.execute("SELECT * FROM incident_reports WHERE id=?", (entered["incident_id"],)).fetchone()
+    current_mode = control.execute("SELECT current_mode FROM server_modes WHERE id=1").fetchone()["current_mode"]
+    control.close()
+    assert report["status"] == "open"
+    assert report["entry_state"] == "restore_failed"
+    assert "injected incident restore failure" in report["entry_error"]
+    assert current_mode == "incident_lockdown"
+    conn = _db(db_path)
+    maintenance = conn.execute("SELECT value FROM system_settings WHERE key='maintenance_mode'").fetchone()["value"]
+    conn.close()
+    assert maintenance.lower() == "true"
+    assert any(call[0][0] == "SERVER_MODE_INCIDENT_RESOLVE" and not call[1]["success"] for call in audit_log)
+
+
+def test_startup_reconcile_repairs_split_brain_without_mutating_incident_evidence(tmp_path):
+    audit_log = []
+    service, db_path, _uploads = _service(tmp_path, audit_log)
+    control_db_path = tmp_path / "app" / "control.db"
+    actor = {"id": 1, "username": "root", "role": "super_admin"}
+    startup_actor = {"id": 0, "username": "system-startup", "role": "system"}
+    mode = ServerModeService(
+        snapshot_service=service,
+        get_db=lambda: _db(db_path),
+        get_control_db=lambda: _db(control_db_path),
+        audit=lambda *args, **kwargs: audit_log.append((args, kwargs)),
+    )
+    entered = mode.enter_incident_lockdown(
+        actor=actor,
+        trigger_type="restart_preservation_test",
+        reason="incident must survive launcher restart",
+    )
+    assert entered["ok"] is True
+
+    control = _db(control_db_path)
+    incident_before = dict(
+        control.execute(
+            "SELECT * FROM incident_reports WHERE id=?", (entered["incident_id"],)
+        ).fetchone()
+    )
+    control.execute(
+        "UPDATE server_modes SET current_mode='dev_ready', previous_mode='incident_lockdown', "
+        "active_snapshot_id='bad-active', checkpoint_id='bad-checkpoint', "
+        "config_json='{\"bad\": true}', notes='bad launcher overwrite', "
+        "reason='bad launcher overwrite' WHERE id=1"
+    )
+    control.commit()
+    control.close()
+    main = _db(db_path)
+    epoch_before = main.execute(
+        "SELECT value FROM system_settings WHERE key='server_security_epoch'"
+    ).fetchone()["value"]
+    main.execute(
+        "UPDATE server_modes SET current_mode='dev_ready', previous_mode='incident_lockdown', "
+        "active_snapshot_id='bad-active', checkpoint_id='bad-checkpoint', "
+        "config_json='{\"bad\": true}', notes='bad launcher overwrite', "
+        "reason='bad launcher overwrite' WHERE id=1"
+    )
+    for key, value in (
+        ("maintenance_mode", "False"),
+        ("allow_register", "True"),
+        ("browser_only_mode_enabled", "False"),
+        ("feature_trading_enabled", "True"),
+        ("integrity_guard_strict_mode", "False"),
+    ):
+        main.execute(
+            "INSERT OR REPLACE INTO system_settings (key, value, updated_at, updated_by) "
+            "VALUES (?, ?, '', 'bad-launcher')",
+            (key, value),
+        )
+    main.commit()
+    main.close()
+
+    reconciled = mode.reconcile_open_incident_on_startup(actor=startup_actor)
+
+    assert reconciled == {
+        "ok": True,
+        "active": True,
+        "reconciled": True,
+        "control_mode_reconciled": True,
+        "main_mode_reconciled": True,
+        "profile_reconciled": True,
+        "open_incident_count": 1,
+        "incident_id": entered["incident_id"],
+    }
+    control = _db(control_db_path)
+    control_mode = dict(control.execute("SELECT * FROM server_modes WHERE id=1").fetchone())
+    assert control_mode["current_mode"] == "incident_lockdown"
+    assert control_mode["previous_mode"] == incident_before["previous_mode"]
+    assert control_mode["active_snapshot_id"] is None
+    assert control_mode["checkpoint_id"] == incident_before["checkpoint_id"]
+    assert json.loads(control_mode["config_json"])["settings"]["maintenance_mode"] is True
+    assert dict(
+        control.execute(
+            "SELECT * FROM incident_reports WHERE id=?", (entered["incident_id"],)
+        ).fetchone()
+    ) == incident_before
+    mode_log_count = control.execute("SELECT COUNT(*) AS c FROM mode_switch_logs").fetchone()["c"]
+    control.close()
+    main = _db(db_path)
+    main_mode = dict(main.execute("SELECT * FROM server_modes WHERE id=1").fetchone())
+    assert main_mode["current_mode"] == "incident_lockdown"
+    assert {
+        key: main_mode[key]
+        for key in ("current_mode", "previous_mode", "active_snapshot_id", "checkpoint_id", "config_json")
+    } == {
+        key: control_mode[key]
+        for key in ("current_mode", "previous_mode", "active_snapshot_id", "checkpoint_id", "config_json")
+    }
+    settings = {
+        row["key"]: row["value"]
+        for row in main.execute("SELECT key, value FROM system_settings").fetchall()
+    }
+    assert settings["server_security_epoch"] == epoch_before
+    assert settings["maintenance_mode"].lower() == "true"
+    assert settings["allow_register"].lower() == "false"
+    assert settings["browser_only_mode_enabled"].lower() == "true"
+    assert settings["feature_trading_enabled"].lower() == "false"
+    assert settings["integrity_guard_strict_mode"].lower() == "true"
+    main.close()
+
+    # A second startup is a true no-op: no epoch rotation, no duplicate mode
+    # switch record, and no incident evidence rewrite.
+    again = mode.reconcile_open_incident_on_startup(actor=startup_actor)
+    assert again["ok"] is True
+    assert again["active"] is True
+    assert again["reconciled"] is False
+    control = _db(control_db_path)
+    assert control.execute("SELECT COUNT(*) AS c FROM mode_switch_logs").fetchone()["c"] == mode_log_count
+    assert dict(
+        control.execute(
+            "SELECT * FROM incident_reports WHERE id=?", (entered["incident_id"],)
+        ).fetchone()
+    ) == incident_before
+    control.close()
+    main = _db(db_path)
+    assert main.execute(
+        "SELECT value FROM system_settings WHERE key='server_security_epoch'"
+    ).fetchone()["value"] == epoch_before
+    main.close()
+
+    resolved = mode.resolve_incident(
+        actor=actor,
+        confirm="RESOLVE_INCIDENT",
+        notes="startup preservation verified",
+    )
+    assert resolved["ok"] is True
+    assert resolved["restored_mode"] == "dev_ready"
+
+
+def test_startup_reconcile_multiple_open_incidents_locks_down_but_refuses_start(tmp_path):
+    audit_log = []
+    service, db_path, _uploads = _service(tmp_path, audit_log)
+    control_db_path = tmp_path / "app" / "control.db"
+    actor = {"id": 1, "username": "root", "role": "super_admin"}
+    mode = ServerModeService(
+        snapshot_service=service,
+        get_db=lambda: _db(db_path),
+        get_control_db=lambda: _db(control_db_path),
+        audit=lambda *args, **kwargs: audit_log.append((args, kwargs)),
+    )
+    entered = mode.enter_incident_lockdown(
+        actor=actor,
+        trigger_type="ambiguous_restart_test",
+        reason="first open incident",
+    )
+    control = _db(control_db_path)
+    first = dict(control.execute("SELECT * FROM incident_reports WHERE id=?", (entered["incident_id"],)).fetchone())
+    second = dict(first)
+    second["id"] = "incident_duplicate_open_for_test"
+    second["entered_at"] = "2099-01-01T00:00:00"
+    columns = list(second)
+    control.execute(
+        f"INSERT INTO incident_reports ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})",
+        tuple(second[column] for column in columns),
+    )
+    control.execute("UPDATE server_modes SET current_mode='dev_ready' WHERE id=1")
+    control.commit()
+    evidence_before = [
+        dict(row)
+        for row in control.execute("SELECT * FROM incident_reports ORDER BY id").fetchall()
+    ]
+    control.close()
+    main = _db(db_path)
+    main.execute("UPDATE server_modes SET current_mode='dev_ready' WHERE id=1")
+    main.execute(
+        "INSERT OR REPLACE INTO system_settings (key, value, updated_at, updated_by) "
+        "VALUES ('maintenance_mode', 'False', '', 'bad-launcher')"
+    )
+    main.commit()
+    main.close()
+
+    result = mode.reconcile_open_incident_on_startup(
+        actor={"id": 0, "username": "system-startup", "role": "system"}
+    )
+
+    assert result["ok"] is False
+    assert result["active"] is True
+    assert result["error"] == "multiple_open_incidents"
+    assert result["open_incident_count"] == 2
+    control = _db(control_db_path)
+    assert control.execute(
+        "SELECT current_mode FROM server_modes WHERE id=1"
+    ).fetchone()["current_mode"] == "incident_lockdown"
+    assert [
+        dict(row)
+        for row in control.execute("SELECT * FROM incident_reports ORDER BY id").fetchall()
+    ] == evidence_before
+    control.close()
+    main = _db(db_path)
+    assert main.execute(
+        "SELECT current_mode FROM server_modes WHERE id=1"
+    ).fetchone()["current_mode"] == "incident_lockdown"
+    assert main.execute(
+        "SELECT value FROM system_settings WHERE key='maintenance_mode'"
+    ).fetchone()["value"].lower() == "true"
+    main.close()
+
+
+def test_startup_reconcile_main_failure_keeps_control_locked_and_raises(tmp_path):
+    audit_log = []
+    service, db_path, _uploads = _service(tmp_path, audit_log)
+    control_db_path = tmp_path / "app" / "control.db"
+    actor = {"id": 1, "username": "root", "role": "super_admin"}
+    mode = ServerModeService(
+        snapshot_service=service,
+        get_db=lambda: _db(db_path),
+        get_control_db=lambda: _db(control_db_path),
+        audit=lambda *args, **kwargs: audit_log.append((args, kwargs)),
+    )
+    entered = mode.enter_incident_lockdown(
+        actor=actor,
+        trigger_type="main_failure_restart_test",
+        reason="fail closed on main read failure",
+    )
+    control = _db(control_db_path)
+    control.execute("UPDATE server_modes SET current_mode='dev_ready' WHERE id=1")
+    control.commit()
+    control.close()
+
+    def unavailable_main_db():
+        raise OSError("injected main database failure")
+
+    failing = ServerModeService(
+        snapshot_service=service,
+        get_db=unavailable_main_db,
+        get_control_db=lambda: _db(control_db_path),
+        audit=lambda *args, **kwargs: None,
+    )
+    with pytest.raises(RuntimeError, match="could not enforce the main database/profile"):
+        failing.reconcile_open_incident_on_startup(
+            actor={"id": 0, "username": "system-startup", "role": "system"}
+        )
+    control = _db(control_db_path)
+    assert control.execute(
+        "SELECT current_mode FROM server_modes WHERE id=1"
+    ).fetchone()["current_mode"] == "incident_lockdown"
+    assert control.execute(
+        "SELECT status FROM incident_reports WHERE id=?", (entered["incident_id"],)
+    ).fetchone()["status"] == "open"
+    control.close()
+
+
+def test_startup_reconcile_no_open_normal_mode_is_noop(tmp_path):
+    audit_log = []
+    service, db_path, _uploads = _service(tmp_path, audit_log)
+    control_db_path = tmp_path / "app" / "control.db"
+    mode = ServerModeService(
+        snapshot_service=service,
+        get_db=lambda: _db(db_path),
+        get_control_db=lambda: _db(control_db_path),
+        audit=lambda *args, **kwargs: audit_log.append((args, kwargs)),
+    )
+    control = _db(control_db_path)
+    mode_before = dict(control.execute("SELECT * FROM server_modes WHERE id=1").fetchone())
+    control.close()
+    main = _db(db_path)
+    settings_before = [
+        tuple(row)
+        for row in main.execute(
+            "SELECT key, value, updated_at, updated_by FROM system_settings ORDER BY key"
+        ).fetchall()
+    ]
+    main.close()
+
+    result = mode.reconcile_open_incident_on_startup(
+        actor={"id": 0, "username": "system-startup", "role": "system"}
+    )
+
+    assert result == {
+        "ok": True,
+        "active": False,
+        "reconciled": False,
+        "open_incident_count": 0,
+    }
+    control = _db(control_db_path)
+    assert dict(control.execute("SELECT * FROM server_modes WHERE id=1").fetchone()) == mode_before
+    control.close()
+    main = _db(db_path)
+    assert [
+        tuple(row)
+        for row in main.execute(
+            "SELECT key, value, updated_at, updated_by FROM system_settings ORDER BY key"
+        ).fetchall()
+    ] == settings_before
+    main.close()
+
+
+def test_startup_reconcile_incident_mode_without_open_report_fails_closed(tmp_path):
+    audit_log = []
+    service, db_path, _uploads = _service(tmp_path, audit_log)
+    control_db_path = tmp_path / "app" / "control.db"
+    mode = ServerModeService(
+        snapshot_service=service,
+        get_db=lambda: _db(db_path),
+        get_control_db=lambda: _db(control_db_path),
+        audit=lambda *args, **kwargs: audit_log.append((args, kwargs)),
+    )
+    control = _db(control_db_path)
+    control.execute("UPDATE server_modes SET current_mode='incident_lockdown' WHERE id=1")
+    control.commit()
+    control.close()
+
+    result = mode.reconcile_open_incident_on_startup(
+        actor={"id": 0, "username": "system-startup", "role": "system"}
+    )
+
+    assert result == {
+        "ok": False,
+        "active": True,
+        "error": "incident_lockdown_without_open_incident",
+        "open_incident_count": 0,
+    }
+    control = _db(control_db_path)
+    assert control.execute(
+        "SELECT current_mode FROM server_modes WHERE id=1"
+    ).fetchone()["current_mode"] == "incident_lockdown"
+    control.close()
+
+
+def test_incident_mode_switch_fails_closed_when_checkpoint_raises(tmp_path, monkeypatch):
+    audit_log = []
+    service, db_path, _uploads = _service(tmp_path, audit_log)
+    control_db_path = tmp_path / "app" / "control.db"
+    actor = {"id": 1, "username": "root", "role": "super_admin"}
+    mode = ServerModeService(
+        snapshot_service=service,
+        get_db=lambda: _db(db_path),
+        get_control_db=lambda: _db(control_db_path),
+        audit=lambda *args, **kwargs: audit_log.append((args, kwargs)),
+    )
+
+    def fail_checkpoint(**kwargs):
+        raise OSError("injected snapshot storage failure")
+
+    monkeypatch.setattr(service, "create_snapshot", fail_checkpoint)
+    entered = mode.switch_mode(
+        target_mode="incident_lockdown",
+        actor=actor,
+        confirm="ENTER_INCIDENT_LOCKDOWN",
+        notes="checkpoint must not block emergency lockdown",
+    )
+
+    assert entered["ok"] is True
+    assert entered["incident_lockdown"] is True
+    assert entered["checkpoint_ok"] is False
+    assert "injected snapshot storage failure" in entered["checkpoint"]["error"]
+    assert entered["mode"]["current_mode"] == "incident_lockdown"
+    conn = _db(db_path)
+    maintenance = conn.execute("SELECT value FROM system_settings WHERE key='maintenance_mode'").fetchone()["value"]
+    epoch = conn.execute("SELECT value FROM system_settings WHERE key='server_security_epoch'").fetchone()["value"]
+    conn.close()
+    assert maintenance.lower() == "true"
+    assert epoch == "1"
+    control = _db(control_db_path)
+    report = control.execute("SELECT * FROM incident_reports WHERE id=?", (entered["incident_id"],)).fetchone()
+    control.close()
+    assert report["status"] == "open"
+    assert report["entry_state"] == "active"
+    assert report["checkpoint_id"] is None
+    assert json.loads(report["verification_json"])["requested_via"] == "switch_mode"
+
+
+def test_incident_schema_migrates_existing_control_database(tmp_path):
+    control_db_path = tmp_path / "control.db"
+    conn = _db(control_db_path)
+    conn.execute(
+        """
+        CREATE TABLE incident_reports (
+            id TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            trigger_type TEXT NOT NULL,
+            reason TEXT,
+            entered_by INTEGER,
+            entered_at TEXT NOT NULL,
+            resolved_by INTEGER,
+            resolved_at TEXT,
+            resolution_notes TEXT,
+            verification_json TEXT NOT NULL DEFAULT '{}'
+        )
+        """
+    )
+    conn.commit()
+    mode = ServerModeService(
+        snapshot_service=None,
+        get_db=lambda: _db(control_db_path),
+        get_control_db=lambda: _db(control_db_path),
+        audit=lambda *args, **kwargs: None,
+    )
+    mode.ensure_schema(conn)
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(incident_reports)").fetchall()}
+    conn.close()
+
+    assert {
+        "previous_mode",
+        "previous_mode_json",
+        "previous_settings_json",
+        "previous_settings_hash",
+        "checkpoint_id",
+        "snapshot_id",
+        "entry_state",
+        "entry_error",
+        "restore_result_json",
+        "resolution_verification_json",
+    } <= columns
+
+
+def test_incident_entry_without_settings_store_is_degraded_and_cannot_false_resolve(tmp_path):
+    main_db_path = tmp_path / "main.db"
+    control_db_path = tmp_path / "control.db"
+    conn = _db(main_db_path)
+    conn.execute("CREATE TABLE marker (id INTEGER PRIMARY KEY)")
+    conn.commit()
+    conn.close()
+    actor = {"id": 1, "username": "root", "role": "super_admin"}
+    mode = ServerModeService(
+        snapshot_service=None,
+        get_db=lambda: _db(main_db_path),
+        get_control_db=lambda: _db(control_db_path),
+        audit=lambda *args, **kwargs: None,
+    )
+
+    entered = mode.enter_incident_lockdown(
+        actor=actor,
+        trigger_type="missing_settings_store",
+        reason="fail closed",
+    )
+
+    assert entered["ok"] is False
+    assert entered["incident_lockdown"] is True
+    assert entered["entry_state"] == "degraded"
+    assert "system_settings table is unavailable" in entered["entry_error"]
+    assert entered["mode"]["current_mode"] == "incident_lockdown"
+    control = _db(control_db_path)
+    report = control.execute("SELECT * FROM incident_reports WHERE id=?", (entered["incident_id"],)).fetchone()
+    control.close()
+    assert report["status"] == "open"
+    assert report["previous_settings_hash"] == ""
+
+    resolved = mode.resolve_incident(
+        actor=actor,
+        confirm="RESOLVE_INCIDENT",
+        notes="must not false-green",
+    )
+
+    assert resolved["ok"] is False
+    control = _db(control_db_path)
+    report = control.execute("SELECT status, entry_state FROM incident_reports WHERE id=?", (entered["incident_id"],)).fetchone()
+    current_mode = control.execute("SELECT current_mode FROM server_modes WHERE id=1").fetchone()["current_mode"]
+    control.close()
+    assert report["status"] == "open"
+    assert report["entry_state"] == "restore_failed"
+    assert current_mode == "incident_lockdown"
+
+
+def test_incident_resolve_rejects_snapshot_hash_tampering(tmp_path):
+    audit_log = []
+    service, db_path, _uploads = _service(tmp_path, audit_log)
+    control_db_path = tmp_path / "app" / "control.db"
+    actor = {"id": 1, "username": "root", "role": "super_admin"}
+    mode = ServerModeService(
+        snapshot_service=service,
+        get_db=lambda: _db(db_path),
+        get_control_db=lambda: _db(control_db_path),
+        audit=lambda *args, **kwargs: audit_log.append((args, kwargs)),
+    )
+    entered = mode.enter_incident_lockdown(
+        actor=actor,
+        trigger_type="tamper_test",
+        reason="verify immutable evidence binding",
+    )
+    assert entered["ok"] is True
+    tampered_settings = {"maintenance_mode": "False", "feature_trading_enabled": "True"}
+    control = _db(control_db_path)
+    control.execute(
+        """
+        UPDATE incident_reports
+        SET previous_settings_json=?, previous_settings_hash=?
+        WHERE id=?
+        """,
+        (
+            json.dumps(tampered_settings, sort_keys=True),
+            mode._stable_hash(tampered_settings),
+            entered["incident_id"],
+        ),
+    )
+    control.commit()
+    control.close()
+
+    resolved = mode.resolve_incident(
+        actor=actor,
+        confirm="RESOLVE_INCIDENT",
+        notes="tampered evidence must fail",
+    )
+
+    assert resolved["ok"] is False
+    assert "證據驗證失敗" in resolved["msg"]
+    assert "entry audit event" in resolved["error"] or "checkpoint" in resolved["error"]
+    control = _db(control_db_path)
+    report = control.execute("SELECT status, entry_state FROM incident_reports WHERE id=?", (entered["incident_id"],)).fetchone()
+    current_mode = control.execute("SELECT current_mode FROM server_modes WHERE id=1").fetchone()["current_mode"]
+    control.close()
+    assert report["status"] == "open"
+    assert report["entry_state"] == "restore_failed"
+    assert current_mode == "incident_lockdown"
+
+
+def test_incident_resolution_claim_prevents_overlap_and_allows_stale_recovery(tmp_path):
+    audit_log = []
+    service, db_path, _uploads = _service(tmp_path, audit_log)
+    control_db_path = tmp_path / "app" / "control.db"
+    actor = {"id": 1, "username": "root", "role": "super_admin"}
+    mode = ServerModeService(
+        snapshot_service=service,
+        get_db=lambda: _db(db_path),
+        get_control_db=lambda: _db(control_db_path),
+        audit=lambda *args, **kwargs: audit_log.append((args, kwargs)),
+    )
+    entered = mode.enter_incident_lockdown(
+        actor=actor,
+        trigger_type="claim_test",
+        reason="serialize resolution",
+    )
+    assert entered["ok"] is True
+    fresh_claim = json.dumps(
+        {"actor_id": 99, "claimed_at_epoch": time.time(), "token": "other-resolver"},
+        sort_keys=True,
+    )
+    control = _db(control_db_path)
+    control.execute(
+        "UPDATE incident_reports SET entry_state='resolving', entry_error=? WHERE id=?",
+        (fresh_claim, entered["incident_id"]),
+    )
+    control.commit()
+    control.close()
+
+    overlapping = mode.resolve_incident(actor=actor, confirm="RESOLVE_INCIDENT", notes="must wait")
+
+    assert overlapping["ok"] is False
+    assert overlapping["resolution_in_progress"] is True
+    control = _db(control_db_path)
+    assert control.execute("SELECT current_mode FROM server_modes WHERE id=1").fetchone()["current_mode"] == "incident_lockdown"
+    stale_claim = json.dumps({"actor_id": 99, "claimed_at_epoch": 0, "token": "stale"}, sort_keys=True)
+    control.execute(
+        "UPDATE incident_reports SET entry_error=? WHERE id=?",
+        (stale_claim, entered["incident_id"]),
+    )
+    control.commit()
+    control.close()
+
+    recovered = mode.resolve_incident(actor=actor, confirm="RESOLVE_INCIDENT", notes="stale owner recovered")
+
+    assert recovered["ok"] is True
+    assert recovered["restored_mode"] == "dev_ready"
 
 
 def test_daily_snapshot_runs_once_after_configured_time(tmp_path):

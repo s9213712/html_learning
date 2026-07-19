@@ -696,15 +696,24 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
         result["message"] = str(exc)
         return result
     finally:
-        json_report, md_report = write_reports(result, json_path)
-        result["json"] = str(json_report)
-        result["md"] = str(md_report)
+        was_running = server.poll() is None
+        terminate_attempted = bool(was_running and not args.keep_server)
         if server.poll() is None and not args.keep_server:
             server.terminate()
             try:
                 server.wait(timeout=8)
             except subprocess.TimeoutExpired:
                 server.kill()
+                server.wait(timeout=5)
+        result["cleanup"] = {
+            "server_was_running": was_running,
+            "terminate_attempted": terminate_attempted,
+            "server_stopped": server.poll() is not None,
+            "keep_server_requested": bool(args.keep_server),
+        }
+        json_report, md_report = write_reports(result, json_path)
+        result["json"] = str(json_report)
+        result["md"] = str(md_report)
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:

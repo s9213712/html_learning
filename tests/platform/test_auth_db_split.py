@@ -129,6 +129,74 @@ def test_auth_service_writes_hot_auth_state_to_split_db_only(tmp_path):
     assert int(session_row["is_revoked"]) == 0
 
 
+def test_split_auth_session_uses_main_db_security_epoch_and_remains_valid(tmp_path):
+    main_db_path = tmp_path / "database.db"
+    auth_db_path = tmp_path / "auth.db"
+
+    main_conn = sqlite3.connect(main_db_path)
+    try:
+        main_conn.executescript(
+            """
+            CREATE TABLE users (
+                id INTEGER PRIMARY KEY,
+                username TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active'
+            );
+            CREATE TABLE system_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            );
+            INSERT INTO users (id, username, status)
+            VALUES (1, 'alice', 'active');
+            INSERT INTO system_settings (key, value)
+            VALUES ('server_security_epoch', '37');
+            """
+        )
+        main_conn.commit()
+    finally:
+        main_conn.close()
+
+    def _get_main_db():
+        conn = sqlite3.connect(main_db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _get_auth_db():
+        return get_auth_db(str(auth_db_path))
+
+    auth_service.configure_auth_service(
+        get_db=_get_main_db,
+        get_auth_db=_get_auth_db,
+        get_user_by_username=lambda username: None,
+        fernet=Fernet(Fernet.generate_key()),
+        get_runtime_server_mode=lambda: "dev_ready",
+    )
+
+    token = "session-at-current-security-epoch"
+    auth_service.db_save_session(1, token, "-", "")
+
+    auth_conn = _get_auth_db()
+    try:
+        auth_tables = {
+            row["name"]
+            for row in auth_conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        session_row = auth_conn.execute(
+            "SELECT session_epoch, is_revoked FROM sessions WHERE token_hash=?",
+            (auth_service._hash_token(token),),
+        ).fetchone()
+    finally:
+        auth_conn.close()
+
+    assert "system_settings" not in auth_tables
+    assert session_row is not None
+    assert int(session_row["session_epoch"]) == 37
+    assert int(session_row["is_revoked"]) == 0
+    assert auth_service.db_get_user_from_token(token) == "alice"
+
+
 def _build_public_auth_app(main_db_path, auth_db_path, *, ensure_membership=None, points_service=None):
     app = Flask(__name__)
     app.testing = True

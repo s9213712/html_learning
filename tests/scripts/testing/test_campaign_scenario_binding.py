@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
+import json
+from pathlib import Path
+from typing import Mapping
 
 import pytest
 
@@ -8,10 +12,15 @@ from scripts.testing.campaign_contract import (
     SCENARIO_CONTRACT_SCHEMA_VERSION,
     FormalResultStatus,
 )
+from scripts.testing.campaign_native_evidence import attach_native_evidence
 from scripts.testing.campaign_scenario_binding import (
     AUDITED_NATIVE_BINDING_BLOCKERS,
     FORMAL_BINDING_GATE_SCHEMA_VERSION,
     FORMAL_SCENARIO_BINDINGS,
+    NATIVE_ARTIFACT_BUNDLE_SCHEMA_VERSION,
+    NATIVE_EVIDENCE_MANIFEST_SCHEMA_VERSION,
+    NATIVE_RUNNER_RESULT_SCHEMA_VERSION,
+    NATIVE_RUNTIME_PIPELINE_SCHEMA_VERSION,
     RUNTIME_RECEIPT_SCHEMA_VERSION,
     BindingValidationError,
     FormalScenarioBinding,
@@ -21,6 +30,11 @@ from scripts.testing.campaign_scenario_binding import (
     ValidatorKind,
     build_and_validate_formal_scenario_bindings,
     build_formal_scenario_contracts,
+    build_strict_native_adapter_registry,
+    build_strict_native_validator_registry,
+    execute_registered_native_scenario,
+    native_evidence_manifest_validation_errors,
+    strict_native_runtime_pipeline_verified,
     validate_formal_scenario_bindings,
     validate_scenario_runtime_receipt,
 )
@@ -38,6 +52,145 @@ _NATIVE_HANDLER_REF = f"{_native_handler.__module__}:{_native_handler.__name__}"
 _NO_BINDING_BLOCKERS = {
     scenario_id: () for scenario_id in CAMPAIGN_SCENARIO_CONTRACTS
 }
+_PIPELINE_NATIVE_RESULT: dict[str, object] = {}
+
+
+def _pipeline_native_runner() -> object:
+    result = dict(_PIPELINE_NATIVE_RESULT)
+    started = datetime.now(timezone.utc)
+    finished = max(
+        datetime.now(timezone.utc),
+        started + timedelta(microseconds=1),
+    )
+    result["started_at"] = started.isoformat(timespec="microseconds").replace(
+        "+00:00", "Z"
+    )
+    result["finished_at"] = finished.isoformat(timespec="microseconds").replace(
+        "+00:00", "Z"
+    )
+    result["elapsed_seconds"] = (finished - started).total_seconds()
+    return result
+
+
+def _pointer_token(value: str) -> str:
+    return value.replace("~", "~0").replace("/", "~1")
+
+
+def scenario_authority(binding: FormalScenarioBinding) -> dict[str, object]:
+    return {
+        "qualification_campaign_uuid": "qualification-campaign-0001",
+        "campaign_uuid": "runtime-campaign-0001",
+        "campaign_attempt_uuid": "runtime-attempt-0001",
+        "scenario_attempt_uuid": f"scenario-attempt-{binding.scenario_id}",
+        "native_invocation_id": "native-invocation-0001",
+        "commit": "a" * 40,
+        "source_digest": "b" * 64,
+        "protected_source_digest": "c" * 64,
+        "started_at": "2026-07-14T00:00:00Z",
+        "finished_at": "2026-07-14T00:00:01Z",
+        "started_monotonic_ns": 1_000_000_000,
+        "finished_monotonic_ns": 2_000_000_000,
+    }
+
+
+def scenario_authority_identity(
+    binding: FormalScenarioBinding,
+) -> dict[str, object]:
+    authority = scenario_authority(binding)
+    for field_name in (
+        "started_at",
+        "finished_at",
+        "started_monotonic_ns",
+        "finished_monotonic_ns",
+    ):
+        authority.pop(field_name)
+    return authority
+
+
+def native_pipeline_fixture(
+    tmp_path: Path,
+    binding: FormalScenarioBinding,
+    *,
+    weak_pointer: bool = False,
+    handwritten_receipt: bool = False,
+) -> tuple[
+    dict[str, ScenarioRunnerRegistration],
+    Mapping[str, NativeEvidenceAdapterRegistration],
+    Mapping[str, ScenarioValidatorRegistration],
+]:
+    artifact_id = f"native.source.{binding.scenario_id}.domain_probe"
+    source = tmp_path / "domain_probe.json"
+    source_payload = {
+        "domain": {
+            "terminal_state": "success",
+            "residual_fixture_count": 0,
+            "evidence": {
+                evidence_id: {"observed": True}
+                for evidence_id in binding.evidence_adapter_ids
+            },
+        },
+        "ok": True,
+    }
+    source.write_text(json.dumps(source_payload), encoding="utf-8")
+    raw_runner_result = {
+        "schema_version": NATIVE_RUNNER_RESULT_SCHEMA_VERSION,
+        "scenario_id": binding.scenario_id,
+        "started_at": "2026-07-14T00:00:00Z",
+        "finished_at": "2026-07-14T00:00:01Z",
+        "elapsed_seconds": 1.0,
+        "terminal_state": "success",
+        "execution_succeeded": True,
+        "ok": True,
+        "steps": [{
+            "step_id": "domain_probe",
+            "timed_out": False,
+            "returncode": 0,
+            "evidence_errors": [],
+            "secret_leak_labels": [],
+        }],
+        "artifacts": [{
+            "artifact_id": artifact_id,
+            "path": str(source.resolve()),
+            "artifact_type": "json",
+        }],
+        "formal_evidence_manifest": "",
+    }
+    attached = attach_native_evidence(
+        raw_runner_result,
+        scenario_id=binding.scenario_id,
+        output_dir=tmp_path,
+        scenario_assertions={
+            evidence_id: True for evidence_id in binding.evidence_adapter_ids
+        },
+        terminal_assertions={"domain_terminal_success": True},
+        cleanup_assertions={"fixture_cleanup_complete": True},
+        details={"source_kind": "runtime_probe"},
+    )
+    if weak_pointer:
+        manifest_path = Path(str(attached["formal_evidence_manifest"]))
+        manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        first_evidence = next(iter(binding.evidence_adapter_ids))
+        manifest_payload["evidence"][first_evidence][0]["json_pointer"] = "/ok"
+        manifest_path.write_text(json.dumps(manifest_payload), encoding="utf-8")
+        manifest_path.chmod(0o600)
+    _PIPELINE_NATIVE_RESULT.clear()
+    _PIPELINE_NATIVE_RESULT.update(attached)
+    if handwritten_receipt:
+        _PIPELINE_NATIVE_RESULT["runtime_receipt"] = passing_receipt(binding)
+    handler_ref = f"{_pipeline_native_runner.__module__}:{_pipeline_native_runner.__name__}"
+    runners = {
+        binding.runner_id: ScenarioRunnerRegistration(
+            runner_id=binding.runner_id,
+            scenario_id=binding.scenario_id,
+            implementation_ref=handler_ref,
+            handler=_pipeline_native_runner,
+        )
+    }
+    return (
+        runners,
+        build_strict_native_adapter_registry(),
+        build_strict_native_validator_registry(),
+    )
 
 
 def complete_registries() -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
@@ -82,6 +235,7 @@ def passing_receipt(binding: FormalScenarioBinding) -> dict[str, object]:
         "runner_id": binding.runner_id,
         "status": "PASS",
         "terminal_state": "success",
+        "authority": scenario_authority(binding),
         "evidence_receipts": {
             evidence_id: {
                 "evidence_id": evidence_id,
@@ -101,6 +255,19 @@ def passing_receipt(binding: FormalScenarioBinding) -> dict[str, object]:
             validator_id: True for validator_id in binding.artifact_validator_ids
         },
         "artifact_ids": (f"native.artifact.bundle.{binding.scenario_id}",),
+        "artifact_bundle": {
+            "artifact_id": f"native.artifact.bundle.{binding.scenario_id}",
+            "content_schema_version": NATIVE_ARTIFACT_BUNDLE_SCHEMA_VERSION,
+            "path": f"/tmp/hackme-campaign-artifacts/{binding.scenario_id}.json",
+            "sha256": "1" * 64,
+            "size_bytes": 4096,
+            "manifest_sha256": "2" * 64,
+            "member_inventory_sha256": "3" * 64,
+            "member_count": 2,
+            "artifact_archive_id": f"native.artifact.archive.{binding.scenario_id}",
+            "artifact_archive_sha256": "4" * 64,
+            "artifact_archive_size_bytes": 10240,
+        },
         "diagnostics": (),
     }
 
@@ -176,7 +343,7 @@ def test_complete_exact_callable_registrations_pass_only_the_binding_gate() -> N
     assert gate.to_dict()["runtime_execution_pipeline_verified"] is True
 
 
-def test_audited_product_blockers_are_machine_readable_and_keep_gate_closed() -> None:
+def test_all_audited_blockers_cleared_but_unverified_pipeline_keeps_gate_closed() -> None:
     adapters, runners, validators = complete_registries()
     gate = build_and_validate_formal_scenario_bindings(
         adapter_registry=adapters,
@@ -186,7 +353,20 @@ def test_audited_product_blockers_are_machine_readable_and_keep_gate_closed() ->
     payload = gate.to_dict()
 
     assert set(AUDITED_NATIVE_BINDING_BLOCKERS) == set(CAMPAIGN_SCENARIO_CONTRACTS)
-    assert all(AUDITED_NATIVE_BINDING_BLOCKERS.values())
+    assert AUDITED_NATIVE_BINDING_BLOCKERS["pointschain_hft_invariants"] == ()
+    assert AUDITED_NATIVE_BINDING_BLOCKERS["media_proxy_cross_browser"] == ()
+    assert AUDITED_NATIVE_BINDING_BLOCKERS["final_ui_mobile_prelaunch"] == ()
+    assert AUDITED_NATIVE_BINDING_BLOCKERS["media_long_hls_share"] == ()
+    assert AUDITED_NATIVE_BINDING_BLOCKERS["wallet_incident_governance"] == ()
+    assert AUDITED_NATIVE_BINDING_BLOCKERS["backup_restore_restart"] == ()
+    assert AUDITED_NATIVE_BINDING_BLOCKERS["server_emergency_incident"] == ()
+    assert AUDITED_NATIVE_BINDING_BLOCKERS["trading_background_custom_workflow"] == ()
+    assert AUDITED_NATIVE_BINDING_BLOCKERS["cloud_drive_share_stream"] == ()
+    assert AUDITED_NATIVE_BINDING_BLOCKERS["community_governance_operations"] == ()
+    assert AUDITED_NATIVE_BINDING_BLOCKERS["comfyui_real_workflows"] == ()
+    assert AUDITED_NATIVE_BINDING_BLOCKERS["ai_agent_positive_operations"] == ()
+    assert AUDITED_NATIVE_BINDING_BLOCKERS["bt_download_stream_restart"] == ()
+    assert all(blockers == () for blockers in AUDITED_NATIVE_BINDING_BLOCKERS.values())
     assert gate.status is FormalResultStatus.FAIL_HARNESS
     assert payload["fully_bound_scenario_count"] == 0
     assert payload["runtime_execution_pipeline_verified"] is False
@@ -196,14 +376,8 @@ def test_audited_product_blockers_are_machine_readable_and_keep_gate_closed() ->
         for item in payload["registration_coverage"].values()
     )
     assert payload["gate_pass"] is False
-    assert payload["binding_blockers"]["bt_download_stream_restart"] == [
-        "native_scenario_runner_missing",
-        "magnet_torrent_hash_pause_resume_restart_evidence_adapters_missing",
-    ]
-    assert any(
-        error.startswith("native_binding_blockers_present:bt_download_stream_restart:")
-        for error in gate.errors
-    )
+    assert payload["binding_blockers"]["bt_download_stream_restart"] == []
+    assert not any(error.startswith("native_binding_blockers_present:") for error in gate.errors)
 
 
 def test_binding_blocker_manifest_missing_extra_or_invalid_scenario_fails_closed() -> None:
@@ -367,6 +541,243 @@ def test_complete_native_runtime_receipt_is_contract_pass() -> None:
     assert result.errors == ()
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (("size_bytes", 200), ("artifact_archive_size_bytes", 202)),
+)
+def test_bundle_sizes_equal_to_http_status_numbers_are_not_transport_shortcuts(
+    field: str,
+    value: int,
+) -> None:
+    binding = next(iter(FORMAL_SCENARIO_BINDINGS.values()))
+    payload = passing_receipt(binding)
+    payload["artifact_bundle"][field] = value
+
+    result = validate_scenario_runtime_receipt(payload, binding)
+
+    assert result.status is FormalResultStatus.PASS
+    assert result.valid is True
+    assert result.contract_pass is True
+    assert result.errors == ()
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_error"),
+    (
+        (
+            lambda payload: payload.update({"schema_version": "obsolete"}),
+            "native_evidence_manifest_schema_mismatch",
+        ),
+        (
+            lambda payload: payload.update({"artifact_ids": ["native.other"]}),
+            "native_evidence_manifest_artifact_ids_mismatch",
+        ),
+        (
+            lambda payload: payload.update({"skip": True}),
+            "native_shortcut_key_forbidden:native_evidence_manifest.skip",
+        ),
+    ),
+)
+def test_in_memory_native_manifest_validation_is_complete_and_fail_closed(
+    mutation,
+    expected_error: str,
+) -> None:
+    binding = next(iter(FORMAL_SCENARIO_BINDINGS.values()))
+    artifact_id = f"native.artifact.{binding.scenario_id}.proof"
+    manifest = {
+        "schema_version": NATIVE_EVIDENCE_MANIFEST_SCHEMA_VERSION,
+        "scenario_id": binding.scenario_id,
+        "artifact_ids": [artifact_id],
+        "evidence": {
+            evidence_id: [] for evidence_id in binding.evidence_adapter_ids
+        },
+        "terminal": {"state": "success", "observations": []},
+        "cleanup": {"state": "clean", "observations": []},
+    }
+    assert native_evidence_manifest_validation_errors(
+        manifest,
+        binding,
+        artifact_ids={artifact_id},
+    ) == ()
+
+    mutation(manifest)
+    errors = native_evidence_manifest_validation_errors(
+        manifest,
+        binding,
+        artifact_ids={artifact_id},
+    )
+
+    assert expected_error in errors
+
+
+@pytest.mark.parametrize(
+    "field,value,expected_error",
+    [
+        (
+            "campaign_uuid",
+            "other",
+            "runtime_receipt_authority_campaign_uuid_invalid",
+        ),
+        (
+            "commit",
+            "d" * 39,
+            "runtime_receipt_authority_commit_invalid",
+        ),
+        (
+            "source_digest",
+            "g" * 64,
+            "runtime_receipt_authority_source_digest_invalid",
+        ),
+        (
+            "protected_source_digest",
+            "f" * 63,
+            "runtime_receipt_authority_protected_source_digest_invalid",
+        ),
+        (
+            "campaign_attempt_uuid",
+            "short",
+            "runtime_receipt_authority_campaign_attempt_uuid_invalid",
+        ),
+        (
+            "scenario_attempt_uuid",
+            "x",
+            "runtime_receipt_authority_scenario_attempt_uuid_invalid",
+        ),
+    ],
+)
+def test_runtime_receipt_rejects_malformed_campaign_source_and_attempt_authority(
+    field: str,
+    value: str,
+    expected_error: str,
+) -> None:
+    binding = next(iter(FORMAL_SCENARIO_BINDINGS.values()))
+    payload = passing_receipt(binding)
+    payload["authority"][field] = value
+
+    result = validate_scenario_runtime_receipt(payload, binding)
+
+    assert result.status is FormalResultStatus.FAIL_HARNESS
+    assert result.valid is False
+    assert expected_error in result.errors
+
+
+@pytest.mark.parametrize(
+    "mutation,expected_error",
+    [
+        (
+            lambda authority: authority.update(
+                {
+                    "started_at": "2026-07-14T00:00:02Z",
+                    "finished_at": "2026-07-14T00:00:01Z",
+                }
+            ),
+            "runtime_receipt_authority_wall_boundary_invalid",
+        ),
+        (
+            lambda authority: authority.update(
+                {
+                    "started_monotonic_ns": 3_000_000_000,
+                    "finished_monotonic_ns": 2_000_000_000,
+                }
+            ),
+            "runtime_receipt_authority_monotonic_boundary_invalid",
+        ),
+        (
+            lambda authority: authority.update(
+                {"finished_monotonic_ns": 12_000_000_000}
+            ),
+            "runtime_receipt_authority_wall_monotonic_duration_mismatch",
+        ),
+    ],
+)
+def test_runtime_receipt_rejects_inverted_or_mismatched_time_bounds(
+    mutation,
+    expected_error: str,
+) -> None:
+    binding = next(iter(FORMAL_SCENARIO_BINDINGS.values()))
+    payload = passing_receipt(binding)
+    mutation(payload["authority"])
+
+    result = validate_scenario_runtime_receipt(payload, binding)
+
+    assert result.status is FormalResultStatus.FAIL_HARNESS
+    assert result.valid is False
+    assert expected_error in result.errors
+
+
+@pytest.mark.parametrize(
+    "field,value,expected_error",
+    [
+        (
+            "artifact_id",
+            "native.artifact.bundle.other_scenario",
+            "runtime_receipt_artifact_bundle_id_mismatch",
+        ),
+        (
+            "content_schema_version",
+            "hackme.campaign.native-artifact-bundle/v1",
+            "runtime_receipt_artifact_bundle_schema_mismatch",
+        ),
+        (
+            "path",
+            "/tmp/hackme-campaign-artifacts/../substituted.json",
+            "runtime_receipt_artifact_bundle_path_not_canonical",
+        ),
+        (
+            "sha256",
+            "not-a-sha256",
+            "runtime_receipt_artifact_bundle_sha256_invalid",
+        ),
+        (
+            "size_bytes",
+            0,
+            "runtime_receipt_artifact_bundle_size_bytes_invalid",
+        ),
+        (
+            "artifact_archive_id",
+            "native.artifact.archive.other_scenario",
+            "runtime_receipt_artifact_bundle_archive_id_mismatch",
+        ),
+        (
+            "artifact_archive_size_bytes",
+            -1,
+            "runtime_receipt_artifact_bundle_artifact_archive_size_bytes_invalid",
+        ),
+    ],
+)
+def test_runtime_receipt_rejects_substituted_bundle_reference(
+    field: str,
+    value: object,
+    expected_error: str,
+) -> None:
+    binding = next(iter(FORMAL_SCENARIO_BINDINGS.values()))
+    payload = passing_receipt(binding)
+    payload["artifact_bundle"][field] = value
+
+    result = validate_scenario_runtime_receipt(payload, binding)
+
+    assert result.status is FormalResultStatus.FAIL_HARNESS
+    assert result.valid is False
+    assert expected_error in result.errors
+
+
+def test_runtime_receipt_rejects_symbolic_bundle_id_without_concrete_reference() -> None:
+    binding = next(iter(FORMAL_SCENARIO_BINDINGS.values()))
+    payload = passing_receipt(binding)
+    payload.pop("artifact_bundle")
+
+    result = validate_scenario_runtime_receipt(payload, binding)
+
+    assert result.status is FormalResultStatus.FAIL_HARNESS
+    assert result.valid is False
+    assert "runtime_receipt_fields_missing:artifact_bundle" in result.errors
+    assert "runtime_receipt_artifact_bundle_not_mapping" in result.errors
+    assert (
+        "runtime_receipt_symbolic_bundle_without_concrete_reference"
+        in result.errors
+    )
+
+
 def test_runtime_receipt_requires_the_reviewed_scenario_artifact_bundle() -> None:
     binding = next(iter(FORMAL_SCENARIO_BINDINGS.values()))
     payload = passing_receipt(binding)
@@ -497,6 +908,207 @@ def test_registration_rejects_forged_callable_provenance() -> None:
             implementation_ref="scripts.testing.operational_campaign_24h:scenario_media_long",
             handler=_native_handler,
         )
+
+
+def test_shared_strict_runtime_registry_covers_all_91_evidence_and_39_validators() -> None:
+    adapters = build_strict_native_adapter_registry()
+    validators = build_strict_native_validator_registry()
+
+    assert len(adapters) == 91
+    assert len(validators) == 39
+    assert strict_native_runtime_pipeline_verified(
+        adapter_registry=adapters,
+        validator_registry=validators,
+    ) is True
+    assert {
+        registration.kind for registration in validators.values()
+    } == {ValidatorKind.TERMINAL, ValidatorKind.CLEANUP, ValidatorKind.ARTIFACT}
+
+
+def test_native_pipeline_invokes_runner_and_derives_pass_receipt_from_reopened_artifacts(
+    tmp_path: Path,
+) -> None:
+    binding = FORMAL_SCENARIO_BINDINGS["media_long_hls_share"]
+    runners, adapters, validators = native_pipeline_fixture(tmp_path, binding)
+    registration = runners[binding.runner_id]
+    invocation_count = 0
+
+    def counted_runner() -> object:
+        nonlocal invocation_count
+        invocation_count += 1
+        return registration.handler()
+
+    runners = {
+        binding.runner_id: replace(
+            registration,
+            implementation_ref=(
+                f"{counted_runner.__module__}:{counted_runner.__name__}"
+            ),
+            handler=counted_runner,
+        )
+    }
+
+    result = execute_registered_native_scenario(
+        binding=binding,
+        runner_registry=runners,
+        adapter_registry=adapters,
+        validator_registry=validators,
+        artifact_root=tmp_path,
+        authority=scenario_authority_identity(binding),
+    )
+
+    assert result["schema_version"] == NATIVE_RUNTIME_PIPELINE_SCHEMA_VERSION
+    assert result["runner_invoked"] is True
+    assert invocation_count == 1
+    assert result["classification"] == "PASS"
+    assert result["ok"] is True
+    assert result["runtime_receipt_validation"]["contract_pass"] is True
+    assert set(result["runtime_receipt"]["evidence_receipts"]) == set(
+        binding.evidence_adapter_ids
+    )
+    assert all(
+        receipt["validated"] is True
+        and receipt["native_observation_ids"]
+        for receipt in result["runtime_receipt"]["evidence_receipts"].values()
+    )
+    bundle = Path(result["artifact_bundle_path"])
+    assert bundle.is_file()
+    assert bundle.stat().st_mode & 0o077 == 0
+    assert len(result["artifact_bundle_sha256"]) == 64
+
+
+def test_native_pipeline_missing_authority_fails_before_invoking_runner(
+    tmp_path: Path,
+) -> None:
+    binding = FORMAL_SCENARIO_BINDINGS["media_long_hls_share"]
+    runners, adapters, validators = native_pipeline_fixture(tmp_path, binding)
+
+    result = execute_registered_native_scenario(
+        binding=binding,
+        runner_registry=runners,
+        adapter_registry=adapters,
+        validator_registry=validators,
+        artifact_root=tmp_path,
+    )
+
+    assert result["classification"] == "FAIL_HARNESS"
+    assert result["ok"] is False
+    assert result["runner_invoked"] is False
+    assert any(
+        item.startswith("native_pipeline_authority_")
+        for item in result["diagnostics"]
+    )
+
+
+def test_native_pipeline_rejects_runner_wall_interval_outside_measured_envelope(
+    tmp_path: Path,
+) -> None:
+    binding = FORMAL_SCENARIO_BINDINGS["media_long_hls_share"]
+    runners, adapters, validators = native_pipeline_fixture(tmp_path, binding)
+    registered = runners[binding.runner_id]
+
+    def stale_runner() -> object:
+        result = dict(_pipeline_native_runner())
+        result["started_at"] = "2000-01-01T00:00:00.000000Z"
+        result["finished_at"] = "2000-01-01T00:00:01.000000Z"
+        return result
+
+    runners = {
+        binding.runner_id: replace(
+            registered,
+            implementation_ref=f"{stale_runner.__module__}:{stale_runner.__name__}",
+            handler=stale_runner,
+        )
+    }
+    result = execute_registered_native_scenario(
+        binding=binding,
+        runner_registry=runners,
+        adapter_registry=adapters,
+        validator_registry=validators,
+        artifact_root=tmp_path,
+        authority=scenario_authority_identity(binding),
+    )
+
+    assert result["classification"] == "FAIL_HARNESS"
+    assert result["ok"] is False
+    assert result["runner_invoked"] is True
+    assert "native_runner_authority_wall_interval_mismatch" in result["diagnostics"]
+
+
+def test_native_pipeline_rejects_ok_field_as_semantic_evidence(
+    tmp_path: Path,
+) -> None:
+    binding = FORMAL_SCENARIO_BINDINGS["media_long_hls_share"]
+    runners, adapters, validators = native_pipeline_fixture(
+        tmp_path,
+        binding,
+        weak_pointer=True,
+    )
+
+    result = execute_registered_native_scenario(
+        binding=binding,
+        runner_registry=runners,
+        adapter_registry=adapters,
+        validator_registry=validators,
+        artifact_root=tmp_path,
+        authority=scenario_authority_identity(binding),
+    )
+
+    assert result["ok"] is False
+    assert result["classification"] == "FAIL_HARNESS"
+    assert result["runtime_receipt_validation"]["contract_pass"] is False
+    assert any("transport/process shortcut" in item for item in result["diagnostics"])
+
+
+def test_native_pipeline_rejects_skip_or_fallback_semantics_in_probe_manifest(
+    tmp_path: Path,
+) -> None:
+    binding = FORMAL_SCENARIO_BINDINGS["media_long_hls_share"]
+    runners, adapters, validators = native_pipeline_fixture(tmp_path, binding)
+    manifest_path = Path(str(_PIPELINE_NATIVE_RESULT["formal_evidence_manifest"]))
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    first_evidence = next(iter(binding.evidence_adapter_ids))
+    manifest["evidence"][first_evidence][0]["skip"] = False
+    manifest["cleanup"]["fallback"] = "clean"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    result = execute_registered_native_scenario(
+        binding=binding,
+        runner_registry=runners,
+        adapter_registry=adapters,
+        validator_registry=validators,
+        artifact_root=tmp_path,
+        authority=scenario_authority_identity(binding),
+    )
+
+    assert result["ok"] is False
+    assert result["classification"] == "FAIL_HARNESS"
+    assert any("native_shortcut_key_forbidden" in item for item in result["diagnostics"])
+
+
+def test_native_pipeline_rejects_runner_supplied_handwritten_receipt(
+    tmp_path: Path,
+) -> None:
+    binding = FORMAL_SCENARIO_BINDINGS["media_long_hls_share"]
+    runners, adapters, validators = native_pipeline_fixture(
+        tmp_path,
+        binding,
+        handwritten_receipt=True,
+    )
+
+    result = execute_registered_native_scenario(
+        binding=binding,
+        runner_registry=runners,
+        adapter_registry=adapters,
+        validator_registry=validators,
+        artifact_root=tmp_path,
+        authority=scenario_authority_identity(binding),
+    )
+
+    assert result["ok"] is False
+    assert result["classification"] == "FAIL_HARNESS"
+    assert "native_runner_result_shape_mismatch" in result["diagnostics"]
+    assert any("runtime_receipt" in item for item in result["diagnostics"])
 
 
 def test_build_rejects_structurally_drifted_reviewed_contract_instead_of_partial_output() -> None:

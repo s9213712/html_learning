@@ -6,6 +6,7 @@ import subprocess
 import sys
 from argparse import Namespace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -144,6 +145,144 @@ def test_wait_for_hls_rejects_failed_terminal_jobs(tmp_path: Path, monkeypatch: 
     assert result["ok"] is False
     assert result["error"] == "hls_job_terminal_failure"
     assert result["failed_jobs"][0]["id"] == 7
+
+
+@pytest.mark.parametrize(("mobile", "expected_viewport"), ((False, "desktop"), (True, "mobile")))
+def test_browser_seek_records_machine_readable_frame_and_random_seek_latency(
+    monkeypatch: pytest.MonkeyPatch,
+    mobile: bool,
+    expected_viewport: str,
+) -> None:
+    context_options: list[dict] = []
+
+    class FakeLocator:
+        def __init__(self, *, visible: bool = False) -> None:
+            self.visible = visible
+
+        def count(self) -> int:
+            return int(self.visible)
+
+        def click(self) -> None:
+            return None
+
+    class FakePage:
+        def on(self, *_args) -> None:
+            return None
+
+        def goto(self, *_args, **_kwargs) -> None:
+            return None
+
+        def wait_for_selector(self, *_args, **_kwargs) -> None:
+            return None
+
+        def locator(self, selector: str) -> FakeLocator:
+            return FakeLocator(visible=selector == "#share-password-form:not(.hidden)")
+
+        def fill(self, *_args) -> None:
+            return None
+
+        def wait_for_function(self, *_args, **_kwargs) -> None:
+            return None
+
+        def evaluate(self, source: str, *_args):
+            if "playingObserved" in source:
+                return {
+                    "terminal_event": "playing_and_video_frame",
+                    "playing_observed": True,
+                    "frame_observed": True,
+                    "frame_observation_method": "requestVideoFrameCallback",
+                    "frame_metadata": {"presentedFrames": 2, "width": 1280, "height": 720},
+                    "play_to_frame_latency_ms": 450,
+                    "current_time": 0.25,
+                    "ready_state": 4,
+                    "network_state": 1,
+                    "paused": False,
+                    "play_error": "",
+                }
+            if "randomValues" in source:
+                return {
+                    "duration": 3900,
+                    "target": 2100,
+                    "target_ratio": 0.538,
+                    "random_source": "crypto.getRandomValues",
+                    "random_sample_uint32": 2_381_000_000,
+                    "currentTime": 2100,
+                    "readyState": 4,
+                    "networkState": 1,
+                    "paused": False,
+                    "terminal_event": "seeked_and_video_frame",
+                    "terminal_latency_ms": 1800,
+                    "seeked_observed": True,
+                    "frame_observed": True,
+                    "frame_observation_method": "requestVideoFrameCallback",
+                    "frame_metadata": {"presentedFrames": 3, "width": 1280, "height": 720},
+                    "play_error": "",
+                }
+            return {
+                "viewportWidth": 390 if mobile else 1366,
+                "scrollWidth": 390 if mobile else 1366,
+                "playerWidth": 390 if mobile else 960,
+                "playerHeight": 219 if mobile else 540,
+            }
+
+    class FakeContext:
+        def __init__(self) -> None:
+            self.page = FakePage()
+
+        def new_page(self) -> FakePage:
+            return self.page
+
+        def close(self) -> None:
+            return None
+
+    class FakeBrowser:
+        def new_context(self, **kwargs) -> FakeContext:
+            context_options.append(kwargs)
+            return FakeContext()
+
+        def close(self) -> None:
+            return None
+
+    class FakePlaywrightManager:
+        def __enter__(self):
+            return SimpleNamespace(chromium=SimpleNamespace(launch=lambda **_kwargs: FakeBrowser()))
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+    monkeypatch.setitem(
+        sys.modules,
+        "playwright.sync_api",
+        SimpleNamespace(sync_playwright=lambda: FakePlaywrightManager()),
+    )
+    clock = iter((10.0, 11.0, 11.5))
+    monkeypatch.setattr(probe.time, "perf_counter", lambda: next(clock))
+
+    result = probe.browser_seek_shared_video(
+        base_url="https://127.0.0.1:1",
+        share_url="/shared/videos/formal-token",
+        share_password="private",
+        mobile=mobile,
+        minimum_duration_seconds=3600,
+    )
+
+    assert result["ok"] is True
+    assert result["schema_version"] == "hackme.browser-video-latency/v1"
+    assert result["viewport"] == expected_viewport
+    assert result["emulation"]["is_mobile"] is mobile
+    assert result["emulation"]["has_touch"] is mobile
+    assert context_options[0]["is_mobile"] is mobile
+    assert context_options[0]["has_touch"] is mobile
+    assert result["latency_thresholds_ms"] == {
+        "first_frame": 8000,
+        "random_seek_terminal": 5000,
+    }
+    assert result["first_frame"]["origin"] == "unlock_submit"
+    assert result["first_frame"]["elapsed_ms"] == 500
+    assert result["first_frame"]["terminal_event"] == "playing_and_video_frame"
+    assert result["seek"]["terminal_event"] == "seeked_and_video_frame"
+    assert result["seek"]["random_source"] == "crypto.getRandomValues"
+    assert result["seek"]["terminal_latency_ms"] == 1800
 
 
 @pytest.mark.skipif(not shutil.which("ffmpeg") or not shutil.which("ffprobe"), reason="ffmpeg toolchain unavailable")

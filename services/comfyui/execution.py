@@ -8,6 +8,14 @@ import time
 import urllib.parse
 import uuid
 
+from services.comfyui.workflow.final_model_safety import (
+    FINAL_MODEL_SAFETY_EXTRA_DATA_KEY,
+    FinalModelSafetyError,
+    enforce_campaign_final_graph_model_safety,
+    final_model_safety_prompt_marker,
+    verify_final_model_safety_backend_history_binding,
+)
+
 
 QUEUE_TIMEOUT_EXTENSION_SECONDS = 1800
 QUEUE_MAX_TIMEOUT_SECONDS = 21600
@@ -83,14 +91,40 @@ def extract_history_error_message(record):
 
 def queue_prompt_with_client_id(client, workflow, *, client_id=None, extra_data=None, error_cls):
     client_id = str(client_id or uuid.uuid4().hex)
-    payload = {"prompt": workflow, "client_id": client_id}
-    if isinstance(extra_data, dict) and extra_data:
-        payload["extra_data"] = dict(extra_data)
+    try:
+        submitted_workflow, safety_receipt = enforce_campaign_final_graph_model_safety(
+            workflow,
+            backend_url=str(getattr(client, "base_url", "") or ""),
+        )
+    except Exception as exc:
+        if isinstance(exc, FinalModelSafetyError):
+            detail = str(exc)
+        else:
+            detail = f"{exc.__class__.__name__}: {exc}"
+        raise error_cls(f"ComfyUI final graph safety rejected before /prompt: {detail}") from exc
+    prompt_extra_data = dict(extra_data) if isinstance(extra_data, dict) else {}
+    if safety_receipt is not None:
+        if FINAL_MODEL_SAFETY_EXTRA_DATA_KEY in prompt_extra_data:
+            raise error_cls(
+                "ComfyUI final graph safety rejected before /prompt: "
+                f"reserved extra_data key collision ({FINAL_MODEL_SAFETY_EXTRA_DATA_KEY})"
+            )
+        prompt_extra_data[FINAL_MODEL_SAFETY_EXTRA_DATA_KEY] = final_model_safety_prompt_marker(
+            safety_receipt
+        )
+    payload = {"prompt": submitted_workflow, "client_id": client_id}
+    if prompt_extra_data:
+        payload["extra_data"] = prompt_extra_data
     data = client._json_request("/prompt", method="POST", payload=payload)
     prompt_id = data.get("prompt_id") if isinstance(data, dict) else None
     if not prompt_id:
         raise error_cls("ComfyUI 未回傳 prompt_id")
-    return {"prompt_id": str(prompt_id), "client_id": client_id}
+    return {
+        "prompt_id": str(prompt_id),
+        "client_id": client_id,
+        "final_model_safety": safety_receipt,
+        "_submitted_workflow": submitted_workflow,
+    }
 
 
 def queue_prompt(client, workflow, *, extra_data=None, error_cls):
@@ -528,6 +562,7 @@ def wait_for_outputs(
     progress_callback=None,
     error_cls,
     websocket_module=None,
+    final_model_safety_receipt=None,
 ):
     start_time = time.time()
     timeout_value = max(0, int(timeout_seconds or 0))
@@ -639,6 +674,24 @@ def wait_for_outputs(
                 continue
             record = history.get(prompt_id) if isinstance(history, dict) else None
             if record:
+                backend_safety_binding = None
+                if final_model_safety_receipt is not None:
+                    try:
+                        backend_safety_binding = verify_final_model_safety_backend_history_binding(
+                            record,
+                            final_model_safety_receipt,
+                            prompt_id=str(prompt_id),
+                        )
+                    except Exception as exc:
+                        detail = (
+                            str(exc)
+                            if isinstance(exc, FinalModelSafetyError)
+                            else f"{exc.__class__.__name__}: {exc}"
+                        )
+                        raise error_cls(
+                            "ComfyUI final graph safety backend history binding failed: "
+                            f"{detail}"
+                        ) from exc
                 status = record.get("status") or {}
                 last_status = status
                 if status.get("status_str") == "error" or status.get("completed") is False and status.get("status_str") == "error":
@@ -659,18 +712,24 @@ def wait_for_outputs(
                     snapshot["completed"] = True
                     snapshot["detail"] = f"已完成，輸出 {image_count + media_count} 個檔案"
                     emit_progress(progress_callback, snapshot)
-                    return {**found, "prompt_id": str(prompt_id)}
+                    result = {**found, "prompt_id": str(prompt_id)}
+                    if backend_safety_binding is not None:
+                        result["final_model_safety_backend_binding"] = backend_safety_binding
+                    return result
                 if not wait_until_completed and image_count >= expected:
                     snapshot["phase"] = "completed"
                     snapshot["percent"] = 100
                     snapshot["completed"] = True
                     snapshot["detail"] = f"已完成，共 {len(found['images'][:expected])} 張"
                     emit_progress(progress_callback, snapshot)
-                    return {
+                    result = {
                         **found,
                         "images": found["images"][:expected],
                         "prompt_id": str(prompt_id),
                     }
+                    if backend_safety_binding is not None:
+                        result["final_model_safety_backend_binding"] = backend_safety_binding
+                    return result
             next_history_poll = now + float(poll_interval)
         time.sleep(0.15)
     detail_parts = []
@@ -773,6 +832,8 @@ def generate_from_workflow(
 ):
     websocket_conn = None
     client_id = uuid.uuid4().hex
+    final_model_safety = None
+    submitted_workflow = workflow
     try:
         if progress_callback:
             try:
@@ -787,8 +848,15 @@ def generate_from_workflow(
             error_cls=error_cls,
         )
         prompt_id = queued["prompt_id"]
-        total_node_count = _workflow_node_count(workflow)
-        emit_progress(progress_callback, {
+        final_model_safety = queued.get("final_model_safety")
+        submitted_workflow = queued.get("_submitted_workflow") or workflow
+        total_node_count = _workflow_node_count(submitted_workflow)
+        safety_marker = (
+            final_model_safety_prompt_marker(final_model_safety)
+            if final_model_safety is not None
+            else None
+        )
+        queued_progress = {
             "prompt_id": prompt_id,
             "phase": "queued",
             "percent": 0,
@@ -800,19 +868,23 @@ def generate_from_workflow(
             "detail": "已送出至 ComfyUI 佇列",
             "completed": False,
             "updated_at": time.time(),
-        })
+        }
+        if safety_marker is not None:
+            queued_progress["final_model_safety"] = safety_marker
+        emit_progress(progress_callback, queued_progress)
         output_refs = wait_for_outputs(
             client,
             prompt_id,
             timeout_seconds=timeout_seconds,
             expected_count=expected_count,
             wait_until_completed=wait_until_completed,
-            workflow=workflow,
+            workflow=submitted_workflow,
             total_node_count=total_node_count,
             websocket_conn=websocket_conn,
             progress_callback=progress_callback,
             error_cls=error_cls,
             websocket_module=websocket_module,
+            final_model_safety_receipt=final_model_safety,
         )
     finally:
         try:
@@ -826,7 +898,7 @@ def generate_from_workflow(
         if not image_refs and not any(media_refs.values()):
             raise error_cls("ComfyUI 沒有回傳可用輸出檔")
         primary_ref = image_refs[0] if image_refs else next(item for values in media_refs.values() for item in values)
-        return {
+        result = {
             "prompt_id": prompt_id,
             "image_ref": primary_ref,
             "mime_type": "image/png" if image_refs else "application/octet-stream",
@@ -859,6 +931,12 @@ def generate_from_workflow(
                 for key, values in media_refs.items()
             },
         }
+        if final_model_safety is not None:
+            result["final_model_safety"] = final_model_safety
+            result["final_model_safety_backend_binding"] = output_refs.get(
+                "final_model_safety_backend_binding"
+            )
+        return result
     image_refs = list(output_refs.get("images") or [])
     media_refs = {key: list(output_refs.get(key) or []) for key in ("videos", "audio", "other")}
     try:
@@ -897,7 +975,13 @@ def generate_from_workflow(
             "detail": "ComfyUI 已完成生成，但預覽檔讀取暫時失敗；已保留輸出檔引用，可稍後重新載入預覽。",
             "updated_at": time.time(),
         })
-        return _output_refs_without_preview_data(output_refs, prompt_id=prompt_id, fetch_error=exc)
+        fallback = _output_refs_without_preview_data(output_refs, prompt_id=prompt_id, fetch_error=exc)
+        if final_model_safety is not None:
+            fallback["final_model_safety"] = final_model_safety
+            fallback["final_model_safety_backend_binding"] = output_refs.get(
+                "final_model_safety_backend_binding"
+            )
+        return fallback
     if not images and not any(media_outputs.values()):
         raise error_cls("ComfyUI 沒有回傳可用輸出檔")
     primary = images[0] if images else next(item for values in media_outputs.values() for item in values)
@@ -927,7 +1011,7 @@ def generate_from_workflow(
         } for item in values]
         for key, values in media_outputs.items()
     }
-    return {
+    result = {
         "prompt_id": prompt_id,
         "image_ref": {
             "filename": primary.filename,
@@ -939,6 +1023,12 @@ def generate_from_workflow(
         "images": serialized_images,
         "media": serialized_media,
     }
+    if final_model_safety is not None:
+        result["final_model_safety"] = final_model_safety
+        result["final_model_safety_backend_binding"] = output_refs.get(
+            "final_model_safety_backend_binding"
+        )
+    return result
 
 
 def generate_image(

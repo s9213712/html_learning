@@ -13,6 +13,7 @@ import pytest
 from services.comfyui.template.analyzer import analyze_workflow_json
 from services.comfyui.template.seeding import SYSTEM_WORKFLOW_IDS
 from services.comfyui.validation.sanitize import sanitize_workflow_json
+from services.comfyui.workflow.summary import validate_manifest_dependency_contract
 from routes.comfyui_sections.workflow_routes import (
     _apply_qwen_2512_controlnet_pose_mode,
     _is_qwen_image_edit_2509_family,
@@ -60,6 +61,21 @@ EXPECTED_SYSTEM_WORKFLOW_IDS = EXPECTED_ORIGIN_WORKFLOW_IDS | {
     "origin_qwen_image_edit_2509_anything2real",
     "origin_qwen_image_edit_gguf_lite",
     "origin_sdxl_checkpoint_inpaint",
+}
+
+WORKFLOWS_WITH_CLASSIFIED_LORA_OR_CONTROLNET_DEPENDENCIES = {
+    "origin_ltx23_t2v",
+    "origin_multi_method_upscale",
+    "origin_multi_method_upscale_mode_test",
+    "origin_one_click_anime_to_real",
+    "origin_qwen_image_controlnet_2512",
+    "origin_qwen_image_edit_2509",
+    "origin_qwen_image_edit_2509_anything2real",
+    "origin_qwen_image_txt2img",
+    "origin_sd35_large_canny_controlnet",
+    "origin_sd35_large_depth_controlnet",
+    "origin_wan22_14b_i2v_subgraphed",
+    "origin_wan_vace_inpainting",
 }
 
 
@@ -298,6 +314,30 @@ def test_manifest_output_kinds_match_workflow_output_nodes(workflow_id):
     workflow = _workflow(workflow_id)
 
     assert _manifest_output_kinds(manifest) == _workflow_output_kinds(workflow)
+
+
+@pytest.mark.parametrize("workflow_id", sorted(EXPECTED_SYSTEM_WORKFLOW_IDS))
+def test_system_manifest_matches_graph_loader_dependencies_and_explicit_custom_node_packages(workflow_id):
+    result = validate_manifest_dependency_contract(_workflow(workflow_id), _manifest(workflow_id))
+
+    assert result["scope"]["custom_nodes"] == "explicit_class_to_package_mapping_only"
+    assert result["custom_node_evidence"]["limitation"]
+    assert result["ok"] is True, json.dumps(result, ensure_ascii=False, indent=2)
+
+
+def test_twelve_lora_controlnet_workflows_are_not_required_model_mismatches():
+    classified = set()
+    for workflow_id in sorted(EXPECTED_SYSTEM_WORKFLOW_IDS):
+        result = validate_manifest_dependency_contract(_workflow(workflow_id), _manifest(workflow_id))
+        graph = result["graph"]
+        non_model_names = set(graph["loras"]) | set(graph["controlnets"])
+        model_names = {item["name"] for item in graph["models"]}
+        if non_model_names:
+            classified.add(workflow_id)
+        assert not (model_names & non_model_names), workflow_id
+        assert result["ok"] is True, json.dumps(result, ensure_ascii=False, indent=2)
+
+    assert classified == WORKFLOWS_WITH_CLASSIFIED_LORA_OR_CONTROLNET_DEPENDENCIES
 
 
 def test_frontend_workflow_routes_infer_output_kinds_from_output_nodes_only():

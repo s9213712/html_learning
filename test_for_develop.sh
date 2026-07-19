@@ -5432,8 +5432,6 @@ mkdir -p \
 touch "$LOG_CAPTURE" "$GUNICORN_ACCESS_LOG" "$GUNICORN_ERROR_LOG"
 
 resolve_python
-migrate_legacy_runtime_storage_to_cloud_drive_root
-run_transmission_backend_setup_if_requested
 if [[ "$PYTHON_BIN" != "python3" ]]; then
   say "[dev-tmp] python:    $PYTHON_BIN"
 else
@@ -5572,6 +5570,48 @@ import json
 import os
 from pathlib import Path
 import secrets
+import sqlite3
+
+
+def detect_persisted_incident_before_server_import():
+    """Read the authoritative control DB without triggering app bootstrap."""
+
+    db_dir = Path(os.environ["HTML_LEARNING_DB_DIR"])
+    control_path = Path(
+        os.environ.get("HTML_LEARNING_CONTROL_DB_PATH") or (db_dir / "control.db")
+    ).expanduser().resolve()
+    if not control_path.exists():
+        return False
+    try:
+        conn = sqlite3.connect(control_path.as_uri() + "?mode=ro", uri=True, timeout=10)
+        conn.row_factory = sqlite3.Row
+        tables = {
+            row["name"]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+        open_count = 0
+        if "incident_reports" in tables:
+            open_count = int(
+                conn.execute(
+                    "SELECT COUNT(*) AS c FROM incident_reports WHERE status='open'"
+                ).fetchone()["c"]
+                or 0
+            )
+        current_mode = ""
+        if "server_modes" in tables:
+            row = conn.execute(
+                "SELECT current_mode FROM server_modes WHERE id=1"
+            ).fetchone()
+            current_mode = str(row["current_mode"] or "").strip().lower() if row else ""
+        conn.close()
+        return open_count > 0 or current_mode == "incident_lockdown"
+    except Exception as exc:
+        raise SystemExit(
+            f"cannot verify persisted incident state before server import: {exc}"
+        ) from exc
+
+
+preserve_existing_runtime = detect_persisted_incident_before_server_import()
 import server
 from services.comfyui.template.seeding import seed_default_comfyui_workflows
 from services.server.startup import bootstrap_points_initial_grants_if_due
@@ -5596,8 +5636,42 @@ server.init_db(
     ensure_points_economy_schema=server.ensure_points_economy_schema,
     ensure_official_chat_room=server.ensure_official_chat_room,
     hash_password=server.hash_password,
+    preserve_existing_runtime=preserve_existing_runtime,
 )
 server.ensure_local_tls_files(server.CERT_FILE, server.KEY_FILE)
+
+# An open incident is authoritative across controlled restarts.  Reconcile it
+# before any dev profile/account/trading bootstrap writes can run.  Any
+# unreadable or ambiguous incident state aborts startup instead of falling back
+# to the launcher-selected mode.
+incident_startup = server.server_mode_service.reconcile_open_incident_on_startup(
+    actor={"id": 0, "username": "system-startup", "role": "system"}
+)
+if not incident_startup.get("ok"):
+    raise SystemExit(
+        "persisted incident startup reconciliation failed: "
+        + json.dumps(incident_startup, ensure_ascii=True, sort_keys=True)
+    )
+incident_lockdown_preserved = bool(incident_startup.get("active"))
+incident_state_path = Path(os.environ["HACKME_RUNTIME_DIR"]) / ".startup_incident_state"
+incident_state_tmp = incident_state_path.with_name(
+    f"{incident_state_path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
+)
+incident_state_tmp.write_text(
+    "incident_lockdown\n" if incident_lockdown_preserved else "normal\n",
+    encoding="utf-8",
+)
+try:
+    incident_state_tmp.chmod(0o600)
+except Exception:
+    pass
+os.replace(incident_state_tmp, incident_state_path)
+if incident_lockdown_preserved:
+    print(
+        "[dev-tmp] persisted incident preserved across restart: "
+        f"incident_id={incident_startup.get('incident_id')} "
+        f"reconciled={bool(incident_startup.get('reconciled'))}"
+    )
 
 feature_keys = [
     key
@@ -5765,7 +5839,8 @@ if cloud_drive_capacity_limit:
         cloud_drive_capacity_limit
     )
 feature_updates.update(cloud_drive_setting_updates)
-server.save_settings(feature_updates)
+if not incident_lockdown_preserved:
+    server.save_settings(feature_updates)
 
 
 def parse_extra_accounts(raw_value):
@@ -5908,36 +5983,42 @@ try:
                     json.dumps({"source": "test_for_develop.sh", "security_enabled": security_enabled}, ensure_ascii=True, sort_keys=True),
                 ),
             )
-    try:
-        apply_selected_server_mode(conn)
-        control_conn = server.get_control_db()
+    if not incident_lockdown_preserved:
         try:
-            apply_selected_server_mode(control_conn)
-            control_conn.commit()
-        finally:
-            control_conn.close()
-    except Exception:
-        pass
-    conn.execute("DELETE FROM ip_blocks")
-    conn.execute("DELETE FROM security_events")
-    conn.execute("DELETE FROM notifications WHERE type='root_security_alert'")
-    conn.execute("UPDATE sessions SET is_revoked=1, revoked_at=?", (now,))
-    conn.execute(
-        """
-        UPDATE users
-        SET must_change_password=?,
-            is_default_password=?,
-            failed_login_count=0,
-            locked_until=NULL,
-            blocked_until=NULL,
-            updated_at=?
-        WHERE username IN ('root', 'admin', 'test')
-        """,
-        (default_account_must_change, default_account_must_change, now),
-    )
-    for username, password, role in parse_extra_accounts(os.environ.get("HACKME_DEV_EXTRA_ACCOUNTS", "")):
+            apply_selected_server_mode(conn)
+            control_conn = server.get_control_db()
+            try:
+                apply_selected_server_mode(control_conn)
+                control_conn.commit()
+            finally:
+                control_conn.close()
+        except Exception:
+            pass
+        conn.execute("DELETE FROM ip_blocks")
+        conn.execute("DELETE FROM security_events")
+        conn.execute("DELETE FROM notifications WHERE type='root_security_alert'")
+        conn.execute("UPDATE sessions SET is_revoked=1, revoked_at=?", (now,))
+        conn.execute(
+            """
+            UPDATE users
+            SET must_change_password=?,
+                is_default_password=?,
+                failed_login_count=0,
+                locked_until=NULL,
+                blocked_until=NULL,
+                updated_at=?
+            WHERE username IN ('root', 'admin', 'test')
+            """,
+            (default_account_must_change, default_account_must_change, now),
+        )
+    for username, password, role in (
+        parse_extra_accounts(os.environ.get("HACKME_DEV_EXTRA_ACCOUNTS", ""))
+        if not incident_lockdown_preserved
+        else []
+    ):
         ensure_extra_account(conn, username, password, role, now)
-    conn.execute(
+    if not incident_lockdown_preserved:
+        conn.execute(
         """
         UPDATE trading_markets_registry
         SET enabled=1,
@@ -5949,9 +6030,9 @@ try:
             reference_price_enabled=1,
             updated_at=?
         """,
-        (now,),
-    )
-    conn.execute(
+            (now,),
+        )
+        conn.execute(
         """
         UPDATE trading_markets
         SET enabled=1,
@@ -5962,9 +6043,9 @@ try:
             reference_price_enabled=1,
             updated_at=?
         """,
-        (now,),
-    )
-    for key, value in (
+            (now,),
+        )
+    trading_setting_updates = (
         ("trading.enabled", "true"),
         ("trading.borrowing_enabled", "true"),
         ("trading.margin_liquidation_enabled", "true"),
@@ -6008,34 +6089,38 @@ try:
         # block further down.
         ("trading.btc_trade_enabled", "true"),
         ("trading.btc_trade_project_dir", "/tmp/BTC_trade"),
-    ):
-        conn.execute(
-            "INSERT OR REPLACE INTO trading_settings (key, value, updated_at, updated_by) VALUES (?, ?, ?, ?)",
-            (key, value, now, "test_for_develop"),
-        )
+    )
+    if not incident_lockdown_preserved:
+        for key, value in trading_setting_updates:
+            conn.execute(
+                "INSERT OR REPLACE INTO trading_settings (key, value, updated_at, updated_by) VALUES (?, ?, ?, ?)",
+                (key, value, now, "test_for_develop"),
+            )
     conn.commit()
 finally:
     conn.close()
 
-try:
-    comfyui_seed = seed_default_comfyui_workflows(runtime_root=Path(os.environ["HACKME_RUNTIME_DIR"]))
-    print(
-        "[dev-tmp] workflows seeded: "
-        f"source={comfyui_seed.get('source_count', 0)} "
-        f"runtime={comfyui_seed.get('runtime_count', 0)} "
-        f"copied={len(comfyui_seed.get('copied') or [])} "
-        f"destination={comfyui_seed.get('destination')}"
+if not incident_lockdown_preserved:
+    try:
+        comfyui_seed = seed_default_comfyui_workflows(runtime_root=Path(os.environ["HACKME_RUNTIME_DIR"]))
+        print(
+            "[dev-tmp] workflows seeded: "
+            f"source={comfyui_seed.get('source_count', 0)} "
+            f"runtime={comfyui_seed.get('runtime_count', 0)} "
+            f"copied={len(comfyui_seed.get('copied') or [])} "
+            f"destination={comfyui_seed.get('destination')}"
+        )
+    except Exception as exc:
+        print(f"[dev-tmp] warning: official ComfyUI workflow seed failed: {exc}")
+    points_bootstrap = bootstrap_points_initial_grants_if_due(
+        points_service=server.points_service,
+        get_system_settings=server.get_system_settings,
+        get_runtime_server_mode=server.get_runtime_server_mode,
+        audit=server.audit,
+        env_value="1" if selected_server_mode in {"production", "dev_ready", "test"} else "",
     )
-except Exception as exc:
-    print(f"[dev-tmp] warning: official ComfyUI workflow seed failed: {exc}")
-
-points_bootstrap = bootstrap_points_initial_grants_if_due(
-    points_service=server.points_service,
-    get_system_settings=server.get_system_settings,
-    get_runtime_server_mode=server.get_runtime_server_mode,
-    audit=server.audit,
-    env_value="1" if selected_server_mode in {"production", "dev_ready", "test"} else "",
-)
+else:
+    points_bootstrap = {"ok": True, "skipped": True, "reason": "incident_lockdown_preserved"}
 if not points_bootstrap.get("ok"):
     print(f"[dev-tmp] warning: default account point grants failed: {points_bootstrap.get('error')}")
 elif not points_bootstrap.get("skipped"):
@@ -6050,7 +6135,11 @@ dev_tokens_payload = {
     "tokens": {},
     "warnings": [],
 }
-if selected_server_mode in {"test", "internal_test"} and dev_tokens_path:
+if (
+    not incident_lockdown_preserved
+    and selected_server_mode in {"test", "internal_test"}
+    and dev_tokens_path
+):
     ttl_minutes = dev_token_ttl_minutes()
     token_features = normalize_token_feature_scope(os.environ.get("HACKME_DEV_TOKEN_FEATURES", ""))
     effective_feature_values = dict(server.DEFAULT_SETTINGS)
@@ -6145,6 +6234,87 @@ if [[ "$BOOTSTRAP_STATUS" != "0" ]]; then
   die "dev runtime bootstrap failed with status $BOOTSTRAP_STATUS"
 fi
 
+POST_BOOTSTRAP_READY_FILE="${HACKME_DEV_POST_BOOTSTRAP_READY_FILE:-}"
+POST_BOOTSTRAP_RELEASE_FILE="${HACKME_DEV_POST_BOOTSTRAP_RELEASE_FILE:-}"
+POST_BOOTSTRAP_NONCE="${HACKME_DEV_POST_BOOTSTRAP_NONCE:-}"
+POST_BOOTSTRAP_TIMEOUT_SECONDS="${HACKME_DEV_POST_BOOTSTRAP_TIMEOUT_SECONDS:-180}"
+if [[ -n "$POST_BOOTSTRAP_READY_FILE" || -n "$POST_BOOTSTRAP_RELEASE_FILE" || -n "$POST_BOOTSTRAP_NONCE" ]]; then
+  [[ -n "$POST_BOOTSTRAP_READY_FILE" && -n "$POST_BOOTSTRAP_RELEASE_FILE" && -n "$POST_BOOTSTRAP_NONCE" ]] \
+    || die "post-bootstrap safety gate configuration is incomplete"
+  [[ "$POST_BOOTSTRAP_NONCE" =~ ^[0-9a-f]{64}$ ]] \
+    || die "post-bootstrap safety gate nonce is invalid"
+  [[ "$POST_BOOTSTRAP_TIMEOUT_SECONDS" =~ ^[0-9]+$ && "$POST_BOOTSTRAP_TIMEOUT_SECONDS" -ge 1 && "$POST_BOOTSTRAP_TIMEOUT_SECONDS" -le 300 ]] \
+    || die "post-bootstrap safety gate timeout must be 1..300 seconds"
+  case "$POST_BOOTSTRAP_READY_FILE" in
+    "$RUN_ROOT"/control/post_bootstrap/*) ;;
+    *) die "post-bootstrap ready file escapes the controlled run root" ;;
+  esac
+  case "$POST_BOOTSTRAP_RELEASE_FILE" in
+    "$RUN_ROOT"/control/post_bootstrap/*) ;;
+    *) die "post-bootstrap release file escapes the controlled run root" ;;
+  esac
+  [[ ! -e "$POST_BOOTSTRAP_READY_FILE" && ! -L "$POST_BOOTSTRAP_READY_FILE" ]] \
+    || die "post-bootstrap ready file already exists"
+  [[ ! -e "$POST_BOOTSTRAP_RELEASE_FILE" && ! -L "$POST_BOOTSTRAP_RELEASE_FILE" ]] \
+    || die "post-bootstrap release file already exists"
+  post_bootstrap_ready_tmp="${POST_BOOTSTRAP_READY_FILE}.$$.tmp"
+  ( set -o noclobber; umask 077; printf '%s\n' "$POST_BOOTSTRAP_NONCE" > "$post_bootstrap_ready_tmp" ) \
+    || die "cannot create post-bootstrap ready evidence"
+  chmod 600 "$post_bootstrap_ready_tmp"
+  mv -n "$post_bootstrap_ready_tmp" "$POST_BOOTSTRAP_READY_FILE"
+  rm -f "$post_bootstrap_ready_tmp"
+  [[ -f "$POST_BOOTSTRAP_READY_FILE" && ! -L "$POST_BOOTSTRAP_READY_FILE" ]] \
+    || die "post-bootstrap ready evidence was not committed"
+  post_bootstrap_ready_nonce=""
+  IFS= read -r post_bootstrap_ready_nonce < "$POST_BOOTSTRAP_READY_FILE" || true
+  [[ "$post_bootstrap_ready_nonce" == "$POST_BOOTSTRAP_NONCE" ]] \
+    || die "post-bootstrap ready evidence nonce mismatch"
+  post_bootstrap_deadline=$((SECONDS + POST_BOOTSTRAP_TIMEOUT_SECONDS))
+  while true; do
+    if [[ -f "$POST_BOOTSTRAP_RELEASE_FILE" && ! -L "$POST_BOOTSTRAP_RELEASE_FILE" ]]; then
+      post_bootstrap_release_nonce=""
+      IFS= read -r post_bootstrap_release_nonce < "$POST_BOOTSTRAP_RELEASE_FILE" || true
+      [[ "$post_bootstrap_release_nonce" == "$POST_BOOTSTRAP_NONCE" ]] \
+        || die "post-bootstrap safety gate nonce mismatch"
+      break
+    fi
+    (( SECONDS < post_bootstrap_deadline )) \
+      || die "post-bootstrap safety gate timed out before server launch"
+    sleep 0.1
+  done
+fi
+
+INCIDENT_LOCKDOWN_PRESERVED=0
+STARTUP_INCIDENT_STATE_FILE="$RUNTIME_ROOT/.startup_incident_state"
+STARTUP_INCIDENT_STATE=""
+if [[ ! -r "$STARTUP_INCIDENT_STATE_FILE" ]]; then
+  die "startup incident state marker is missing or unreadable"
+fi
+IFS= read -r STARTUP_INCIDENT_STATE < "$STARTUP_INCIDENT_STATE_FILE" || true
+case "$STARTUP_INCIDENT_STATE" in
+  normal)
+    ;;
+  incident_lockdown)
+    INCIDENT_LOCKDOWN_PRESERVED=1
+    export HACKME_DEV_SERVER_MODE="incident_lockdown"
+    export HACKME_DEV_BTC_TRADE_AUTOSTART=0
+    export HACKME_DEV_BACKTEST_PROBE_ON_STARTUP=0
+    export HTML_LEARNING_TRADING_BACKTEST_PROBE_ON_STARTUP=0
+    export HACKME_DEV_TRADING_BACKGROUND_DEV_READY=0
+    say "[dev-tmp] incident lockdown preserved: all autostart jobs and Cloudflare exposure disabled"
+    ;;
+  *)
+    die "invalid startup incident state marker: ${STARTUP_INCIDENT_STATE:-<empty>}"
+    ;;
+esac
+
+if [[ "$INCIDENT_LOCKDOWN_PRESERVED" != "1" ]]; then
+  migrate_legacy_runtime_storage_to_cloud_drive_root
+  run_transmission_backend_setup_if_requested
+else
+  say "[dev-tmp] incident lockdown preserved: storage migration and Transmission setup skipped"
+fi
+
 if [[ "$FOREGROUND" == "1" ]]; then
   if [[ "$RUNTIME_IN_SOURCE" == "1" ]]; then
     say "[dev-tmp] source:    $COPY_ROOT (source runtime deployment)"
@@ -6165,9 +6335,15 @@ if [[ "$FOREGROUND" == "1" ]]; then
   if [[ "$SERVER_RUNNER" == "flask" ]]; then
     say "[dev-tmp] warning:   Flask/Werkzeug direct server is debug-only; use gunicorn for uploads/HLS/load."
   fi
-  say "[dev-tmp] bootstrap accounts: root, admin, test (passwords are not printed)"
+  if [[ "$INCIDENT_LOCKDOWN_PRESERVED" == "1" ]]; then
+    say "[dev-tmp] accounts:  preserved unchanged for incident recovery"
+  else
+    say "[dev-tmp] bootstrap accounts: root, admin, test (passwords are not printed)"
+  fi
   print_transmission_access_summary
-  print_generated_dev_tokens
+  if [[ "$INCIDENT_LOCKDOWN_PRESERVED" != "1" ]]; then
+    print_generated_dev_tokens
+  fi
   write_restart_shortcut_script
   if [[ "$SERVER_RUNNER" == "gunicorn" ]]; then
     exec "$PYTHON_BIN" -m gunicorn "server:app" \
@@ -6247,7 +6423,11 @@ elif [[ -n "$TRUSTED_HOSTS" ]]; then
   say "[dev-tmp] trusted:   $TRUSTED_HOSTS"
 fi
 say "[dev-tmp] url:       $SERVER_URL"
-start_cloudflare_quick_tunnel_if_requested
+if [[ "$INCIDENT_LOCKDOWN_PRESERVED" != "1" ]]; then
+  start_cloudflare_quick_tunnel_if_requested
+else
+  say "[dev-tmp] cloudflare: disabled while persisted incident is open"
+fi
 if [[ -n "$PUBLIC_HOST" ]]; then
   case "$PUBLIC_HOST" in
     \[*\]|*:*:*)
@@ -6261,7 +6441,11 @@ if [[ -n "$PUBLIC_HOST" ]]; then
       ;;
   esac
 fi
-say "[dev-tmp] bootstrap accounts: root, admin, test (passwords are not printed)"
+if [[ "$INCIDENT_LOCKDOWN_PRESERVED" == "1" ]]; then
+  say "[dev-tmp] accounts:  preserved unchanged for incident recovery"
+else
+  say "[dev-tmp] bootstrap accounts: root, admin, test (passwords are not printed)"
+fi
 print_transmission_access_summary
 if [[ "$FOREGROUND" == "1" ]]; then
   say "[dev-tmp] log:       foreground mode uses stdout/stderr"
@@ -6272,7 +6456,9 @@ elif [[ "$SERVER_RUNNER" == "gunicorn" ]]; then
 else
   say "[dev-tmp] log:       $LOG_CAPTURE"
 fi
-print_generated_dev_tokens
+if [[ "$INCIDENT_LOCKDOWN_PRESERVED" != "1" ]]; then
+  print_generated_dev_tokens
+fi
 if [[ -n "$SERVER_URL" ]]; then
   write_restart_shortcut_script
 else
@@ -6287,7 +6473,7 @@ fi
 #   - re-run when /tmp/BTC_trade already has the required scripts: skips
 #     clone/install and goes straight to update_data → retrain → predict.
 # This is intentionally fire-and-forget so test_for_develop.sh exits fast.
-if [[ -n "$SERVER_URL" && "$BTC_TRADE_AUTOSTART" == "1" ]]; then
+if [[ "$INCIDENT_LOCKDOWN_PRESERVED" != "1" && -n "$SERVER_URL" && "$BTC_TRADE_AUTOSTART" == "1" ]]; then
   BTC_LOG="$RUNTIME_ROOT/logs/btc_trade_autostart.log"
   (
     set +e

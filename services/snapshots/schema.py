@@ -20,7 +20,17 @@ from services.server.runtime import default_runtime_root_path
 SNAPSHOT_ID_RE = re.compile(r"^snap_\d{8}_\d{6}_[a-f0-9]{6}$")
 SHA256_REPORT_HASH_RE = re.compile(r"^sha256:[a-f0-9]{64}$")
 SERVER_BOOT_ID = os.environ.get("SERVER_BOOT_ID") or secrets.token_hex(16)
-SNAPSHOT_TYPES = {"manual", "before_superweak", "mode_checkpoint", "scheduled", "pre_restore", "pre_reset", "pre_migration", "emergency"}
+SNAPSHOT_TYPES = {
+    "manual",
+    "before_superweak",
+    "before_incident_lockdown",
+    "mode_checkpoint",
+    "scheduled",
+    "pre_restore",
+    "pre_reset",
+    "pre_migration",
+    "emergency",
+}
 RESTORE_MODES = {"full", "db_only", "files_only", "config_only", "dry_run"}
 SERVER_MODES = {"production", "preprod", "dev_ready", "internal_test", "test", "superweak", "maintenance", "incident_lockdown"}
 MODE_CONFIRM_PHRASES = {
@@ -1237,10 +1247,35 @@ def ensure_snapshot_schema(conn):
             resolved_by         INTEGER,
             resolved_at         TEXT,
             resolution_notes    TEXT,
-            verification_json   TEXT NOT NULL DEFAULT '{}'
+            verification_json   TEXT NOT NULL DEFAULT '{}',
+            previous_mode       TEXT,
+            previous_mode_json  TEXT NOT NULL DEFAULT '{}',
+            previous_settings_json TEXT NOT NULL DEFAULT '{}',
+            previous_settings_hash TEXT NOT NULL DEFAULT '',
+            checkpoint_id       TEXT,
+            snapshot_id         TEXT,
+            entry_state         TEXT NOT NULL DEFAULT 'active',
+            entry_error         TEXT NOT NULL DEFAULT '',
+            restore_result_json TEXT NOT NULL DEFAULT '{}',
+            resolution_verification_json TEXT NOT NULL DEFAULT '{}'
         )
         """
     )
+    incident_report_cols = {row["name"] for row in conn.execute("PRAGMA table_info(incident_reports)").fetchall()}
+    for col, ddl in (
+        ("previous_mode", "ALTER TABLE incident_reports ADD COLUMN previous_mode TEXT"),
+        ("previous_mode_json", "ALTER TABLE incident_reports ADD COLUMN previous_mode_json TEXT NOT NULL DEFAULT '{}'"),
+        ("previous_settings_json", "ALTER TABLE incident_reports ADD COLUMN previous_settings_json TEXT NOT NULL DEFAULT '{}'"),
+        ("previous_settings_hash", "ALTER TABLE incident_reports ADD COLUMN previous_settings_hash TEXT NOT NULL DEFAULT ''"),
+        ("checkpoint_id", "ALTER TABLE incident_reports ADD COLUMN checkpoint_id TEXT"),
+        ("snapshot_id", "ALTER TABLE incident_reports ADD COLUMN snapshot_id TEXT"),
+        ("entry_state", "ALTER TABLE incident_reports ADD COLUMN entry_state TEXT NOT NULL DEFAULT 'active'"),
+        ("entry_error", "ALTER TABLE incident_reports ADD COLUMN entry_error TEXT NOT NULL DEFAULT ''"),
+        ("restore_result_json", "ALTER TABLE incident_reports ADD COLUMN restore_result_json TEXT NOT NULL DEFAULT '{}'"),
+        ("resolution_verification_json", "ALTER TABLE incident_reports ADD COLUMN resolution_verification_json TEXT NOT NULL DEFAULT '{}'"),
+    ):
+        if col not in incident_report_cols:
+            conn.execute(ddl)
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS security_profiles (
@@ -1501,10 +1536,35 @@ def ensure_control_db_schema(conn):
             resolved_by       INTEGER,
             resolved_at       TEXT,
             resolution_notes  TEXT,
-            verification_json TEXT NOT NULL DEFAULT '{}'
+            verification_json TEXT NOT NULL DEFAULT '{}',
+            previous_mode     TEXT,
+            previous_mode_json TEXT NOT NULL DEFAULT '{}',
+            previous_settings_json TEXT NOT NULL DEFAULT '{}',
+            previous_settings_hash TEXT NOT NULL DEFAULT '',
+            checkpoint_id     TEXT,
+            snapshot_id       TEXT,
+            entry_state       TEXT NOT NULL DEFAULT 'active',
+            entry_error       TEXT NOT NULL DEFAULT '',
+            restore_result_json TEXT NOT NULL DEFAULT '{}',
+            resolution_verification_json TEXT NOT NULL DEFAULT '{}'
         )
         """
     )
+    incident_report_cols = {row["name"] for row in conn.execute("PRAGMA table_info(incident_reports)").fetchall()}
+    for col, ddl in (
+        ("previous_mode", "ALTER TABLE incident_reports ADD COLUMN previous_mode TEXT"),
+        ("previous_mode_json", "ALTER TABLE incident_reports ADD COLUMN previous_mode_json TEXT NOT NULL DEFAULT '{}'"),
+        ("previous_settings_json", "ALTER TABLE incident_reports ADD COLUMN previous_settings_json TEXT NOT NULL DEFAULT '{}'"),
+        ("previous_settings_hash", "ALTER TABLE incident_reports ADD COLUMN previous_settings_hash TEXT NOT NULL DEFAULT ''"),
+        ("checkpoint_id", "ALTER TABLE incident_reports ADD COLUMN checkpoint_id TEXT"),
+        ("snapshot_id", "ALTER TABLE incident_reports ADD COLUMN snapshot_id TEXT"),
+        ("entry_state", "ALTER TABLE incident_reports ADD COLUMN entry_state TEXT NOT NULL DEFAULT 'active'"),
+        ("entry_error", "ALTER TABLE incident_reports ADD COLUMN entry_error TEXT NOT NULL DEFAULT ''"),
+        ("restore_result_json", "ALTER TABLE incident_reports ADD COLUMN restore_result_json TEXT NOT NULL DEFAULT '{}'"),
+        ("resolution_verification_json", "ALTER TABLE incident_reports ADD COLUMN resolution_verification_json TEXT NOT NULL DEFAULT '{}'"),
+    ):
+        if col not in incident_report_cols:
+            conn.execute(ddl)
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS security_profiles (

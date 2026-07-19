@@ -2562,10 +2562,46 @@ function aiAgentUserTextIsNonExecutingContext(userText = "") {
   return /\b(?:hypothetical|for documentation|for example|example only|translate this|explain how|show me how)\b/i.test(raw);
 }
 
+function aiAgentUserTextHasAffirmativeWriteAfterNegation(userText = "") {
+  const raw = String(userText || "").trim().toLowerCase();
+  if (!raw) return false;
+  const writeAction = "(?:執行|送出|建立|新增|修改|更新|切換|上線|啟動|停止|重啟|下單|掛單|轉帳|匯款|下載|刪除|移除|發布|發佈|審核|獎勵|懲處|回測|生圖|產圖)";
+  return new RegExp(
+    `(?:不要|不需|不用|無需|不得|禁止|勿)[\\s\\S]{0,96}?(?:但(?:是)?|而是|只(?:要|需|需要)?|僅(?:要|需|需要)?|仍(?:然)?|改為|改成|[，,；;])[，,\\s]*(?:請|幫我|麻煩)?[，,\\s]*(?:立即|直接|正式)?[，,\\s]*${writeAction}`,
+    "i",
+  ).test(raw);
+}
+
 function aiAgentUserTextNegatesWrite(userText = "") {
   const raw = String(userText || "").toLowerCase();
-  return aiAgentUserTextIsNonExecutingContext(raw)
-    || /不要(?:執行|真的|下載|轉|下單|建立|送出|發布|刪除)|不是要你真的|只是(?:問|詢問|判斷|說明|測試)|只要(?:判斷|說明)|不要管規則|忽略安全|繞過\s*audit/i.test(raw);
+  if (aiAgentUserTextIsNonExecutingContext(raw)) return true;
+  // Safety-boundary bypasses and explicitly hypothetical requests remain
+  // non-executing even if a later clause contains an imperative verb.
+  if (/不是要你真的|只是(?:問|詢問|判斷|說明|測試)|只要(?:判斷|說明)|不要管規則|忽略安全|繞過\s*audit/i.test(raw)) {
+    return true;
+  }
+  const negatedWrite = /不要(?:執行|真的|下載|轉|下單|建立|送出|發布|刪除)/i.test(raw);
+  return negatedWrite && !aiAgentUserTextHasAffirmativeWriteAfterNegation(raw);
+}
+
+function aiAgentUserTextExplicitlyRequestsReadonly(userText = "") {
+  const raw = String(userText || "").trim().toLowerCase();
+  if (!raw) return false;
+  const readonlyIntent = /唯讀|只讀|read[ -]?only|僅(?:查詢|查看|讀取|檢視)|只(?:要|需|需要)?(?:查詢|查看|讀取|檢視|確認|判斷)|(?:請|幫我|麻煩)?(?:實際)?查詢|不要(?:執行|修改|寫入|切換)/i;
+  if (!readonlyIntent.test(raw)) return false;
+  const writeAction = "(?:執行|送出|建立|新增|修改|更新|切換|上線|啟動|停止|重啟|下單|掛單|轉帳|匯款|下載|刪除|移除|發布|發佈|審核|獎勵|懲處|回測|生圖|產圖)";
+  // A compound request is not readonly merely because its first phase asks
+  // for a query.  Permit a real planner/tool decision when the sentence later
+  // contains an affirmative write phase, including an object between the
+  // query verb and "後" (for example "查詢伺服器狀態後，再重啟").
+  const queryThenWrite = new RegExp(
+    `(?:查詢|查看|讀取|檢視|確認|判斷)[\\s\\S]{0,96}?(?:(?:完成|確認)?(?:之)?後|然後|接著|再|並且|並)[，,\\s]*(?:請|幫我|麻煩)?[，,\\s]*(?:立即|直接|正式)?[，,\\s]*${writeAction}`,
+    "i",
+  );
+  // A negated mutation may be followed by a different, explicitly requested
+  // operation ("不要切換模式，只執行 dry-run").  Treat only the
+  // negated clause as blocked instead of swallowing the later write request.
+  return !(queryThenWrite.test(raw) || aiAgentUserTextHasAffirmativeWriteAfterNegation(raw));
 }
 
 function aiAgentUserTextExplicitlyRequestsWrite(userText = "") {
@@ -2837,6 +2873,25 @@ function aiAgentDeterministicToolName(userText = "", context = {}) {
 
 function aiAgentDeterministicToolPlan(userText = "", context = {}, error = null) {
   const raw = String(userText || "");
+  if (aiAgentUserTextExplicitlyRequestsReadonly(raw)) {
+    const serverScope = /伺服器|server|上線|launch|production|安全|security|audit/i.test(raw);
+    return {
+      action: "readonly",
+      confidence: 0.96,
+      reason: "Local verifier preserved the user's explicit read-only request and blocked write-tool promotion.",
+      question: null,
+      readonly_scope: serverScope ? "server_mode" : "all",
+      merge_strategy: null,
+      execute_write: false,
+      tool: "",
+      args: {},
+      // This is a guard rather than a pre-provider fast-path gate: the real
+      // provider still interprets the request, then aiAgentRepairToolPlan
+      // forces the terminal decision back to this readonly plan.
+      planner_strategy: "local_readonly_guard",
+      fallback_error: String(error?.message || error || ""),
+    };
+  }
   if (aiAgentUserTextNegatesWrite(raw)) {
     return {
       action: "chat",
@@ -2979,7 +3034,7 @@ function aiAgentEnforceLaunchPlanConfirmation(plan = {}, userText = "") {
 function aiAgentRepairToolPlan(plan = {}, userText = "", context = {}) {
   if (!plan || typeof plan !== "object") return plan;
   const localPlan = aiAgentDeterministicToolPlan(userText, context, null);
-  if (localPlan && ["local_safety_gate", "local_boundary_gate", "local_clarify_gate"].includes(localPlan.planner_strategy)) {
+  if (localPlan && ["local_readonly_guard", "local_safety_gate", "local_boundary_gate", "local_clarify_gate"].includes(localPlan.planner_strategy)) {
     return { ...localPlan, repaired_from_action: plan.action || "", repaired_from_tool: plan.tool || "" };
   }
   if (!localPlan || localPlan.action !== "write_tool") {
@@ -6700,6 +6755,12 @@ async function runAiAgentAuditScan() {
 }
 
 async function loadAiAgentStatus(options = {}) {
+  // The initial /api/me response can finish before this module registers its
+  // account-context listener on a slow page.  Reconcile at the public status
+  // entrypoint as well, so a missed early event cannot leave conversation or
+  // tool state bound to the anonymous account.
+  const currentScope = aiAgentCurrentAccountScope();
+  if (AI_AGENT_STATE.accountScope !== currentScope) aiAgentResetScopeState();
   if (AI_AGENT_STATE.loading) return;
   if (AI_AGENT_STATE.loaded && !options.force) return;
   const operation = aiAgentOperationContext();

@@ -529,7 +529,9 @@ class _Scanner:
         if is_zip:
             if not self._zip_preflight(descriptor, size, path):
                 return
-            raw = os.fdopen(os.dup(descriptor), "rb", closefd=True)
+            archive_descriptor = os.dup(descriptor)
+            os.lseek(archive_descriptor, 0, os.SEEK_SET)
+            raw = os.fdopen(archive_descriptor, "rb", closefd=True)
             try:
                 with raw, zipfile.ZipFile(raw) as archive:
                     infos = archive.infolist()
@@ -567,7 +569,9 @@ class _Scanner:
                 self._error("archive_scan_failed", path, error=_safe_error(exc))
                 return
         else:
-            raw = os.fdopen(os.dup(descriptor), "rb", closefd=True)
+            archive_descriptor = os.dup(descriptor)
+            os.lseek(archive_descriptor, 0, os.SEEK_SET)
+            raw = os.fdopen(archive_descriptor, "rb", closefd=True)
             try:
                 with raw, tarfile.open(fileobj=raw, mode="r|*") as archive:
                     for member in archive:
@@ -1228,6 +1232,8 @@ def scan_campaign_secret_files(
 
 
 CONTROL_SNAPSHOT_SCHEMA_VERSION = "hackme.campaign-control-snapshot.v1"
+CONTROL_SNAPSHOT_DURABILITY_PER_FILE = "per_file_fsync"
+CONTROL_SNAPSHOT_DURABILITY_MANIFEST = "manifest_fsync"
 
 
 @dataclass(frozen=True)
@@ -1247,6 +1253,7 @@ class ControlSnapshotConfig:
     max_rounds: int = 12
     max_seconds: float = 300.0
     minimum_free_reserve_bytes: int = DEFAULT_MINIMUM_FREE_RESERVE_BYTES
+    durability_mode: str = CONTROL_SNAPSHOT_DURABILITY_PER_FILE
 
 
 class _ControlSnapshotDeadline(TimeoutError):
@@ -1268,6 +1275,11 @@ class _ControlSnapshot:
         progress_callback: Callable[[str], None] | None,
     ) -> None:
         self.config = config
+        if config.durability_mode not in {
+            CONTROL_SNAPSHOT_DURABILITY_PER_FILE,
+            CONTROL_SNAPSHOT_DURABILITY_MANIFEST,
+        }:
+            raise ValueError("unsupported control snapshot durability mode")
         self.source_root = Path(config.source_root).absolute()
         self.snapshot_root = Path(config.snapshot_root).absolute()
         self.progress_callback = progress_callback
@@ -1691,21 +1703,29 @@ class _ControlSnapshot:
                 or _identity(final_entry) != initial_identity
             ):
                 raise OSError("control evidence changed during snapshot")
-            os.fsync(destination_fd)
+            if (
+                self.config.durability_mode
+                == CONTROL_SNAPSHOT_DURABILITY_PER_FILE
+            ):
+                os.fsync(destination_fd)
             os.close(destination_fd)
             destination_fd = -1
             os.replace(temporary, destination)
-            destination_parent_fd = os.open(
-                destination.parent,
-                os.O_RDONLY
-                | getattr(os, "O_CLOEXEC", 0)
-                | getattr(os, "O_DIRECTORY", 0)
-                | getattr(os, "O_NOFOLLOW", 0),
-            )
-            try:
-                os.fsync(destination_parent_fd)
-            finally:
-                os.close(destination_parent_fd)
+            if (
+                self.config.durability_mode
+                == CONTROL_SNAPSHOT_DURABILITY_PER_FILE
+            ):
+                destination_parent_fd = os.open(
+                    destination.parent,
+                    os.O_RDONLY
+                    | getattr(os, "O_CLOEXEC", 0)
+                    | getattr(os, "O_DIRECTORY", 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
+                )
+                try:
+                    os.fsync(destination_parent_fd)
+                finally:
+                    os.close(destination_parent_fd)
             destination_info = destination.lstat()
             if (
                 not stat.S_ISREG(destination_info.st_mode)
@@ -2021,6 +2041,7 @@ class _ControlSnapshot:
             "io_bytes_read": self.io_bytes_read,
             "entries_observed": self.entries_observed,
             "progress_events": self.progress_events,
+            "durability_mode": self.config.durability_mode,
             "files_inventory": [self.records[name] for name in sorted(self.records)],
             "errors": errors,
             "error_count": len(errors),

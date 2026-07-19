@@ -6317,7 +6317,15 @@ def test_output_album_prunes_files_moved_out_of_output_folder(tmp_path):
         conn.close()
 
 
-def test_comfyui_discard_deletes_original_comfyui_file_in_local_mode(tmp_path):
+def test_comfyui_discard_deletes_original_comfyui_file_in_local_mode(tmp_path, monkeypatch):
+    class LocalDeletingClient(FakeComfyUIClient):
+        def discard_image(self, image_ref, *, prompt_id=None, **kwargs):
+            base = Path(kwargs["local_base_dir"])
+            target = base / image_ref.get("type", "output") / image_ref["filename"]
+            if target.exists():
+                target.unlink()
+            return super().discard_image(image_ref, prompt_id=prompt_id, **kwargs)
+
     FakeComfyUIClient.discarded = []
     db_path = tmp_path / "comfyui.db"
     storage_root = tmp_path / "storage"
@@ -6325,12 +6333,27 @@ def test_comfyui_discard_deletes_original_comfyui_file_in_local_mode(tmp_path):
     storage_root.mkdir()
     (comfy_base / "output").mkdir(parents=True)
     _init_db(db_path)
+    monkeypatch.setattr(
+        "services.comfyui.template.cleanup.local_backend_binding_proof",
+        lambda *_args, **_kwargs: {
+            "binding_verified": True,
+            "listener_pid": 123,
+            "listener_inode": "456",
+            "listener_cwd": str(comfy_base.resolve()),
+            "detail": "test_exact_binding",
+        },
+    )
     client = _build_app(
         db_path,
         storage_root,
-        settings={"comfyui_connection_mode": "local", "comfyui_base_dir": str(comfy_base)},
+        # The product may call this remote-mode, but exact listener/cwd proof
+        # safely authorizes local deletion for a loopback backend.
+        settings={"comfyui_connection_mode": "remote", "comfyui_base_dir": str(comfy_base)},
+        comfyui_client=LocalDeletingClient(),
     ).test_client()
     preview = _generate_preview(client)
+    output_file = comfy_base / "output" / preview["image_ref"]["filename"]
+    output_file.write_bytes(b"backend-output")
 
     discarded = client.post(
         "/api/comfyui/discard",
@@ -6344,6 +6367,9 @@ def test_comfyui_discard_deletes_original_comfyui_file_in_local_mode(tmp_path):
     body = discarded.get_json()
     assert body["discard"]["file_deleted"] is True
     assert body["discard"]["history_deleted"] is True
+    assert body["discard"]["absence_verified"] is True
+    assert body["discard"]["local_binding"]["binding_verified"] is True
+    assert not output_file.exists()
     assert FakeComfyUIClient.discarded == [{
         "image_ref": {"filename": "hackme_web_00001_.png", "subfolder": "", "type": "output"},
         "prompt_id": "prompt-1",
@@ -6352,12 +6378,16 @@ def test_comfyui_discard_deletes_original_comfyui_file_in_local_mode(tmp_path):
     }]
 
 
-def test_comfyui_discard_remote_mode_clears_preview_without_deleting_source(tmp_path):
+def test_comfyui_discard_remote_mode_clears_preview_without_deleting_source(tmp_path, monkeypatch):
     FakeComfyUIClient.discarded = []
     db_path = tmp_path / "comfyui.db"
     storage_root = tmp_path / "storage"
     storage_root.mkdir()
     _init_db(db_path)
+    monkeypatch.setattr(
+        "services.comfyui.template.cleanup.remote_ref_absent",
+        lambda _client, _ref: (False, "still_present"),
+    )
     client = _build_app(db_path, storage_root, settings={"comfyui_connection_mode": "remote"}).test_client()
     preview = _generate_preview(client)
 
@@ -6369,12 +6399,43 @@ def test_comfyui_discard_remote_mode_clears_preview_without_deleting_source(tmp_
         },
     )
 
-    assert discarded.status_code == 200
+    assert discarded.status_code == 409
     body = discarded.get_json()
-    assert body["ok"] is True
+    assert body["ok"] is False
     assert body["warning"] == "source_file_not_deleted"
-    assert body["discard"]["file_delete_supported"] is False
-    assert FakeComfyUIClient.discarded == []
+    assert body["discard"]["absence_verified"] is False
+    assert body["discard"]["local_binding"]["binding_verified"] is False
+    assert FakeComfyUIClient.discarded
+
+
+def test_comfyui_discard_remote_delete_requires_and_accepts_post_delete_404(tmp_path, monkeypatch):
+    FakeComfyUIClient.discarded = []
+    db_path = tmp_path / "comfyui.db"
+    storage_root = tmp_path / "storage"
+    storage_root.mkdir()
+    _init_db(db_path)
+    monkeypatch.setattr(
+        "services.comfyui.template.cleanup.remote_ref_absent",
+        lambda _client, _ref: (True, "http_404"),
+    )
+    client = _build_app(
+        db_path,
+        storage_root,
+        settings={"comfyui_connection_mode": "remote"},
+    ).test_client()
+    preview = _generate_preview(client)
+
+    discarded = client.post(
+        "/api/comfyui/discard",
+        json={"image_ref": preview["image_ref"], "prompt_id": preview["prompt_id"]},
+    )
+
+    assert discarded.status_code == 200
+    result = discarded.get_json()["discard"]
+    assert result["file_deleted"] is True
+    assert result["absence_verified"] is True
+    assert result["verification"] == "http_404"
+    assert result["local_binding"]["binding_verified"] is False
 
 
 def test_comfyui_discard_tolerates_plain_text_history_response(tmp_path, monkeypatch):
@@ -6412,7 +6473,7 @@ def test_comfyui_discard_tolerates_plain_text_history_response(tmp_path, monkeyp
     assert calls == ["http://fake-comfyui/history"]
 
 
-def test_comfyui_discard_without_file_delete_endpoint_clears_preview_with_warning(tmp_path):
+def test_comfyui_discard_without_file_delete_endpoint_clears_preview_with_warning(tmp_path, monkeypatch):
     class UnsupportedDeleteClient(FakeComfyUIClient):
         def discard_image(self, image_ref, *, prompt_id=None, **kwargs):
             return {
@@ -6426,12 +6487,16 @@ def test_comfyui_discard_without_file_delete_endpoint_clears_preview_with_warnin
     storage_root = tmp_path / "storage"
     storage_root.mkdir()
     _init_db(db_path)
+    monkeypatch.setattr(
+        "services.comfyui.template.cleanup.remote_ref_absent",
+        lambda _client, _ref: (False, "still_present"),
+    )
     comfy_base = tmp_path / "ComfyUI"
     (comfy_base / "output").mkdir(parents=True)
     client = _build_app(
         db_path,
         storage_root,
-        settings={"comfyui_connection_mode": "local", "comfyui_base_dir": str(comfy_base)},
+        settings={"comfyui_connection_mode": "remote", "comfyui_base_dir": str(comfy_base)},
         comfyui_client=UnsupportedDeleteClient(),
     ).test_client()
     preview = _generate_preview(client)
@@ -6444,12 +6509,12 @@ def test_comfyui_discard_without_file_delete_endpoint_clears_preview_with_warnin
         },
     )
 
-    assert discarded.status_code == 200
+    assert discarded.status_code == 409
     body = discarded.get_json()
-    assert body["ok"] is True
+    assert body["ok"] is False
     assert body["warning"] == "source_file_not_deleted"
     assert body["discard"]["history_deleted"] is True
-    assert "原始檔可能仍留在 ComfyUI output" in body["msg"]
+    assert body["discard"]["absence_verified"] is False
 
 
 def test_comfyui_interrupt_requests_backend_interrupt(tmp_path):

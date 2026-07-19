@@ -804,6 +804,17 @@ def main() -> int:
         root_page = root_ctx.new_page()
         root_login = login(root_page, base_url, "root", args.root_password)
         assert_api_ok(rec, "root login", root_login)
+        feature_snapshot_response = api(root_page, "GET", "/admin/features")
+        assert_api_ok(rec, "feature flag snapshot before trading probe", feature_snapshot_response)
+        feature_snapshot = {
+            key: bool((feature_snapshot_response.get("body") or {}).get("features", {}).get(key))
+            for key in (
+                "feature_economy_enabled",
+                "feature_trading_enabled",
+                "feature_reports_notifications_enabled",
+            )
+        }
+        scenario["feature_flags_before"] = feature_snapshot
         assert_api_ok(
             rec,
             "enable feature flags",
@@ -1039,10 +1050,12 @@ def main() -> int:
 
         for ctx in member_contexts:
             ctx.close()
+        scenario["member_contexts_closed_before_background"] = True
         rec.add("all setup member browser sessions closed before background trigger", True, "no active member Playwright browser context remains")
         if args.trigger_mode == "auto":
             root_ctx.close()
             root_page = None
+            scenario["root_context_closed_before_background"] = True
             rec.add("root browser session closed before automatic background trigger", True, "server worker must run without a logged-in browser session")
 
         # Stage 1: after member browsers close, server-side jobs must run.
@@ -1217,6 +1230,13 @@ def main() -> int:
         assert_api_ok(rec, "root background status API after no-login jobs", bg_status)
         bg_jobs = bg_status["body"].get("jobs") or []
         recent_runs = bg_status["body"].get("recent_runs") or []
+        scenario["background_terminal"] = {
+            "recent_job_keys": sorted({str(row.get("job_key") or "") for row in recent_runs if row.get("job_key")}),
+            "failure_counts": {
+                str(row.get("job_key") or ""): int(row.get("failure_count") or 0)
+                for row in bg_jobs if row.get("job_key")
+            },
+        }
         rec.require(
             "background job run log contains expected jobs",
             {"order_matching", "take_profit_stop_loss_scan", "bot_trigger_scan", "margin_liquidation_scan", "interest_accrual"}.issubset({row.get("job_key") for row in recent_runs}),
@@ -1239,6 +1259,13 @@ def main() -> int:
             ctx.close()
         no_5xx = all(int(row.get("status") or 0) < 500 for row in stress_results)
         success_count = sum(1 for row in stress_results if row.get("ok"))
+        scenario["concurrent_stress"] = {
+            "requested_per_user": max(1, int(args.stress_orders)),
+            "request_count": len(stress_results),
+            "success_count": success_count,
+            "statuses": sorted({int(row.get("status") or 0) for row in stress_results}),
+            "no_5xx": no_5xx,
+        }
         rec.require(
             "Playwright concurrent order stress has no 5xx and produces fills",
             no_5xx and success_count > 0,
@@ -1274,9 +1301,76 @@ def main() -> int:
                 "SELECT user_id, market_symbol, locked_quantity_units FROM trading_spot_positions WHERE locked_quantity_units < 0",
             )
         ]
+        scenario["domain_terminal"] = {
+            "limit_order_status": str(db_one(
+                db_path,
+                "SELECT status FROM trading_orders WHERE order_uuid=?",
+                (scenario["uuids"]["limit_order"],),
+            )["status"]),
+            "margin_liquidation_status": str(db_one(
+                db_path,
+                "SELECT status FROM trading_margin_positions WHERE position_uuid=?",
+                (scenario["uuids"]["margin_liq"],),
+            )["status"]),
+            "margin_take_profit_status": str(db_one(
+                db_path,
+                "SELECT status FROM trading_margin_positions WHERE position_uuid=?",
+                (scenario["uuids"]["margin_tp"],),
+            )["status"]),
+            "margin_interest_hours": int(db_one(
+                db_path,
+                "SELECT interest_accrued_hours FROM trading_margin_positions WHERE position_uuid=?",
+                (scenario["uuids"]["margin_interest"],),
+            )["interest_accrued_hours"] or 0),
+            "spot_stop_loss_quantity_units": int(db_one(
+                db_path,
+                "SELECT quantity_units FROM trading_spot_positions WHERE user_id=? AND market_symbol='ETH/POINTS'",
+                (user_ids["spot_sl"],),
+            )["quantity_units"] or 0),
+            "spot_take_profit_quantity_units": int(db_one(
+                db_path,
+                "SELECT quantity_units FROM trading_spot_positions WHERE user_id=? AND market_symbol='ETH/POINTS'",
+                (user_ids["spot_tp"],),
+            )["quantity_units"] or 0),
+            "workflow_bot_triggered_runs": int(db_one(
+                db_path,
+                "SELECT COUNT(*) AS c FROM trading_bot_runs r JOIN trading_bots b ON b.id=r.bot_id WHERE b.bot_uuid=? AND r.status='triggered' AND COALESCE(r.order_uuid, '')<>''",
+                (scenario["uuids"]["workflow_bot"],),
+            )["c"] or 0),
+            "dca_bot_triggered_runs": int(db_one(
+                db_path,
+                "SELECT COUNT(*) AS c FROM trading_bot_runs r JOIN trading_bots b ON b.id=r.bot_id WHERE b.bot_uuid=? AND r.status='triggered' AND COALESCE(r.order_uuid, '')<>''",
+                (scenario["uuids"]["dca_bot"],),
+            )["c"] or 0),
+            "grid_filled_orders": int(db_one(
+                db_path,
+                "SELECT COUNT(*) AS c FROM trading_grid_orders WHERE grid_bot_id=(SELECT id FROM trading_grid_bots WHERE bot_uuid=?) AND status='filled'",
+                (scenario["uuids"]["grid_bot"],),
+            )["c"] or 0),
+            "negative_wallet_rows": bad_wallets,
+            "negative_spot_lock_rows": bad_margin_locks,
+            "reserve_before": reserve_before,
+            "reserve_after": reserve_after,
+        }
         rec.require("wallet balances/frozen amounts remain non-negative", not bad_wallets, json.dumps(bad_wallets, ensure_ascii=False))
         rec.require("spot locked quantities remain non-negative", not bad_margin_locks, json.dumps(bad_margin_locks, ensure_ascii=False))
         rec.require("reserve pool remains non-negative and collects income", reserve_after >= 0 and reserve_after >= reserve_before, f"before={reserve_before} after={reserve_after}")
+
+        feature_restore = api(root_page2, "PUT", "/admin/features", feature_snapshot)
+        assert_api_ok(rec, "restore feature flags after trading probe", feature_restore)
+        feature_after_response = api(root_page2, "GET", "/admin/features")
+        assert_api_ok(rec, "feature flag readback after trading probe", feature_after_response)
+        feature_after = {
+            key: bool((feature_after_response.get("body") or {}).get("features", {}).get(key))
+            for key in feature_snapshot
+        }
+        scenario["feature_flags_after"] = feature_after
+        scenario["feature_flags_restored"] = feature_after == feature_snapshot
+        rec.require(
+            "trading probe feature flags restored exactly",
+            feature_after == feature_snapshot,
+            json.dumps({"before": feature_snapshot, "after": feature_after}, ensure_ascii=False),
+        )
         root_ctx2.close()
         browser.close()
     restore_probe_runtime_once()

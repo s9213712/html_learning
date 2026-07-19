@@ -106,7 +106,6 @@ MANAGER_ACTIONS = frozenset({
     "write_member_update_user",
     "write_member_set_avatar_from_cloud",
     "write_bug_report_review",
-    "write_appeal_review",
     "write_notification_send",
     "write_report_claim",
     "write_report_resolve",

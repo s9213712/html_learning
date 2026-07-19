@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import inspect
 import os
 import signal
+import stat
 import subprocess
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -16,6 +19,7 @@ from scripts.testing import operational_campaign_24h as campaign_module
 from scripts.testing.operational_campaign_24h import (
     MIN_FORMAL_SECONDS,
     EFFECTIVE_LOAD_EVIDENCE_SCHEMA_VERSION,
+    SUPERVISED_LEVEL_DURATIONS,
     SUPERVISED_RUNNER_PROFILES,
     SUPERVISED_LOAD_POLICIES,
     Campaign,
@@ -30,6 +34,8 @@ from scripts.testing.operational_campaign_24h import (
 )
 from scripts.testing.operation_coverage import CAMPAIGN_SCENARIO_CONTRACTS
 from scripts.testing.campaign_load import EffectiveLoadWindow
+from services.server.database import get_audit_db
+from services.system import audit as audit_service
 
 
 def launch_core_activation_child(
@@ -176,6 +182,157 @@ def test_formal_duration_is_24_hours() -> None:
     assert SUPERVISED_LOAD_POLICIES["rehearsal"]["minimum_post_ramp_seconds"] == 3_240.0
 
 
+def test_reliability_soak_is_full_day_low_concurrency_without_capacity_claim() -> None:
+    assert SUPERVISED_LEVEL_DURATIONS["soak"] == 86_400
+    assert SUPERVISED_RUNNER_PROFILES["soak"]["workers"] == 2
+    assert SUPERVISED_RUNNER_PROFILES["soak"]["threads"] == 2
+    assert SUPERVISED_RUNNER_PROFILES["soak"]["concurrency"] == 4
+    assert SUPERVISED_RUNNER_PROFILES["soak"]["resource_interval"] == 2.0
+    assert SUPERVISED_LOAD_POLICIES["soak"]["ramp_required"] is False
+    validation = validate_effective_load_evidence({}, campaign_level="soak")
+    assert validation == {"required": False, "ok": True, "errors": []}
+
+
+def test_smoke_auxiliary_servers_use_one_worker_without_weakening_soak() -> None:
+    assert campaign_module.managed_auxiliary_worker_count(
+        requested_workers=1,
+        supervised=True,
+        campaign_level="smoke",
+    ) == 1
+    assert campaign_module.managed_auxiliary_worker_count(
+        requested_workers=2,
+        supervised=True,
+        campaign_level="soak",
+    ) == 2
+    assert campaign_module.managed_auxiliary_worker_count(
+        requested_workers=2,
+        supervised=False,
+        campaign_level="smoke",
+    ) == 2
+    assert campaign_module.managed_strict_readiness(
+        supervised=True,
+        campaign_level="smoke",
+    ) is False
+    assert campaign_module.managed_strict_readiness(
+        supervised=True,
+        campaign_level="soak",
+    ) is True
+
+
+def test_launcher_post_bootstrap_gate_requires_safe_callback_before_release(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    campaign = Campaign(campaign_args(tmp_path))
+    controller = campaign.primary
+    controller.post_bootstrap_safety_callback = lambda: {
+        "ok": True,
+        "tripped": [],
+    }
+    controller.launch_count = 1
+    controller._prepare_post_bootstrap_gate()
+    assert controller.post_bootstrap_ready_file is not None
+    assert controller.post_bootstrap_release_file is not None
+    environment = controller._env()
+    assert environment["HACKME_DEV_POST_BOOTSTRAP_READY_FILE"] == str(
+        controller.post_bootstrap_ready_file
+    )
+    assert environment["HACKME_DEV_POST_BOOTSTRAP_RELEASE_FILE"] == str(
+        controller.post_bootstrap_release_file
+    )
+    assert environment["HACKME_DEV_POST_BOOTSTRAP_NONCE"] == (
+        controller.post_bootstrap_nonce
+    )
+    controller.post_bootstrap_ready_file.write_text(
+        controller.post_bootstrap_nonce + "\n",
+        encoding="ascii",
+    )
+    os.chmod(controller.post_bootstrap_ready_file, 0o600)
+
+    class Process:
+        pid = os.getpid()
+
+        def poll(self) -> int | None:
+            return 0 if controller.post_bootstrap_release_file.exists() else None
+
+        @staticmethod
+        def wait(timeout: float | None = None) -> int:
+            return -15
+
+    monkeypatch.setattr(
+        controller,
+        "_launcher_observation",
+        lambda _process, _log: ("post-bootstrap",),
+    )
+
+    released = controller._wait_launcher(
+        Process(),  # type: ignore[arg-type]
+        tmp_path / "launcher.log",
+        timeout=2.0,
+    )
+
+    assert released["returncode"] == 0
+    assert released["post_bootstrap"]["ok"] is True
+    assert released["host_safety_blocked"] is False
+    assert controller.post_bootstrap_release_file.read_text(encoding="ascii").strip() == (
+        controller.post_bootstrap_nonce
+    )
+
+    controller.post_bootstrap_safety_callback = lambda: {
+        "ok": False,
+        "tripped": ["HOST_IO_PRESSURE_HIGH"],
+    }
+    controller.launch_count = 2
+    controller._prepare_post_bootstrap_gate()
+    assert controller.post_bootstrap_ready_file is not None
+    controller.post_bootstrap_ready_file.write_text(
+        controller.post_bootstrap_nonce + "\n",
+        encoding="ascii",
+    )
+    os.chmod(controller.post_bootstrap_ready_file, 0o600)
+    monkeypatch.setattr(
+        campaign_module,
+        "terminate_process_group",
+        lambda *_args, **_kwargs: None,
+    )
+
+    blocked = controller._wait_launcher(
+        Process(),  # type: ignore[arg-type]
+        tmp_path / "launcher.log",
+        timeout=2.0,
+    )
+
+    assert blocked["host_safety_blocked"] is True
+    assert blocked["post_bootstrap"]["host_safety"]["tripped"] == [
+        "HOST_IO_PRESSURE_HIGH"
+    ]
+    assert controller.post_bootstrap_release_file is not None
+    assert not controller.post_bootstrap_release_file.exists()
+
+
+def test_run_group_fails_closed_without_starting_dependent_steps(tmp_path: Path) -> None:
+    campaign = Campaign(campaign_args(tmp_path))
+    calls: list[str] = []
+
+    def failed_producer() -> dict[str, object]:
+        calls.append("producer")
+        return {"ok": False, "error": "terminal_assertion_failed"}
+
+    def unsafe_consumer() -> dict[str, object]:
+        calls.append("consumer")
+        return {"ok": True}
+
+    result = campaign.run_group(
+        "ai_agent_positive_operations",
+        [failed_producer, unsafe_consumer],
+    )
+
+    assert result["ok"] is False
+    assert result["terminal_state"] == "failed"
+    assert calls == ["producer"]
+    assert len(result["steps"]) == 1
+
+
 def test_supervised_runtime_contract_rejects_duration_and_source_divergence(
     tmp_path: Path,
 ) -> None:
@@ -190,6 +347,8 @@ def test_supervised_runtime_contract_rejects_duration_and_source_divergence(
         str(Path.home() / "logs" / "hackme_web_campaign_24h" / "campaign-1" / "campaign.checkpoint.json"),
     )
     args.minimum_free_gb = 20.0
+    for name, value in SUPERVISED_RUNNER_PROFILES["smoke"].items():
+        setattr(args, name, value)
     campaign_root = Path(args.campaign_root).resolve()
     control_root = campaign_root.parent / ".campaign-control"
     args.control_root = str(control_root)
@@ -200,11 +359,34 @@ def test_supervised_runtime_contract_rejects_duration_and_source_divergence(
     args.source_freeze_path = str(control_root / "artifacts" / "source" / "H0" / "source_freeze.json")
     args.activation_gate = str(control_root / "checkpoint" / "campaign.activation.json")
     args.supervisor_contract = str(control_root / "checkpoint" / "supervisor.contract.json")
+    runner_auth_key = b"k" * 32
+    control_auth_hash = campaign_module.hashlib.sha256(runner_auth_key).hexdigest()
+    setattr(args, "_runner_auth_key", runner_auth_key)
+    args.supervisor_pid = 1234
+    args.supervisor_start_ticks = 5678
+    args.supervisor_boot_id = "boot-test"
+    args.supervisor_cgroup = "/supervisor.scope"
+    supervisor_identity = {
+        "pid": args.supervisor_pid,
+        "start_ticks": args.supervisor_start_ticks,
+        "boot_id": args.supervisor_boot_id,
+        "cgroup_path": args.supervisor_cgroup,
+    }
+    setattr(args, "_control_auth_evidence", {
+        "session_secret_sha256": control_auth_hash,
+        "server_identity_verified": True,
+        "server_process": supervisor_identity,
+    })
     contract = {
         "level": "smoke",
         "duration_seconds": 180,
         "campaign_root": str(campaign_root),
         "control_root": str(control_root),
+        "watchdog_liveness_path": str(control_root / "checkpoint" / "watchdog.liveness.json"),
+        "runner_auth_key_sha256": control_auth_hash,
+        "watchdog_auth_key_sha256": campaign_module.hashlib.sha256(b"w" * 32).hexdigest(),
+        "role_separated_auth_keys": True,
+        "supervisor_identity": supervisor_identity,
         "checkpoint_mirror_path": str(Path(args.checkpoint_mirror_path).resolve()),
         "cgroup_path": "/test.scope",
         "cgroup_event_baseline": {
@@ -218,6 +400,14 @@ def test_supervised_runtime_contract_rejects_duration_and_source_divergence(
         "gates": {
             name: {"status": "PASS", "machine_verified": True}
             for name in (
+                "authenticated_control_channel_verified",
+                "runner_control_channel_authenticated",
+                "watchdog_reciprocal_liveness_verified",
+                "runner_import_staged_verified",
+                "watchdog_import_staged_verified",
+                "host_safety_runner_import_settled",
+                "host_safety_state_initialization_settled",
+                "host_safety_activation_verified",
                 "cgroup_limits_verified",
                 "external_watchdog_verified",
                 "runner_and_watchdog_placement_verified",
@@ -233,11 +423,22 @@ def test_supervised_runtime_contract_rejects_duration_and_source_divergence(
         "repo_root": str(campaign_module.ROOT),
         "commit": contract["commit"],
         "tracked_content_digest": contract["source_digest"],
+        "content_evidence_mode": campaign_module.METADATA_CONTENT_EVIDENCE,
         "require_clean": False,
     }
     args.duration_seconds = 180
 
     validate_supervised_runtime_contract(args, contract, source)
+
+    staged_gate = contract["gates"].pop(
+        "host_safety_runner_import_settled"
+    )
+    with pytest.raises(
+        RuntimeError,
+        match="gate:host_safety_runner_import_settled",
+    ):
+        validate_supervised_runtime_contract(args, contract, source)
+    contract["gates"]["host_safety_runner_import_settled"] = staged_gate
 
     args.duration_seconds = 179
     with pytest.raises(RuntimeError, match="runner_duration_seconds"):
@@ -245,6 +446,415 @@ def test_supervised_runtime_contract_rejects_duration_and_source_divergence(
     args.duration_seconds = 180
     source["tracked_content_digest"] = "c" * 64
     with pytest.raises(RuntimeError, match="source_digest"):
+        validate_supervised_runtime_contract(args, contract, source)
+    source["tracked_content_digest"] = contract["source_digest"]
+    source["content_evidence_mode"] = campaign_module.FULL_CONTENT_EVIDENCE
+    with pytest.raises(RuntimeError, match="source_content_evidence_mode"):
+        validate_supervised_runtime_contract(args, contract, source)
+
+
+def test_rehearsal_contract_requires_exact_managed_comfyui_receipt_and_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = campaign_args(
+        tmp_path,
+        "--supervised",
+        "--campaign-uuid",
+        "campaign-comfyui",
+        "--cgroup-path",
+        "/test.scope",
+        "--checkpoint-mirror-path",
+        str(
+            Path.home()
+            / "logs"
+            / "hackme_web_campaign_24h"
+            / "campaign-comfyui"
+            / "campaign.checkpoint.json"
+        ),
+    )
+    args.duration_seconds = 3600
+    args.minimum_free_gb = 20.0
+    for name, value in SUPERVISED_RUNNER_PROFILES["rehearsal"].items():
+        setattr(args, name, value)
+    campaign_root = Path(args.campaign_root).resolve()
+    control_root = campaign_root.parent / ".campaign-comfyui-control"
+    ready_path = control_root / "artifacts" / "comfyui_backend" / "ready.json"
+    lifecycle_path = ready_path.with_name("lifecycle.json")
+    stdout_path = ready_path.with_name("backend.stdout")
+    ready_path.parent.mkdir(parents=True)
+    backend_root = (tmp_path / "managed-comfyui").resolve()
+    backend_root.mkdir()
+    backend_models = backend_root / "models"
+    backend_models.mkdir()
+    backend_main = backend_root / "main.py"
+    backend_main.write_text("# contract fixture\n", encoding="utf-8")
+    backend_python = Path(sys.executable).resolve(strict=True)
+    backend_command = [
+        str(backend_python),
+        str(backend_main),
+        "--listen",
+        "127.0.0.1",
+        "--port",
+        "48188",
+        "--disable-auto-launch",
+    ]
+    backend_command_sha256 = campaign_module.hashlib.sha256(
+        b"\0".join(value.encode() for value in backend_command)
+    ).hexdigest()
+    models_metadata = backend_models.stat()
+    models_binding = {
+        "entry_path": str(backend_models),
+        "realpath": str(backend_models),
+        "device": int(models_metadata.st_dev),
+        "inode": int(models_metadata.st_ino),
+        "mode": stat.S_IMODE(models_metadata.st_mode),
+        "uid": int(models_metadata.st_uid),
+        "gid": int(models_metadata.st_gid),
+        "symlink": False,
+        "ok": True,
+    }
+    zero_capabilities = {
+        name: "0000000000000000"
+        for name in ("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb")
+    }
+    confinement = {
+        "schema_version": campaign_module.SANDBOX_PROOF_SCHEMA_VERSION,
+        "nonce": "f" * 32,
+        "actual_execution": True,
+        "simulated": False,
+        "adopted_external_process": False,
+        "shell": False,
+        "fixed_command": backend_command,
+        "expected_host_cgroup_path": "/test.scope/comfyui",
+        "launcher": {
+            "host_pid": 4141,
+            "host_process_group": 4141,
+            "host_session": 4141,
+            "process_group_leader": True,
+        },
+        "host_transition": {
+            "schema_version": campaign_module.HOST_TRANSITION_SCHEMA_VERSION,
+            "nonce": "f" * 32,
+            "pid": 4141,
+            "start_ticks": 123456,
+            "boot_id": "launcher-boot-test",
+            "cgroup_path": "/test.scope/comfyui",
+            "ok": True,
+        },
+        "mounts": {
+            "cgroup_namespace_path": "/",
+            "leaf_kernel_objects_match": True,
+            "ok": True,
+        },
+        "privileges": {
+            "capability_sets": zero_capabilities,
+            "securebits_locked": True,
+            "no_new_privileges": True,
+            "seccomp": {"mode": 2, "ok": True},
+            "ok": True,
+        },
+        "cgroup_write_denial": {
+            "write_open_succeeded": False,
+            "errno": 13,
+            "ok": True,
+        },
+        "workload_delegation_capability": False,
+        "workload_delegation_confinement": {
+            "workload_delegation_capability": False,
+            "namespace_rooted_cgroup2": True,
+            "cgroup2_read_only": True,
+            "capability_sets_zero": True,
+            "namespace_and_mount_syscalls_denied": True,
+            "ok": True,
+        },
+        "proof_written_before_exec": True,
+        "outer_launcher_preserves_process_group": True,
+        "reaper_preserves_wait_status": True,
+        "ok": True,
+    }
+    ready = {
+        "schema_version": campaign_module.COMFYUI_BACKEND_READY_SCHEMA_VERSION,
+        "ok": True,
+        "actual_execution": True,
+        "simulated": False,
+        "adopted_external_pid": False,
+        "api_url": "http://127.0.0.1:48188",
+        "python_executable": str(backend_python),
+        "main_path": str(backend_main),
+        "working_root": str(backend_root),
+        "models_root": str(backend_models),
+        "models_binding": models_binding,
+        "command": backend_command,
+        "command_sha256": backend_command_sha256,
+        "environment_keys": [
+            "HACKME_CAMPAIGN_COMFYUI_API_URL",
+            "HACKME_CAMPAIGN_COMFYUI_INSTANCE_ID",
+            "HACKME_CAMPAIGN_COMFYUI_MODELS_ROOT",
+            "PYTHONUNBUFFERED",
+        ],
+        "process": {
+            "pid": 4242,
+            "start_ticks": 987654,
+            "boot_id": "backend-boot-test",
+            "cgroup_path": "/test.scope/comfyui",
+            "cwd": str(backend_root),
+            "executable": str(backend_python),
+            "process_group": 4141,
+            "no_new_privileges": True,
+            "seccomp_mode": 2,
+            "capability_sets": zero_capabilities,
+            "namespace_pids": [4242, 2],
+            "namespace_links": {
+                name: f"fixture:[{name}]"
+                for name in ("user", "mnt", "cgroup", "pid")
+            },
+            "models_binding": models_binding,
+            "ok": True,
+        },
+        "placement": {
+            "pid": 4242,
+            "start_ticks": 987654,
+            "campaign_cgroup": "/test.scope/comfyui",
+            "ok": True,
+        },
+        "managed_leaf": {
+            "cgroup_path": "/test.scope/comfyui",
+            "device": 7,
+            "inode": 11,
+            "subtree_controllers_enabled": False,
+            "descendant_cgroups": 0,
+            "host_leaf_state_before_sandbox": "pending_sandbox",
+            "workload_delegation_capability": False,
+            "ok": True,
+        },
+        "managed_leaf_state": {
+            "cgroup_path": "/test.scope/comfyui",
+            "pids": [4141, 4242],
+            "populated": 1,
+            "consistent": True,
+            "subtree_control": [],
+            "descendant_cgroups": 0,
+            "topology_intact": True,
+            "workload_delegation_capability": False,
+            "ok": True,
+        },
+        "confinement": confinement,
+        "sandbox": confinement,
+        "sandbox_live": {
+            "launcher_pid": 4141,
+            "backend_host_pid": 4242,
+            "process_group": 4141,
+            "namespace_links": {
+                name: f"fixture:[{name}]"
+                for name in ("user", "mnt", "cgroup", "pid")
+            },
+            "namespace_pid": 2,
+            "leaf_pids": [4141, 4242],
+            "workload_delegation_capability": False,
+            "ok": True,
+        },
+        "launcher": {
+            "pid": 4141,
+            "process_group": 4141,
+            "session": 4141,
+            "ok": True,
+        },
+        "listener": {
+            "family": "ipv4",
+            "address": "127.0.0.1",
+            "port": 48188,
+            "socket_inode": 123456,
+            "owner_pids": [4242],
+            "loopback_only": True,
+            "ok": True,
+        },
+        "listener_stable_across_readiness": True,
+        "readiness": {
+            "endpoint": "http://127.0.0.1:48188/system_stats",
+            "system_fields": ["python_version"],
+            "device_count": 1,
+            "device_names": ["fixture-device"],
+            "ok": True,
+        },
+    }
+    ready_path.write_text(json.dumps(ready), encoding="utf-8")
+    ready_path.chmod(0o400)
+    ready_metadata = ready_path.stat()
+    ready_sha256 = campaign_module.hashlib.sha256(
+        ready_path.read_bytes()
+    ).hexdigest()
+    for name, path in (
+        ("state_path", control_root / "checkpoint" / "campaign.state.json"),
+        ("control_path", control_root / "checkpoint" / "campaign.control.json"),
+        ("heartbeat_path", control_root / "checkpoint" / "campaign.heartbeat.json"),
+        ("checkpoint_path", control_root / "checkpoint" / "campaign.checkpoint.json"),
+        ("source_freeze_path", control_root / "artifacts" / "source" / "H0" / "source_freeze.json"),
+        ("activation_gate", control_root / "checkpoint" / "campaign.activation.json"),
+        ("supervisor_contract", control_root / "checkpoint" / "supervisor.contract.json"),
+    ):
+        setattr(args, name, str(path))
+    args.control_root = str(control_root)
+    runner_auth_key = b"r" * 32
+    runner_auth_hash = campaign_module.hashlib.sha256(runner_auth_key).hexdigest()
+    setattr(args, "_runner_auth_key", runner_auth_key)
+    args.supervisor_pid = 1234
+    args.supervisor_start_ticks = 5678
+    args.supervisor_boot_id = "boot-test"
+    args.supervisor_cgroup = "/supervisor.scope"
+    supervisor_identity = {
+        "pid": 1234,
+        "start_ticks": 5678,
+        "boot_id": "boot-test",
+        "cgroup_path": "/supervisor.scope",
+    }
+    setattr(args, "_control_auth_evidence", {
+        "session_secret_sha256": runner_auth_hash,
+        "server_identity_verified": True,
+        "server_process": supervisor_identity,
+    })
+    contract = {
+        "level": "rehearsal",
+        "duration_seconds": 3600,
+        "campaign_root": str(campaign_root),
+        "control_root": str(control_root),
+        "watchdog_liveness_path": str(control_root / "checkpoint" / "watchdog.liveness.json"),
+        "runner_auth_key_sha256": runner_auth_hash,
+        "watchdog_auth_key_sha256": campaign_module.hashlib.sha256(b"w" * 32).hexdigest(),
+        "role_separated_auth_keys": True,
+        "supervisor_identity": supervisor_identity,
+        "checkpoint_mirror_path": str(Path(args.checkpoint_mirror_path).resolve()),
+        "cgroup_path": "/test.scope",
+        "cgroup_event_baseline": {
+            "memory.events": {"max": 0, "oom": 0, "oom_kill": 0},
+            "pids.events": {"max": 0},
+        },
+        "commit": "a" * 40,
+        "source_digest": "b" * 64,
+        "runner_profile": dict(SUPERVISED_RUNNER_PROFILES["rehearsal"]),
+        "load_policy": dict(SUPERVISED_LOAD_POLICIES["rehearsal"]),
+        "comfyui_backend": {
+            "status": "ready",
+            "ok": True,
+            "actual_execution": True,
+            "simulated": False,
+            "adopted_external_pid": False,
+            "api_url": ready["api_url"],
+            "python_executable": ready["python_executable"],
+            "main_path": ready["main_path"],
+            "working_root": ready["working_root"],
+            "models_root": ready["models_root"],
+            "command": backend_command,
+            "command_sha256": backend_command_sha256,
+            "backend_pid": 4242,
+            "backend_start_ticks": 987654,
+            "backend_boot_id": "backend-boot-test",
+            "backend_cgroup": "/test.scope/comfyui",
+            "launcher_pid": 4141,
+            "process_group": 4141,
+            "managed_leaf": {
+                "cgroup_path": "/test.scope/comfyui",
+                "device": 7,
+                "inode": 11,
+                "subtree_controllers_enabled": False,
+                "descendant_cgroups": 0,
+                "host_leaf_state_before_sandbox": "pending_sandbox",
+                "workload_delegation_capability": False,
+                "ok": True,
+            },
+            "confinement": confinement,
+            "sandbox": confinement,
+            "ready_receipt": str(ready_path),
+            "ready_receipt_sha256": ready_sha256,
+            "ready_receipt_identity": {
+                "sha256": ready_sha256,
+                "device": int(ready_metadata.st_dev),
+                "inode": int(ready_metadata.st_ino),
+                "size": int(ready_metadata.st_size),
+                "mode": stat.S_IMODE(ready_metadata.st_mode),
+                "uid": int(ready_metadata.st_uid),
+                "gid": int(ready_metadata.st_gid),
+                "link_count": int(ready_metadata.st_nlink),
+                "mtime_ns": int(ready_metadata.st_mtime_ns),
+                "ctime_ns": int(ready_metadata.st_ctime_ns),
+                "nofollow_stable": True,
+            },
+            "lifecycle_path": str(lifecycle_path),
+            "stdout_path": str(stdout_path),
+        },
+        "gates": {
+            name: {"status": "PASS", "machine_verified": True}
+            for name in (
+                "authenticated_control_channel_verified",
+                "runner_control_channel_authenticated",
+                "watchdog_reciprocal_liveness_verified",
+                "runner_import_staged_verified",
+                "watchdog_import_staged_verified",
+                "host_safety_runner_import_settled",
+                "host_safety_state_initialization_settled",
+                "host_safety_activation_verified",
+                "cgroup_limits_verified",
+                "external_watchdog_verified",
+                "runner_and_watchdog_placement_verified",
+                "cgroup_event_baseline_verified",
+                "source_baseline_frozen",
+                "comfyui_backend_lifecycle_verified",
+                "host_safety_backend_startup_settled",
+            )
+        },
+    }
+    source = {
+        "schema_version": campaign_module.SOURCE_FREEZE_SCHEMA_VERSION,
+        "verified": True,
+        "label": "H0",
+        "repo_root": str(campaign_module.ROOT),
+        "commit": contract["commit"],
+        "tracked_content_digest": contract["source_digest"],
+        "content_evidence_mode": campaign_module.FULL_CONTENT_EVIDENCE,
+        "require_clean": False,
+    }
+    monkeypatch.setenv("HACKME_CAMPAIGN_COMFYUI_API_URL", str(ready["api_url"]))
+    monkeypatch.setenv("HACKME_CAMPAIGN_COMFYUI_MODELS_ROOT", str(ready["models_root"]))
+    monkeypatch.setenv("HACKME_CAMPAIGN_COMFYUI_BACKEND_PID", "4242")
+    monkeypatch.setattr(
+        campaign_module,
+        "validate_live_comfyui_backend_authority",
+        lambda contract, payload: {
+            "pid": contract["backend_pid"],
+            "receipt_pid": payload["process"]["pid"],
+            "ok": True,
+        },
+    )
+
+    validate_supervised_runtime_contract(args, contract, source)
+
+    contract["level"] = "soak"
+    contract["duration_seconds"] = MIN_FORMAL_SECONDS
+    contract["runner_profile"] = dict(SUPERVISED_RUNNER_PROFILES["soak"])
+    contract["load_policy"] = dict(SUPERVISED_LOAD_POLICIES["soak"])
+    args.duration_seconds = MIN_FORMAL_SECONDS
+    for name, value in SUPERVISED_RUNNER_PROFILES["soak"].items():
+        setattr(args, name, value)
+    validate_supervised_runtime_contract(args, contract, source)
+
+    contract["level"] = "rehearsal"
+    contract["duration_seconds"] = 3600
+    contract["runner_profile"] = dict(SUPERVISED_RUNNER_PROFILES["rehearsal"])
+    contract["load_policy"] = dict(SUPERVISED_LOAD_POLICIES["rehearsal"])
+    args.duration_seconds = 3600
+    for name, value in SUPERVISED_RUNNER_PROFILES["rehearsal"].items():
+        setattr(args, name, value)
+
+    monkeypatch.setenv("HACKME_CAMPAIGN_COMFYUI_BACKEND_PID", "9999")
+    with pytest.raises(RuntimeError, match="comfyui_backend_environment"):
+        validate_supervised_runtime_contract(args, contract, source)
+
+    monkeypatch.setenv("HACKME_CAMPAIGN_COMFYUI_BACKEND_PID", "4242")
+    contract["comfyui_backend"]["command"] = [
+        *backend_command,
+        "--tampered",
+    ]
+    with pytest.raises(RuntimeError, match="comfyui_backend_ready_authority"):
         validate_supervised_runtime_contract(args, contract, source)
 
 
@@ -263,6 +873,8 @@ def test_supervised_runtime_contract_rejects_weakened_load_sla_and_resource_valu
     )
     args.duration_seconds = 180
     args.minimum_free_gb = 20.0
+    for name, value in SUPERVISED_RUNNER_PROFILES["smoke"].items():
+        setattr(args, name, value)
     contract = {
         "level": "smoke",
         "duration_seconds": 180,
@@ -280,6 +892,14 @@ def test_supervised_runtime_contract_rejects_weakened_load_sla_and_resource_valu
         "gates": {
             name: {"status": "PASS", "machine_verified": True}
             for name in (
+                "authenticated_control_channel_verified",
+                "runner_control_channel_authenticated",
+                "watchdog_reciprocal_liveness_verified",
+                "runner_import_staged_verified",
+                "watchdog_import_staged_verified",
+                "host_safety_runner_import_settled",
+                "host_safety_state_initialization_settled",
+                "host_safety_activation_verified",
                 "cgroup_limits_verified",
                 "external_watchdog_verified",
                 "runner_and_watchdog_placement_verified",
@@ -295,6 +915,7 @@ def test_supervised_runtime_contract_rejects_weakened_load_sla_and_resource_valu
         "repo_root": str(campaign_module.ROOT),
         "commit": contract["commit"],
         "tracked_content_digest": contract["source_digest"],
+        "content_evidence_mode": campaign_module.METADATA_CONTENT_EVIDENCE,
         "require_clean": False,
     }
 
@@ -576,6 +1197,258 @@ def test_campaign_manifest_covers_product_code_harness_and_tests() -> None:
         assert path in manifest
 
 
+def test_supervised_source_identity_reuses_authenticated_h0() -> None:
+    source_hashes, digest, file_count, metadata = (
+        campaign_module.supervised_source_identity({
+            "commit": "a" * 40,
+            "branch": "test-branch",
+            "tracked_content_digest": "b" * 64,
+            "tracked_file_count": 2009,
+            "git_status_empty": False,
+            "status": {
+                "blocked_changes": [
+                    {"path": "server.py", "status": "M"},
+                    {"path": "new.py", "status": "??"},
+                ],
+            },
+        })
+    )
+
+    assert source_hashes == {}
+    assert digest == "b" * 64
+    assert file_count == 2009
+    assert metadata == {
+        "target_commit": "a" * 40,
+        "target_branch": "test-branch",
+        "worktree_dirty": True,
+        "worktree_change_count": 2,
+        "authority": "supervisor_h0",
+    }
+
+
+def test_runner_host_safety_cold_start_wait_keeps_thresholds_and_extends_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+    expected = {"ok": True, "tripped": []}
+
+    def fake_wait(**kwargs: object) -> dict[str, object]:
+        calls.append(kwargs)
+        return expected
+
+    monkeypatch.setattr(campaign_module, "wait_for_host_safety_preflight", fake_wait)
+
+    result = campaign_module.wait_for_runner_host_safety_preflight()
+
+    assert result is expected
+    assert len(calls) == 1
+    assert calls[0]["timeout_seconds"] == (
+        campaign_module.RUNNER_HOST_SAFETY_TIMEOUT_SECONDS
+    )
+    assert calls[0]["collector"] is campaign_module.collect_runner_startup_headroom
+
+    collector_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        campaign_module,
+        "collect_host_startup_safety_preflight",
+        lambda **kwargs: collector_calls.append(kwargs) or expected,
+    )
+
+    assert campaign_module.collect_runner_startup_headroom() is expected
+    assert collector_calls == [{}]
+
+
+def test_smoke_preflight_probes_only_the_dependency_it_exercises() -> None:
+    smoke = campaign_module.preflight_dependency_commands("smoke")
+    formal = campaign_module.preflight_dependency_commands("formal")
+
+    assert set(smoke) == {"gunicorn"}
+    assert set(formal) == {"ffmpeg", "ffprobe", "playwright", "gunicorn"}
+
+
+def test_smoke_preflight_explicitly_omits_repo_scale_runtime_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[Path] = []
+    expected = {
+        "schema_version": "hackme.preflight-runtime-scan.v1",
+        "ok": True,
+        "complete": True,
+        "entries_scanned": 1,
+        "repo_runtime_pollution": [],
+        "errors": [],
+    }
+
+    monkeypatch.setattr(
+        campaign_module,
+        "bounded_repo_runtime_scan",
+        lambda root, **_kwargs: calls.append(root) or expected,
+    )
+
+    smoke = campaign_module.preflight_repo_runtime_scan(
+        tmp_path,
+        campaign_level="smoke",
+    )
+    formal = campaign_module.preflight_repo_runtime_scan(
+        tmp_path,
+        campaign_level="formal",
+    )
+
+    assert smoke == {
+        "schema_version": "hackme.preflight-runtime-scan.v1",
+        "status": "NOT_APPLICABLE",
+        "reason": (
+            "level_0_smoke_uses_supervisor_source_freeze_and_isolated_run_root"
+        ),
+        "required": False,
+        "ok": True,
+        "complete": False,
+        "entries_scanned": 0,
+        "repo_runtime_pollution": [],
+        "errors": [],
+    }
+    assert formal == {**expected, "status": "EVALUATED", "required": True}
+    assert calls == [tmp_path]
+
+
+@pytest.mark.parametrize(
+    ("actual_cgroup", "expected_ok"),
+    (("/campaign.scope", True), ("/other.scope", False)),
+)
+def test_role_inheritance_uses_one_direct_child_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    actual_cgroup: str,
+    expected_ok: bool,
+) -> None:
+    campaign = Campaign(campaign_args(tmp_path))
+    campaign.cgroup_path = "/campaign.scope"
+    campaign.reports.mkdir(parents=True)
+    popen_calls: list[tuple[list[str], dict[str, object]]] = []
+    signals: list[tuple[int, int]] = []
+
+    class Probe:
+        pid = 43210
+        returncode: int | None = None
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def wait(self, *, timeout: float) -> int:
+            assert timeout == 5
+            self.returncode = -signal.SIGTERM
+            return self.returncode
+
+    def fake_popen(
+        command: list[str],
+        **kwargs: object,
+    ) -> Probe:
+        popen_calls.append((command, kwargs))
+        return Probe()
+
+    monkeypatch.setattr(campaign_module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(
+        campaign_module,
+        "_current_unified_cgroup",
+        lambda _pid: actual_cgroup,
+    )
+    monkeypatch.setattr(
+        campaign_module.os,
+        "killpg",
+        lambda pid, sent_signal: signals.append((pid, sent_signal)),
+    )
+
+    result = campaign.verify_role_inheritance()
+
+    assert result["ok"] is expected_ok
+    assert result["probe_count"] == 1
+    assert result["probe_mode"] == "single_direct_child_kernel_inheritance"
+    assert result["managed_roles_covered"] == sorted(
+        campaign_module.MANDATORY_MANAGED_ROLES
+    )
+    assert len(popen_calls) == 1
+    assert popen_calls[0][0] == ["/bin/sleep", "30"]
+    assert signals == [(43210, signal.SIGTERM)]
+    if expected_ok:
+        assert result["errors"] == []
+    else:
+        assert result["errors"] == [
+            f"direct_child:outside_campaign_scope:{actual_cgroup}"
+        ]
+
+
+def test_server_startup_waits_for_host_safety_before_starting_next_server(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    class Controller:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def start(self) -> dict[str, object]:
+            calls.append(self.name)
+            return {"ok": True, "name": self.name}
+
+    campaign = Campaign.__new__(Campaign)
+    campaign.reports = tmp_path / "reports"
+    campaign.reports.mkdir()
+    campaign.primary = Controller("primary")  # type: ignore[assignment]
+    campaign.recovery = Controller("recovery")  # type: ignore[assignment]
+    campaign.security_sentinel = Controller("security_sentinel")  # type: ignore[assignment]
+    checkpoints: list[str] = []
+    campaign.write_checkpoint = checkpoints.append  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        campaign_module,
+        "wait_for_runner_host_safety_preflight",
+        lambda: {
+            "ok": False,
+            "tripped": ["HOST_IO_PRESSURE_HIGH"],
+        },
+    )
+
+    result = campaign._start_managed_servers_with_host_safety()
+
+    assert result["ok"] is False
+    assert result["classification"] == "FAIL_INFRA"
+    assert result["failed_stage"] == "primary_host_safety"
+    assert calls == ["primary"]
+    assert checkpoints == ["starting_primary", "waiting_for_primary_host_safety"]
+    evidence = campaign_module.load_json(
+        campaign.reports / "host_safety_after_primary.json"
+    )
+    assert evidence["tripped"] == ["HOST_IO_PRESSURE_HIGH"]
+
+
+def test_git_metadata_disables_optional_index_locks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append({"command": list(command), **kwargs})
+        stdout = ""
+        if "rev-parse" in command and "HEAD" in command:
+            stdout = "a" * 40 + "\n"
+        elif "--abbrev-ref" in command:
+            stdout = "test-branch\n"
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(campaign_module.subprocess, "run", fake_run)
+
+    metadata = campaign_module.git_metadata()
+
+    assert metadata["target_commit"] == "a" * 40
+    assert calls
+    assert all(
+        isinstance(call.get("env"), dict)
+        and call["env"].get("GIT_OPTIONAL_LOCKS") == "0"  # type: ignore[union-attr]
+        for call in calls
+    )
+
+
 def test_campaign_matrix_contains_every_mandatory_operational_category(tmp_path: Path) -> None:
     campaign = Campaign(campaign_args(tmp_path))
     specs = campaign.scenario_specs()
@@ -610,35 +1483,385 @@ def test_level_0_smoke_marks_formal_scenario_binding_not_applicable(tmp_path: Pa
     assert result["formal_campaign_pass"] is False
 
 
-def test_rehearsal_fails_closed_while_native_scenario_bindings_are_unwired(tmp_path: Path) -> None:
+def test_rehearsal_native_scenario_binding_preflight_is_complete(tmp_path: Path) -> None:
     campaign = Campaign(campaign_args(tmp_path))
     campaign.campaign_level = "rehearsal"
 
     result, required = campaign.formal_scenario_binding_preflight()
 
     assert required is True
-    assert result["status"] == "FAIL_HARNESS"
-    assert result["gate_pass"] is False
+    assert result["status"] == "PASS"
+    assert result["gate_pass"] is True
     assert result["reviewed_scenario_count"] == 13
     assert result["required_evidence_count"] == 91
-    assert result["registered_runner_count"] == 4
-    assert result["registered_evidence_adapter_count"] == 0
-    assert result["registered_validator_count"] == 0
-    assert result["fully_bound_scenario_count"] == 0
+    assert result["registered_runner_count"] == 13
+    assert result["registered_evidence_adapter_count"] == 91
+    assert result["registered_validator_count"] == 39
+    assert result["runtime_execution_pipeline_verified"] is True
+    assert result["fully_bound_scenario_count"] == 13
+    assert result["fully_bound_scenario_ids"] == [
+        "ai_agent_positive_operations",
+        "backup_restore_restart",
+        "bt_download_stream_restart",
+        "cloud_drive_share_stream",
+        "comfyui_real_workflows",
+        "community_governance_operations",
+        "final_ui_mobile_prelaunch",
+        "media_long_hls_share",
+        "media_proxy_cross_browser",
+        "pointschain_hft_invariants",
+        "server_emergency_incident",
+        "trading_background_custom_workflow",
+        "wallet_incident_governance",
+    ]
     assert result["registration_coverage"]["media_long_hls_share"]["runner_registered"] is True
-    assert result["registration_coverage"]["bt_download_stream_restart"]["runner_registered"] is False
+    assert result["registration_coverage"]["bt_download_stream_restart"]["runner_registered"] is True
 
 
-def test_incomplete_native_scenario_cannot_execute_as_formal_pass(tmp_path: Path) -> None:
+def test_bt_formal_runner_streams_exact_magnet_artifact_without_secret_argv(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     campaign = Campaign(campaign_args(tmp_path))
+    campaign.accounts = [("bt-member", "BtMemberPassword!")]
+    scenario_id = "bt_download_stream_restart"
+    out_dir = campaign.reports / "scenarios" / scenario_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    bt_out = out_dir / "bt_formal_local_probe.json"
+    stress_out = out_dir / "downloaded_video_hls.json"
+    restart_out = out_dir / "downloaded_video_restart_continuity.json"
+    magnet = out_dir / "magnet-download.ts"
+    magnet.write_bytes(b"retained-magnet-download")
+    bt_out.write_text(json.dumps({
+        "raw": {"magnet": {"download_path": str(magnet.resolve())}},
+        "artifacts": [{
+            "artifact_id": "magnet_download",
+            "path": str(magnet.resolve()),
+            "type": "video/mpegts",
+            "exists": True,
+            "validated": True,
+        }],
+    }), encoding="utf-8")
+    stress_out.write_text("{}\n", encoding="utf-8")
+    restart_out.write_text("{}\n", encoding="utf-8")
+    calls: list[dict[str, object]] = []
 
-    result = campaign.run_formal_native_scenario("media_long_hls_share")
+    def fake_run_step(
+        received_scenario_id: str,
+        step_id: str,
+        command: list[str],
+        **kwargs: object,
+    ) -> dict[str, object]:
+        calls.append({
+            "scenario_id": received_scenario_id,
+            "step_id": step_id,
+            "command": command,
+            **kwargs,
+        })
+        return {"step_id": step_id, "artifact": str(kwargs["artifact"]), "ok": True}
+
+    def fake_callable_step(
+        received_scenario_id: str,
+        step_id: str,
+        artifact: Path,
+        _callback: Callable[[], dict[str, object]],
+        **_kwargs: object,
+    ) -> dict[str, object]:
+        assert received_scenario_id == scenario_id
+        return {"step_id": step_id, "artifact": str(artifact), "ok": True}
+
+    evidence_ids = set(CAMPAIGN_SCENARIO_CONTRACTS[scenario_id].required_evidence)
+    monkeypatch.setattr(campaign, "run_step", fake_run_step)
+    monkeypatch.setattr(campaign, "run_native_callable_step", fake_callable_step)
+    monkeypatch.setattr(
+        campaign_module,
+        "bt_download_assertions",
+        lambda _probe, _stress, _restart: {
+            "scenario_assertions": {key: True for key in evidence_ids},
+            "terminal_assertions": {"terminal": True},
+            "cleanup_assertions": {"cleanup": True},
+            "details": {"source_count": 3},
+        },
+    )
+
+    result = campaign.native_bt_download_stream_restart()
+
+    assert len(calls) == 2
+    bt_call, hls_call = calls
+    bt_command = bt_call["command"]
+    hls_command = hls_call["command"]
+    assert isinstance(bt_command, list) and bt_command[1].endswith("bt_formal_local_probe.py")
+    assert bt_call["process_role"] == "bt"
+    assert isinstance(hls_command, list) and hls_command[1].endswith("video_hls_quality_stress.py")
+    assert hls_command[hls_command.index("--video") + 1] == str(magnet.resolve())
+    assert hls_call["process_role"] == "ffmpeg"
+    for secret in (campaign.credentials.root, "BtMemberPassword!"):
+        assert secret not in bt_command
+        assert secret not in hls_command
+    assert hls_call["env"] == {
+        "HACKME_HLS_STRESS_ACCOUNTS_JSON": json.dumps([
+            {"username": "bt-member", "password": "BtMemberPassword!"},
+        ]),
+        "HACKME_HLS_SHARE_PASSWORD": hls_call["env"]["HACKME_HLS_SHARE_PASSWORD"],
+        "HACKME_PROBE_ROOT_PASSWORD": campaign.credentials.root,
+    }
+    assert result["ok"] is True
+    assert Path(result["formal_evidence_manifest"]).is_file()
+    assert magnet.resolve() in {Path(row["path"]) for row in result["artifacts"]}
+    magnet_declaration = next(
+        row for row in result["artifacts"] if Path(row["path"]) == magnet.resolve()
+    )
+    assert magnet_declaration["artifact_type"] == "auto"
+    binding = campaign_module.FORMAL_SCENARIO_BINDINGS[scenario_id]
+    assert binding.runner_id in campaign.native_scenario_runner_registry()
+
+
+def test_comfyui_formal_runner_uses_exact_probe_secret_env_and_artifact_sources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    campaign = Campaign(campaign_args(tmp_path))
+    scenario_id = "comfyui_real_workflows"
+    probe_dir = campaign.reports / "scenarios" / scenario_id / "probe"
+    probe_dir.mkdir(parents=True, exist_ok=True)
+    probe_out = probe_dir / "formal_comfyui_workflows_probe.json"
+    probe_out.write_text('{"ok": true}\n', encoding="utf-8")
+    output = probe_dir / "outputs" / "generated.bin"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_bytes(b"formal-comfyui-output")
+    artifact_index_out = probe_dir / "artifact_index.json"
+    artifact_index_out.write_text(
+        json.dumps({
+            "artifacts": [
+                {"path": str(probe_out.resolve())},
+                {"path": str(output.resolve())},
+            ],
+        }) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HACKME_CAMPAIGN_COMFYUI_API_URL", "http://127.0.0.1:8188")
+    captured: dict[str, object] = {}
+
+    def fake_run_step(
+        received_scenario_id: str,
+        step_id: str,
+        command: list[str],
+        **kwargs: object,
+    ) -> dict[str, object]:
+        captured.update({
+            "scenario_id": received_scenario_id,
+            "step_id": step_id,
+            "command": command,
+            **kwargs,
+        })
+        return {
+            "step_id": step_id,
+            "artifact": str(kwargs["artifact"]),
+            "ok": True,
+        }
+
+    evidence_ids = set(
+        CAMPAIGN_SCENARIO_CONTRACTS[scenario_id].required_evidence
+    )
+    monkeypatch.setattr(campaign, "run_step", fake_run_step)
+    monkeypatch.setattr(
+        campaign_module,
+        "comfyui_workflow_assertions",
+        lambda _probe, _index: {
+            "scenario_assertions": {key: True for key in evidence_ids},
+            "terminal_assertions": {"terminal": True},
+            "cleanup_assertions": {"cleanup": True},
+            "details": {"source_count": 3},
+        },
+    )
+
+    result = campaign.native_comfyui_real_workflows()
+
+    command = captured["command"]
+    assert isinstance(command, list)
+    assert command[1].endswith("formal_comfyui_workflows_probe.py")
+    assert "--feature-timeout" in command
+    assert "--official-timeout" in command
+    assert campaign.credentials.root not in command
+    assert captured["process_role"] == "comfyui"
+    assert captured["timeout"] == 16 * 60 * 60
+    assert captured["env"] == {
+        "HACKME_CAMPAIGN_COMFYUI_API_URL": "http://127.0.0.1:8188",
+        "HACKME_PROBE_ROOT_PASSWORD": campaign.credentials.root,
+    }
+    assert result["ok"] is True
+    assert Path(result["formal_evidence_manifest"]).is_file()
+    artifact_paths = {Path(row["path"]) for row in result["artifacts"]}
+    assert probe_out.resolve() in artifact_paths
+    assert artifact_index_out.resolve() in artifact_paths
+    assert output.resolve() in artifact_paths
+    binding = campaign_module.FORMAL_SCENARIO_BINDINGS[scenario_id]
+    assert binding.runner_id in campaign.native_scenario_runner_registry()
+
+
+def test_ai_agent_formal_runner_keeps_credentials_out_of_argv_and_targets_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    campaign = Campaign(campaign_args(tmp_path))
+    campaign.accounts = [("qa-one", "MemberOne!"), ("qa-two", "MemberTwo!")]
+    scenario_id = "ai_agent_positive_operations"
+    out_dir = campaign.reports / "scenarios" / scenario_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    fixture = out_dir / "artifacts" / "fixture.mp4"
+    fixture.parent.mkdir(parents=True, exist_ok=True)
+    fixture.write_bytes(b"video")
+    probe_out = out_dir / "formal_ai_agent_positive_operations.json"
+    restart_out = out_dir / "supervised_restart.json"
+    probe_out.write_text(json.dumps({
+        "ok": True,
+        "video": {"fixture": {"path": str(fixture.resolve())}},
+    }), encoding="utf-8")
+    restart_out.write_text('{"ok": true}\n', encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    def fake_run_step(
+        received_scenario_id: str,
+        step_id: str,
+        command: list[str],
+        **kwargs: object,
+    ) -> dict[str, object]:
+        captured.update({
+            "scenario_id": received_scenario_id,
+            "step_id": step_id,
+            "command": command,
+            **kwargs,
+        })
+        return {"step_id": step_id, "artifact": str(kwargs["artifact"]), "ok": True}
+
+    def fake_run_group(received_scenario_id: str, steps: list[object]) -> dict[str, object]:
+        first = steps[0]
+        assert callable(first)
+        first()
+        return {
+            "schema_version": campaign_module.NATIVE_RUNNER_RESULT_SCHEMA_VERSION,
+            "scenario_id": received_scenario_id,
+            "ok": True,
+            "execution_succeeded": True,
+            "terminal_state": "success",
+            "artifacts": [
+                {"artifact_id": "native.source.ai.probe", "path": str(probe_out), "artifact_type": "json"},
+                {"artifact_id": "native.source.ai.restart", "path": str(restart_out), "artifact_type": "json"},
+            ],
+        }
+
+    evidence_ids = set(CAMPAIGN_SCENARIO_CONTRACTS[scenario_id].required_evidence)
+    monkeypatch.setattr(campaign, "run_step", fake_run_step)
+    monkeypatch.setattr(campaign, "run_group", fake_run_group)
+    monkeypatch.setattr(
+        campaign_module,
+        "ai_agent_positive_assertions",
+        lambda _probe, _restart: {
+            "scenario_assertions": {key: True for key in evidence_ids},
+            "terminal_assertions": {"terminal": True},
+            "cleanup_assertions": {"cleanup": True},
+            "details": {"source_count": 3},
+        },
+    )
+
+    result = campaign.native_ai_agent_positive_operations()
+
+    command = captured["command"]
+    assert isinstance(command, list)
+    assert command[1].endswith("formal_ai_agent_positive_operations_probe.py")
+    for secret in (
+        campaign.credentials.root,
+        campaign.credentials.manager,
+        "MemberOne!",
+        "MemberTwo!",
+    ):
+        assert secret not in command
+    assert captured["env"] == {
+        "HACKME_PROBE_ROOT_PASSWORD": campaign.credentials.root,
+        "HACKME_PROBE_MANAGER_PASSWORD": campaign.credentials.manager,
+        "HACKME_PROBE_USER_ONE_PASSWORD": "MemberOne!",
+        "HACKME_PROBE_USER_TWO_PASSWORD": "MemberTwo!",
+    }
+    assert "--base-url" in command
+    assert command[command.index("--base-url") + 1] == campaign.recovery.base_url
+    assert captured["process_role"] == "ffmpeg"
+    assert result["ok"] is True
+    binding = campaign_module.FORMAL_SCENARIO_BINDINGS[scenario_id]
+    assert binding.runner_id in campaign.native_scenario_runner_registry()
+
+
+def test_incomplete_native_scenario_cannot_execute_as_formal_pass(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    campaign = Campaign(campaign_args(tmp_path))
+    scenario_id = "cloud_drive_share_stream"
+    runner_id = campaign_module.FORMAL_SCENARIO_BINDINGS[scenario_id].runner_id
+    complete_registry = campaign.native_scenario_runner_registry()
+    monkeypatch.setattr(
+        campaign,
+        "native_scenario_runner_registry",
+        lambda: {
+            registered_id: registration
+            for registered_id, registration in complete_registry.items()
+            if registered_id != runner_id
+        },
+    )
+
+    result = campaign.run_formal_native_scenario(scenario_id)
 
     assert result["ok"] is False
     assert result["classification"] == "FAIL_HARNESS"
     assert result["error"] == "formal_native_binding_incomplete"
-    assert result["registration_coverage"]["runner_registered"] is True
-    assert result["binding_blockers"]
+    assert result["registration_coverage"]["runner_registered"] is False
+    assert result["registration_coverage"]["registrations_complete"] is False
+    assert result["runtime_execution_pipeline_verified"] is True
+    # This failure is injected by removing an otherwise audited runner; the
+    # registration coverage, rather than the static audit-blocker list, is the
+    # machine-readable reason it must fail closed.
+    assert result["binding_blockers"] == []
+
+
+def test_formal_native_scenario_caller_supplies_exact_unique_eight_field_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    campaign = Campaign(campaign_args(tmp_path))
+    captured: list[dict[str, object]] = []
+
+    def execute_spy(**kwargs: object) -> dict[str, object]:
+        captured.append(dict(kwargs["authority"]))
+        binding = kwargs["binding"]
+        return {
+            "ok": False,
+            "classification": "FAIL_HARNESS",
+            "scenario_id": binding.scenario_id,
+            "diagnostics": ["spy_stopped_before_handler"],
+        }
+
+    monkeypatch.setattr(
+        campaign_module,
+        "execute_registered_native_scenario",
+        execute_spy,
+    )
+    scenario_ids = tuple(campaign_module.FORMAL_SCENARIO_BINDINGS)[:2]
+    for scenario_id in scenario_ids:
+        campaign.run_formal_native_scenario(scenario_id)
+
+    assert len(captured) == 2
+    expected_fields = {
+        "qualification_campaign_uuid",
+        "campaign_uuid",
+        "campaign_attempt_uuid",
+        "scenario_attempt_uuid",
+        "native_invocation_id",
+        "commit",
+        "source_digest",
+        "protected_source_digest",
+    }
+    assert all(set(authority) == expected_fields for authority in captured)
+    assert len({authority["scenario_attempt_uuid"] for authority in captured}) == 2
+    assert len({authority["native_invocation_id"] for authority in captured}) == 2
 
 
 def test_supervised_smoke_uses_bounded_lifecycle_load_without_secret_argv(
@@ -686,16 +1909,21 @@ def test_managed_server_environment_disables_mutable_capacity_defaults(
 ) -> None:
     monkeypatch.setenv("HACKME_DEV_CAPACITY_DEFAULTS_FILE", "/tmp/host-controlled.env")
     monkeypatch.setenv("HACKME_DEV_CAPACITY_REPORT_FILE", "/tmp/host-controlled.json")
+    monkeypatch.setenv("PYTHONPYCACHEPREFIX", "/tmp/host-controlled-pycache")
     campaign = Campaign(campaign_args(tmp_path))
 
     env = campaign.primary._env()
+    probe_env = campaign.base_env()
 
     assert env["HACKME_DEV_USE_CAPACITY_DEFAULTS"] == "0"
     assert "HACKME_DEV_CAPACITY_DEFAULTS_FILE" not in env
     assert "HACKME_DEV_CAPACITY_REPORT_FILE" not in env
+    for child_env in (env, probe_env):
+        assert child_env["PYTHONDONTWRITEBYTECODE"] == "1"
+        assert "PYTHONPYCACHEPREFIX" not in child_env
     command = campaign.primary.launcher_command()
-    assert command[command.index("--gunicorn-workers") + 1] == "4"
-    assert command[command.index("--gunicorn-threads") + 1] == "8"
+    assert command[command.index("--gunicorn-workers") + 1] == "2"
+    assert command[command.index("--gunicorn-threads") + 1] == "2"
 
 
 def test_slow_launcher_reports_only_changed_observations(
@@ -1263,11 +2491,83 @@ def test_security_sentinel_completed_requests_publish_main_thread_progress(
 
     monkeypatch.setattr(campaign_module.requests, "Session", Session)
     monkeypatch.setattr(campaign_module, "ProductionSecuritySentinel", Sentinel)
+    monkeypatch.setattr(
+        campaign,
+        "validate_online_security_audit_evidence",
+        lambda *_args, **_kwargs: {
+            "schema_version": "hackme.audit-evidence-triad-online-wiring/v1",
+            "ok": True,
+            "classification": "PASS",
+            "receipt": {},
+            "contract": {},
+            "errors": [],
+        },
+    )
 
     result = campaign.production_security_sentinel_check(phase="final")
 
     assert result["ok"] is True
     assert progress == ["security_final:request_completed:GET:200"]
+
+
+def test_online_security_triad_binding_mismatch_is_never_classified_pass(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    campaign = Campaign(campaign_args(tmp_path))
+    output_dir = tmp_path / "online-triad"
+    output_dir.mkdir()
+    receipt_path = output_dir / "receipt.json"
+    receipt_path.write_text("{}\n", encoding="utf-8")
+    metadata = campaign._stream_file_metadata(receipt_path)
+    contract = {
+        "schema_version": "hackme.audit-evidence-triad-validation/v1",
+        "ok": True,
+        "classification": "PASS",
+        "errors": [],
+        "validated_invariants": [],
+        "artifact_files_verified": True,
+    }
+    monkeypatch.setattr(
+        campaign_module,
+        "validate_audit_evidence_receipt",
+        lambda *_args, **_kwargs: dict(contract),
+    )
+    reference = {
+        "schema_version": "hackme.audit-evidence-triad-reference/v1",
+        "receipt_schema_version": campaign_module.AUDIT_EVIDENCE_SCHEMA_VERSION,
+        "mode": "online",
+        "target": "security_sentinel",
+        "receipt_path": metadata["path"],
+        "receipt_sha256": "0" * 64,
+        "receipt_size_bytes": metadata["size_bytes"],
+        "receipt": {},
+        "validation": contract,
+    }
+    result = campaign.validate_online_security_audit_evidence(
+        {
+            "audit_evidence": reference,
+            "checks": [{
+                "name": "audit_evidence_triad_online",
+                "ok": True,
+                "detail": {
+                    "receipt_schema_version": campaign_module.AUDIT_EVIDENCE_SCHEMA_VERSION,
+                    "mode": "online",
+                    "target": "security_sentinel",
+                    "receipt_sha256": metadata["sha256"],
+                    "receipt_size_bytes": metadata["size_bytes"],
+                    "artifact_files_verified": True,
+                    "validation_classification": "PASS",
+                    "validation_errors": [],
+                },
+            }],
+        },
+        output_dir=output_dir,
+    )
+
+    assert result["ok"] is False
+    assert result["classification"] == "FAIL_HARNESS"
+    assert "audit_evidence_reference_hash_mismatch" in result["errors"]
 
 
 def test_long_video_scenario_uploads_waits_and_measures_hls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1299,7 +2599,10 @@ def test_core_soak_ready_activation_ack_share_one_future_active_edge(
     activation = campaign.activate_core_soak(
         ready,
         ack_timeout_seconds=30.0,
-        lead_seconds=1.0,
+        # Exercise the production activation window.  A one-second edge is
+        # shorter than the supported five-second lead and makes protocol
+        # correctness depend on scheduler/I/O latency on a loaded host.
+        lead_seconds=campaign_module.CORE_ACTIVATION_LEAD_SECONDS,
     )
     process.wait(timeout=30)
     output = process.stdout.read() if process.stdout else ""
@@ -1688,6 +2991,252 @@ def test_final_server_log_scan_is_after_all_server_touching_cleanup() -> None:
     assert source.index('controller.stop(reason="final_evidence_log_seal")') < source.index(
         "server_logs = self.scan_server_logs"
     )
+    assert source.index("final_audit_evidence = self.capture_final_audit_evidence") < source.index(
+        "server_logs = self.scan_server_logs"
+    )
+
+
+def _valid_final_log_seal_stops(campaign: Campaign) -> dict[str, dict[str, object]]:
+    controllers = (
+        campaign.primary,
+        campaign.recovery,
+        campaign.security_sentinel,
+    )
+    for controller in controllers:
+        controller.final_evidence_restart_disabled = True
+        controller.planned_outage.set()
+        controller.registered_identity = None
+    return {
+        controller.name: {
+            "action": "stop",
+            "name": controller.name,
+            "reason": "final_evidence_log_seal",
+            "pid": 0,
+            "master_process_remaining": False,
+            "process_group_remaining": False,
+            "restart_disabled": True,
+            "launch_generation": controller.launch_count,
+            "ok": True,
+        }
+        for controller in controllers
+    }
+
+
+def _write_controller_audit_fixture(
+    controller: ServerController,
+    *,
+    suffix: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = controller.runtime_root
+    for directory in (
+        runtime,
+        runtime / "database",
+        runtime / "logs",
+        runtime / "anchors",
+    ):
+        directory.mkdir(parents=True, exist_ok=True)
+    seed = f"{suffix:02x}" * 24
+    key = bytes([suffix]) * 32
+    (runtime / ".chain_seed").write_text(seed, encoding="utf-8")
+    (runtime / ".integrity_key").write_bytes(key)
+    database = runtime / "database" / "audit.db"
+    audit_service.configure_audit_service(
+        get_db=lambda database=database: get_audit_db(str(database)),
+        chain_seed=seed,
+        integrity_key=key,
+        audit_log_path=str(runtime / "logs" / "audit.log"),
+        audit_anchor_path=str(runtime / "anchors" / "audit_head.jsonl"),
+        audit_anchor_latest_path=str(runtime / "anchors" / "audit_head_latest.json"),
+        audit_anchor_interval_seconds=60,
+    )
+    monkeypatch.setattr(audit_service, "_last_audit_anchor_at", 0.0)
+    audit_service.audit(
+        f"final_fixture_{controller.name}",
+        "127.0.0.1",
+        user="campaign",
+        success=True,
+        ua="pytest",
+        detail="sealed-final",
+    )
+
+
+def test_h24_sealed_triad_requires_writer_seal_and_indexes_all_targets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    campaign = Campaign(campaign_args(tmp_path))
+    for suffix, controller in enumerate(
+        (campaign.primary, campaign.recovery, campaign.security_sentinel),
+        start=1,
+    ):
+        _write_controller_audit_fixture(
+            controller,
+            suffix=suffix,
+            monkeypatch=monkeypatch,
+        )
+    stops = _valid_final_log_seal_stops(campaign)
+
+    result = campaign.capture_final_audit_evidence(stops)
+
+    assert result["ok"] is True
+    assert result["classification"] == "PASS"
+    assert result["capture_attempted"] is True
+    assert set(result["targets"]) == {"primary", "recovery", "security_sentinel"}
+    assert all(row["ok"] is True for row in result["targets"].values())
+    assert all(
+        row["heads"]["anchor_latest"]["reason"] == "formal_evidence_seal"
+        for row in result["targets"].values()
+    )
+    index = Path(result["artifact_index"]["path"])
+    manifest = Path(result["hash_manifest"]["path"])
+    assert index.is_file() and manifest.is_file()
+    manifest_payload = json.loads(manifest.read_text(encoding="utf-8"))
+    names = {row["path"] for row in manifest_payload["files"]}
+    assert "artifact_index.json" in names
+    assert "audit_evidence_triad.schema.json" in names
+    assert {
+        "primary/receipt.json",
+        "recovery/receipt.json",
+        "security_sentinel/receipt.json",
+    } <= names
+
+
+def test_h24_never_calls_sealed_capture_while_runtime_writer_is_alive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    campaign = Campaign(campaign_args(tmp_path))
+    calls: list[str] = []
+    monkeypatch.setattr(campaign, "_runtime_writer_pids", lambda _root: [4242])
+    monkeypatch.setattr(
+        campaign_module,
+        "capture_audit_evidence",
+        lambda **_kwargs: calls.append("capture"),
+    )
+
+    result = campaign.capture_final_audit_evidence(
+        _valid_final_log_seal_stops(campaign)
+    )
+
+    assert result["ok"] is False
+    assert result["classification"] == "FAIL_HARNESS"
+    assert result["capture_attempted"] is False
+    assert calls == []
+    assert all(
+        "sealed_capture_forbidden_without_writer_seal" in row["errors"]
+        for row in result["targets"].values()
+    )
+
+
+def test_h24_rechecks_for_writers_immediately_before_sealed_capture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    campaign = Campaign(campaign_args(tmp_path))
+    writer_checks = 0
+    captured_targets: list[str] = []
+
+    def runtime_writers(_root: Path) -> list[int]:
+        nonlocal writer_checks
+        writer_checks += 1
+        # The first three calls establish the aggregate stop seal.  A writer
+        # appearing immediately before the primary capture must still block it.
+        return [4242] if writer_checks == 4 else []
+
+    def capture(**kwargs: object) -> None:
+        captured_targets.append(str(kwargs["target"]))
+        raise RuntimeError("test capture stops after call observation")
+
+    monkeypatch.setattr(campaign, "_runtime_writer_pids", runtime_writers)
+    monkeypatch.setattr(campaign_module, "capture_audit_evidence", capture)
+
+    result = campaign.capture_final_audit_evidence(
+        _valid_final_log_seal_stops(campaign)
+    )
+
+    assert result["capture_attempted"] is True
+    assert result["ok"] is False
+    assert result["classification"] == "FAIL_HARNESS"
+    assert "primary" not in captured_targets
+    assert result["targets"]["primary"]["errors"] == [
+        "runtime_writer_detected_immediately_before_sealed_capture"
+    ]
+
+
+def test_h24_manifest_rehashes_index_after_fail_closed_manifest_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    campaign = Campaign(campaign_args(tmp_path))
+    for suffix, controller in enumerate(
+        (campaign.primary, campaign.recovery, campaign.security_sentinel),
+        start=7,
+    ):
+        _write_controller_audit_fixture(
+            controller,
+            suffix=suffix,
+            monkeypatch=monkeypatch,
+        )
+    original = campaign._stream_file_metadata
+    schema_calls = 0
+
+    def fail_schema_during_manifest(path: Path) -> dict[str, object]:
+        nonlocal schema_calls
+        if Path(path).name == "audit_evidence_triad.schema.json":
+            schema_calls += 1
+            if schema_calls == 2:
+                raise RuntimeError("injected manifest read failure")
+        return original(path)
+
+    monkeypatch.setattr(campaign, "_stream_file_metadata", fail_schema_during_manifest)
+
+    result = campaign.capture_final_audit_evidence(
+        _valid_final_log_seal_stops(campaign)
+    )
+
+    assert result["ok"] is False
+    assert result["classification"] == "FAIL_HARNESS"
+    index_path = Path(result["artifact_index"]["path"])
+    manifest = json.loads(Path(result["hash_manifest"]["path"]).read_text(encoding="utf-8"))
+    index_row = next(row for row in manifest["files"] if row["path"] == "artifact_index.json")
+    index_bytes = index_path.read_bytes()
+    assert index_row["size_bytes"] == len(index_bytes)
+    assert index_row["sha256"] == hashlib.sha256(index_bytes).hexdigest()
+    assert manifest["ok"] is False
+
+
+def test_h24_cross_source_integrity_failure_is_classified_as_product(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    campaign = Campaign(campaign_args(tmp_path))
+    for suffix, controller in enumerate(
+        (campaign.primary, campaign.recovery, campaign.security_sentinel),
+        start=4,
+    ):
+        _write_controller_audit_fixture(
+            controller,
+            suffix=suffix,
+            monkeypatch=monkeypatch,
+        )
+    primary_log = campaign.primary.runtime_root / "logs" / "audit.log"
+    entry = json.loads(primary_log.read_text(encoding="utf-8"))
+    entry["detail"] = "tampered-after-write"
+    primary_log.write_text(
+        campaign_module.json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    result = campaign.capture_final_audit_evidence(
+        _valid_final_log_seal_stops(campaign)
+    )
+
+    assert result["ok"] is False
+    assert result["classification"] == "FAIL_PRODUCT"
+    assert result["targets"]["primary"]["classification"] == "FAIL_PRODUCT"
+    assert result["targets"]["recovery"]["ok"] is True
+    assert result["targets"]["security_sentinel"]["ok"] is True
 
 
 def test_server_stop_reports_progress_and_fails_when_process_group_remains(
@@ -1738,6 +3287,28 @@ def test_server_stop_reports_progress_and_fails_when_process_group_remains(
     assert signal.SIGKILL in signals
     assert any("stop_waiting_for_process_group" in item for item in progress)
     assert progress[-1].endswith(":0")
+
+
+def test_final_evidence_stop_permanently_disables_controller_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    campaign = Campaign(campaign_args(tmp_path))
+    controller = campaign.primary
+    monkeypatch.setattr(controller, "pid", lambda: 0)
+
+    stopped = controller.stop(reason="final_evidence_log_seal")
+    started = controller.start()
+    restarted = controller.restart(reason="forbidden_after_seal")
+
+    assert stopped["ok"] is True
+    assert stopped["restart_disabled"] is True
+    assert controller.final_evidence_restart_disabled is True
+    assert started["ok"] is False
+    assert started["error"] == "final_evidence_restart_barrier_active"
+    assert restarted["ok"] is False
+    assert restarted["restart_disabled"] is True
+    assert controller.planned_outage.is_set() is True
 
 
 def test_child_report_loader_rejects_oversize_before_reading(tmp_path: Path) -> None:
@@ -1868,3 +3439,83 @@ def test_child_report_loader_caps_ramp_stage_cardinality_at_four(tmp_path: Path)
         and row["actual"] == 5
         for row in validation["errors"]
     )
+
+
+def test_rehearsal_execution_contract_is_derived_from_strict_runtime_state() -> None:
+    scenario_results = {
+        scenario_id: {"ok": True, "details": {"fallback": False, "skips": []}}
+        for scenario_id in set(campaign_module.REHEARSAL_FEATURE_SCENARIOS.values())
+    }
+
+    result = campaign_module.derive_rehearsal_execution_contract(
+        scenario_results,
+        {"clock": {"continuous_active_seconds": 3600.0, "invalid_seconds": 0.0}},
+    )
+
+    assert result == {
+        "invalid_seconds": 0.0,
+        "mandatory_features_executed": sorted(
+            campaign_module.REHEARSAL_FEATURE_SCENARIOS
+        ),
+        "skips": [],
+        "fallbacks": [],
+        "expected_gaps": [],
+        "errors": [],
+    }
+
+
+def test_rehearsal_execution_contract_never_claims_failed_or_truthy_scenario() -> None:
+    scenario_id = campaign_module.REHEARSAL_FEATURE_SCENARIOS["comfyui_real_workflow"]
+
+    failed = campaign_module.derive_rehearsal_execution_contract(
+        {scenario_id: {"ok": False}},
+        {"clock": {"invalid_seconds": 0}},
+    )
+    truthy_not_boolean = campaign_module.derive_rehearsal_execution_contract(
+        {scenario_id: {"ok": 1}},
+        {"clock": {"invalid_seconds": 0}},
+    )
+
+    assert "comfyui_real_workflow" not in failed["mandatory_features_executed"]
+    assert "comfyui_real_workflow" not in truthy_not_boolean["mandatory_features_executed"]
+
+
+def test_rehearsal_execution_contract_detects_nested_gap_markers() -> None:
+    result = campaign_module.derive_rehearsal_execution_contract(
+        {
+            "scenario-one": {
+                "ok": True,
+                "nested": [
+                    {"skip": "dependency missing"},
+                    {"fallback_error": "provider unavailable"},
+                    {"expected-gap": ["mobile UI"]},
+                    {"skipped": False, "used_fallback": 0, "expected_gaps": []},
+                ],
+            }
+        },
+        {"clock": {"invalid_seconds": 1.25}},
+    )
+
+    assert result["invalid_seconds"] == 1.25
+    assert [row["marker"] for row in result["skips"]] == ["skip"]
+    assert [row["marker"] for row in result["fallbacks"]] == ["fallback_error"]
+    assert [row["marker"] for row in result["expected_gaps"]] == ["expected_gap"]
+
+
+@pytest.mark.parametrize(
+    "state_snapshot",
+    [
+        {},
+        {"clock": {}},
+        {"clock": {"invalid_seconds": True}},
+        {"clock": {"invalid_seconds": -1}},
+        {"clock": {"invalid_seconds": float("nan")}},
+    ],
+)
+def test_rehearsal_execution_contract_fails_closed_without_valid_clock(
+    state_snapshot: dict[str, object],
+) -> None:
+    result = campaign_module.derive_rehearsal_execution_contract({}, state_snapshot)
+
+    assert result["invalid_seconds"] is None
+    assert result["errors"]

@@ -489,6 +489,83 @@ def switch_to_standard_proxy(page, share_session_id: str = "") -> dict[str, Any]
     }
 
 
+def exercise_subtitle_shift(page, playback_body: dict[str, Any]) -> dict[str, Any]:
+    """Exercise the real shared-video subtitle controls and reset their state."""
+
+    subtitles = playback_body.get("subtitles")
+    if not isinstance(subtitles, list):
+        status = playback_body.get("status")
+        subtitles = status.get("subtitles") if isinstance(status, dict) else []
+    expected = len(subtitles or [])
+    before = page.evaluate(
+        """() => ({
+            inputPresent: !!document.querySelector('#subtitle-shift-seconds'),
+            trackCount: document.querySelectorAll('track[data-shared-subtitle="1"]').length,
+            trackSources: Array.from(document.querySelectorAll('track[data-shared-subtitle="1"]')).map(track => track.src || track.getAttribute('src') || ''),
+        })"""
+    )
+    if expected <= 0:
+        return {
+            "ok": False,
+            "expected_subtitle_count": expected,
+            "before": before,
+            "reason": "playback_subtitles_missing",
+            "reset": False,
+        }
+    if not before.get("inputPresent") or int(before.get("trackCount") or 0) < expected:
+        return {
+            "ok": False,
+            "expected_subtitle_count": expected,
+            "before": before,
+            "reason": "subtitle_controls_or_tracks_missing",
+            "reset": False,
+        }
+    page.locator("#subtitle-shift-seconds").fill("0.5")
+    page.locator("#subtitle-shift-seconds").dispatch_event("change")
+    page.wait_for_function(
+        """() => {
+            const tracks = Array.from(document.querySelectorAll('track[data-shared-subtitle="1"]'));
+            return tracks.length > 0 && tracks.every(track => {
+                const src = track.src || track.getAttribute('src') || '';
+                return new URL(src, window.location.origin).searchParams.get('shift_ms') === '500';
+            });
+        }""",
+        timeout=15000,
+    )
+    shifted = page.evaluate(
+        """() => ({
+            inputValue: document.querySelector('#subtitle-shift-seconds')?.value || '',
+            trackSources: Array.from(document.querySelectorAll('track[data-shared-subtitle="1"]')).map(track => track.src || track.getAttribute('src') || ''),
+        })"""
+    )
+    page.locator("[data-subtitle-shift-reset]").click()
+    page.wait_for_function(
+        """() => {
+            const input = document.querySelector('#subtitle-shift-seconds');
+            const tracks = Array.from(document.querySelectorAll('track[data-shared-subtitle="1"]'));
+            return input?.value === '0' && tracks.length > 0 && tracks.every(track => {
+                const src = track.src || track.getAttribute('src') || '';
+                return !new URL(src, window.location.origin).searchParams.has('shift_ms');
+            });
+        }""",
+        timeout=15000,
+    )
+    reset = page.evaluate(
+        """() => ({
+            inputValue: document.querySelector('#subtitle-shift-seconds')?.value || '',
+            trackSources: Array.from(document.querySelectorAll('track[data-shared-subtitle="1"]')).map(track => track.src || track.getAttribute('src') || ''),
+        })"""
+    )
+    return {
+        "ok": True,
+        "expected_subtitle_count": expected,
+        "before": before,
+        "shifted": shifted,
+        "reset_state": reset,
+        "reset": True,
+    }
+
+
 def check_shared_video_browser(browser_type, *, browser_name: str, base_url: str, share_url: str, headed: bool, mobile: bool) -> dict[str, Any]:
     errors: list[dict[str, str]] = []
     viewport = {"width": 390, "height": 844} if mobile else {"width": 1366, "height": 768}
@@ -548,6 +625,7 @@ def check_shared_video_browser(browser_type, *, browser_name: str, base_url: str
                 }""",
                 master_url,
             )
+        subtitle_shift = exercise_subtitle_shift(page, playback.get("body") or {})
         standard = switch_to_standard_proxy(page, share_session_id)
         fatal_errors = [
             item
@@ -562,10 +640,12 @@ def check_shared_video_browser(browser_type, *, browser_name: str, base_url: str
             and media["height"] > 0
             and media["hostHidden"] is False
             and standard.get("ok") is True
+            and subtitle_shift.get("ok") is True
+            and subtitle_shift.get("reset") is True
             and not fatal_errors
             and (not master_url or (master.get("status") == 200 and "#EXTM3U" in master.get("text", "")))
         )
-        result.update({"ok": bool(ok), "media": media, "playback": playback, "master": master, "standard": standard, "fatal_errors": fatal_errors})
+        result.update({"ok": bool(ok), "media": media, "playback": playback, "master": master, "standard": standard, "subtitle_shift": subtitle_shift, "fatal_errors": fatal_errors})
         return result
     except Exception as exc:
         exception_text = f"{type(exc).__name__}: {exc}"
@@ -704,15 +784,24 @@ def main(argv: list[str] | None = None) -> int:
             require_all_browsers=bool(args.require_all_browsers),
         )
         payload["browser_coverage"] = coverage
-        payload["ok"] = coverage["ok"]
-        json_path, md_path = write_outputs(runtime_root, payload)
-        print(json.dumps({"ok": payload["ok"], "json": str(json_path), "md": str(md_path), "base_url": base_url}, ensure_ascii=False), flush=True)
+        was_running = server.poll() is None
+        terminate_attempted = bool(was_running and not args.keep_server)
         if server.poll() is None and not args.keep_server:
             server.terminate()
             try:
                 server.wait(timeout=8)
             except subprocess.TimeoutExpired:
                 server.kill()
+                server.wait(timeout=5)
+        payload["cleanup"] = {
+            "server_was_running": was_running,
+            "terminate_attempted": terminate_attempted,
+            "server_stopped": server.poll() is not None,
+            "keep_server_requested": bool(args.keep_server),
+        }
+        payload["ok"] = bool(coverage["ok"] and (args.keep_server or payload["cleanup"]["server_stopped"]))
+        json_path, md_path = write_outputs(runtime_root, payload)
+        print(json.dumps({"ok": payload["ok"], "json": str(json_path), "md": str(md_path), "base_url": base_url}, ensure_ascii=False), flush=True)
     return 0 if payload.get("ok") else 1
 
 

@@ -12,6 +12,7 @@ import pytest
 
 from scripts.testing.campaign_watchdog import (
     CONTROL_SCHEMA_VERSION,
+    DURABLE_HEARTBEAT_INTERVAL_SECONDS,
     INCIDENT_EXIT_CODE,
     CgroupIdentity,
     DuplicateWatchdogError,
@@ -25,6 +26,7 @@ from scripts.testing.campaign_watchdog import (
     load_json,
     locked_path,
 )
+from scripts.testing.campaign_control_channel import sign_authenticated_payload
 
 
 CAMPAIGN_UUID = "campaign-watchdog-test-001"
@@ -71,12 +73,12 @@ def fake_cgroup(cgroup_root: Path, path: str = "/test.slice/campaign.scope") -> 
         "cgroup.events": "populated 0\nfrozen 0\n",
         "memory.current": "1024\n",
         "memory.events": "oom 0\noom_kill 0\n",
-        "memory.max": str(8 * 1024**3) + "\n",
-        "memory.high": str(7 * 1024**3) + "\n",
-        "memory.swap.max": str(1024**3) + "\n",
-        "cpu.max": "600000 100000\n",
+        "memory.max": str(6 * 1024**3) + "\n",
+        "memory.high": str(5 * 1024**3) + "\n",
+        "memory.swap.max": str(512 * 1024**2) + "\n",
+        "cpu.max": "300000 100000\n",
         "pids.current": "3\n",
-        "pids.max": "768\n",
+        "pids.max": "384\n",
     }
     for name, value in files.items():
         (target / name).write_text(value, encoding="ascii")
@@ -195,6 +197,90 @@ def test_healthy_watchdog_sample_records_external_heartbeat_without_stopping_loa
     assert (cgroup_root / "test.slice" / "campaign.scope" / "cgroup.kill").read_text().startswith("0")
 
 
+def test_durable_watchdog_heartbeat_is_throttled_without_throttling_evaluation(
+    tmp_path: Path,
+) -> None:
+    watchdog, _paths, _proc_root, _cgroup_root = make_harness(tmp_path)
+    now = [100_000_000_000]
+    watchdog.monotonic_ns = lambda: now[0]
+    watchdog.last_watchdog_heartbeat_ns = now[0]
+
+    assert watchdog._watchdog_heartbeat_due() is False
+    now[0] += int(DURABLE_HEARTBEAT_INTERVAL_SECONDS * 1_000_000_000) - 1
+    assert watchdog._watchdog_heartbeat_due() is False
+    now[0] += 1
+    assert watchdog._watchdog_heartbeat_due() is True
+
+
+def test_recurring_watchdog_liveness_does_not_rewrite_state_every_interval(
+    tmp_path: Path,
+) -> None:
+    watchdog, paths, _proc_root, _cgroup_root = make_harness(tmp_path)
+
+    assert watchdog.run(once=True) == 0
+    state_before = paths.state.read_bytes()
+    liveness_path = watchdog._liveness_path()
+    liveness_before = load_json(liveness_path)
+    now_ns = int(
+        (liveness_before.get("watchdog") or {}).get("monotonic_ns") or 0
+    ) + int(DURABLE_HEARTBEAT_INTERVAL_SECONDS * 1_000_000_000)
+    watchdog.monotonic_ns = lambda: now_ns
+
+    watchdog._record_watchdog_heartbeat(update_state=False)
+
+    assert paths.state.read_bytes() == state_before
+    liveness_after = load_json(liveness_path)
+    assert liveness_after["watchdog"]["monotonic_ns"] == now_ns
+
+
+def test_authenticated_heartbeat_rejects_tamper_and_replayed_sequence(tmp_path: Path) -> None:
+    watchdog, paths, _proc_root, _cgroup_root = make_harness(tmp_path)
+    secret = b"h" * 32
+    watchdog.runner_auth_key = secret
+    heartbeat = load_json(paths.heartbeat)
+    checkpoint = load_json(paths.checkpoint)
+    signed_heartbeat = sign_authenticated_payload(
+        heartbeat,
+        session_secret=secret,
+        campaign_uuid=CAMPAIGN_UUID,
+        stream="runner_heartbeat",
+        sequence=2,
+        monotonic_ns=9_000_000_000,
+    )
+    signed_checkpoint = sign_authenticated_payload(
+        checkpoint,
+        session_secret=secret,
+        campaign_uuid=CAMPAIGN_UUID,
+        stream="runner_checkpoint",
+        sequence=2,
+        monotonic_ns=9_000_000_000,
+    )
+    write_json(paths.heartbeat, signed_heartbeat)
+    write_json(paths.checkpoint, signed_checkpoint)
+
+    healthy, reason, _details = watchdog._heartbeat_health()
+    assert healthy is True
+    assert reason == "HEALTHY"
+
+    write_json(paths.heartbeat, {**signed_heartbeat, "tampered": True})
+    healthy, reason, _details = watchdog._heartbeat_health()
+    assert healthy is False
+    assert reason == "HEARTBEAT_AUTHENTICATION_INVALID"
+
+    replayed_heartbeat = sign_authenticated_payload(
+        heartbeat,
+        session_secret=secret,
+        campaign_uuid=CAMPAIGN_UUID,
+        stream="runner_heartbeat",
+        sequence=1,
+        monotonic_ns=9_000_000_000,
+    )
+    write_json(paths.heartbeat, replayed_heartbeat)
+    healthy, reason, _details = watchdog._heartbeat_health()
+    assert healthy is False
+    assert reason == "HEARTBEAT_AUTHENTICATION_INVALID"
+
+
 def test_stale_heartbeat_atomically_stops_admission_preserves_time_and_kills_scope(tmp_path: Path) -> None:
     watchdog, paths, _proc_root, cgroup_root = make_harness(
         tmp_path,
@@ -291,6 +377,22 @@ def test_checkpoint_must_be_at_least_as_durable_as_heartbeat(tmp_path: Path) -> 
 
     assert watchdog.run(once=True) == INCIDENT_EXIT_CODE
     assert load_json(paths.state)["hard_stop"]["reason_code"] == "CHECKPOINT_NOT_DURABLE"
+
+
+def test_startup_evidence_preserves_secret_free_reciprocal_auth_proof(tmp_path: Path) -> None:
+    watchdog, _paths, _proc_root, _cgroup_root = make_harness(tmp_path)
+    proof = {
+        "server_identity_verified": True,
+        "session_secret_received": True,
+        "session_secret_sha256": "a" * 64,
+        "role": "watchdog",
+    }
+    watchdog.control_authentication_evidence = dict(proof)
+
+    startup = watchdog.validate_startup()
+
+    assert startup["authenticated_control_channel"] == proof
+    assert "session_secret" not in startup["authenticated_control_channel"]
 
 
 def test_watchdog_refuses_to_run_inside_campaign_cgroup(tmp_path: Path) -> None:

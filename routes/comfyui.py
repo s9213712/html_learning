@@ -86,6 +86,7 @@ from services.comfyui.template import (
     runtime_comfyui_dir,
 )
 from services.comfyui.template.seeding import SYSTEM_WORKFLOW_IDS
+from services.comfyui.template.cleanup import cleanup_run_temp_files, purge_comfyui_run_input
 from services.comfyui.validation.rules import (
     WORKFLOW_ABSOLUTE_PATH_RE,
     WORKFLOW_BLOCKED_COMMAND_RE,
@@ -3524,22 +3525,28 @@ def register_comfyui_routes(app, deps):
             history_id = None
             conn = get_db()
             try:
+                history_result_payload = {
+                    "prompt_id": result.get("prompt_id") or "",
+                    "images": [
+                        {
+                            "image_ref": item.get("image_ref"),
+                            "mime_type": item.get("mime_type"),
+                            "size_bytes": item.get("size_bytes"),
+                        }
+                        for item in images
+                    ],
+                }
+                if result.get("final_model_safety") is not None:
+                    history_result_payload["final_model_safety"] = result.get("final_model_safety")
+                    history_result_payload["final_model_safety_backend_binding"] = result.get(
+                        "final_model_safety_backend_binding"
+                    )
                 history_id = _record_generation_history(
                     conn,
                     actor=actor,
                     params=params,
                     backend_url=backend_binding.get("url"),
-                    result_payload={
-                        "prompt_id": result.get("prompt_id") or "",
-                        "images": [
-                            {
-                                "image_ref": item.get("image_ref"),
-                                "mime_type": item.get("mime_type"),
-                                "size_bytes": item.get("size_bytes"),
-                            }
-                            for item in images
-                        ],
-                    },
+                    result_payload=history_result_payload,
                 )
                 conn.commit()
             except Exception:
@@ -3550,12 +3557,18 @@ def register_comfyui_routes(app, deps):
             finally:
                 conn.close()
             payload = {
+                "prompt_id": result.get("prompt_id") or "",
                 "image": images[0],
                 "images": images,
                 "billing": billing,
                 "history_id": history_id,
                 "wallet": (billing or {}).get("wallet") or _comfyui_wallet_payload(actor),
             }
+            if result.get("final_model_safety") is not None:
+                payload["final_model_safety"] = result.get("final_model_safety")
+                payload["final_model_safety_backend_binding"] = result.get(
+                    "final_model_safety_backend_binding"
+                )
             payload.update(_generation_delivery_contract(params, image_count=len(images)))
             audit(
                 "COMFYUI_GENERATE",
@@ -3705,7 +3718,66 @@ def register_comfyui_routes(app, deps):
         prompt = str(default_params.get("prompt") or "")
         negative_prompt = str(default_params.get("negative_prompt") or "")
         expected_count = _workflow_expected_image_count(workflow_json, default_params)
+        input_assignment_count = len(
+            default_params.get("image_field_assignments")
+            if isinstance(default_params.get("image_field_assignments"), dict)
+            else {}
+        )
         partial_state = {"signature": ""}
+        cleanup_state = {"receipt": None}
+
+        def _cleanup_media_inputs(reason):
+            if cleanup_state["receipt"] is not None:
+                return cleanup_state["receipt"]
+            media_run_id = str(default_params.get("media_remap_run_id") or "").strip()
+            if not media_run_id:
+                cleanup_state["receipt"] = {
+                    "schema_version": 1,
+                    "run_id": "",
+                    "reason": reason,
+                    "ok": True,
+                    "absence_verified": True,
+                    "detail": "no_temp_inputs",
+                    "input_ref_count": 0,
+                }
+                return cleanup_state["receipt"]
+
+            def _purge_callback(
+                *,
+                run_id,
+                user_id,
+                backend_url="",
+                input_refs=None,
+                upload_attempted=False,
+            ):
+                cleanup_backend_url = str(backend_url or backend_binding.get("url") or "").strip()
+                cleanup_client = _client_for_url(cleanup_backend_url)
+                try:
+                    project_dir = _configured_comfyui_project_dir()
+                except Exception:
+                    project_dir = None
+                return purge_comfyui_run_input(
+                    run_id=run_id,
+                    user_id=user_id,
+                    backend_url=cleanup_backend_url,
+                    input_refs=list(input_refs or []),
+                    upload_attempted=bool(upload_attempted),
+                    client=cleanup_client,
+                    local_base_dir=project_dir,
+                )
+
+            cleanup_state["receipt"] = cleanup_run_temp_files(
+                run_id=media_run_id,
+                user_id=int(_actor_value(actor, "id")),
+                cleanup_callback=_purge_callback,
+                audit=audit,
+                audit_user=_actor_value(actor, "username") or "-",
+                audit_ip=audit_ip,
+                audit_ua=audit_ua,
+                reason=reason,
+                return_receipt=True,
+            )
+            return cleanup_state["receipt"]
 
         def _partial_output_signature(refs):
             parts = []
@@ -3765,6 +3837,7 @@ def register_comfyui_routes(app, deps):
             except Exception:
                 return
             payload = {
+                "prompt_id": result.get("prompt_id") or "",
                 "image": images[0] if images else None,
                 "images": images,
                 "media": [],
@@ -3803,6 +3876,11 @@ def register_comfyui_routes(app, deps):
                 audit_ua=audit_ua,
             )
             _assert_comfyui_final_images_usable(result)
+            cleanup_receipt = _cleanup_media_inputs("async_terminal_success")
+            if not cleanup_receipt.get("ok") or not cleanup_receipt.get("absence_verified"):
+                raise ComfyUIError(
+                    "ComfyUI workflow 已產生輸出，但暫存輸入媒體無法證明已清除；工作已依安全策略標記失敗"
+                )
             images = (
                 _finalize_generation_records(actor, default_params, result, backend_url=backend_binding.get("url"))
                 if isinstance(result.get("images"), list) and result.get("images")
@@ -3811,6 +3889,7 @@ def register_comfyui_routes(app, deps):
             media = _serialize_comfyui_media_records(result)
             output_refs = {
                 "prompt_id": result.get("prompt_id") or "",
+                "input_cleanup": cleanup_receipt,
                 "images": [
                     {
                         "image_ref": item.get("image_ref"),
@@ -3831,6 +3910,11 @@ def register_comfyui_routes(app, deps):
                     for item in media
                 ],
             }
+            if result.get("final_model_safety") is not None:
+                output_refs["final_model_safety"] = result.get("final_model_safety")
+                output_refs["final_model_safety_backend_binding"] = result.get(
+                    "final_model_safety_backend_binding"
+                )
             conn = get_db()
             try:
                 _update_workflow_run(conn, run_id=run_id, status="completed", output_refs=output_refs, error="")
@@ -3844,7 +3928,14 @@ def register_comfyui_routes(app, deps):
                 "backend_url": backend_binding.get("url"),
                 "workflow_run_id": run_id,
                 "preset_id": int(row["id"]),
+                "input_cleanup": cleanup_receipt,
+                "input_assignment_count": input_assignment_count,
             }
+            if result.get("final_model_safety") is not None:
+                payload["final_model_safety"] = result.get("final_model_safety")
+                payload["final_model_safety_backend_binding"] = result.get(
+                    "final_model_safety_backend_binding"
+                )
             payload.update(_generation_delivery_contract(default_params, image_count=len(images)))
             completed_progress = {
                 **_generation_job_progress_snapshot(job_id),
@@ -3870,41 +3961,89 @@ def register_comfyui_routes(app, deps):
                 detail=f"job_id={job_id}, preset_id={row['id']}, run_id={run_id}, prompt_id={result.get('prompt_id') or ''}",
             )
         except ComfyUIError as exc:
-            conn = get_db()
+            cleanup_receipt = _cleanup_media_inputs("async_terminal_comfyui_error")
+            error_text = str(exc)
+            if not cleanup_receipt.get("ok") or not cleanup_receipt.get("absence_verified"):
+                error_text = f"{error_text}; input_cleanup_not_verified"
             try:
-                _update_workflow_run(conn, run_id=run_id, status="error", output_refs={}, error=str(exc))
-                conn.commit()
-            finally:
-                conn.close()
+                conn = get_db()
+                try:
+                    _update_workflow_run(
+                        conn,
+                        run_id=run_id,
+                        status="error",
+                        output_refs={"input_cleanup": cleanup_receipt},
+                        error=error_text,
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
+            except Exception as persist_exc:
+                error_text = f"{error_text}; workflow_error_receipt_persist_failed:{type(persist_exc).__name__}"
             error_progress = {
                 **_generation_job_progress_snapshot(job_id),
                 "phase": "error",
                 "percent": 100,
-                "detail": str(exc),
-                "error_message": str(exc),
+                "detail": error_text,
+                "error_message": error_text,
                 "completed": False,
+                "input_cleanup": cleanup_receipt,
             }
-            _update_generation_job(job_id, status="error", error=str(exc), result=None, progress=error_progress)
+            _update_generation_job(
+                job_id,
+                status="error",
+                error=error_text,
+                result={
+                    "workflow_run_id": run_id,
+                    "input_cleanup": cleanup_receipt,
+                    "input_assignment_count": input_assignment_count,
+                },
+                progress=error_progress,
+            )
             _update_generation_job_progress(job_id, error_progress)
-            audit("COMFYUI_WORKFLOW_RUN_ERROR", audit_ip, user=_actor_value(actor, "username"), success=False, ua=audit_ua, detail=str(exc)[:180])
+            audit("COMFYUI_WORKFLOW_RUN_ERROR", audit_ip, user=_actor_value(actor, "username"), success=False, ua=audit_ua, detail=error_text[:180])
         except Exception as exc:
-            conn = get_db()
+            cleanup_receipt = _cleanup_media_inputs("async_terminal_unexpected_error")
+            error_text = str(exc)
+            if not cleanup_receipt.get("ok") or not cleanup_receipt.get("absence_verified"):
+                error_text = f"{error_text}; input_cleanup_not_verified"
             try:
-                _update_workflow_run(conn, run_id=run_id, status="error", output_refs={}, error=str(exc))
-                conn.commit()
-            finally:
-                conn.close()
+                conn = get_db()
+                try:
+                    _update_workflow_run(
+                        conn,
+                        run_id=run_id,
+                        status="error",
+                        output_refs={"input_cleanup": cleanup_receipt},
+                        error=error_text,
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
+            except Exception as persist_exc:
+                error_text = f"{error_text}; workflow_error_receipt_persist_failed:{type(persist_exc).__name__}"
             error_progress = {
                 **_generation_job_progress_snapshot(job_id),
                 "phase": "error",
                 "percent": 100,
-                "detail": str(exc),
-                "error_message": str(exc),
+                "detail": error_text,
+                "error_message": error_text,
                 "completed": False,
+                "input_cleanup": cleanup_receipt,
             }
-            _update_generation_job(job_id, status="error", error=str(exc), result=None, progress=error_progress)
+            _update_generation_job(
+                job_id,
+                status="error",
+                error=error_text,
+                result={
+                    "workflow_run_id": run_id,
+                    "input_cleanup": cleanup_receipt,
+                    "input_assignment_count": input_assignment_count,
+                },
+                progress=error_progress,
+            )
             _update_generation_job_progress(job_id, error_progress)
-            audit("COMFYUI_WORKFLOW_RUN_ERROR", audit_ip, user=_actor_value(actor, "username"), success=False, ua=audit_ua, detail=str(exc)[:180])
+            audit("COMFYUI_WORKFLOW_RUN_ERROR", audit_ip, user=_actor_value(actor, "username"), success=False, ua=audit_ua, detail=error_text[:180])
 
     def _run_comfyui_model_download_job(job_id, actor, request_data, request_meta=None):
         request_data = dict(request_data or {})
@@ -4822,6 +4961,7 @@ def register_comfyui_routes(app, deps):
         "list_workflow_runs": _list_workflow_runs,
         "resolve_file_storage_path": resolve_file_storage_path,
         "storage_root": storage_root,
+        "configured_comfyui_project_dir": _configured_comfyui_project_dir,
         "normalize_generation_payload": _normalize_generation_payload,
         "validate_generation_capabilities": _validate_generation_capabilities,
         "sanitize_workflow_json": sanitize_workflow_json,
@@ -4832,6 +4972,7 @@ def register_comfyui_routes(app, deps):
         "assert_workflow_dependencies_or_error": _assert_workflow_dependencies_or_error,
         "create_workflow_run": _create_workflow_run,
         "create_generation_job": _create_generation_job,
+        "update_generation_job": _update_generation_job,
         "capture_request_audit_meta": _capture_request_audit_meta,
         "run_comfyui_workflow_preset_job": _run_comfyui_workflow_preset_job,
         "comfyui_paid_api_policy": _comfyui_paid_api_policy,

@@ -296,9 +296,18 @@ def test_appeal_approval_rolls_back_points_before_committing_review():
     appeals = (ROOT / "routes" / "appeals.py").read_text(encoding="utf-8")
     review = appeals.split("def admin_violation_appeal_review", 1)[1].split("def ", 1)[0]
 
-    assert "申覆點數補償交易失敗，申覆狀態尚未變更，請修復後重試" in review
-    assert review.index("points_service.compensate_ledger") < review.index("UPDATE violation_appeals SET status=?")
-    assert review.index("points_service.compensate_ledger") < review.index("conn.commit()")
+    claim = "SET status='reviewing_approve'"
+    compensate = "points_service.compensate_ledger"
+    finalize = "SET status='approved'"
+
+    assert "申覆點數補償交易失敗，申覆保留於可重試審核狀態" in review
+    assert claim in review
+    assert "WHERE id=? AND status='pending'" in review
+    assert "WHERE id=? AND status='reviewing_approve'" in review
+    assert review.index(claim) < review.index(compensate) < review.index(finalize)
+    assert "restored_violation_count(" in review
+    assert 'current_count=user_row["violation_count"]' in review
+    assert 'appeal["violation_count_snapshot"]' not in review
 
 
 def test_album_share_links_revoked_and_deleted_albums_not_resolved():

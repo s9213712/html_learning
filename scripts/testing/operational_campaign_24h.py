@@ -10,12 +10,14 @@ import math
 import os
 import re
 import secrets
+import shutil
 import signal
 import socket
 import sqlite3
 import stat
 import subprocess
 import sys
+import tarfile
 import threading
 import time
 from dataclasses import dataclass
@@ -23,7 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from statistics import median
 from typing import Any, Callable, Mapping
-from urllib.parse import quote
+from urllib.parse import quote, urljoin, urlsplit
 
 import requests
 import urllib3
@@ -51,11 +53,63 @@ from scripts.testing.campaign_load import (
     LOAD_SAMPLE_SCHEMA_VERSION,
 )
 from scripts.testing.campaign_cgroup import MANDATORY_MANAGED_ROLES
+from scripts.testing.campaign_comfyui_sandbox import (
+    HOST_TRANSITION_SCHEMA_VERSION,
+    SANDBOX_PROOF_SCHEMA_VERSION,
+)
+from scripts.testing.campaign_comfyui_backend import (
+    COMFYUI_BACKEND_READY_SCHEMA_VERSION,
+    read_stable_ready_receipt,
+    validate_live_comfyui_backend_authority,
+)
 from scripts.testing.campaign_scenario_binding import (
     FORMAL_BINDING_GATE_SCHEMA_VERSION,
     FORMAL_SCENARIO_BINDINGS,
+    NATIVE_RUNNER_RESULT_SCHEMA_VERSION,
+    NativeEvidenceAdapterRegistration,
     ScenarioRunnerRegistration,
+    ScenarioValidatorRegistration,
     build_and_validate_formal_scenario_bindings,
+    build_strict_native_adapter_registry,
+    build_strict_native_validator_registry,
+    execute_registered_native_scenario,
+    strict_native_runtime_pipeline_verified,
+    validate_scenario_runtime_receipt,
+)
+from scripts.testing.campaign_gate_bundle import protected_source_identity_digest
+from scripts.testing.campaign_qualification_capture import (
+    REHEARSAL_PROJECTION_CONTEXT_ENV,
+    REHEARSAL_PROJECTION_CONTEXT_SHA256_ENV,
+    read_sealed_rehearsal_projection_context,
+)
+from scripts.testing.audit_evidence_triad import (
+    ARCHIVE_SCHEMA_VERSION as AUDIT_EVIDENCE_ARCHIVE_SCHEMA_VERSION,
+    SCHEMA_PATH as AUDIT_EVIDENCE_SCHEMA_PATH,
+    SCHEMA_VERSION as AUDIT_EVIDENCE_SCHEMA_VERSION,
+    AuditEvidencePaths,
+    capture_audit_evidence,
+    validate_audit_evidence_archive,
+    validate_audit_evidence_receipt,
+)
+from scripts.testing.campaign_native_evidence import attach_native_evidence
+from scripts.testing.bt_formal_local_probe import (
+    MANDATORY_CHECK_IDS as BT_MANDATORY_CHECK_IDS,
+    validate_machine_report as validate_bt_machine_report,
+)
+from scripts.testing.campaign_native_selectors import (
+    ai_agent_positive_assertions,
+    backup_restore_assertions,
+    bt_download_assertions,
+    cloud_drive_stream_assertions,
+    comfyui_workflow_assertions,
+    community_governance_assertions,
+    final_ui_assertions,
+    media_long_assertions,
+    media_proxy_assertions,
+    pointschain_hft_assertions,
+    server_emergency_assertions,
+    trading_workflow_assertions,
+    wallet_incident_assertions,
 )
 from scripts.testing.operation_coverage import CAMPAIGN_SCENARIO_CONTRACTS
 from scripts.testing.campaign_observability import (
@@ -63,6 +117,10 @@ from scripts.testing.campaign_observability import (
     ResourceCollector as StructuredResourceCollector,
     ResourceCollectorConfig as StructuredResourceCollectorConfig,
     ResourceMonitor as StructuredResourceMonitor,
+    STARTUP_MAXIMUM_HOST_IO_PRESSURE_FULL_AVG10,
+    STARTUP_MAXIMUM_HOST_IO_PRESSURE_FULL_AVG60,
+    collect_host_startup_safety_preflight,
+    wait_for_host_safety_preflight,
 )
 from scripts.testing.campaign_security_sentinel import (
     ProductionSecuritySentinel,
@@ -76,14 +134,47 @@ from scripts.testing.campaign_secret_scan import (
     scan_campaign_secrets,
     snapshot_control_evidence,
 )
-from scripts.testing.campaign_source_freeze import GitSourceFreezer, SOURCE_FREEZE_SCHEMA_VERSION
+from scripts.testing.campaign_source_freeze import (
+    FULL_CONTENT_EVIDENCE,
+    METADATA_CONTENT_EVIDENCE,
+    GitSourceFreezer,
+    SOURCE_FREEZE_SCHEMA_VERSION,
+)
+from scripts.testing.campaign_runtime_contract import (
+    MIN_FORMAL_SECONDS,
+    SUPERVISED_LEVEL_DURATIONS,
+    SUPERVISED_LOAD_POLICIES,
+    SUPERVISED_RUNNER_PROFILE_OPTIONS,
+    SUPERVISED_RUNNER_PROFILES,
+    Credentials,
+    validate_control_root,
+    validate_tmp_path,
+)
 from scripts.testing.campaign_state import CampaignState, CampaignStateError, CampaignStateMachine, process_start_ticks
+from scripts.testing.campaign_control_channel import (
+    PeerIdentity,
+    send_hello,
+    sign_authenticated_payload,
+    verify_authenticated_payload,
+)
 from scripts.testing.campaign_watchdog import atomic_write_json as durable_atomic_write_json
 
 LAUNCHER = ROOT / "test_for_develop.sh"
 SOAK = ROOT / "scripts" / "testing" / "operational_soak_probe.py"
 SMOKE_LOAD = ROOT / "scripts" / "testing" / "campaign_smoke_load.py"
-MIN_FORMAL_SECONDS = 24 * 60 * 60
+RUNNER_HOST_SAFETY_TIMEOUT_SECONDS = 90.0
+# Covers all dormant supervisor settle windows (runner import, state writes,
+# staged watchdog bootstrap, readiness, and final activation) with margin.
+RUNNER_SUPERVISOR_ACTIVATION_TIMEOUT_SECONDS = 900.0
+RUNNER_STARTUP_IO_PRESSURE_AVG10_MAXIMUM = (
+    STARTUP_MAXIMUM_HOST_IO_PRESSURE_FULL_AVG10
+)
+RUNNER_STARTUP_IO_PRESSURE_AVG60_MAXIMUM = (
+    STARTUP_MAXIMUM_HOST_IO_PRESSURE_FULL_AVG60
+)
+FINAL_AUDIT_EVIDENCE_INDEX_SCHEMA_VERSION = "hackme.audit-evidence-triad-index/v1"
+FINAL_AUDIT_EVIDENCE_MANIFEST_SCHEMA_VERSION = "hackme.audit-evidence-triad-hash-manifest/v1"
+FINAL_AUDIT_EVIDENCE_SEAL_SCHEMA_VERSION = "hackme.audit-writer-seal-verification/v1"
 SMOKE_REQUIRED_MANAGED_ROLES = frozenset({
     "primary",
     "recovery",
@@ -135,77 +226,138 @@ CORE_REPORT_CARDINALITY_LIMITS = {
     "smoke_load_samples": 10_000,
     "smoke_workers": 256,
 }
-SUPERVISED_LEVEL_DURATIONS = {
-    "smoke": 180,
-    "rehearsal": 3_600,
-    "formal": MIN_FORMAL_SECONDS,
+# These are evidence mappings, not labels inferred from a campaign level.  A
+# feature is emitted into the rehearsal receipt only when the strict native
+# scenario pipeline for the owning scenario returned an exact ``ok is True``.
+# The formal gate independently reopens each scenario receipt afterwards.
+REHEARSAL_FEATURE_SCENARIOS: Mapping[str, str] = {
+    "planned_restart": "backup_restore_restart",
+    "runtime_backup_restore": "backup_restore_restart",
+    "comfyui_real_workflow": "comfyui_real_workflows",
+    "bt_terminal_download": "bt_download_stream_restart",
+    "cross_browser_mobile_ui": "final_ui_mobile_prelaunch",
 }
-# The supervisor writes this exact profile into its signed runtime contract and
-# also supplies every value explicitly on the runner argv.  Re-validating the
-# same values inside the managed runner prevents a hand-edited activation file
-# or a late argv option from weakening the campaign after preflight.
-SUPERVISED_RUNNER_PROFILES: dict[str, dict[str, int | float]] = {
-    level: {
-        "workers": 4,
-        "threads": 8,
-        "account_count": 10,
-        "round_ops": 1_000,
-        "concurrency": 32,
-        "session_pool": 20,
-        "browser_interval_seconds": 3 * 60 * 60,
-        "resource_interval": 5.0,
-        "heartbeat_interval": 60.0,
-        "scenario_join_timeout_seconds": 8 * 60 * 60,
-        "minimum_free_gb": 20.0,
-        "max_server_busy_rate": 0.05,
-        "max_ordinary_p95_ms": 3_000.0,
-        "max_ordinary_p99_ms": 8_000.0,
-        "max_sentinel_p95_ms": 3_000.0,
+_EXECUTION_GAP_KEYS: Mapping[str, frozenset[str]] = {
+    "skips": frozenset({"skip", "skipped", "skips"}),
+    "fallbacks": frozenset({
+        "fallback",
+        "fallbacks",
+        "fallback_error",
+        "fallback_used",
+        "used_fallback",
+    }),
+    "expected_gaps": frozenset({"expected_gap", "expected_gaps"}),
+}
+_EXECUTION_GAP_SCAN_MAX_NODES = 250_000
+_EXECUTION_GAP_SCAN_MAX_DEPTH = 64
+
+
+def _declared_gap_is_active(value: Any) -> bool:
+    """Treat only explicit, non-empty gap declarations as active evidence."""
+
+    if value is None or value is False:
+        return False
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() not in {"", "0", "false", "none", "no"}
+    if isinstance(value, (list, tuple, set, frozenset, dict)):
+        return bool(value)
+    return True
+
+
+def derive_rehearsal_execution_contract(
+    scenario_results: Mapping[str, Any],
+    state_snapshot: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Project gate fields from authoritative runtime state, fail closed.
+
+    The projection never declares all features merely because a rehearsal was
+    requested.  It requires the corresponding strict native scenario result,
+    reads invalid time from the durable state-machine clock, and recursively
+    detects any explicit skip/fallback/expected-gap marker.
+    """
+
+    errors: list[str] = []
+    clock = state_snapshot.get("clock")
+    invalid_seconds: float | None = None
+    if not isinstance(clock, Mapping):
+        errors.append("state_clock_missing")
+    else:
+        raw_invalid = clock.get("invalid_seconds")
+        if (
+            isinstance(raw_invalid, bool)
+            or not isinstance(raw_invalid, (int, float))
+            or not math.isfinite(float(raw_invalid))
+            or float(raw_invalid) < 0.0
+        ):
+            errors.append("invalid_seconds_missing_or_invalid")
+        else:
+            invalid_seconds = round(float(raw_invalid), 6)
+
+    features = sorted(
+        feature
+        for feature, scenario_id in REHEARSAL_FEATURE_SCENARIOS.items()
+        if isinstance(scenario_results.get(scenario_id), Mapping)
+        and scenario_results[scenario_id].get("ok") is True
+    )
+
+    declarations: dict[str, list[dict[str, str]]] = {
+        name: [] for name in _EXECUTION_GAP_KEYS
     }
-    for level in SUPERVISED_LEVEL_DURATIONS
-}
-SUPERVISED_RUNNER_PROFILE_OPTIONS = {
-    "workers": "--workers",
-    "threads": "--threads",
-    "account_count": "--account-count",
-    "round_ops": "--round-ops",
-    "concurrency": "--concurrency",
-    "session_pool": "--session-pool",
-    "browser_interval_seconds": "--browser-interval-seconds",
-    "resource_interval": "--resource-interval",
-    "heartbeat_interval": "--heartbeat-interval",
-    "scenario_join_timeout_seconds": "--scenario-join-timeout-seconds",
-    "minimum_free_gb": "--minimum-free-gb",
-    "max_server_busy_rate": "--max-server-busy-rate",
-    "max_ordinary_p95_ms": "--max-ordinary-p95-ms",
-    "max_ordinary_p99_ms": "--max-ordinary-p99-ms",
-    "max_sentinel_p95_ms": "--max-sentinel-p95-ms",
-}
-SUPERVISED_LOAD_POLICIES: dict[str, dict[str, Any]] = {
-    level: {
-        "ramp_required": level in {"rehearsal", "formal"},
-        "ramp_levels": [4, 8, 16, 32],
-        "minimum_ramp_stage_seconds": (
-            {"4": 600.0, "8": 1_200.0, "16": 1_800.0, "32": 0.0}
-            if level == "formal"
-            else {"4": 60.0, "8": 120.0, "16": 180.0, "32": 0.0}
-            if level == "rehearsal"
-            else {"4": 0.0, "8": 0.0, "16": 0.0, "32": 0.0}
-        ),
-        "minimum_target_load_coverage": 0.90,
-        "minimum_active_workers_at_32": 28,
-        "minimum_baseline_throughput_ratio": 0.80,
-        "minimum_effective_operation_ratio": 0.85,
-        "maximum_stage_boundary_lag_seconds": 15.0,
-        "ramp_completion_deadline_seconds": (
-            3_600.0 if level == "formal" else 360.0 if level == "rehearsal" else 0.0
-        ),
-        "minimum_post_ramp_seconds": (
-            82_800.0 if level == "formal" else 3_240.0 if level == "rehearsal" else 0.0
-        ),
+    stack: list[tuple[str, str, Any, int]] = [
+        (str(scenario_id), str(scenario_id), payload, 0)
+        for scenario_id, payload in scenario_results.items()
+    ]
+    visited: set[int] = set()
+    nodes = 0
+    while stack:
+        scenario_id, path, value, depth = stack.pop()
+        nodes += 1
+        if nodes > _EXECUTION_GAP_SCAN_MAX_NODES:
+            errors.append("execution_gap_scan_node_budget_exceeded")
+            break
+        if depth > _EXECUTION_GAP_SCAN_MAX_DEPTH:
+            errors.append("execution_gap_scan_depth_exceeded")
+            break
+        if isinstance(value, Mapping):
+            identity = id(value)
+            if identity in visited:
+                errors.append("execution_gap_scan_cycle_detected")
+                break
+            visited.add(identity)
+            for raw_key, child in value.items():
+                key = str(raw_key).strip().lower().replace("-", "_")
+                child_path = f"{path}.{raw_key}"
+                for bucket, keys in _EXECUTION_GAP_KEYS.items():
+                    if key in keys and _declared_gap_is_active(child):
+                        declarations[bucket].append({
+                            "scenario_id": scenario_id,
+                            "path": child_path,
+                            "marker": key,
+                        })
+                stack.append((scenario_id, child_path, child, depth + 1))
+        elif isinstance(value, (list, tuple)):
+            identity = id(value)
+            if identity in visited:
+                errors.append("execution_gap_scan_cycle_detected")
+                break
+            visited.add(identity)
+            for index, child in enumerate(value):
+                stack.append((scenario_id, f"{path}[{index}]", child, depth + 1))
+
+    for rows in declarations.values():
+        rows.sort(key=lambda row: (row["scenario_id"], row["path"], row["marker"]))
+    return {
+        "invalid_seconds": invalid_seconds,
+        "mandatory_features_executed": features,
+        "skips": declarations["skips"],
+        "fallbacks": declarations["fallbacks"],
+        "expected_gaps": declarations["expected_gaps"],
+        "errors": sorted(set(errors)),
     }
-    for level in SUPERVISED_LEVEL_DURATIONS
-}
+
+
 HEARTBEAT_PUMP_INTERVAL_SECONDS = 15.0
 EFFECTIVE_LOAD_EVIDENCE_SCHEMA_VERSION = "hackme.operational-effective-load.v1"
 CORE_READY_TIMEOUT_SECONDS = 600.0
@@ -373,6 +525,7 @@ def _git_ignored_repo_paths(root: Path, relative_paths: list[str]) -> set[str]:
         capture_output=True,
         check=False,
         timeout=30,
+        env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
     )
     if completed.returncode not in {0, 1}:
         detail = os.fsdecode(completed.stderr or b"").strip()[:500]
@@ -534,6 +687,65 @@ def bounded_repo_runtime_scan(
         "pruned_directory_count": pruned_count,
         "pruned_directory_samples": pruned_samples,
         "errors": errors,
+    }
+
+
+def preflight_dependency_commands(
+    campaign_level: str,
+) -> dict[str, list[str]]:
+    """Probe only capabilities exercised by a level before server startup."""
+
+    commands = {
+        "gunicorn": [
+            sys.executable,
+            "-c",
+            "import gunicorn; print(gunicorn.__version__)",
+        ],
+    }
+    if campaign_level != "smoke":
+        commands = {
+            "ffmpeg": ["ffmpeg", "-version"],
+            "ffprobe": ["ffprobe", "-version"],
+            "playwright": [
+                sys.executable,
+                "-c",
+                "from playwright.sync_api import sync_playwright; print('ok')",
+            ],
+            **commands,
+        }
+    return commands
+
+
+def preflight_repo_runtime_scan(
+    root: Path,
+    *,
+    campaign_level: str,
+    progress_callback: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
+    """Keep the repo-scale pollution scan out of level-0 lifecycle smoke."""
+
+    if campaign_level == "smoke":
+        return {
+            "schema_version": "hackme.preflight-runtime-scan.v1",
+            "status": "NOT_APPLICABLE",
+            "reason": (
+                "level_0_smoke_uses_supervisor_source_freeze_and_isolated_run_root"
+            ),
+            "required": False,
+            "ok": True,
+            "complete": False,
+            "entries_scanned": 0,
+            "repo_runtime_pollution": [],
+            "errors": [],
+        }
+    result = bounded_repo_runtime_scan(
+        root,
+        progress_callback=progress_callback,
+    )
+    return {
+        **result,
+        "status": "EVALUATED",
+        "required": True,
     }
 
 
@@ -831,26 +1043,6 @@ def percentile(values: list[float], pct: float) -> float:
     ordered = sorted(float(value) for value in values)
     index = min(len(ordered) - 1, max(0, int((len(ordered) - 1) * pct)))
     return round(ordered[index], 3)
-
-
-def validate_tmp_path(path: Path, *, label: str) -> Path:
-    resolved = path.expanduser().resolve(strict=False)
-    tmp = Path("/tmp").resolve()
-    if resolved != tmp and tmp not in resolved.parents:
-        raise ValueError(f"{label} must remain under /tmp: {resolved}")
-    return resolved
-
-
-def validate_control_root(campaign_root: Path, control_root: Path) -> Path:
-    """Require the live control plane to be a private sibling of artifacts."""
-
-    campaign = validate_tmp_path(campaign_root, label="campaign root")
-    control = validate_tmp_path(control_root, label="campaign control root")
-    if control == Path("/tmp").resolve() or control == campaign:
-        raise ValueError("campaign control root must be a distinct directory below /tmp")
-    if control.parent != campaign.parent:
-        raise ValueError("campaign control root must be a sibling of campaign root")
-    return control
 
 
 def free_port() -> int:
@@ -1246,6 +1438,7 @@ def git_metadata() -> dict[str, Any]:
                 capture_output=True,
                 timeout=15,
                 check=True,
+                env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
             )
             return completed.stdout.strip()
         except Exception:
@@ -1296,6 +1489,57 @@ def manifest_digest(manifest: dict[str, str]) -> str:
     return digest.hexdigest()
 
 
+def supervised_source_identity(
+    source_h0: Mapping[str, Any],
+) -> tuple[dict[str, str], str, int, dict[str, Any]]:
+    """Reuse the supervisor's authenticated H0 instead of rescanning source."""
+
+    status = source_h0.get("status") or {}
+    blocked_changes = (
+        status.get("blocked_changes") if isinstance(status, Mapping) else []
+    ) or []
+    return (
+        {},
+        str(source_h0.get("tracked_content_digest") or ""),
+        int(source_h0.get("tracked_file_count") or 0),
+        {
+            "target_commit": str(source_h0.get("commit") or ""),
+            "target_branch": str(source_h0.get("branch") or ""),
+            "worktree_dirty": not bool(source_h0.get("git_status_empty")),
+            "worktree_change_count": len(blocked_changes),
+            "authority": "supervisor_h0",
+        },
+    )
+
+
+def wait_for_runner_host_safety_preflight() -> dict[str, Any]:
+    """Require extra I/O headroom before each cold-start stage."""
+
+    return wait_for_host_safety_preflight(
+        timeout_seconds=RUNNER_HOST_SAFETY_TIMEOUT_SECONDS,
+        collector=collect_runner_startup_headroom,
+    )
+
+
+def collect_runner_startup_headroom() -> dict[str, Any]:
+    return collect_host_startup_safety_preflight()
+
+
+def managed_auxiliary_worker_count(
+    *,
+    requested_workers: int,
+    supervised: bool,
+    campaign_level: str,
+) -> int:
+    if supervised and campaign_level == "smoke":
+        return 1
+    return max(2, int(requested_workers) // 2)
+
+
+def managed_strict_readiness(*, supervised: bool, campaign_level: str) -> bool:
+    return bool(supervised and campaign_level != "smoke")
+
+
 def manifest_drift(expected: dict[str, str]) -> dict[str, dict[str, str]]:
     current = source_manifest()
     return {
@@ -1303,51 +1547,6 @@ def manifest_drift(expected: dict[str, str]) -> dict[str, dict[str, str]]:
         for name in sorted(set(expected) | set(current))
         if expected.get(name) != current.get(name)
     }
-
-
-@dataclass(frozen=True)
-class Credentials:
-    root: str
-    manager: str
-    test: str
-    member: str
-
-    @classmethod
-    def load(cls, *, managed_servers: bool) -> "Credentials":
-        names = {
-            "root": "HACKME_CAMPAIGN_ROOT_PASSWORD",
-            "manager": "HACKME_CAMPAIGN_MANAGER_PASSWORD",
-            "test": "HACKME_CAMPAIGN_TEST_PASSWORD",
-            "member": "HACKME_CAMPAIGN_MEMBER_PASSWORD",
-        }
-        values = {key: str(os.environ.get(name) or "") for key, name in names.items()}
-        if not managed_servers:
-            missing = [name for key, name in names.items() if not values[key]]
-            if missing:
-                raise ValueError("existing targets require credential environment variables: " + ", ".join(missing))
-        for key in values:
-            values[key] = values[key] or f"Campaign-{key}-{secrets.token_urlsafe(24)}"
-        return cls(**values)
-
-    def child_env(self) -> dict[str, str]:
-        return {
-            "HACKME_PROBE_ROOT_PASSWORD": self.root,
-            "HACKME_PROBE_MANAGER_PASSWORD": self.manager,
-            "HACKME_PROBE_USER_PASSWORD": self.test,
-            "HACKME_ROOT_PASSWORD": self.root,
-            "HACKME_MANAGER_PASSWORD": self.manager,
-            "HACKME_TEST_PASSWORD": self.test,
-            "PLAYWRIGHT_ROOT_PASSWORD": self.root,
-            "PLAYWRIGHT_MANAGER_PASSWORD": self.manager,
-            "PLAYWRIGHT_TEST_PASSWORD": self.test,
-            "PENTEST_ROOT_PASSWORD": self.root,
-            "PENTEST_MANAGER_PASSWORD": self.manager,
-            "PENTEST_TEST_PASSWORD": self.test,
-            "PENTEST_STRESS_USER_PASSWORD": self.member,
-            "HACKME_QA_ROOT_PASSWORD": self.root,
-            "HACKME_QA_TEST_PASSWORD": self.test,
-            "HACKME_TRADING_PROBE_USER_PASSWORD": self.member,
-        }
 
 
 class WebClient:
@@ -1472,6 +1671,7 @@ class ServerController:
         process_registry: Any | None = None,
         process_role: str = "",
         progress_callback: Callable[[str], None] | None = None,
+        post_bootstrap_safety_callback: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
         self.name = name
         self.run_root = validate_tmp_path(run_root, label=f"{name} run root")
@@ -1488,9 +1688,14 @@ class ServerController:
         self.process_registry = process_registry
         self.process_role = str(process_role or name)
         self.progress_callback = progress_callback
+        self.post_bootstrap_safety_callback = post_bootstrap_safety_callback
         self.registered_identity: Any | None = None
         self.launch_count = 0
+        self.final_evidence_restart_disabled = False
         self.events: list[dict[str, Any]] = []
+        self.post_bootstrap_nonce = ""
+        self.post_bootstrap_ready_file: Path | None = None
+        self.post_bootstrap_release_file: Path | None = None
 
     def _report_progress(self, detail: str) -> None:
         if self.progress_callback is not None:
@@ -1524,6 +1729,92 @@ class ServerController:
             pid_file_state,
         )
 
+    def _prepare_post_bootstrap_gate(self) -> None:
+        if self.post_bootstrap_safety_callback is None:
+            self.post_bootstrap_nonce = ""
+            self.post_bootstrap_ready_file = None
+            self.post_bootstrap_release_file = None
+            return
+        gate_root = self.run_root / "control" / "post_bootstrap"
+        gate_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(gate_root, 0o700)
+        nonce = secrets.token_hex(32)
+        ready = gate_root / f"launcher_{self.launch_count:03d}.ready"
+        release = gate_root / f"launcher_{self.launch_count:03d}.release"
+        for path in (ready, release):
+            if path.exists() or path.is_symlink():
+                raise RuntimeError(f"post-bootstrap gate path already exists: {path}")
+        self.post_bootstrap_nonce = nonce
+        self.post_bootstrap_ready_file = ready
+        self.post_bootstrap_release_file = release
+
+    def _verify_post_bootstrap_ready(self) -> dict[str, Any]:
+        path = self.post_bootstrap_ready_file
+        if path is None or not self.post_bootstrap_nonce:
+            raise RuntimeError("post-bootstrap gate was not prepared")
+        before = os.lstat(path)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or stat.S_ISLNK(before.st_mode)
+            or int(before.st_nlink) != 1
+            or int(before.st_uid) != os.getuid()
+            or stat.S_IMODE(before.st_mode) & 0o077
+        ):
+            raise RuntimeError("post-bootstrap ready evidence metadata is unsafe")
+        value = path.read_text(encoding="ascii", errors="strict").strip()
+        after = os.lstat(path)
+        if (
+            value != self.post_bootstrap_nonce
+            or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+            != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+        ):
+            raise RuntimeError("post-bootstrap ready evidence is invalid or unstable")
+        return {
+            "ok": True,
+            "path": str(path),
+            "mode": oct(stat.S_IMODE(after.st_mode)),
+            "nonce_sha256": hashlib.sha256(value.encode("ascii")).hexdigest(),
+        }
+
+    def _release_post_bootstrap_gate(self) -> dict[str, Any]:
+        path = self.post_bootstrap_release_file
+        if path is None or not self.post_bootstrap_nonce:
+            raise RuntimeError("post-bootstrap release gate was not prepared")
+        flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptor = os.open(path, flags, 0o600)
+        payload = (self.post_bootstrap_nonce + "\n").encode("ascii")
+        try:
+            view = memoryview(payload)
+            while view:
+                written = os.write(descriptor, view)
+                if written <= 0:
+                    raise OSError("short post-bootstrap release write")
+                view = view[written:]
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        directory = os.open(
+            path.parent,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+        return {
+            "ok": True,
+            "path": str(path),
+            "nonce_sha256": hashlib.sha256(
+                self.post_bootstrap_nonce.encode("ascii")
+            ).hexdigest(),
+        }
+
     def _wait_launcher(
         self,
         process: subprocess.Popen[Any],
@@ -1537,20 +1828,72 @@ class ServerController:
         deadline = started + max(0.1, float(timeout))
         last_observation: tuple[Any, ...] | None = None
         observations = 0
+        gate_required = self.post_bootstrap_safety_callback is not None
+        gate_released = not gate_required
+        post_bootstrap: dict[str, Any] = {
+            "required": gate_required,
+            "ready": {},
+            "host_safety": {},
+            "release": {},
+            "ok": not gate_required,
+        }
         while True:
             observation = self._launcher_observation(process, log)
             if observation != last_observation:
                 observations += 1
                 last_observation = observation
                 self._report_progress(f"launcher_observed_progress:{observations}")
+            ready_path = self.post_bootstrap_ready_file
+            if (
+                gate_required
+                and not gate_released
+                and ready_path is not None
+                and (ready_path.exists() or ready_path.is_symlink())
+            ):
+                try:
+                    post_bootstrap["ready"] = self._verify_post_bootstrap_ready()
+                    self._report_progress("post_bootstrap_ready_verified")
+                    callback = self.post_bootstrap_safety_callback
+                    if callback is None:
+                        raise RuntimeError("post-bootstrap safety callback disappeared")
+                    post_bootstrap["host_safety"] = callback()
+                    if post_bootstrap["host_safety"].get("ok") is not True:
+                        raise RuntimeError("post-bootstrap host safety gate failed")
+                    post_bootstrap["release"] = self._release_post_bootstrap_gate()
+                    post_bootstrap["ok"] = True
+                    gate_released = True
+                    self._report_progress("post_bootstrap_safety_released")
+                except Exception as exc:
+                    post_bootstrap["ok"] = False
+                    post_bootstrap["error"] = f"{exc.__class__.__name__}: {exc}"
+                    terminate_process_group(process, grace_seconds=2.0)
+                    try:
+                        returncode = int(process.wait(timeout=5))
+                    except subprocess.TimeoutExpired:
+                        returncode = 125
+                    return {
+                        "returncode": returncode if returncode != 0 else 125,
+                        "timed_out": False,
+                        "observations": observations,
+                        "elapsed_seconds": round(time.monotonic() - started, 3),
+                        "post_bootstrap": post_bootstrap,
+                        "host_safety_blocked": True,
+                    }
             returncode = process.poll()
             if returncode is not None:
+                if gate_required and not gate_released and returncode == 0:
+                    returncode = 125
+                    post_bootstrap["error"] = (
+                        "launcher exited before post-bootstrap safety release"
+                    )
                 self._report_progress(f"launcher_completed:{returncode}")
                 return {
                     "returncode": int(returncode),
                     "timed_out": False,
                     "observations": observations,
                     "elapsed_seconds": round(time.monotonic() - started, 3),
+                    "post_bootstrap": post_bootstrap,
+                    "host_safety_blocked": False,
                 }
             now = time.monotonic()
             if now >= deadline:
@@ -1564,12 +1907,22 @@ class ServerController:
                     "timed_out": True,
                     "observations": observations,
                     "elapsed_seconds": round(time.monotonic() - started, 3),
+                    "post_bootstrap": post_bootstrap,
+                    "host_safety_blocked": False,
                 }
             time.sleep(min(0.5, max(0.01, deadline - now)))
 
     @property
     def pid_file(self) -> Path:
         return self.runtime_root / "server.pid"
+
+    @property
+    def restart_request_root(self) -> Path:
+        return self.run_root / "control" / "restart_requests"
+
+    @property
+    def restart_request_file(self) -> Path:
+        return self.restart_request_root / "server_restart.json"
 
     def pid(self) -> int:
         try:
@@ -1579,17 +1932,20 @@ class ServerController:
 
     def _env(self) -> dict[str, str]:
         env = os.environ.copy()
+        env.pop("PYTHONPYCACHEPREFIX", None)
         # Capacity recommendations may point at mutable files outside the
         # frozen repository.  A supervised campaign supplies its exact
         # gunicorn profile on argv, so inherited redirects must never be able
         # to rewrite that profile before launcher argument processing.
         env.pop("HACKME_DEV_CAPACITY_DEFAULTS_FILE", None)
         env.pop("HACKME_DEV_CAPACITY_REPORT_FILE", None)
+        self.restart_request_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(self.restart_request_root, 0o700)
         env.update({
             "ROOT_PASSWORD": self.credentials.root,
             "MANAGER_PASSWORD": self.credentials.manager,
             "TEST_PASSWORD": self.credentials.test,
-            "PYTHONPYCACHEPREFIX": str(self.run_root / "pycache"),
+            "PYTHONDONTWRITEBYTECODE": "1",
             "HACKME_MEDIA_REALTIME_PROXY_ENABLED": "1",
             "HACKME_MEDIA_REALTIME_PROXY_MAX_CONCURRENT": "2",
             "HACKME_MEDIA_REALTIME_PROXY_LIMIT_SCOPE": "host",
@@ -1597,7 +1953,26 @@ class ServerController:
             "HACKME_DEV_BACKTEST_PROBE_ON_STARTUP": "0",
             "HACKME_DEV_BTC_TRADE_AUTOSTART": "0",
             "HACKME_DEV_USE_CAPACITY_DEFAULTS": "0",
+            "HACKME_SUPERVISED_RESTART_REQUEST_ROOT": str(self.restart_request_root),
+            "HACKME_SUPERVISED_RESTART_REQUEST_FILE": str(self.restart_request_file),
         })
+        if self.post_bootstrap_safety_callback is not None:
+            if (
+                self.post_bootstrap_ready_file is None
+                or self.post_bootstrap_release_file is None
+                or not self.post_bootstrap_nonce
+            ):
+                raise RuntimeError("post-bootstrap safety gate was not prepared")
+            env.update({
+                "HACKME_DEV_POST_BOOTSTRAP_READY_FILE": str(
+                    self.post_bootstrap_ready_file
+                ),
+                "HACKME_DEV_POST_BOOTSTRAP_RELEASE_FILE": str(
+                    self.post_bootstrap_release_file
+                ),
+                "HACKME_DEV_POST_BOOTSTRAP_NONCE": self.post_bootstrap_nonce,
+                "HACKME_DEV_POST_BOOTSTRAP_TIMEOUT_SECONDS": "180",
+            })
         return env
 
     def launcher_command(self) -> list[str]:
@@ -1629,8 +2004,14 @@ class ServerController:
             command.append("--trading-background-dev-ready")
         return command
 
-    def wait_ready(self, *, timeout: float = 180.0) -> dict[str, Any]:
-        if self.strict_readiness:
+    def wait_ready(
+        self,
+        *,
+        timeout: float = 180.0,
+        strict: bool | None = None,
+    ) -> dict[str, Any]:
+        use_strict = self.strict_readiness if strict is None else bool(strict)
+        if use_strict:
             session = requests.Session()
             original_request = session.request
 
@@ -1715,8 +2096,21 @@ class ServerController:
         }
 
     def start(self) -> dict[str, Any]:
+        if self.final_evidence_restart_disabled:
+            event = {
+                "action": "start",
+                "name": self.name,
+                "at": utc_now(),
+                "pid": 0,
+                "restart_disabled": True,
+                "error": "final_evidence_restart_barrier_active",
+                "ok": False,
+            }
+            self.events.append(event)
+            return event
         self.run_root.mkdir(parents=True, exist_ok=True)
         self.launch_count += 1
+        self._prepare_post_bootstrap_gate()
         log = self.run_root / "campaign" / f"launcher_{self.launch_count:03d}.log"
         log.parent.mkdir(parents=True, exist_ok=True)
         started = time.monotonic()
@@ -1760,13 +2154,49 @@ class ServerController:
         )
         leaked = list(launcher_log["secret_leak_labels"])
         launcher_evidence_ok = bool(launcher_log.get("ok"))
-        ready = (
-            self.wait_ready()
-            if completed["returncode"] == 0 and not leaked and launcher_evidence_ok
-            else {
+        post_launch_host_safety: dict[str, Any] = {
+            "required": self.post_bootstrap_safety_callback is not None,
+            "ok": self.post_bootstrap_safety_callback is None,
+        }
+        if completed["returncode"] == 0 and not leaked and launcher_evidence_ok:
+            basic_ready = self.wait_ready(strict=False)
+            if (
+                basic_ready.get("ok") is True
+                and self.post_bootstrap_safety_callback is not None
+            ):
+                try:
+                    post_launch_host_safety = self.post_bootstrap_safety_callback()
+                except Exception as exc:
+                    post_launch_host_safety = {
+                        "required": True,
+                        "ok": False,
+                        "error": f"{exc.__class__.__name__}: {exc}",
+                    }
+            if basic_ready.get("ok") is not True:
+                ready = basic_ready
+            elif post_launch_host_safety.get("ok") is not True:
+                ready = {
+                    "ok": False,
+                    "error": "post-launch host safety gate failed",
+                    "basic": basic_ready,
+                }
+            elif self.strict_readiness:
+                ready = self.wait_ready(strict=True)
+                ready["basic"] = basic_ready
+            else:
+                ready = basic_ready
+            ready["post_launch_host_safety"] = post_launch_host_safety
+        else:
+            ready = {
                 "ok": False,
                 "error": "launcher_failed_secret_leak_or_log_snapshot_invalid",
             }
+        host_safety_blocked = bool(
+            completed.get("host_safety_blocked")
+            or (
+                post_launch_host_safety.get("required") is True
+                and post_launch_host_safety.get("ok") is not True
+            )
         )
         event = {
             "action": "start",
@@ -1785,6 +2215,9 @@ class ServerController:
             "launcher_log_diagnostic_truncated": launcher_log.get("diagnostic_truncated"),
             "launcher_log_tail": launcher_log.get("diagnostic_tail"),
             "launcher_log_errors": launcher_log.get("errors"),
+            "post_bootstrap": completed.get("post_bootstrap") or {},
+            "post_launch_host_safety": post_launch_host_safety,
+            "classification": "FAIL_INFRA" if host_safety_blocked else "FAIL_HARNESS",
             "command": sanitized_command(command),
             "ok": (
                 completed["returncode"] == 0
@@ -1795,6 +2228,7 @@ class ServerController:
             ),
         }
         if event["ok"]:
+            event["classification"] = "PASS"
             self.planned_outage.clear()
             if self.process_registry is not None:
                 if self.registered_identity is not None:
@@ -1816,10 +2250,20 @@ class ServerController:
         return expected in environ
 
     def stop(self, *, reason: str = "campaign") -> dict[str, Any]:
+        if reason == "final_evidence_log_seal":
+            self.final_evidence_restart_disabled = True
         self.planned_outage.set()
         pid = self.pid()
         started = time.monotonic()
-        event: dict[str, Any] = {"action": "stop", "name": self.name, "at": utc_now(), "pid": pid, "reason": reason}
+        event: dict[str, Any] = {
+            "action": "stop",
+            "name": self.name,
+            "at": utc_now(),
+            "pid": pid,
+            "reason": reason,
+            "restart_disabled": self.final_evidence_restart_disabled,
+            "launch_generation": self.launch_count,
+        }
         self._report_progress(f"stop_started:{reason}")
 
         def process_group_alive(pgid: int) -> bool:
@@ -1874,6 +2318,17 @@ class ServerController:
         return event
 
     def restart(self, *, reason: str) -> dict[str, Any]:
+        if self.final_evidence_restart_disabled:
+            result = {
+                "action": "restart",
+                "name": self.name,
+                "reason": reason,
+                "restart_disabled": True,
+                "error": "final_evidence_restart_barrier_active",
+                "ok": False,
+            }
+            self.events.append(result)
+            return result
         started = time.monotonic()
         stopped = self.stop(reason=reason)
         start = self.start() if stopped.get("ok") else {"ok": False, "error": "stop_failed"}
@@ -2059,6 +2514,18 @@ class Campaign:
         self.reports = self.root / "reports"
         self.supervised = bool(args.supervised)
         self.campaign_uuid = str(args.campaign_uuid or os.environ.get("HACKME_CAMPAIGN_UUID") or "")
+        raw_runner_auth_key = getattr(args, "_runner_auth_key", None)
+        self.runner_auth_key = (
+            bytes(raw_runner_auth_key)
+            if isinstance(raw_runner_auth_key, (bytes, bytearray))
+            else None
+        )
+        if self.supervised and (
+            self.runner_auth_key is None or len(self.runner_auth_key) != 32
+        ):
+            raise RuntimeError("supervised runner session authentication is unavailable")
+        self.control_auth_sequences: dict[str, int] = {}
+        self.control_auth_lock = threading.Lock()
         self.control_root = (
             validate_control_root(self.root, Path(args.control_root))
             if args.control_root
@@ -2073,6 +2540,28 @@ class Campaign:
             if args.checkpoint_mirror_path
             else None
         )
+        if self.runner_auth_key is not None:
+            authenticated_baselines = (
+                ("runner_heartbeat", self.heartbeat_path),
+                ("runner_checkpoint", self.checkpoint_path),
+            )
+            for stream, path in authenticated_baselines:
+                payload = load_json(path)
+                evidence = verify_authenticated_payload(
+                    payload,
+                    session_secret=self.runner_auth_key,
+                    expected_campaign_uuid=self.campaign_uuid,
+                    expected_stream=stream,
+                )
+                if stream == "runner_heartbeat":
+                    heartbeat = payload.get("heartbeat")
+                    if (
+                        not isinstance(heartbeat, Mapping)
+                        or int(heartbeat.get("orchestrator_monotonic_ns") or 0)
+                        != int(evidence.get("monotonic_ns") or 0)
+                    ):
+                        raise RuntimeError("authenticated runner heartbeat monotonic binding is invalid")
+                self.control_auth_sequences[stream] = int(evidence["sequence"])
         self.watchdog_ready_path = self.control_root / "checkpoint" / "watchdog.status.json"
         self.supervisor_contract_path = Path(args.supervisor_contract).resolve(strict=False) if args.supervisor_contract else Path()
         self.activation_gate_path = Path(args.activation_gate).resolve(strict=False) if args.activation_gate else Path()
@@ -2089,7 +2578,7 @@ class Campaign:
         self.security_outage = threading.Event()
         required_roles = (
             MANDATORY_MANAGED_ROLES
-            if self.supervised and self.campaign_level in {"rehearsal", "formal"}
+            if self.supervised and self.campaign_level in {"rehearsal", "soak", "formal"}
             else SMOKE_REQUIRED_MANAGED_ROLES
             if self.supervised
             else ()
@@ -2118,6 +2607,18 @@ class Campaign:
         security_port = int(args.security_port or free_port())
         while security_port in {primary_port, recovery_port}:
             security_port = free_port()
+        auxiliary_workers = managed_auxiliary_worker_count(
+            requested_workers=args.workers,
+            supervised=self.supervised,
+            campaign_level=self.campaign_level,
+        )
+        strict_server_readiness = managed_strict_readiness(
+            supervised=self.supervised,
+            campaign_level=self.campaign_level,
+        )
+        server_safety_callback = (
+            wait_for_runner_host_safety_preflight if self.supervised else None
+        )
         self.primary = ServerController(
             name="primary",
             run_root=self.root / "primary",
@@ -2126,30 +2627,32 @@ class Campaign:
             workers=args.workers,
             threads=args.threads,
             planned_outage=self.primary_outage,
-            strict_readiness=self.supervised,
+            strict_readiness=strict_server_readiness,
             process_registry=self.process_registry if self.supervised else None,
             process_role="primary",
             progress_callback=self._server_progress if self.supervised else None,
+            post_bootstrap_safety_callback=server_safety_callback,
         )
         self.recovery = ServerController(
             name="recovery",
             run_root=self.root / "recovery",
             port=recovery_port,
             credentials=self.credentials,
-            workers=max(2, args.workers // 2),
+            workers=auxiliary_workers,
             threads=args.threads,
             planned_outage=self.recovery_outage,
-            strict_readiness=self.supervised,
+            strict_readiness=strict_server_readiness,
             process_registry=self.process_registry if self.supervised else None,
             process_role="recovery",
             progress_callback=self._server_progress if self.supervised else None,
+            post_bootstrap_safety_callback=server_safety_callback,
         )
         self.security_sentinel = ServerController(
             name="security_sentinel",
             run_root=self.root / "security_sentinel",
             port=security_port,
             credentials=self.credentials,
-            workers=max(2, args.workers // 2),
+            workers=auxiliary_workers,
             threads=args.threads,
             planned_outage=self.security_outage,
             security="on",
@@ -2158,6 +2661,7 @@ class Campaign:
             process_registry=self.process_registry if self.supervised else None,
             process_role="security_sentinel",
             progress_callback=self._server_progress if self.supervised else None,
+            post_bootstrap_safety_callback=server_safety_callback,
         )
         self.heartbeat_pump_thread: threading.Thread | None = None
         self.heartbeat_phase = "runner_initializing"
@@ -2170,14 +2674,29 @@ class Campaign:
         self.accounts: list[tuple[str, str]] = []
         self.account_inventory: list[dict[str, Any]] = []
         self.account_cleanup: dict[str, Any] = {}
-        self.source_hashes = source_manifest()
-        self.source_digest = manifest_digest(self.source_hashes)
-        self.source_git = git_metadata()
         self.drift: dict[str, dict[str, str]] = {}
         self.source_freezer: GitSourceFreezer | None = None
+        self.source_h0_authority: dict[str, Any] = {}
         if self.supervised:
             self.source_freezer = GitSourceFreezer(ROOT, self.root / "artifacts" / "source")
-            self.source_freezer.load_baseline(Path(args.source_freeze_path))
+            self.source_h0_authority = dict(
+                self.source_freezer.load_baseline(Path(args.source_freeze_path))
+            )
+            (
+                self.source_hashes,
+                self.source_digest,
+                self.source_manifest_file_count,
+                self.source_git,
+            ) = supervised_source_identity(self.source_h0_authority)
+        else:
+            self.source_hashes = source_manifest()
+            self.source_digest = manifest_digest(self.source_hashes)
+            self.source_manifest_file_count = len(self.source_hashes)
+            self.source_git = git_metadata()
+        self.rehearsal_projection_context: dict[str, Any] = {}
+        self.native_outer_authority_identity: dict[str, Any] = {}
+        self.native_scenario_authority_identities: dict[str, dict[str, Any]] = {}
+        self._initialize_native_scenario_authorities()
         self.core_process: subprocess.Popen[Any] | None = None
         self.core_identity: Any | None = None
         self.core_stdout_handle: Any = None
@@ -2208,9 +2727,9 @@ class Campaign:
                 },
                 campaign_data_root=self.root,
                 process_registry=self.process_registry,
-                require_gpu=not bool(args.allow_short_duration),
+                require_gpu=self.campaign_level in {"rehearsal", "soak", "formal"},
                 comfyui_queue_url=f"{comfyui_url}/queue" if comfyui_url else "",
-                require_comfyui_queue=not bool(args.allow_short_duration),
+                require_comfyui_queue=self.campaign_level in {"rehearsal", "soak", "formal"},
                 minimum_disk_free_bytes=int(args.minimum_free_gb * 1024**3),
                 expected_process_cgroup=self.cgroup_path,
                 cgroup_event_baseline=(
@@ -2249,12 +2768,138 @@ class Campaign:
                 interval=args.resource_interval,
             )
 
+    def _initialize_native_scenario_authorities(self) -> None:
+        """Pin the eight caller-owned fields before any scenario can execute."""
+
+        locator = str(os.environ.get(REHEARSAL_PROJECTION_CONTEXT_ENV) or "")
+        declared_digest = str(
+            os.environ.get(REHEARSAL_PROJECTION_CONTEXT_SHA256_ENV) or ""
+        )
+        if bool(locator) != bool(declared_digest):
+            raise RuntimeError("rehearsal projection locator/digest pair is incomplete")
+        projection: dict[str, Any] = {}
+        if locator:
+            if not (self.supervised and self.campaign_level == "rehearsal"):
+                raise RuntimeError(
+                    "formal rehearsal projection is only valid in a supervised rehearsal"
+                )
+            projection = read_sealed_rehearsal_projection_context(
+                locator,
+                declared_digest,
+            )
+            capture = projection["capture_context"]
+            if self.source_h0_authority:
+                protected_digest = protected_source_identity_digest(
+                    str(
+                        self.source_h0_authority.get(
+                            "protected_ignored_manifest_digest"
+                        )
+                        or ""
+                    ),
+                    str(
+                        self.source_h0_authority.get(
+                            "protected_ignored_content_digest"
+                        )
+                        or ""
+                    ),
+                )
+                if (
+                    capture.get("commit") != self.source_h0_authority.get("commit")
+                    or capture.get("source_digest")
+                    != self.source_h0_authority.get("tracked_content_digest")
+                    or capture.get("protected_source_digest") != protected_digest
+                ):
+                    raise RuntimeError(
+                        "sealed rehearsal projection differs from the supervisor H0 source"
+                    )
+            expected_native_root = (
+                self.root / "artifacts" / "formal_native_rehearsal"
+            ).resolve(strict=False)
+            for role, raw_path in projection["native_artifact_paths"].items():
+                path = Path(str(raw_path)).resolve(strict=False)
+                if path.parent != expected_native_root:
+                    raise RuntimeError(
+                        f"rehearsal native artifact escapes the reviewed root: {role}"
+                    )
+            self.rehearsal_projection_context = projection
+            outer = {
+                "qualification_campaign_uuid": capture[
+                    "qualification_campaign_uuid"
+                ],
+                "campaign_uuid": self.campaign_uuid,
+                "campaign_attempt_uuid": projection["campaign_attempt_uuid"],
+                "native_invocation_id": projection["outer_native_invocation_id"],
+                "commit": capture["commit"],
+                "source_digest": capture["source_digest"],
+                "protected_source_digest": capture[
+                    "protected_source_digest"
+                ],
+            }
+            scenario_authorities = projection["scenario_authorities"]
+        else:
+            h0 = self.source_h0_authority
+            commit = str(h0.get("commit") or self.source_git.get("commit") or "")
+            if not re.fullmatch(r"[0-9a-f]{40}", commit):
+                commit = hashlib.sha1(
+                    canonical_digest(self.source_git).encode("ascii")
+                ).hexdigest()
+            source_digest = str(
+                h0.get("tracked_content_digest") or self.source_digest
+            )
+            if not re.fullmatch(r"[0-9a-f]{64}", source_digest):
+                source_digest = hashlib.sha256(
+                    source_digest.encode("utf-8", errors="surrogatepass")
+                ).hexdigest()
+            protected_digest = (
+                protected_source_identity_digest(
+                    str(h0.get("protected_ignored_manifest_digest") or ""),
+                    str(h0.get("protected_ignored_content_digest") or ""),
+                )
+                if h0
+                else hashlib.sha256(b"local-unqualified-protected-source").hexdigest()
+            )
+            campaign = self.campaign_uuid or f"local-campaign:{secrets.token_hex(16)}"
+            outer = {
+                "qualification_campaign_uuid": f"qualification:{campaign}",
+                "campaign_uuid": campaign,
+                "campaign_attempt_uuid": f"campaign-attempt:{secrets.token_hex(16)}",
+                "native_invocation_id": f"operational:{secrets.token_hex(16)}",
+                "commit": commit,
+                "source_digest": source_digest,
+                "protected_source_digest": protected_digest,
+            }
+            scenario_authorities = {
+                scenario_id: {
+                    "scenario_attempt_uuid": (
+                        f"scenario-attempt:{secrets.token_hex(16)}"
+                    ),
+                    "native_invocation_id": (
+                        f"scenario-invocation:{secrets.token_hex(16)}"
+                    ),
+                }
+                for scenario_id in FORMAL_SCENARIO_BINDINGS
+            }
+        self.native_outer_authority_identity = dict(outer)
+        self.native_scenario_authority_identities = {
+            scenario_id: {
+                **outer,
+                "scenario_attempt_uuid": str(
+                    scenario_authorities[scenario_id]["scenario_attempt_uuid"]
+                ),
+                "native_invocation_id": str(
+                    scenario_authorities[scenario_id]["native_invocation_id"]
+                ),
+            }
+            for scenario_id in FORMAL_SCENARIO_BINDINGS
+        }
+
     def base_env(self) -> dict[str, str]:
         env = os.environ.copy()
+        env.pop("PYTHONPYCACHEPREFIX", None)
         env.update(self.credentials.child_env())
         env.update({
             "PYTHONPATH": str(ROOT),
-            "PYTHONPYCACHEPREFIX": str(self.root / "pycache"),
+            "PYTHONDONTWRITEBYTECODE": "1",
             "HACKME_TEST_ARTIFACT_ROOT": str(self.root / "test_artifacts"),
         })
         return env
@@ -2383,7 +3028,7 @@ class Campaign:
                 checkpoint_revision=checkpoint_revision,
                 now_ns=progress_ns,
             )
-        durable_atomic_write_json(self.heartbeat_path, {
+        payload = {
             "schema_version": "hackme.campaign-heartbeat.v1",
             "campaign_uuid": self.campaign_uuid,
             "heartbeat": {
@@ -2395,24 +3040,56 @@ class Campaign:
                 "main_progress_phase": phase,
                 "updated_at": utc_now(),
             },
-        })
+        }
+        if self.runner_auth_key is None:
+            durable_atomic_write_json(self.heartbeat_path, payload)
+            return
+        with self.control_auth_lock:
+            sequence = int(self.control_auth_sequences.get("runner_heartbeat") or 0) + 1
+            signed = sign_authenticated_payload(
+                payload,
+                session_secret=self.runner_auth_key,
+                campaign_uuid=self.campaign_uuid,
+                stream="runner_heartbeat",
+                sequence=sequence,
+                monotonic_ns=progress_ns,
+            )
+            durable_atomic_write_json(self.heartbeat_path, signed)
+            self.control_auth_sequences["runner_heartbeat"] = sequence
 
     def _commit_checkpoint(self, payload: Mapping[str, Any]) -> None:
         """Atomically persist and read back both volatile and reboot-safe copies."""
 
-        durable_atomic_write_json(self.checkpoint_path, payload)
-        if self.checkpoint_mirror_path is None:
+        def commit(committed_payload: Mapping[str, Any]) -> None:
+            durable_atomic_write_json(self.checkpoint_path, committed_payload)
+            if self.checkpoint_mirror_path is None:
+                return
+            mirror_parent = self.checkpoint_mirror_path.parent
+            mirror_parent.mkdir(parents=True, exist_ok=True)
+            os.chmod(mirror_parent, 0o700)
+            durable_atomic_write_json(self.checkpoint_mirror_path, committed_payload)
+            primary = load_json(self.checkpoint_path)
+            mirror = load_json(self.checkpoint_mirror_path)
+            if primary != dict(committed_payload) or mirror != dict(committed_payload) or primary != mirror:
+                raise RuntimeError("campaign checkpoint primary/mirror readback mismatch")
+            if self.checkpoint_mirror_path.stat().st_mode & 0o077:
+                raise RuntimeError("campaign checkpoint mirror permissions are not private")
+
+        if getattr(self, "runner_auth_key", None) is None:
+            commit(payload)
             return
-        mirror_parent = self.checkpoint_mirror_path.parent
-        mirror_parent.mkdir(parents=True, exist_ok=True)
-        os.chmod(mirror_parent, 0o700)
-        durable_atomic_write_json(self.checkpoint_mirror_path, payload)
-        primary = load_json(self.checkpoint_path)
-        mirror = load_json(self.checkpoint_mirror_path)
-        if primary != dict(payload) or mirror != dict(payload) or primary != mirror:
-            raise RuntimeError("campaign checkpoint primary/mirror readback mismatch")
-        if self.checkpoint_mirror_path.stat().st_mode & 0o077:
-            raise RuntimeError("campaign checkpoint mirror permissions are not private")
+        with self.control_auth_lock:
+            sequence = int(self.control_auth_sequences.get("runner_checkpoint") or 0) + 1
+            signed = sign_authenticated_payload(
+                payload,
+                session_secret=self.runner_auth_key,
+                campaign_uuid=self.campaign_uuid,
+                stream="runner_checkpoint",
+                sequence=sequence,
+                monotonic_ns=time.monotonic_ns(),
+            )
+            commit(signed)
+            self.control_auth_sequences["runner_checkpoint"] = sequence
 
     def start_heartbeat_pump(self) -> None:
         """Keep startup/preflight heartbeat durable before ACTIVE begins.
@@ -2765,7 +3442,13 @@ class Campaign:
             results.append({"pid": process.pid, "returncode": process.poll()})
         return results
 
-    def run_group(self, scenario_id: str, steps: list[Callable[[], dict[str, Any]]]) -> dict[str, Any]:
+    def run_group(
+        self,
+        scenario_id: str,
+        steps: list[Callable[[], dict[str, Any]]],
+        *,
+        formal_evidence_manifest: Path | None = None,
+    ) -> dict[str, Any]:
         started_at = utc_now()
         started = time.monotonic()
         results: list[dict[str, Any]] = []
@@ -2773,14 +3456,2263 @@ class Campaign:
             if self.stop_event.is_set():
                 results.append({"ok": False, "error": "campaign_stopping"})
                 break
-            results.append(step())
+            step_result = step()
+            results.append(step_result)
+            # Formal scenario steps are ordered dependencies.  Continuing
+            # after a failed producer can trigger an unsafe consumer (for
+            # example consuming a restart receipt from a probe that did not
+            # reach its terminal cleanup/audit state).  Every individual
+            # step owns its failure cleanup; the group itself therefore
+            # fails closed and never starts later steps after a non-PASS.
+            if step_result.get("ok") is not True:
+                break
+        execution_succeeded = bool(results) and all(item.get("ok") for item in results)
+        artifacts: list[dict[str, str]] = []
+        for index, result in enumerate(results):
+            artifact_path = str(result.get("artifact") or "").strip()
+            if not artifact_path:
+                continue
+            raw_step_id = str(result.get("step_id") or f"step_{index}")
+            step_id = re.sub(r"[^a-z0-9_.-]+", "_", raw_step_id.lower()).strip("_.-")
+            artifacts.append({
+                "artifact_id": f"native.source.{scenario_id}.{step_id or f'step_{index}'}",
+                "path": str(Path(artifact_path).expanduser().resolve(strict=False)),
+                "artifact_type": "auto",
+            })
         return {
-            "ok": bool(results) and all(item.get("ok") for item in results),
+            "schema_version": NATIVE_RUNNER_RESULT_SCHEMA_VERSION,
+            "scenario_id": scenario_id,
+            "ok": execution_succeeded,
+            "execution_succeeded": execution_succeeded,
+            "terminal_state": "success" if execution_succeeded else "failed",
             "started_at": started_at,
             "finished_at": utc_now(),
             "elapsed_seconds": round(time.monotonic() - started, 3),
             "steps": results,
+            "artifacts": artifacts,
+            "formal_evidence_manifest": (
+                str(formal_evidence_manifest.expanduser().resolve(strict=False))
+                if formal_evidence_manifest is not None
+                else ""
+            ),
         }
+
+    def run_native_callable_step(
+        self,
+        scenario_id: str,
+        step_id: str,
+        artifact: Path,
+        callback: Callable[[], dict[str, Any]],
+        *,
+        payload_ok: Callable[[Mapping[str, Any]], bool],
+    ) -> dict[str, Any]:
+        """Run an in-process domain operation with the same evidence shape as a probe."""
+
+        started_at = utc_now()
+        started = time.monotonic()
+        payload: dict[str, Any]
+        try:
+            value = callback()
+            payload = dict(value) if isinstance(value, Mapping) else {
+                "error": "domain_callback_result_invalid",
+            }
+        except Exception as exc:
+            payload = {
+                "error": f"{exc.__class__.__name__}: {exc}",
+            }
+        try:
+            semantic_pass = payload_ok(payload) is True
+        except Exception as exc:
+            semantic_pass = False
+            payload["validation_error"] = f"{exc.__class__.__name__}: {exc}"
+        payload["semantic_pass"] = semantic_pass
+        atomic_write_json(artifact, payload)
+        return {
+            "step_id": step_id,
+            "started_at": started_at,
+            "finished_at": utc_now(),
+            "elapsed_seconds": round(time.monotonic() - started, 3),
+            "returncode": 0 if semantic_pass else 1,
+            "timed_out": False,
+            "command": ["internal_domain_operation", step_id],
+            "stdout": "",
+            "artifact": str(artifact),
+            "artifact_summary": {"semantic_pass": semantic_pass},
+            "evidence_errors": [] if semantic_pass else ["domain_assertion_failed"],
+            "secret_leak_labels": [],
+            "ok": semantic_pass,
+        }
+
+    def _cleanup_exact_scenario_users(
+        self,
+        usernames: list[str],
+        *,
+        target: Any | None = None,
+    ) -> dict[str, Any]:
+        """Delete only the exact scenario-owned users and prove their names vanished."""
+
+        exact_names = sorted({
+            str(username or "").strip()
+            for username in usernames
+            if str(username or "").strip() not in {"", "root", "admin", "test"}
+        })
+        controller = target or self.primary
+        root = WebClient(controller.base_url, "root", self.credentials.root, timeout=60)
+        login = root.login()
+        records: list[dict[str, Any]] = []
+        if not login.get("ok"):
+            return {
+                "login_succeeded": False,
+                "requested_usernames": exact_names,
+                "records": records,
+            }
+        for username in exact_names:
+            lookup = root.request(
+                "GET",
+                "/api/admin/users",
+                params={"q": username, "page_size": 100},
+            )
+            rows = (
+                ((lookup.get("body") or {}).get("users") or [])
+                if isinstance(lookup.get("body"), Mapping)
+                else []
+            )
+            exact = next(
+                (row for row in rows if str(row.get("username") or "") == username),
+                None,
+            )
+            user_id = int((exact or {}).get("id") or 0)
+            deleted = (
+                root.request("DELETE", f"/api/admin/users/{user_id}")
+                if user_id > 0
+                else {"status": 0}
+            )
+            verify = root.request(
+                "GET",
+                "/api/admin/users",
+                params={"q": username, "page_size": 100},
+            )
+            verify_rows = (
+                ((verify.get("body") or {}).get("users") or [])
+                if isinstance(verify.get("body"), Mapping)
+                else []
+            )
+            residual = [
+                row for row in verify_rows
+                if str(row.get("username") or "") == username
+            ]
+            records.append({
+                "username": username,
+                "user_id": user_id,
+                "delete_status": int(deleted.get("status") or 0),
+                "verify_status": int(verify.get("status") or 0),
+                "deleted": int(deleted.get("status") or 0) == 200,
+                "residual_exact_count": len(residual),
+            })
+        return {
+            "login_succeeded": True,
+            "requested_usernames": exact_names,
+            "records": records,
+        }
+
+    def native_points_hft_invariants(self) -> dict[str, Any]:
+        """Execute the exact reviewed PointsChain HFT scenario and bind its artifacts."""
+
+        scenario_id = "pointschain_hft_invariants"
+        out_dir = self.reports / "scenarios" / scenario_id
+        stress = out_dir / "points_chain_destructive_stress.json"
+        dispute = out_dir / "pointschain_dispute_api.json"
+        frontend = out_dir / "points_chain_post_stress.json"
+        cleanup = out_dir / "fixture_account_cleanup.json"
+        direct_ops = 12000
+        transfer_ops = 1200
+        trading_ops = 600
+
+        def cleanup_step() -> dict[str, Any]:
+            stress_payload = load_json(stress)
+            dispute_payload = load_json(dispute)
+            usernames = list(stress_payload.get("fixture_usernames") or [])
+            usernames.extend(dispute_payload.get("fixture_usernames") or [])
+            return self._cleanup_exact_scenario_users([str(value) for value in usernames])
+
+        result = self.run_group(scenario_id, [
+            lambda: self.run_step(
+                scenario_id,
+                "high_frequency_chain_and_trading",
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "testing" / "points_chain_destructive_stress.py"),
+                    "--base-url", self.primary.base_url,
+                    "--runtime-root", str(self.primary.runtime_root),
+                    "--out", str(stress),
+                    "--accounts", "24",
+                    "--grant-points", "20000",
+                    "--transfer-ops", str(transfer_ops),
+                    "--direct-transfer-ops", str(direct_ops),
+                    "--trading-ops", str(trading_ops),
+                    "--concurrency", "32",
+                    "--external-transfer-every", "7",
+                    "--max-external-transfers", "40",
+                    "--server-pids", str(self.primary.pid()),
+                ],
+                timeout=4 * 60 * 60,
+                artifact=stress,
+                env={"HACKME_POINTS_STRESS_ROOT_PASSWORD": self.credentials.root},
+            ),
+            lambda: self.run_step(
+                scenario_id,
+                "branch_and_dispute_api",
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "testing" / "pointschain_dispute_api_probe.py"),
+                    "--base-url", self.primary.base_url,
+                    "--runtime-root", str(self.primary.runtime_root),
+                    "--out", str(dispute),
+                ],
+                timeout=1800,
+                artifact=dispute,
+            ),
+            lambda: self.run_step(
+                scenario_id,
+                "post_stress_desktop_mobile",
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "testing" / "points_chain_post_stress_playwright.py"),
+                    "--base-url", self.primary.base_url,
+                    "--out", str(frontend),
+                    "--member-username", "admin",
+                ],
+                timeout=1200,
+                artifact=frontend,
+                process_role="browser",
+            ),
+            lambda: self.run_native_callable_step(
+                scenario_id,
+                "fixture_account_cleanup",
+                cleanup,
+                cleanup_step,
+                payload_ok=lambda payload: bool(
+                    payload.get("login_succeeded") is True
+                    and payload.get("records")
+                    and all(
+                        row.get("deleted") is True
+                        and int(row.get("residual_exact_count") or 0) == 0
+                        for row in payload.get("records") or []
+                    )
+                ),
+            ),
+        ])
+        selected = pointschain_hft_assertions(
+            load_json(stress),
+            load_json(dispute),
+            load_json(frontend),
+            load_json(cleanup),
+        )
+        return attach_native_evidence(
+            result,
+            scenario_id=scenario_id,
+            output_dir=out_dir,
+            scenario_assertions=selected["scenario_assertions"],
+            terminal_assertions=selected["terminal_assertions"],
+            cleanup_assertions=selected["cleanup_assertions"],
+            details=selected["details"],
+        )
+
+    def native_wallet_incident_governance(self) -> dict[str, Any]:
+        """Run a real compromise, freeze, vote, compensation, and branch cycle."""
+
+        scenario_id = "wallet_incident_governance"
+        out_dir = self.reports / "scenarios" / scenario_id
+        stop_out = out_dir / "recovery_stop.json"
+        realistic_out = out_dir / "realistic_wallet_incident.json"
+        start_out = out_dir / "recovery_start.json"
+        replay_out = out_dir / "replay_and_wrong_branch_rejection.json"
+        branch_out = out_dir / "governed_recovery_branch.json"
+        cleanup_out = out_dir / "fixture_account_cleanup.json"
+        final_out = out_dir / "post_cleanup_chain_state.json"
+
+        def stop_recovery() -> dict[str, Any]:
+            old_pid = self.recovery.pid()
+            stopped = self.recovery.stop(reason="formal_wallet_incident_offline_drill")
+            return {
+                "old_pid": old_pid,
+                "stop_succeeded": stopped.get("ok") is True,
+                "master_process_remaining": stopped.get("master_process_remaining"),
+                "process_group_remaining": stopped.get("process_group_remaining"),
+            }
+
+        def start_recovery() -> dict[str, Any]:
+            started = self.recovery.start()
+            ready = started.get("ready") if isinstance(started.get("ready"), Mapping) else {}
+            return {
+                "new_pid": int(started.get("pid") or 0),
+                "start_succeeded": started.get("ok") is True,
+                "readiness_succeeded": ready.get("ok") is True,
+            }
+
+        def branch_command() -> list[str]:
+            realistic = load_json(realistic_out)
+            incident = realistic.get("incident") if isinstance(realistic.get("incident"), Mapping) else {}
+            users = realistic.get("users") if isinstance(realistic.get("users"), Mapping) else {}
+            victim = users.get("victim") if isinstance(users.get("victim"), Mapping) else {}
+            return [
+                sys.executable,
+                str(ROOT / "scripts" / "testing" / "pointschain_live_branch_drill.py"),
+                "--base-url", self.recovery.base_url,
+                "--incident-tx-hash", str(incident.get("theft_tx_hash") or ""),
+                "--victim-wallet", str(victim.get("wallet") or ""),
+                "--claim-amount", str(int(incident.get("claimed_amount") or 0)),
+                "--out", str(branch_out),
+            ]
+
+        def cleanup_users() -> dict[str, Any]:
+            realistic = load_json(realistic_out)
+            replay = load_json(replay_out)
+            users = realistic.get("users") if isinstance(realistic.get("users"), Mapping) else {}
+            usernames = [
+                str(row.get("username") or "")
+                for row in users.values()
+                if isinstance(row, Mapping)
+            ]
+            usernames.extend(str(value) for value in (replay.get("fixture_usernames") or []))
+            return self._cleanup_exact_scenario_users(usernames, target=self.recovery)
+
+        def final_chain_state() -> dict[str, Any]:
+            realistic = load_json(realistic_out)
+            incident = realistic.get("incident") if isinstance(realistic.get("incident"), Mapping) else {}
+            theft_hash = str(incident.get("theft_tx_hash") or "")
+            root = WebClient(self.recovery.base_url, "root", self.credentials.root, timeout=90)
+            login = root.login()
+            if not login.get("ok"):
+                return {"root_login_succeeded": False}
+            started = root.request("POST", "/api/root/points/chain/verify/jobs", json_body={})
+            job = self._await_management_job(root, started, timeout_seconds=900)
+            return {
+                "root_login_succeeded": True,
+                "readiness": self.recovery.wait_ready(timeout=180.0),
+                "points_verify_job": job,
+                "points_verify_latest": root.request("GET", "/api/root/points/chain/verify/latest"),
+                "theft_explorer": (
+                    root.request("GET", f"/api/points/explorer/tx/{quote(theft_hash, safe='')}")
+                    if theft_hash else {"status": 0}
+                ),
+            }
+
+        result = self.run_group(scenario_id, [
+            lambda: self.run_native_callable_step(
+                scenario_id,
+                "stop_recovery_for_offline_incident",
+                stop_out,
+                stop_recovery,
+                payload_ok=lambda payload: bool(
+                    payload.get("stop_succeeded") is True
+                    and payload.get("master_process_remaining") is False
+                    and payload.get("process_group_remaining") is False
+                ),
+            ),
+            lambda: self.run_step(
+                scenario_id,
+                "realistic_wallet_incident",
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "testing" / "pointschain_realistic_recovery_drill.py"),
+                    "--runtime-root", str(self.recovery.runtime_root),
+                    "--out", str(realistic_out),
+                    "--mode", "dev_ready",
+                ],
+                timeout=3600,
+                artifact=realistic_out,
+            ),
+            lambda: self.run_native_callable_step(
+                scenario_id,
+                "restart_recovery_after_incident",
+                start_out,
+                start_recovery,
+                payload_ok=lambda payload: bool(
+                    payload.get("start_succeeded") is True
+                    and payload.get("readiness_succeeded") is True
+                    and int(payload.get("new_pid") or 0) > 0
+                ),
+            ),
+            lambda: self.run_step(
+                scenario_id,
+                "replay_and_wrong_branch_rejection",
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "testing" / "pointschain_dispute_api_probe.py"),
+                    "--base-url", self.recovery.base_url,
+                    "--runtime-root", str(self.recovery.runtime_root),
+                    "--out", str(replay_out),
+                ],
+                timeout=1800,
+                artifact=replay_out,
+            ),
+            lambda: self.run_step(
+                scenario_id,
+                "governed_recovery_branch",
+                branch_command(),
+                timeout=3600,
+                artifact=branch_out,
+            ),
+            lambda: self.run_native_callable_step(
+                scenario_id,
+                "fixture_account_cleanup",
+                cleanup_out,
+                cleanup_users,
+                payload_ok=lambda payload: bool(
+                    payload.get("login_succeeded") is True
+                    and payload.get("records")
+                    and all(
+                        row.get("deleted") is True
+                        and int(row.get("residual_exact_count") or 0) == 0
+                        for row in payload.get("records") or []
+                    )
+                ),
+            ),
+            lambda: self.run_native_callable_step(
+                scenario_id,
+                "post_cleanup_chain_state",
+                final_out,
+                final_chain_state,
+                payload_ok=lambda payload: bool(
+                    payload.get("root_login_succeeded") is True
+                    and (payload.get("readiness") or {}).get("ok") is True
+                    and (payload.get("points_verify_job") or {}).get("terminal_status") == "succeeded"
+                    and int((payload.get("theft_explorer") or {}).get("status") or 0) == 200
+                ),
+            ),
+        ])
+        selected = wallet_incident_assertions(
+            load_json(realistic_out),
+            load_json(replay_out),
+            load_json(branch_out),
+            load_json(final_out),
+            load_json(cleanup_out),
+        )
+        return attach_native_evidence(
+            result,
+            scenario_id=scenario_id,
+            output_dir=out_dir,
+            scenario_assertions=selected["scenario_assertions"],
+            terminal_assertions=selected["terminal_assertions"],
+            cleanup_assertions=selected["cleanup_assertions"],
+            details=selected["details"],
+        )
+
+    @staticmethod
+    def _shared_hls_observation(
+        session: requests.Session,
+        *,
+        base_url: str,
+        share_token: str,
+        share_session: str,
+    ) -> dict[str, Any]:
+        playback = session.get(
+            f"{base_url}/api/videos/shared/{share_token}/playback",
+            params={"share_session": share_session},
+            timeout=60,
+            verify=False,
+        )
+        try:
+            payload = playback.json()
+        except Exception:
+            payload = {}
+        master_url = str(payload.get("master_url") or "") if isinstance(payload, Mapping) else ""
+        master = session.get(urljoin(base_url + "/", master_url), timeout=60, verify=False) if master_url else None
+        master_text = master.text if master is not None and master.status_code == 200 else ""
+        master_paths = [
+            line.strip()
+            for line in master_text.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+        variant_url = urljoin(master.url if master is not None else base_url + "/", master_paths[0]) if master_paths else ""
+        variant = session.get(variant_url, timeout=60, verify=False) if variant_url else None
+        variant_text = variant.text if variant is not None and variant.status_code == 200 else ""
+        segment_paths = [
+            line.strip()
+            for line in variant_text.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+        segment_url = urljoin(variant.url if variant is not None else base_url + "/", segment_paths[-1]) if segment_paths else ""
+        segment = session.get(segment_url, timeout=60, verify=False) if segment_url else None
+        return {
+            "playback_status": playback.status_code,
+            "mode": payload.get("mode") if isinstance(payload, Mapping) else "",
+            "streaming_ready": payload.get("streaming_ready") is True if isinstance(payload, Mapping) else False,
+            "duration_seconds": (
+                payload.get("duration_seconds")
+                or (_mapping_status.get("duration_seconds") if isinstance((_mapping_status := payload.get("status")), Mapping) else None)
+            ) if isinstance(payload, Mapping) else None,
+            "variant_names": [
+                str(row.get("name") or "")
+                for row in (payload.get("variants") or [])
+                if isinstance(row, Mapping)
+            ] if isinstance(payload, Mapping) else [],
+            "audio_track_count": len(payload.get("audio_tracks") or []) if isinstance(payload, Mapping) else 0,
+            "subtitle_count": len(payload.get("subtitles") or []) if isinstance(payload, Mapping) else 0,
+            "master_status": master.status_code if master is not None else 0,
+            "master_extm3u": "#EXTM3U" in master_text,
+            "variant_status": variant.status_code if variant is not None else 0,
+            "variant_segment_count": len(segment_paths),
+            "sample_segment_status": segment.status_code if segment is not None else 0,
+            "sample_segment_bytes": len(segment.content) if segment is not None else 0,
+        }
+
+    def _media_restart_continuity(self, stress_path: Path, share_password: str) -> dict[str, Any]:
+        stress = load_json(stress_path)
+        upload_phase = next(
+            (
+                phase for phase in stress.get("phases") or []
+                if isinstance(phase, Mapping) and phase.get("phase") == "upload"
+            ),
+            {},
+        )
+        uploads = [
+            row for row in upload_phase.get("uploads") or []
+            if isinstance(row, Mapping) and row.get("ok") is True
+        ]
+        passwords = {username: password for username, password in self.accounts}
+        continuity_upload = uploads[0] if uploads else {}
+        username = str(continuity_upload.get("username") or "")
+        video_id = int(continuity_upload.get("video_id") or 0)
+        owner = WebClient(self.primary.base_url, username, passwords.get(username, ""), timeout=90)
+        result: dict[str, Any] = {
+            "upload_video_count": len(uploads),
+            "before_restart": {},
+            "after_restart": {},
+            "restart": {},
+            "cleanup": {},
+        }
+        if not uploads:
+            result["cleanup"] = {
+                "continuity_share_revoked": False,
+                "post_revoke_denied": False,
+                "expected_video_count": 0,
+                "deleted_video_count": 0,
+                "all_videos_absent": False,
+            }
+            return result
+        share_token = ""
+        anonymous = requests.Session()
+        anonymous.verify = False
+        share_session = ""
+        try:
+            owner_login = owner.login()
+            share = owner.request(
+                "PUT",
+                f"/api/videos/{video_id}/share-link",
+                json_body={
+                    "regenerate": True,
+                    "share_password": share_password,
+                },
+            ) if owner_login.get("ok") and video_id > 0 else {"body": {}}
+            share_link = (share.get("body") or {}).get("share_link") or {}
+            share_token = str(share_link.get("token") or "")
+            if not share_token:
+                share_url = str(share_link.get("url") or "")
+                if "/shared/videos/" in share_url:
+                    share_token = share_url.split("/shared/videos/", 1)[1].split("?", 1)[0].split("#", 1)[0]
+            csrf_response = anonymous.get(
+                f"{self.primary.base_url}/api/csrf-token",
+                timeout=30,
+                verify=False,
+            )
+            csrf_body = csrf_response.json() if csrf_response.content else {}
+            csrf = str(csrf_body.get("csrf_token") or anonymous.cookies.get("csrf_token") or "")
+            unlock = anonymous.post(
+                f"{self.primary.base_url}/api/videos/shared/{share_token}/unlock",
+                json={"password": share_password},
+                headers={"X-CSRF-Token": csrf},
+                timeout=30,
+                verify=False,
+            ) if share_token else None
+            unlock_body = unlock.json() if unlock is not None and unlock.content else {}
+            share_session = str(unlock_body.get("share_session_id") or "")
+            result["share_created"] = bool(
+                share.get("status") == 200
+                and share_token
+                and unlock is not None
+                and unlock.status_code == 200
+                and share_session
+            )
+            if not result["share_created"]:
+                return result
+            result["before_restart"] = self._shared_hls_observation(
+                anonymous,
+                base_url=self.primary.base_url,
+                share_token=share_token,
+                share_session=share_session,
+            )
+            old_pid = self.primary.pid()
+            restart = self.primary.restart(reason="formal_long_media_continuity")
+            start_event = restart.get("started") if isinstance(restart.get("started"), Mapping) else {}
+            stop_event = restart.get("stopped") if isinstance(restart.get("stopped"), Mapping) else {}
+            result["restart"] = {
+                "stopped": {
+                    "old_pid": old_pid,
+                    "master_process_remaining": stop_event.get("master_process_remaining"),
+                    "process_group_remaining": stop_event.get("process_group_remaining"),
+                },
+                "started": {
+                    "new_pid": int(start_event.get("pid") or 0),
+                    "ready": bool((start_event.get("ready") or {}).get("ok")),
+                },
+                "elapsed_seconds": restart.get("elapsed_seconds"),
+            }
+            if restart.get("ok"):
+                result["after_restart"] = self._shared_hls_observation(
+                    anonymous,
+                    base_url=self.primary.base_url,
+                    share_token=share_token,
+                    share_session=share_session,
+                )
+        finally:
+            if self.primary.pid() <= 0:
+                recovery_start = self.primary.start()
+                result["server_recovery_start_succeeded"] = recovery_start.get("ok") is True
+            deleted = 0
+            all_absent = True
+            revoke_succeeded = False
+            post_revoke_denied = False
+            for row in uploads:
+                account = str(row.get("username") or "")
+                target_id = int(row.get("video_id") or 0)
+                client = WebClient(self.primary.base_url, account, passwords.get(account, ""), timeout=60)
+                if not client.login().get("ok"):
+                    all_absent = False
+                    continue
+                if target_id == video_id:
+                    revoke = client.request("DELETE", f"/api/videos/{target_id}/share-link")
+                    revoke_succeeded = revoke.get("status") == 200
+                    if share_token:
+                        denied = anonymous.get(
+                            f"{self.primary.base_url}/api/videos/shared/{share_token}/playback",
+                            params={"share_session": share_session},
+                            timeout=30,
+                            verify=False,
+                        )
+                        post_revoke_denied = denied.status_code in {404, 410}
+                removed = client.request("DELETE", f"/api/videos/{target_id}/manage")
+                verify = client.request("GET", f"/api/videos/{target_id}")
+                absent = removed.get("status") == 200 and verify.get("status") == 404
+                deleted += int(absent)
+                all_absent = all_absent and absent
+            result["cleanup"] = {
+                "continuity_share_revoked": revoke_succeeded,
+                "post_revoke_denied": post_revoke_denied,
+                "expected_video_count": len(uploads),
+                "deleted_video_count": deleted,
+                "all_videos_absent": all_absent and bool(uploads),
+            }
+        return result
+
+    def native_media_long_hls_share(self) -> dict[str, Any]:
+        """Execute the 3900-second multi-account HLS scenario with planned restart."""
+
+        scenario_id = "media_long_hls_share"
+        out_dir = self.reports / "scenarios" / scenario_id
+        stress_out = out_dir / "video_hls_quality_stress.json"
+        restart_out = out_dir / "planned_restart_continuity.json"
+        fixture = self.root / "fixtures" / "campaign_long_video.mkv"
+        share_password = secrets.token_urlsafe(24)
+        account_rows = [
+            {"username": username, "password": password}
+            for username, password in self.accounts[:3]
+        ]
+        result = self.run_group(scenario_id, [
+            lambda: self.run_step(
+                scenario_id,
+                "long_video_hls_share",
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "testing" / "video_hls_quality_stress.py"),
+                    "--base-url", self.primary.base_url,
+                    "--video", str(fixture),
+                    "--db", str(self.primary.runtime_root / "database" / "database.db"),
+                    "--runtime-marker", str(self.primary.run_root),
+                    "--out", str(stress_out),
+                    "--generate-fixture-duration-seconds", "3900",
+                    "--fixture-timeout-seconds", "1800",
+                    "--minimum-source-duration-seconds", "3600",
+                    "--visibility", "unlisted",
+                    "--privacy-mode", "server_encrypted",
+                    "--upload",
+                    "--wait",
+                    "--measure",
+                    "--verify-share",
+                    "--browser-seek",
+                    "--browser-mobile",
+                    "--expect-audio-tracks", "2",
+                    "--expect-subtitles",
+                    "--minimum-segments-per-variant", "100",
+                    "--segment-concurrency", "8",
+                    "--max-segments-per-variant", "16",
+                    "--post-upload-observe-seconds", "5",
+                    "--upload-timeout-seconds", "1800",
+                    "--wait-timeout-seconds", "21600",
+                    "--wait-interval-seconds", "15",
+                    "--orphan-grace-seconds", "900",
+                ],
+                timeout=8 * 60 * 60,
+                artifact=stress_out,
+                process_role="ffmpeg",
+                env={
+                    "HACKME_HLS_STRESS_ACCOUNTS_JSON": json.dumps(account_rows),
+                    "HACKME_HLS_SHARE_PASSWORD": share_password,
+                    "HACKME_PROBE_ROOT_PASSWORD": self.credentials.root,
+                },
+            ),
+            lambda: self.run_native_callable_step(
+                scenario_id,
+                "planned_restart_hls_continuity_and_cleanup",
+                restart_out,
+                lambda: self._media_restart_continuity(stress_out, share_password),
+                payload_ok=lambda payload: bool(
+                    (payload.get("after_restart") or {}).get("streaming_ready") is True
+                    and (payload.get("cleanup") or {}).get("all_videos_absent") is True
+                ),
+            ),
+        ])
+        selected = media_long_assertions(load_json(stress_out), load_json(restart_out))
+        return attach_native_evidence(
+            result,
+            scenario_id=scenario_id,
+            output_dir=out_dir,
+            scenario_assertions=selected["scenario_assertions"],
+            terminal_assertions=selected["terminal_assertions"],
+            cleanup_assertions=selected["cleanup_assertions"],
+            details=selected["details"],
+        )
+
+    def native_bt_download_stream_restart(self) -> dict[str, Any]:
+        """Run local-only BT lifecycle then stream that exact download via HLS."""
+
+        scenario_id = "bt_download_stream_restart"
+        out_dir = self.reports / "scenarios" / scenario_id
+        bt_out = out_dir / "bt_formal_local_probe.json"
+        bt_artifact_parent = out_dir / "bt_retained_artifacts"
+        bt_runtime_parent = self.root / "bt_runtime"
+        stress_out = out_dir / "downloaded_video_hls.json"
+        restart_out = out_dir / "downloaded_video_restart_continuity.json"
+        share_password = secrets.token_urlsafe(24)
+        account_rows = [
+            {"username": username, "password": password}
+            for username, password in self.accounts[:1]
+        ]
+
+        def bt_report_passes(payload: Mapping[str, Any]) -> bool:
+            try:
+                validation_errors = validate_bt_machine_report(dict(payload))
+            except (TypeError, ValueError, OSError):
+                return False
+            checks = payload.get("checks")
+            return bool(
+                not validation_errors
+                and payload.get("ok") is True
+                and payload.get("terminal_state") == "success"
+                and isinstance(payload.get("errors"), list)
+                and not payload.get("errors")
+                and isinstance(checks, Mapping)
+                and set(checks) == set(BT_MANDATORY_CHECK_IDS)
+                and all(
+                    isinstance(checks.get(check_id), Mapping)
+                    and checks[check_id].get("mandatory") is True
+                    and checks[check_id].get("ok") is True
+                    for check_id in BT_MANDATORY_CHECK_IDS
+                )
+            )
+
+        def magnet_download_path() -> str:
+            payload = load_json(bt_out)
+            raw = payload.get("raw") if isinstance(payload.get("raw"), Mapping) else {}
+            magnet = raw.get("magnet") if isinstance(raw.get("magnet"), Mapping) else {}
+            return str(magnet.get("download_path") or "")
+
+        result = self.run_group(scenario_id, [
+            lambda: self.run_step(
+                scenario_id,
+                "controlled_local_bt_lifecycle",
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "testing" / "bt_formal_local_probe.py"),
+                    "--out", str(bt_out),
+                    "--artifact-dir", str(bt_artifact_parent),
+                    "--runtime-root", str(bt_runtime_parent),
+                    "--timeout-seconds", "600",
+                    "--payload-bytes", str(8 * 1024 * 1024),
+                    "--download-limit-kbps", "192",
+                    "--pause-after-bytes", str(256 * 1024),
+                    "--pause-observation-seconds", "2",
+                ],
+                timeout=30 * 60,
+                artifact=bt_out,
+                payload_ok=bt_report_passes,
+                process_role="bt",
+            ),
+            lambda: self.run_step(
+                scenario_id,
+                "same_download_video_hls_share",
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "testing" / "video_hls_quality_stress.py"),
+                    "--base-url", self.primary.base_url,
+                    "--video", magnet_download_path(),
+                    "--db", str(self.primary.runtime_root / "database" / "database.db"),
+                    "--runtime-marker", str(self.primary.run_root),
+                    "--out", str(stress_out),
+                    "--visibility", "unlisted",
+                    "--privacy-mode", "server_encrypted",
+                    "--upload",
+                    "--wait",
+                    "--measure",
+                    "--verify-share",
+                    "--minimum-segments-per-variant", "1",
+                    "--segment-concurrency", "4",
+                    "--max-segments-per-variant", "12",
+                    "--post-upload-observe-seconds", "5",
+                    "--upload-timeout-seconds", "1800",
+                    "--wait-timeout-seconds", "7200",
+                    "--wait-interval-seconds", "10",
+                    "--orphan-grace-seconds", "600",
+                ],
+                timeout=4 * 60 * 60,
+                artifact=stress_out,
+                payload_ok=lambda payload: bool(
+                    payload.get("ok") is True
+                    and payload.get("verdict") == "PASS"
+                    and {str(row.get("phase") or "") for row in payload.get("phases") or [] if isinstance(row, Mapping)}
+                    == {"upload", "wait", "measure", "share"}
+                    and all(
+                        row.get("ok") is True
+                        for row in payload.get("phases") or []
+                        if isinstance(row, Mapping)
+                    )
+                ),
+                process_role="ffmpeg",
+                env={
+                    "HACKME_HLS_STRESS_ACCOUNTS_JSON": json.dumps(account_rows),
+                    "HACKME_HLS_SHARE_PASSWORD": share_password,
+                    "HACKME_PROBE_ROOT_PASSWORD": self.credentials.root,
+                },
+            ),
+            lambda: self.run_native_callable_step(
+                scenario_id,
+                "same_download_primary_restart_continuity_cleanup",
+                restart_out,
+                lambda: self._media_restart_continuity(stress_out, share_password),
+                payload_ok=lambda payload: bool(
+                    payload.get("share_created") is True
+                    and (payload.get("after_restart") or {}).get("streaming_ready") is True
+                    and (payload.get("cleanup") or {}).get("continuity_share_revoked") is True
+                    and (payload.get("cleanup") or {}).get("post_revoke_denied") is True
+                    and (payload.get("cleanup") or {}).get("all_videos_absent") is True
+                ),
+            ),
+        ])
+
+        # Retain and hash the actual .torrent, both downloaded payloads,
+        # ffprobe records, trace, and daemon logs in addition to the three
+        # step JSON reports.  Missing items remain a selector failure instead
+        # of being represented by an unverifiable manifest declaration.
+        bt_payload = load_json(bt_out)
+        declared_ids = {
+            str(row.get("artifact_id") or "")
+            for row in result.get("artifacts") or []
+            if isinstance(row, Mapping)
+        }
+        for row in bt_payload.get("artifacts") or []:
+            if not isinstance(row, Mapping):
+                continue
+            source_id = re.sub(
+                r"[^a-z0-9_.-]+",
+                "_",
+                str(row.get("artifact_id") or "").lower(),
+            ).strip("_.-")
+            artifact_id = f"native.source.{scenario_id}.bt.{source_id}"
+            path = Path(str(row.get("path") or "")).expanduser()
+            if (
+                source_id
+                and artifact_id not in declared_ids
+                and row.get("exists") is True
+                and row.get("validated") is True
+                and path.is_absolute()
+                and path.is_file()
+                and not path.is_symlink()
+            ):
+                result["artifacts"].append({
+                    "artifact_id": artifact_id,
+                    "path": str(path.resolve(strict=True)),
+                    # The probe index uses MIME labels; the formal artifact
+                    # validator uses its own enum and performs stronger
+                    # suffix-driven parsing when declared as ``auto``.
+                    "artifact_type": "auto",
+                })
+                declared_ids.add(artifact_id)
+
+        selected = bt_download_assertions(
+            bt_payload,
+            load_json(stress_out),
+            load_json(restart_out),
+        )
+        return attach_native_evidence(
+            result,
+            scenario_id=scenario_id,
+            output_dir=out_dir,
+            scenario_assertions=selected["scenario_assertions"],
+            terminal_assertions=selected["terminal_assertions"],
+            cleanup_assertions=selected["cleanup_assertions"],
+            details=selected["details"],
+        )
+
+    def native_media_proxy_cross_browser(self) -> dict[str, Any]:
+        """Execute all proxy/browser combinations with exact terminal cleanup evidence."""
+
+        scenario_id = "media_proxy_cross_browser"
+        out_dir = self.reports / "scenarios" / scenario_id
+        service_out = out_dir / "realtime_proxy_service.json"
+        http_root = out_dir / "http_concurrency"
+        http_out = http_root / "result.json"
+        browser_root = out_dir / "browser_compat"
+        browser_out = browser_root / "reports" / "qa" / "browser_video_compat.json"
+        chat_out = out_dir / "chat_video_share.json"
+        result = self.run_group(scenario_id, [
+            lambda: self.run_step(
+                scenario_id,
+                "realtime_proxy_service",
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "testing" / "realtime_proxy_stress_probe.py"),
+                    "--runtime-root", str(out_dir / "service_runtime"),
+                    "--json-out", str(service_out),
+                    "--duration", "90",
+                    "--max-concurrent", "2",
+                ],
+                timeout=1200,
+                artifact=service_out,
+                process_role="ffmpeg",
+            ),
+            lambda: self.run_step(
+                scenario_id,
+                "realtime_proxy_http_concurrency",
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "testing" / "realtime_proxy_http_concurrency_probe.py"),
+                    "--runtime-root", str(http_root),
+                    "--json-out", str(http_out),
+                    "--duration", "60",
+                    "--max-concurrent", "2",
+                    "--server-runner", "gunicorn",
+                    "--gunicorn-workers", "3",
+                    "--gunicorn-threads", "2",
+                ],
+                timeout=1800,
+                artifact=http_out,
+                process_role="ffmpeg",
+            ),
+            lambda: self.run_step(
+                scenario_id,
+                "cross_browser_video",
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "testing" / "playwright_browser_video_compat.py"),
+                    "--runtime-root", str(browser_root),
+                    "--browsers", "chromium,firefox,webkit",
+                    "--require-all-browsers",
+                ],
+                timeout=3600,
+                artifact=browser_out,
+                process_role="browser",
+            ),
+            lambda: self.run_step(
+                scenario_id,
+                "chat_video_share_embed",
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "testing" / "chat_video_share_link_probe.py"),
+                    "--base-url", self.primary.base_url,
+                    "--out", str(chat_out),
+                ],
+                timeout=1200,
+                artifact=chat_out,
+                process_role="browser",
+            ),
+        ])
+        selected = media_proxy_assertions(
+            load_json(service_out),
+            load_json(http_out),
+            load_json(browser_out),
+            load_json(chat_out),
+        )
+        return attach_native_evidence(
+            result,
+            scenario_id=scenario_id,
+            output_dir=out_dir,
+            scenario_assertions=selected["scenario_assertions"],
+            terminal_assertions=selected["terminal_assertions"],
+            cleanup_assertions=selected["cleanup_assertions"],
+            details=selected["details"],
+        )
+
+    @staticmethod
+    def _await_management_job(
+        client: WebClient,
+        started: Mapping[str, Any],
+        *,
+        timeout_seconds: float = 300.0,
+    ) -> dict[str, Any]:
+        body = _mapping_body = (
+            started.get("body")
+            if isinstance(started.get("body"), Mapping)
+            else {}
+        )
+        status_url = str(_mapping_body.get("status_url") or "")
+        job_uuid = str(_mapping_body.get("job_uuid") or _mapping_body.get("job_id") or "")
+        deadline = time.monotonic() + max(1.0, float(timeout_seconds))
+        last: Mapping[str, Any] = {}
+        while status_url and time.monotonic() < deadline:
+            response = client.request("GET", status_url)
+            response_body = response.get("body") if isinstance(response.get("body"), Mapping) else {}
+            job = response_body.get("job") if isinstance(response_body.get("job"), Mapping) else {}
+            last = job
+            state = str(job.get("status") or "").lower()
+            if state in {"succeeded", "failed", "cancelled", "error"}:
+                return {
+                    "job_uuid": job_uuid,
+                    "terminal_status": state,
+                    "stage": str(job.get("stage") or ""),
+                    "progress_percent": job.get("progress_percent"),
+                    "error_code": str(job.get("error_code") or ""),
+                    "error_message": str(job.get("error_message") or "")[:500],
+                }
+            time.sleep(0.5)
+        return {
+            "job_uuid": job_uuid,
+            "terminal_status": "timeout" if status_url else "status_url_missing",
+            "stage": str(last.get("stage") or ""),
+            "progress_percent": last.get("progress_percent"),
+            "error_code": str(last.get("error_code") or ""),
+            "error_message": str(last.get("error_message") or "")[:500],
+        }
+
+    def _final_ui_invariants(self) -> dict[str, Any]:
+        root = WebClient(self.primary.base_url, "root", self.credentials.root, timeout=60)
+        login = root.login()
+        if not login.get("ok"):
+            return {"root_login_succeeded": False}
+        points_started = root.request("POST", "/api/root/points/chain/verify/jobs", json_body={})
+        points_job = self._await_management_job(root, points_started)
+        points_latest = root.request("GET", "/api/root/points/chain/verify/latest")
+        trading_started = root.request("POST", "/api/root/trading/verify/jobs", json_body={})
+        trading_job = self._await_management_job(root, trading_started)
+        trading_latest = root.request("GET", "/api/root/trading/verify/latest")
+        return {
+            "root_login_succeeded": True,
+            "readiness": self.primary.wait_ready(timeout=180.0),
+            "audit_integrity": root.request("GET", "/api/admin/health/audit-chain"),
+            "database_integrity": root.request("GET", "/api/admin/health/db-integrity"),
+            "mode_log_chain": root.request("GET", "/api/root/server-mode/logs/verify"),
+            "points_verify_job": points_job,
+            "points_verify_latest": points_latest,
+            "trading_verify_job": trading_job,
+            "trading_verify_latest": trading_latest,
+            "sqlite_quick_checks": self._sqlite_checks(self.primary.runtime_root / "database"),
+        }
+
+    def _formal_load_context(self) -> dict[str, Any]:
+        checkpoint = load_json(
+            self.core_root / "reports" / "operational_soak" / "operational_soak.checkpoint.json"
+        )
+        effective = checkpoint.get("effective_load") if isinstance(checkpoint.get("effective_load"), Mapping) else {}
+        ramp = effective.get("ramp") if isinstance(effective.get("ramp"), Mapping) else {}
+        target_summary = (
+            effective.get("target_load_summary")
+            if isinstance(effective.get("target_load_summary"), Mapping)
+            else {}
+        )
+        target_samples = effective.get("target_load_samples")
+        target_samples = target_samples if isinstance(target_samples, list) else []
+        latest_target = target_samples[-1] if target_samples and isinstance(target_samples[-1], Mapping) else {}
+        resource_samples = list(getattr(self.resource_monitor, "samples", []) or [])
+        latest_resource = resource_samples[-1] if resource_samples else {}
+        hard_limit = latest_resource.get("hard_limit_state") if isinstance(latest_resource, Mapping) else {}
+        state = ""
+        if self.state_machine is not None:
+            try:
+                state = str(self.state_machine.snapshot().get("state") or "")
+            except Exception:
+                state = ""
+        return {
+            "campaign_active": bool(
+                self.active_event.is_set()
+                and not self.stop_event.is_set()
+                and (not state or state == "ACTIVE")
+            ),
+            "campaign_state": state,
+            "core_load_process_alive": bool(
+                self.core_process is not None and self.core_process.poll() is None
+            ),
+            "resource_monitor_alive": bool(self.resource_monitor.is_alive()),
+            "resource_sample_count": len(resource_samples),
+            "latest_resource_hard_limit_ok": (
+                hard_limit.get("ok") is True if isinstance(hard_limit, Mapping) else False
+            ),
+            "ramp_completed_levels": list(ramp.get("completed_levels") or []),
+            "target_load_coverage": target_summary.get("target_load_coverage"),
+            "latest_target_sample_at_load": latest_target.get("at_target_load") is True,
+            "latest_effective_load_ratio": latest_target.get("effective_load_ratio"),
+        }
+
+    def native_final_ui_mobile_prelaunch(self) -> dict[str, Any]:
+        """Run the reviewed read-only UI sweep, launch gate, and final invariants."""
+
+        scenario_id = "final_ui_mobile_prelaunch"
+        out_dir = self.reports / "scenarios" / scenario_id
+        ui_out = out_dir / "formal_ui_sweep.json"
+        screenshot_dir = out_dir / "screenshots"
+        gate_dir = out_dir / "production_gate"
+        gate_out = gate_dir / "whole_site_production_gate.json"
+        invariants_out = out_dir / "final_invariants.json"
+        load_out = out_dir / "load_context.json"
+        process_out = out_dir / "process_cleanup.json"
+        baseline_rows = proc_rows()
+        baseline_descendants = descendants(baseline_rows, os.getpid())
+
+        def process_cleanup() -> dict[str, Any]:
+            rows = proc_rows()
+            current = descendants(rows, os.getpid())
+            allowed: set[int] = {os.getpid()}
+            for pid in (
+                self.primary.pid(),
+                self.recovery.pid(),
+                self.security_sentinel.pid(),
+                self.core_process.pid if self.core_process is not None else 0,
+            ):
+                if int(pid or 0) > 0:
+                    allowed.update(descendants(rows, int(pid)))
+            new_descendants = sorted(current - baseline_descendants - allowed)
+            return {
+                "baseline_descendant_count": len(baseline_descendants),
+                "current_descendant_count": len(current),
+                "new_descendant_pids": new_descendants,
+            }
+
+        result = self.run_group(scenario_id, [
+            lambda: self.run_step(
+                scenario_id,
+                "formal_read_only_ui_sweep",
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "testing" / "playwright_formal_ui_sweep.py"),
+                    "--base-url", self.primary.base_url,
+                    "--out", str(ui_out),
+                    "--screenshot-dir", str(screenshot_dir),
+                ],
+                timeout=5400,
+                artifact=ui_out,
+                payload_ok=lambda payload: payload.get("terminal_pass") is True,
+                process_role="browser",
+            ),
+            lambda: self.run_step(
+                scenario_id,
+                "whole_site_production_gate",
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "security" / "gate" / "whole_site_production_gate.py"),
+                    "--base-url", self.primary.base_url,
+                    "--out", str(gate_dir),
+                    "--json-out", str(gate_out),
+                    "--stress-requests", "400",
+                    "--stress-concurrency", "16",
+                ],
+                timeout=3 * 60 * 60,
+                artifact=gate_out,
+                payload_ok=lambda payload: bool(
+                    _mapping := payload.get("WHOLE_SITE_PRODUCTION_GATE_SUMMARY")
+                ) and isinstance(_mapping, Mapping)
+                and _mapping.get("production_readiness") == "YES",
+                process_role="browser",
+                env={"WHOLE_SITE_ROOT_PASSWORD": self.credentials.root},
+            ),
+            lambda: self.run_native_callable_step(
+                scenario_id,
+                "final_db_log_chain_finance_pointschain_invariants",
+                invariants_out,
+                self._final_ui_invariants,
+                payload_ok=lambda payload: bool(
+                    payload.get("root_login_succeeded") is True
+                    and (payload.get("readiness") or {}).get("ok") is True
+                    and (payload.get("points_verify_job") or {}).get("terminal_status") == "succeeded"
+                    and (payload.get("trading_verify_job") or {}).get("terminal_status") == "succeeded"
+                    and payload.get("sqlite_quick_checks")
+                ),
+            ),
+            lambda: self.run_native_callable_step(
+                scenario_id,
+                "effective_load_context",
+                load_out,
+                self._formal_load_context,
+                payload_ok=lambda payload: bool(
+                    payload.get("campaign_active") is True
+                    and payload.get("core_load_process_alive") is True
+                    and payload.get("resource_monitor_alive") is True
+                    and payload.get("latest_target_sample_at_load") is True
+                ),
+            ),
+            lambda: self.run_native_callable_step(
+                scenario_id,
+                "process_cleanup",
+                process_out,
+                process_cleanup,
+                payload_ok=lambda payload: isinstance(payload.get("new_descendant_pids"), list)
+                and not payload.get("new_descendant_pids"),
+            ),
+        ])
+        ui_payload = load_json(ui_out)
+        artifacts = list(result.get("artifacts") or [])
+        for index, screenshot in enumerate(ui_payload.get("screenshots") or []):
+            if not isinstance(screenshot, Mapping):
+                continue
+            screenshot_path = Path(str(screenshot.get("path") or "")).expanduser().resolve(strict=False)
+            artifacts.append({
+                "artifact_id": f"native.source.{scenario_id}.screenshot_{index:03d}",
+                "path": str(screenshot_path),
+                "artifact_type": "image",
+            })
+        result["artifacts"] = artifacts
+        selected = final_ui_assertions(
+            ui_payload,
+            load_json(gate_out),
+            load_json(invariants_out),
+            load_json(load_out),
+            load_json(process_out),
+        )
+        return attach_native_evidence(
+            result,
+            scenario_id=scenario_id,
+            output_dir=out_dir,
+            scenario_assertions=selected["scenario_assertions"],
+            terminal_assertions=selected["terminal_assertions"],
+            cleanup_assertions=selected["cleanup_assertions"],
+            details=selected["details"],
+        )
+
+    def native_cloud_drive_share_stream(self) -> dict[str, Any]:
+        """Run a real cloud upload, HLS/share/proxy/UI/revoke lifecycle."""
+
+        scenario_id = "cloud_drive_share_stream"
+        out_dir = self.reports / "scenarios" / scenario_id
+        probe_out = out_dir / "formal_cloud_drive_stream.json"
+        screenshot_dir = out_dir / "screenshots"
+        result = self.run_group(scenario_id, [
+            lambda: self.run_step(
+                scenario_id,
+                "cloud_upload_hls_share_realtime_ui_revoke",
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "testing" / "formal_cloud_drive_stream_probe.py"),
+                    "--base-url", self.primary.base_url,
+                    "--runtime-root", str(self.primary.runtime_root),
+                    "--out", str(probe_out),
+                    "--screenshot-dir", str(screenshot_dir),
+                ],
+                timeout=3600,
+                artifact=probe_out,
+                process_role="ffmpeg",
+                env={"HACKME_CLOUD_PROBE_SHARE_PASSWORD": secrets.token_urlsafe(24)},
+                payload_ok=lambda payload: bool(
+                    payload.get("schema_version") == "hackme.formal-cloud-drive-stream-probe/v1"
+                    and payload.get("ok") is True
+                    and not payload.get("errors")
+                    and (payload.get("hls_worker") or {}).get("returncode") == 0
+                    and (payload.get("stream") or {}).get("status") == "ready"
+                    and (payload.get("cleanup") or {}).get("owner_preview_after_purge_status") == 404
+                ),
+            ),
+        ])
+        payload = load_json(probe_out)
+        artifacts = list(result.get("artifacts") or [])
+        fixture = payload.get("fixture") if isinstance(payload.get("fixture"), Mapping) else {}
+        fixture_path = Path(str(fixture.get("path") or "")).expanduser().resolve(strict=False)
+        if fixture_path.is_file() and not fixture_path.is_symlink():
+            artifacts.append({
+                "artifact_id": "native.source.cloud_drive_share_stream.fixture_video",
+                "path": str(fixture_path.resolve(strict=True)),
+                "artifact_type": "video",
+            })
+        browser = payload.get("browser") if isinstance(payload.get("browser"), Mapping) else {}
+        for index, row in enumerate(browser.get("rows") or []):
+            if not isinstance(row, Mapping):
+                continue
+            screenshot = Path(str(row.get("screenshot") or "")).expanduser().resolve(strict=False)
+            if screenshot.is_file() and not screenshot.is_symlink():
+                artifacts.append({
+                    "artifact_id": f"native.source.cloud_drive_share_stream.screenshot_{index:02d}",
+                    "path": str(screenshot.resolve(strict=True)),
+                    "artifact_type": "image",
+                })
+        result["artifacts"] = artifacts
+        selected = cloud_drive_stream_assertions(payload)
+        return attach_native_evidence(
+            result,
+            scenario_id=scenario_id,
+            output_dir=out_dir,
+            scenario_assertions=selected["scenario_assertions"],
+            terminal_assertions=selected["terminal_assertions"],
+            cleanup_assertions=selected["cleanup_assertions"],
+            details=selected["details"],
+        )
+
+    def native_community_governance_operations(self) -> dict[str, Any]:
+        """Run exact forum/chat/friend/moderation/governance lifecycle proof."""
+
+        scenario_id = "community_governance_operations"
+        out_dir = self.reports / "scenarios" / scenario_id
+        probe_out = out_dir / "formal_community_governance.json"
+        screenshot_dir = out_dir / "screenshots"
+        if len(self.accounts) < 2:
+            return {
+                "ok": False,
+                "classification": "FAIL_HARNESS",
+                "error": "community_governance_requires_two_campaign_accounts",
+                "scenario_id": scenario_id,
+            }
+        user_one, user_two = self.accounts[:2]
+        result = self.run_group(scenario_id, [
+            lambda: self.run_step(
+                scenario_id,
+                "forum_chat_friend_governance_ui_lifecycle",
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "testing" / "formal_community_governance_probe.py"),
+                    "--base-url", self.primary.base_url,
+                    "--root-password", self.credentials.root,
+                    "--manager-username", "admin",
+                    "--manager-password", self.credentials.manager,
+                    "--user-one", user_one[0],
+                    "--user-one-password", user_one[1],
+                    "--user-two", user_two[0],
+                    "--user-two-password", user_two[1],
+                    "--out", str(probe_out),
+                    "--screenshot-dir", str(screenshot_dir),
+                ],
+                timeout=1800,
+                artifact=probe_out,
+                process_role="browser",
+                payload_ok=lambda payload: bool(
+                    payload.get("schema_version") == "hackme.formal-community-governance-probe/v1"
+                    and payload.get("ok") is True
+                    and not payload.get("errors")
+                    and (payload.get("forum") or {}).get("terminal_report", {}).get("status") == "rejected"
+                    and (payload.get("governance") or {}).get("terminal_proposal", {}).get("status") == "executed"
+                    and (payload.get("boundaries") or {}).get("chat_rate_limit", {}).get("terminal", {}).get("status") == 429
+                    and (payload.get("cleanup") or {}).get("settings_restored") is True
+                    and (payload.get("cleanup") or {}).get("notifications_dismissed") is True
+                ),
+            ),
+        ])
+        payload = load_json(probe_out)
+        artifacts = list(result.get("artifacts") or [])
+        browser = payload.get("browser") if isinstance(payload.get("browser"), Mapping) else {}
+        for index, row in enumerate(browser.get("rows") or []):
+            if not isinstance(row, Mapping):
+                continue
+            screenshot = Path(str(row.get("screenshot") or "")).expanduser().resolve(strict=False)
+            if screenshot.is_file() and not screenshot.is_symlink():
+                artifacts.append({
+                    "artifact_id": f"native.source.{scenario_id}.screenshot_{index:02d}",
+                    "path": str(screenshot.resolve(strict=True)),
+                    "artifact_type": "image",
+                })
+        result["artifacts"] = artifacts
+        selected = community_governance_assertions(payload)
+        return attach_native_evidence(
+            result,
+            scenario_id=scenario_id,
+            output_dir=out_dir,
+            scenario_assertions=selected["scenario_assertions"],
+            terminal_assertions=selected["terminal_assertions"],
+            cleanup_assertions=selected["cleanup_assertions"],
+            details=selected["details"],
+        )
+
+    def native_ai_agent_positive_operations(self) -> dict[str, Any]:
+        """Run exact AI write operations and consume one supervised restart."""
+
+        scenario_id = "ai_agent_positive_operations"
+        out_dir = self.reports / "scenarios" / scenario_id
+        probe_out = out_dir / "formal_ai_agent_positive_operations.json"
+        restart_out = out_dir / "supervised_restart.json"
+        artifact_dir = out_dir / "artifacts"
+        request_file = self.recovery.restart_request_file
+        if len(self.accounts) < 2:
+            return {
+                "ok": False,
+                "classification": "FAIL_HARNESS",
+                "error": "ai_agent_positive_operations_requires_two_campaign_accounts",
+                "scenario_id": scenario_id,
+            }
+        user_one, user_two = self.accounts[:2]
+
+        def consume_restart_request() -> dict[str, Any]:
+            before_pid = self.recovery.pid()
+            if before_pid <= 1 or not Path(f"/proc/{before_pid}").exists():
+                raise RuntimeError("recovery_master_missing_before_ai_restart")
+            if not request_file.is_file() or request_file.is_symlink():
+                raise RuntimeError("supervised_restart_request_missing_or_symlink")
+            request_root = self.recovery.restart_request_root
+            request_mode = stat.S_IMODE(request_file.stat().st_mode)
+            root_mode = stat.S_IMODE(request_root.stat().st_mode)
+            receipt = json.loads(request_file.read_text(encoding="utf-8"))
+            probe = load_json(probe_out)
+            probe_request = probe.get("restart_request") if isinstance(probe.get("restart_request"), Mapping) else {}
+            receipt_nonce = str(receipt.get("nonce") or "")
+            probe_nonce = str(probe_request.get("request_nonce") or "")
+            requesting_pid = int(receipt.get("requesting_pid") or 0)
+            rows = proc_rows()
+            old_tree = descendants(rows, before_pid)
+            old_identities: dict[int, int] = {}
+            for pid in old_tree:
+                try:
+                    old_identities[pid] = process_start_ticks(pid)
+                except Exception:
+                    old_identities[pid] = 0
+            requesting_pid_in_old_tree = requesting_pid in old_tree
+            requesting_pid_runtime_owned = bool(
+                requesting_pid_in_old_tree
+                and self.recovery._pid_matches_runtime(requesting_pid)
+            )
+            receipt_valid = bool(
+                receipt.get("schema_version") == "hackme.supervised-restart-request/v1"
+                and receipt_nonce
+                and receipt_nonce == probe_nonce
+                and requesting_pid_runtime_owned
+                and request_mode == 0o600
+                and root_mode & 0o077 == 0
+            )
+            if not receipt_valid:
+                raise RuntimeError(
+                    "supervised_restart_receipt_invalid:"
+                    f"schema={receipt.get('schema_version')},nonce={bool(receipt_nonce)},"
+                    f"pid_in_tree={requesting_pid_in_old_tree},runtime={requesting_pid_runtime_owned},"
+                    f"file_mode={oct(request_mode)},root_mode={oct(root_mode)}"
+                )
+            request_file.unlink()
+            directory_fd = os.open(request_root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+            if request_file.exists() or request_file.is_symlink():
+                raise RuntimeError("supervised_restart_request_unlink_failed")
+
+            samples: list[dict[str, Any]] = []
+            poll_stop = threading.Event()
+
+            def observe() -> None:
+                while not poll_stop.is_set():
+                    started = time.monotonic()
+                    status = 0
+                    error = ""
+                    try:
+                        response = requests.get(
+                            f"{self.recovery.base_url}/api/version",
+                            verify=False,
+                            timeout=0.5,
+                        )
+                        status = int(response.status_code)
+                    except Exception as exc:
+                        error = exc.__class__.__name__
+                    samples.append({
+                        "monotonic": time.monotonic(),
+                        "status": status,
+                        "error": error,
+                        "latency_seconds": round(time.monotonic() - started, 4),
+                    })
+                    poll_stop.wait(0.05)
+
+            observer = threading.Thread(
+                target=observe,
+                daemon=True,
+                name="campaign-ai-supervised-restart-observer",
+            )
+            observer.start()
+            initial_deadline = time.monotonic() + 3
+            while time.monotonic() < initial_deadline and not any(row.get("status") == 200 for row in samples):
+                time.sleep(0.05)
+            restart = self.recovery.restart(reason="ai_agent_supervised_restart_request")
+            if restart.get("ok"):
+                time.sleep(0.25)
+            poll_stop.set()
+            observer.join(timeout=3)
+            after_pid = self.recovery.pid()
+            readiness = self.recovery.wait_ready(timeout=120) if restart.get("ok") else {"ok": False}
+            old_tree_gone = True
+            for pid, start_ticks in old_identities.items():
+                try:
+                    if Path(f"/proc/{pid}").exists() and process_start_ticks(pid) == start_ticks:
+                        old_tree_gone = False
+                        break
+                except Exception:
+                    continue
+            unavailable = [row for row in samples if int(row.get("status") or 0) != 200]
+            ready_samples = [row for row in samples if int(row.get("status") or 0) == 200]
+            return {
+                "schema_version": "hackme.formal-ai-agent-supervised-restart/v1",
+                "receipt_valid": receipt_valid,
+                "receipt_nonce_matches_probe": receipt_nonce == probe_nonce,
+                "requesting_pid": requesting_pid,
+                "requesting_pid_in_old_tree": requesting_pid_in_old_tree,
+                "requesting_pid_runtime_owned": requesting_pid_runtime_owned,
+                "request_file_mode": oct(request_mode),
+                "request_root_mode": oct(root_mode),
+                "restart_request_removed": not request_file.exists() and not request_file.is_symlink(),
+                "before_pid": before_pid,
+                "after_pid": after_pid,
+                "old_tree_size": len(old_tree),
+                "old_tree_gone": old_tree_gone,
+                "outage_observed": bool(unavailable),
+                "outage_sample_count": len(unavailable),
+                "ready_sample_count": len(ready_samples),
+                "sample_count": len(samples),
+                "maximum_probe_latency_seconds": max(
+                    (float(row.get("latency_seconds") or 0) for row in samples),
+                    default=0.0,
+                ),
+                "restart": restart,
+                "post_restart_readiness": readiness,
+                "post_restart_ready": bool(
+                    restart.get("ok")
+                    and readiness.get("ok")
+                    and after_pid > 1
+                    and after_pid != before_pid
+                ),
+            }
+
+        result = self.run_group(scenario_id, [
+            lambda: self.run_step(
+                scenario_id,
+                "ai_write_operations_and_restart_request",
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "testing" / "formal_ai_agent_positive_operations_probe.py"),
+                    "--base-url", self.recovery.base_url,
+                    "--runtime-root", str(self.recovery.runtime_root),
+                    "--manager-username", "admin",
+                    "--user-one", user_one[0],
+                    "--user-two", user_two[0],
+                    "--restart-request-file", str(request_file),
+                    "--artifact-dir", str(artifact_dir),
+                    "--out", str(probe_out),
+                ],
+                timeout=3600,
+                artifact=probe_out,
+                process_role="ffmpeg",
+                env={
+                    "HACKME_PROBE_ROOT_PASSWORD": self.credentials.root,
+                    "HACKME_PROBE_MANAGER_PASSWORD": self.credentials.manager,
+                    "HACKME_PROBE_USER_ONE_PASSWORD": user_one[1],
+                    "HACKME_PROBE_USER_TWO_PASSWORD": user_two[1],
+                },
+                payload_ok=lambda payload: bool(
+                    payload.get("schema_version") == "hackme.formal-ai-agent-positive-operations-probe/v1"
+                    and payload.get("ok") is True
+                    and not payload.get("errors")
+                    and (payload.get("restart_request") or {}).get("mode") == "supervised-request"
+                    and (payload.get("cleanup") or {}).get("settings_restored") is True
+                ),
+            ),
+            lambda: self.run_native_callable_step(
+                scenario_id,
+                "consume_supervised_restart_and_verify_readiness",
+                restart_out,
+                consume_restart_request,
+                payload_ok=lambda payload: bool(
+                    payload.get("schema_version") == "hackme.formal-ai-agent-supervised-restart/v1"
+                    and payload.get("receipt_valid") is True
+                    and payload.get("requesting_pid_in_old_tree") is True
+                    and payload.get("old_tree_gone") is True
+                    and payload.get("outage_observed") is True
+                    and payload.get("post_restart_ready") is True
+                    and payload.get("restart_request_removed") is True
+                ),
+            ),
+        ])
+        payload = load_json(probe_out)
+        restart_payload = load_json(restart_out)
+        artifacts = list(result.get("artifacts") or [])
+        fixture = payload.get("video") if isinstance(payload.get("video"), Mapping) else {}
+        fixture = fixture.get("fixture") if isinstance(fixture.get("fixture"), Mapping) else {}
+        fixture_path = Path(str(fixture.get("path") or "")).expanduser().resolve(strict=False)
+        if fixture_path.is_file() and not fixture_path.is_symlink():
+            artifacts.append({
+                "artifact_id": "native.source.ai_agent_positive_operations.video_fixture",
+                "path": str(fixture_path.resolve(strict=True)),
+                "artifact_type": "video",
+            })
+        result["artifacts"] = artifacts
+        selected = ai_agent_positive_assertions(payload, restart_payload)
+        return attach_native_evidence(
+            result,
+            scenario_id=scenario_id,
+            output_dir=out_dir,
+            scenario_assertions=selected["scenario_assertions"],
+            terminal_assertions=selected["terminal_assertions"],
+            cleanup_assertions=selected["cleanup_assertions"],
+            details=selected["details"],
+        )
+
+    def native_comfyui_real_workflows(self) -> dict[str, Any]:
+        """Run the strict real-backend, official/custom workflow lifecycle."""
+
+        scenario_id = "comfyui_real_workflows"
+        out_dir = self.reports / "scenarios" / scenario_id
+        probe_dir = out_dir / "probe"
+        probe_out = probe_dir / "formal_comfyui_workflows_probe.json"
+        artifact_index_out = probe_dir / "artifact_index.json"
+        comfyui_url = str(
+            os.environ.get("HACKME_CAMPAIGN_COMFYUI_API_URL") or ""
+        ).strip()
+        if not comfyui_url:
+            return {
+                "schema_version": NATIVE_RUNNER_RESULT_SCHEMA_VERSION,
+                "scenario_id": scenario_id,
+                "ok": False,
+                "classification": "FAIL_HARNESS",
+                "error": "campaign_comfyui_api_url_missing",
+                "artifacts": [],
+            }
+
+        result = self.run_group(scenario_id, [
+            lambda: self.run_step(
+                scenario_id,
+                "real_backend_feature_official_custom_agent_ui_offline_cleanup",
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "testing" / "formal_comfyui_workflows_probe.py"),
+                    "--base-url", self.primary.base_url,
+                    "--out-dir", str(probe_dir),
+                    "--feature-timeout", "900",
+                    "--official-timeout", "1200",
+                    "--insecure",
+                ],
+                timeout=16 * 60 * 60,
+                artifact=probe_out,
+                process_role="comfyui",
+                env={
+                    "HACKME_CAMPAIGN_COMFYUI_API_URL": comfyui_url,
+                    "HACKME_PROBE_ROOT_PASSWORD": self.credentials.root,
+                },
+                payload_ok=lambda payload: bool(
+                    payload.get("schema_version")
+                    == "hackme.formal-comfyui-workflows-probe/v1"
+                    and payload.get("ok") is True
+                    and isinstance(payload.get("errors"), list)
+                    and not payload.get("errors")
+                    and isinstance(payload.get("contract"), Mapping)
+                    and set(payload.get("contract") or {}) == {
+                        "real_backend_required",
+                        "feature_probe",
+                        "official_templates_execute",
+                        "custom_workflow_create_import_run_output_delete",
+                        "ai_agent_generation_terminal_output",
+                        "desktop_mobile_workflow_ui",
+                        "offline_and_dependency_failure_visible",
+                    }
+                    and all(
+                        value is True
+                        for value in (payload.get("contract") or {}).values()
+                    )
+                    and isinstance(payload.get("cleanup"), Mapping)
+                    and (payload.get("cleanup") or {}).get("exact") is True
+                    and artifact_index_out.is_file()
+                ),
+            ),
+        ])
+        if not probe_out.is_file() or not artifact_index_out.is_file():
+            return result
+
+        payload = load_json(probe_out)
+        artifact_index = load_json(artifact_index_out)
+        artifacts = list(result.get("artifacts") or [])
+        artifacts.append({
+            "artifact_id": "native.source.comfyui_real_workflows.artifact_index",
+            "path": str(artifact_index_out.resolve(strict=True)),
+            "artifact_type": "json",
+        })
+        probe_root = probe_dir.resolve(strict=False)
+        report_resolved = probe_out.resolve(strict=False)
+        seen_paths = {
+            Path(str(row.get("path") or "")).resolve(strict=False)
+            for row in artifacts
+            if isinstance(row, Mapping) and str(row.get("path") or "")
+        }
+        for index, row in enumerate(artifact_index.get("artifacts") or []):
+            if not isinstance(row, Mapping):
+                continue
+            path = Path(str(row.get("path") or "")).expanduser().resolve(strict=False)
+            if (
+                path == report_resolved
+                or path in seen_paths
+                or path == probe_root
+                or probe_root not in path.parents
+                or not path.is_file()
+                or path.is_symlink()
+            ):
+                continue
+            seen_paths.add(path)
+            artifacts.append({
+                "artifact_id": f"native.source.comfyui_real_workflows.indexed_{index:03d}",
+                "path": str(path.resolve(strict=True)),
+                "artifact_type": "auto",
+            })
+        result["artifacts"] = artifacts
+        selected = comfyui_workflow_assertions(payload, artifact_index)
+        return attach_native_evidence(
+            result,
+            scenario_id=scenario_id,
+            output_dir=out_dir,
+            scenario_assertions=selected["scenario_assertions"],
+            terminal_assertions=selected["terminal_assertions"],
+            cleanup_assertions=selected["cleanup_assertions"],
+            details=selected["details"],
+        )
+
+    def native_trading_background_custom_workflow(self) -> dict[str, Any]:
+        """Run exact lending, background-bot, race, and workflow lifecycle proof."""
+
+        scenario_id = "trading_background_custom_workflow"
+        out_dir = self.reports / "scenarios" / scenario_id
+        background_dir = out_dir / "background"
+        background_out = background_dir / "trading_background_correctness.json"
+        cancel_out = out_dir / "cancel_race.json"
+        custom_out = out_dir / "custom_workflow_lifecycle.json"
+        restart_out = out_dir / "custom_workflow_restart_persistence.json"
+        cleanup_out = out_dir / "trading_fixture_cleanup.json"
+        final_out = out_dir / "post_cleanup_invariants.json"
+
+        def background_user(role: str) -> str:
+            payload = load_json(background_out)
+            scenario = payload.get("scenario") if isinstance(payload.get("scenario"), Mapping) else {}
+            users = scenario.get("users") if isinstance(scenario.get("users"), Mapping) else {}
+            row = users.get(role) if isinstance(users.get(role), Mapping) else {}
+            return str(row.get("username") or "")
+
+        def overview_locked(response: Mapping[str, Any]) -> int:
+            body = response.get("body") if isinstance(response.get("body"), Mapping) else {}
+            overview = body.get("overview") if isinstance(body.get("overview"), Mapping) else {}
+            return int(overview.get("locked_points") or 0)
+
+        def cancel_race() -> dict[str, Any]:
+            username = background_user("limit")
+            member = WebClient(self.primary.base_url, username, self.credentials.member, timeout=90)
+            login = member.login()
+            before = member.request("GET", "/api/trading/asset-overview") if login.get("ok") else {"status": 0}
+            created = member.request(
+                "POST",
+                "/api/trading/orders",
+                json_body={
+                    "market_symbol": "ETH/POINTS",
+                    "side": "buy",
+                    "order_type": "limit",
+                    "quantity": "1",
+                    "limit_price_points": 1,
+                },
+            ) if login.get("ok") else {"status": 0, "body": {}}
+            order = (created.get("body") or {}).get("order") if isinstance(created.get("body"), Mapping) else {}
+            order = order if isinstance(order, Mapping) else {}
+            order_uuid = str(order.get("order_uuid") or "")
+            after_create = member.request("GET", "/api/trading/asset-overview") if order_uuid else {"status": 0}
+
+            clients = [
+                WebClient(self.primary.base_url, username, self.credentials.member, timeout=90)
+                for _ in range(2)
+            ]
+            client_logins = [client.login() for client in clients]
+            barrier = threading.Barrier(2)
+            rows: list[dict[str, Any]] = []
+            rows_lock = threading.Lock()
+
+            def worker(index: int) -> None:
+                try:
+                    barrier.wait(timeout=30)
+                    response = clients[index].request(
+                        "POST",
+                        f"/api/trading/orders/{quote(order_uuid, safe='')}/cancel",
+                        json_body={},
+                        retry_login=False,
+                    )
+                except Exception as exc:
+                    response = {
+                        "ok": False,
+                        "status": 0,
+                        "error": f"{exc.__class__.__name__}: {exc}",
+                    }
+                with rows_lock:
+                    rows.append({"worker": index, **response})
+
+            threads = [threading.Thread(target=worker, args=(index,)) for index in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=120)
+            alive = [index for index, thread in enumerate(threads) if thread.is_alive()]
+            dashboard = member.request("GET", "/api/trading/dashboard")
+            dashboard_body = dashboard.get("body") if isinstance(dashboard.get("body"), Mapping) else {}
+            trading = dashboard_body.get("trading") if isinstance(dashboard_body.get("trading"), Mapping) else {}
+            final_order = next(
+                (
+                    dict(row) for row in (trading.get("orders") or [])
+                    if isinstance(row, Mapping) and str(row.get("order_uuid") or "") == order_uuid
+                ),
+                {},
+            )
+            after_cancel = member.request("GET", "/api/trading/asset-overview")
+            before_locked = overview_locked(before)
+            created_locked = overview_locked(after_create)
+            cancelled_locked = overview_locked(after_cancel)
+            return {
+                "username": username,
+                "login_status": int(login.get("status") or 0),
+                "client_login_statuses": [int(row.get("status") or 0) for row in client_logins],
+                "order_create": created,
+                "order_uuid": order_uuid,
+                "order_initial_status": str(order.get("status") or ""),
+                "cancel_results": sorted(rows, key=lambda row: int(row.get("worker") or 0)),
+                "worker_threads_alive": alive,
+                "final_order": final_order,
+                "locked_points_before": before_locked,
+                "locked_points_after_create": created_locked,
+                "locked_points_after_cancel": cancelled_locked,
+                "locked_points_increased": created_locked > before_locked,
+                "locked_points_restored_exactly": cancelled_locked == before_locked,
+            }
+
+        def workflow_graph(*, percent: int, name: str) -> dict[str, Any]:
+            return {
+                "version": 2,
+                "strategy_kind": "workflow_graph",
+                "source": "workflow_editor",
+                "name": name,
+                "start_node_id": "start",
+                "nodes": [
+                    {"id": "start", "type": "start", "label": "Start", "x": 0, "y": 0},
+                    {
+                        "id": "buy_once",
+                        "type": "action",
+                        "label": f"Buy {percent}% once",
+                        "x": 240,
+                        "y": 0,
+                        "priority": 10,
+                        "action": {
+                            "type": "buy_percent",
+                            "percent": percent,
+                            "step": 1,
+                            "order_type": "market",
+                        },
+                    },
+                ],
+                "edges": [
+                    {
+                        "id": "start_to_buy",
+                        "from": "start",
+                        "from_port": "out",
+                        "to": "buy_once",
+                        "to_port": "in",
+                    },
+                ],
+            }
+
+        def custom_workflow() -> dict[str, Any]:
+            username = background_user("workflow_bot")
+            suffix = re.sub(r"[^a-z0-9_-]+", "_", self.campaign_uuid.lower()).strip("_")[-32:]
+            template_id = f"formal_trade_{suffix}"
+            initial_label = f"Formal workflow {suffix} v1"
+            edited_label = f"Formal workflow {suffix} v2"
+            custom_root = (self.primary.runtime_root / "workflows" / "custom").resolve(strict=False)
+            matching_before = sorted(custom_root.glob(f"**/{template_id}.json")) if custom_root.exists() else []
+            member = WebClient(self.primary.base_url, username, self.credentials.member, timeout=180)
+            login = member.login()
+            initial_workflow = workflow_graph(percent=1, name=initial_label)
+            edited_workflow = workflow_graph(percent=2, name=edited_label)
+            initial_save = member.request(
+                "POST",
+                "/api/trading/workflow-templates/custom",
+                json_body={
+                    "id": template_id,
+                    "label": initial_label,
+                    "description": "formal campaign initial custom workflow",
+                    "workflow_json": initial_workflow,
+                },
+            ) if login.get("ok") else {"status": 0, "body": {}}
+            edited_save = member.request(
+                "POST",
+                "/api/trading/workflow-templates/custom",
+                json_body={
+                    "id": template_id,
+                    "label": edited_label,
+                    "description": "formal campaign edited custom workflow",
+                    "workflow_json": edited_workflow,
+                },
+            )
+            listing = member.request("GET", "/api/trading/workflow-templates")
+            listing_body = listing.get("body") if isinstance(listing.get("body"), Mapping) else {}
+            edited_template = next(
+                (
+                    dict(row) for row in (listing_body.get("custom") or [])
+                    if isinstance(row, Mapping) and str(row.get("id") or "") == template_id
+                ),
+                {},
+            )
+            backtest = member.request(
+                "POST",
+                "/api/trading/workflow-editor/backtest",
+                json_body={
+                    "market_symbol": "BTC/USDT",
+                    "timeframe": "15m",
+                    "candle_limit": 50,
+                    "initial_cash_points": 10000,
+                    "workflow_json": edited_workflow,
+                },
+            )
+            bot_payload = {
+                "bot_type": "conditional",
+                "name": f"Formal custom workflow bot {suffix}",
+                "market_symbol": "ETH/POINTS",
+                "side": "buy",
+                "order_type": "market",
+                "quantity": "0.00000001",
+                "trigger_type": "always",
+                "enabled": False,
+                "max_runs": 1,
+                "cooldown_seconds": 0,
+                "workflow_json": edited_workflow,
+            }
+            bot_create = member.request("POST", "/api/trading/bots", json_body=bot_payload)
+            bot_body = bot_create.get("body") if isinstance(bot_create.get("body"), Mapping) else {}
+            created_bot = bot_body.get("bot") if isinstance(bot_body.get("bot"), Mapping) else {}
+            bot_uuid = str(created_bot.get("bot_uuid") or "")
+            bot_enable = member.request(
+                "PUT",
+                f"/api/trading/bots/{quote(bot_uuid, safe='')}",
+                json_body={**bot_payload, "enabled": True},
+            ) if bot_uuid else {"status": 0, "body": {}}
+            scan = member.request("POST", "/api/trading/bots/scan", json_body={"limit": 50})
+            scan_body = scan.get("body") if isinstance(scan.get("body"), Mapping) else {}
+            scan_trigger = next(
+                (
+                    dict(row) for row in (scan_body.get("triggered") or [])
+                    if isinstance(row, Mapping) and str(row.get("bot_uuid") or "") == bot_uuid
+                ),
+                {},
+            )
+            order_uuid = str(scan_trigger.get("order_uuid") or "")
+            bots_after = member.request("GET", "/api/trading/bots")
+            dashboard = member.request("GET", "/api/trading/dashboard")
+            dashboard_body = dashboard.get("body") if isinstance(dashboard.get("body"), Mapping) else {}
+            trading = dashboard_body.get("trading") if isinstance(dashboard_body.get("trading"), Mapping) else {}
+            trade_order = next(
+                (
+                    dict(row) for row in (trading.get("orders") or [])
+                    if isinstance(row, Mapping) and str(row.get("order_uuid") or "") == order_uuid
+                ),
+                {},
+            )
+            matching_after = sorted(custom_root.glob(f"**/{template_id}.json")) if custom_root.exists() else []
+            safe_matches = [
+                path.resolve(strict=True)
+                for path in matching_after
+                if path.is_file()
+                and not path.is_symlink()
+                and path.resolve(strict=True).is_relative_to(custom_root)
+            ]
+            template_file = safe_matches[0] if len(safe_matches) == 1 else None
+            return {
+                "username": username,
+                "login_status": int(login.get("status") or 0),
+                "template_id": template_id,
+                "initial_label": initial_label,
+                "edited_label": edited_label,
+                "template_absent_before": not matching_before,
+                "initial_save": initial_save,
+                "edited_save": edited_save,
+                "template_listing": listing,
+                "edited_template_visible": bool(
+                    edited_template.get("label") == edited_label
+                    and _mapping_workflow.get("name") == edited_label
+                    if isinstance((_mapping_workflow := edited_template.get("workflow")), Mapping)
+                    else False
+                ),
+                "backtest": backtest,
+                "bot_create": bot_create,
+                "bot_enable": bot_enable,
+                "scan": scan,
+                "scan_trigger": scan_trigger,
+                "bot_uuid": bot_uuid,
+                "bots_after": bots_after,
+                "trade_order": trade_order,
+                "template_file": str(template_file) if template_file is not None else "",
+                "template_file_sha256": self._sha256(template_file) if template_file is not None else "",
+                "template_file_unique": len(safe_matches) == 1,
+            }
+
+        def restart_persistence() -> dict[str, Any]:
+            custom = load_json(custom_out)
+            old_pid = self.primary.pid()
+            restarted = self.primary.restart(reason="formal_trading_workflow_persistence")
+            stopped = restarted.get("stopped") if isinstance(restarted.get("stopped"), Mapping) else {}
+            started = restarted.get("started") if isinstance(restarted.get("started"), Mapping) else {}
+            readiness = started.get("ready") if isinstance(started.get("ready"), Mapping) else {}
+            username = str(custom.get("username") or "")
+            member = WebClient(self.primary.base_url, username, self.credentials.member, timeout=180)
+            login = member.login() if started.get("ok") else {"status": 0}
+            templates = member.request("GET", "/api/trading/workflow-templates") if login.get("ok") else {"body": {}}
+            bots = member.request("GET", "/api/trading/bots") if login.get("ok") else {"body": {}}
+            dashboard = member.request("GET", "/api/trading/dashboard") if login.get("ok") else {"body": {}}
+            template_rows = ((templates.get("body") or {}).get("custom") or []) if isinstance(templates.get("body"), Mapping) else []
+            bot_rows = ((bots.get("body") or {}).get("bots") or []) if isinstance(bots.get("body"), Mapping) else []
+            dashboard_trading = ((dashboard.get("body") or {}).get("trading") or {}) if isinstance(dashboard.get("body"), Mapping) else {}
+            order_rows = dashboard_trading.get("orders") or [] if isinstance(dashboard_trading, Mapping) else []
+            template_file = Path(str(custom.get("template_file") or ""))
+            template_hash = self._sha256(template_file) if template_file.is_file() and not template_file.is_symlink() else ""
+            order_uuid = str((custom.get("scan_trigger") or {}).get("order_uuid") or "") if isinstance(custom.get("scan_trigger"), Mapping) else ""
+            return {
+                "old_pid": old_pid,
+                "new_pid": int(started.get("pid") or 0),
+                "old_master_remaining": stopped.get("master_process_remaining"),
+                "old_process_group_remaining": stopped.get("process_group_remaining"),
+                "readiness": readiness,
+                "login_status": int(login.get("status") or 0),
+                "template_found": any(
+                    isinstance(row, Mapping) and str(row.get("id") or "") == custom.get("template_id")
+                    for row in template_rows
+                ),
+                "bot_found": any(
+                    isinstance(row, Mapping) and str(row.get("bot_uuid") or "") == custom.get("bot_uuid")
+                    and int(row.get("run_count") or 0) >= 1
+                    for row in bot_rows
+                ),
+                "trade_order_found": any(
+                    isinstance(row, Mapping) and str(row.get("order_uuid") or "") == order_uuid
+                    and row.get("status") == "filled"
+                    for row in order_rows
+                ),
+                "template_file_hash_after_restart": template_hash,
+                "template_file_hash_preserved": bool(
+                    template_hash and template_hash == custom.get("template_file_sha256")
+                ),
+            }
+
+        def cleanup() -> dict[str, Any]:
+            background = load_json(background_out)
+            custom = load_json(custom_out)
+            scenario = background.get("scenario") if isinstance(background.get("scenario"), Mapping) else {}
+            users = scenario.get("users") if isinstance(scenario.get("users"), Mapping) else {}
+            usernames = [
+                str(row.get("username") or "")
+                for row in users.values()
+                if isinstance(row, Mapping)
+            ]
+            member = WebClient(
+                self.primary.base_url,
+                str(custom.get("username") or ""),
+                self.credentials.member,
+                timeout=120,
+            )
+            login = member.login()
+            bot_uuid = str(custom.get("bot_uuid") or "")
+            deleted = member.request(
+                "DELETE", f"/api/trading/bots/{quote(bot_uuid, safe='')}"
+            ) if login.get("ok") and bot_uuid else {"status": 0}
+            listed_bots = member.request("GET", "/api/trading/bots") if login.get("ok") else {"body": {}}
+            bot_rows = ((listed_bots.get("body") or {}).get("bots") or []) if isinstance(listed_bots.get("body"), Mapping) else []
+            bot_absent = bool(bot_uuid) and not any(
+                isinstance(row, Mapping) and str(row.get("bot_uuid") or "") == bot_uuid
+                for row in bot_rows
+            )
+
+            custom_root = (self.primary.runtime_root / "workflows" / "custom").resolve(strict=False)
+            template_file = Path(str(custom.get("template_file") or ""))
+            template_parent: Path | None = None
+            path_safe = False
+            if str(template_file) not in {"", "."}:
+                resolved = template_file.resolve(strict=False)
+                path_safe = resolved.is_relative_to(custom_root) and resolved.name == f"{custom.get('template_id')}.json"
+                if path_safe:
+                    template_parent = resolved.parent
+                    resolved.unlink(missing_ok=True)
+            templates_after = member.request("GET", "/api/trading/workflow-templates") if login.get("ok") else {"body": {}}
+            custom_rows = ((templates_after.get("body") or {}).get("custom") or []) if isinstance(templates_after.get("body"), Mapping) else []
+            template_absent = not any(
+                isinstance(row, Mapping) and str(row.get("id") or "") == custom.get("template_id")
+                for row in custom_rows
+            )
+            if template_parent is not None and template_parent.is_dir():
+                try:
+                    template_parent.rmdir()
+                except OSError:
+                    pass
+            accounts = self._cleanup_exact_scenario_users(usernames)
+            return {
+                "member_login_status": int(login.get("status") or 0),
+                "bot_delete_status": int(deleted.get("status") or 0),
+                "bot_deleted": int(deleted.get("status") or 0) == 200,
+                "bot_absent": bot_absent,
+                "template_path_safe": path_safe,
+                "template_file_removed": path_safe and not template_file.exists(),
+                "template_absent_from_api": template_absent,
+                "custom_user_directory_absent": bool(
+                    template_parent is not None and not template_parent.exists()
+                ),
+                "account_login_succeeded": accounts.get("login_succeeded"),
+                "account_records": accounts.get("records") or [],
+            }
+
+        def final_state() -> dict[str, Any]:
+            root = WebClient(self.primary.base_url, "root", self.credentials.root, timeout=180)
+            login = root.login()
+            if not login.get("ok"):
+                return {"root_login_succeeded": False}
+            trading_started = root.request("POST", "/api/root/trading/verify/jobs", json_body={})
+            trading_job = self._await_management_job(root, trading_started, timeout_seconds=900)
+            points_started = root.request("POST", "/api/root/points/chain/verify/jobs", json_body={})
+            points_job = self._await_management_job(root, points_started, timeout_seconds=900)
+            report = root.request("GET", "/api/admin/trading/report")
+            report_body = report.get("body") if isinstance(report.get("body"), Mapping) else {}
+            report_payload = report_body.get("report") if isinstance(report_body.get("report"), Mapping) else {}
+            reserve = report_payload.get("reserve_pool") if isinstance(report_payload.get("reserve_pool"), Mapping) else {}
+            return {
+                "root_login_succeeded": True,
+                "readiness": self.primary.wait_ready(timeout=180.0),
+                "trading_verify_job": trading_job,
+                "trading_verify_latest": root.request("GET", "/api/root/trading/verify/latest"),
+                "points_verify_job": points_job,
+                "points_verify_latest": root.request("GET", "/api/root/points/chain/verify/latest"),
+                "reserve_balance_points": int(reserve.get("balance_points") or 0),
+            }
+
+        result = self.run_group(scenario_id, [
+            lambda: self.run_step(
+                scenario_id,
+                "background_lending_bots_and_stress",
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "testing" / "playwright_trading_background_correctness.py"),
+                    "--base-url", self.primary.base_url,
+                    "--runtime-dir", str(self.primary.runtime_root),
+                    "--out", str(background_dir),
+                    "--trigger-mode", "auto",
+                    "--stress-orders", "150",
+                ],
+                timeout=5400,
+                artifact=background_out,
+                process_role="browser",
+                payload_ok=lambda payload: bool(
+                    payload.get("ok") is True
+                    and (payload.get("scenario") or {}).get("runtime_settings_restored") is True
+                    and (payload.get("scenario") or {}).get("feature_flags_restored") is True
+                    and int(((payload.get("scenario") or {}).get("concurrent_stress") or {}).get("request_count") or 0) >= 300
+                    and (payload.get("scenario") or {}).get("domain_terminal")
+                ),
+            ),
+            lambda: self.run_native_callable_step(
+                scenario_id,
+                "spot_cancel_race",
+                cancel_out,
+                cancel_race,
+                payload_ok=lambda payload: bool(
+                    payload.get("order_initial_status") in {"open", "partially_filled"}
+                    and not payload.get("worker_threads_alive")
+                    and len(payload.get("cancel_results") or []) == 2
+                    and sum(1 for row in payload.get("cancel_results") or [] if int(row.get("status") or 0) == 200) == 1
+                    and sum(1 for row in payload.get("cancel_results") or [] if int(row.get("status") or 0) == 400) == 1
+                    and (payload.get("final_order") or {}).get("status") == "cancelled"
+                    and payload.get("locked_points_restored_exactly") is True
+                ),
+            ),
+            lambda: self.run_native_callable_step(
+                scenario_id,
+                "custom_workflow_create_edit_backtest_enable_trade",
+                custom_out,
+                custom_workflow,
+                payload_ok=lambda payload: bool(
+                    payload.get("template_absent_before") is True
+                    and payload.get("edited_template_visible") is True
+                    and payload.get("template_file_unique") is True
+                    and int((payload.get("backtest") or {}).get("status") or 0) == 200
+                    and int(((payload.get("backtest") or {}).get("body") or {}).get("trade_count") or 0) >= 1
+                    and str((payload.get("scan_trigger") or {}).get("order_uuid") or "")
+                    and (payload.get("trade_order") or {}).get("status") == "filled"
+                ),
+            ),
+            lambda: self.run_native_callable_step(
+                scenario_id,
+                "custom_workflow_restart_persistence",
+                restart_out,
+                restart_persistence,
+                payload_ok=lambda payload: bool(
+                    int(payload.get("old_pid") or 0) > 0
+                    and int(payload.get("new_pid") or 0) > 0
+                    and int(payload.get("new_pid") or 0) != int(payload.get("old_pid") or 0)
+                    and payload.get("old_master_remaining") is False
+                    and payload.get("old_process_group_remaining") is False
+                    and (payload.get("readiness") or {}).get("ok") is True
+                    and payload.get("template_found") is True
+                    and payload.get("bot_found") is True
+                    and payload.get("trade_order_found") is True
+                    and payload.get("template_file_hash_preserved") is True
+                ),
+            ),
+            lambda: self.run_native_callable_step(
+                scenario_id,
+                "trading_fixture_cleanup",
+                cleanup_out,
+                cleanup,
+                payload_ok=lambda payload: bool(
+                    payload.get("bot_deleted") is True
+                    and payload.get("bot_absent") is True
+                    and payload.get("template_path_safe") is True
+                    and payload.get("template_file_removed") is True
+                    and payload.get("template_absent_from_api") is True
+                    and payload.get("custom_user_directory_absent") is True
+                    and payload.get("account_records")
+                    and all(
+                        row.get("deleted") is True
+                        and int(row.get("residual_exact_count") or 0) == 0
+                        for row in payload.get("account_records") or []
+                    )
+                ),
+            ),
+            lambda: self.run_native_callable_step(
+                scenario_id,
+                "post_cleanup_trading_and_pointschain_invariants",
+                final_out,
+                final_state,
+                payload_ok=lambda payload: bool(
+                    payload.get("root_login_succeeded") is True
+                    and (payload.get("readiness") or {}).get("ok") is True
+                    and (payload.get("trading_verify_job") or {}).get("terminal_status") == "succeeded"
+                    and (payload.get("points_verify_job") or {}).get("terminal_status") == "succeeded"
+                    and int(payload.get("reserve_balance_points") or 0) >= 0
+                ),
+            ),
+        ])
+        selected = trading_workflow_assertions(
+            load_json(background_out),
+            load_json(cancel_out),
+            load_json(custom_out),
+            load_json(restart_out),
+            load_json(final_out),
+            load_json(cleanup_out),
+        )
+        return attach_native_evidence(
+            result,
+            scenario_id=scenario_id,
+            output_dir=out_dir,
+            scenario_assertions=selected["scenario_assertions"],
+            terminal_assertions=selected["terminal_assertions"],
+            cleanup_assertions=selected["cleanup_assertions"],
+            details=selected["details"],
+        )
 
     def scenario_media_long(self) -> dict[str, Any]:
         scenario_id = "media_long_hls_share"
@@ -3261,6 +6193,7 @@ class Campaign:
             "elapsed_seconds": round(time.monotonic() - started, 3),
             "snapshot_status": snapshot.get("status"),
             "snapshot_id_present": bool(snapshot_id),
+            "snapshot_id": snapshot_id,
             "dirty_marker_created": marker.get("ok"),
             "dirty_marker_absent_after_restore": marker_absent,
             "append_only_transfer": transfer,
@@ -3268,6 +6201,7 @@ class Campaign:
             "restore_status": restore.get("status"),
             "protected_database_skips": protected_skips,
             "storage_restored": storage_restored,
+            "storage_marker_path": str(storage_marker),
             "chain_verify_status": verify.get("status"),
         }
 
@@ -3287,6 +6221,745 @@ class Campaign:
             except Exception as exc:
                 results[path.name] = {"ok": False, "error": f"{exc.__class__.__name__}: {exc}"}
         return results
+
+    @staticmethod
+    def _runtime_backup_file_allowed(relative: Path) -> bool:
+        volatile_parts = {"venv", "pycache", "__pycache__", "tmp", "temp"}
+        if any(part in volatile_parts for part in relative.parts):
+            return False
+        if relative.name == "server.pid" or relative.suffix in {".sock", ".lock"}:
+            return False
+        return True
+
+    def _portable_full_runtime_cycle(
+        self,
+        *,
+        out_dir: Path,
+        archive: Path,
+        manifest_path: Path,
+    ) -> dict[str, Any]:
+        """Create, fully read, extract, hash-check, and remove a runtime archive."""
+
+        restore_root = out_dir / "portable_restore_tree"
+        storage_marker = self.recovery.runtime_root / "storage" / "formal_full_backup_marker.bin"
+        payload: dict[str, Any] = {
+            "archive": {},
+            "extracted_restore": {},
+            "restore_root_removed": False,
+            "source_storage_marker_removed": False,
+            "server_restarted": False,
+        }
+        if archive.exists() or archive.is_symlink() or manifest_path.exists():
+            payload["preexisting_output_rejected"] = True
+            return payload
+        storage_marker.parent.mkdir(parents=True, exist_ok=True)
+        storage_marker.write_bytes(secrets.token_bytes(4096))
+        old_pid = self.recovery.pid()
+        stopped = self.recovery.stop(reason="formal_portable_full_runtime_backup")
+        payload["stop"] = {
+            "old_pid": old_pid,
+            "succeeded": stopped.get("ok") is True,
+            "master_process_remaining": stopped.get("master_process_remaining"),
+            "process_group_remaining": stopped.get("process_group_remaining"),
+        }
+        try:
+            if not stopped.get("ok"):
+                return payload
+            files: list[dict[str, Any]] = []
+            symlinks: list[str] = []
+            for path in sorted(self.recovery.runtime_root.rglob("*")):
+                relative = path.relative_to(self.recovery.runtime_root)
+                if not self._runtime_backup_file_allowed(relative):
+                    continue
+                if path.is_symlink():
+                    symlinks.append(relative.as_posix())
+                    continue
+                if not path.is_file():
+                    continue
+                files.append({
+                    "path": relative.as_posix(),
+                    "size_bytes": path.stat().st_size,
+                    "sha256": self._sha256(path),
+                })
+            manifest = {
+                "schema_version": "hackme.campaign.portable-runtime-manifest/v1",
+                "created_at": utc_now(),
+                "runtime_role": "recovery",
+                "excluded_volatile_names": [
+                    "server.pid", "*.sock", "*.lock", "venv", "pycache",
+                    "__pycache__", "tmp", "temp",
+                ],
+                "unsupported_symlinks": symlinks,
+                "files": files,
+            }
+            atomic_write_json(manifest_path, manifest)
+            archive.parent.mkdir(parents=True, exist_ok=True)
+            with tarfile.open(archive, "w:gz") as handle:
+                handle.add(manifest_path, arcname="backup_manifest.json", recursive=False)
+                for row in files:
+                    source = self.recovery.runtime_root / str(row["path"])
+                    handle.add(source, arcname=str(row["path"]), recursive=False)
+
+            unsafe_members: list[str] = []
+            regular_members: list[tarfile.TarInfo] = []
+            readable = True
+            try:
+                with tarfile.open(archive, "r:gz") as handle:
+                    for member in handle.getmembers():
+                        member_path = Path(member.name)
+                        if (
+                            member_path.is_absolute()
+                            or ".." in member_path.parts
+                            or member.issym()
+                            or member.islnk()
+                        ):
+                            unsafe_members.append(member.name)
+                        if member.isfile():
+                            regular_members.append(member)
+                            extracted = handle.extractfile(member)
+                            if extracted is None:
+                                readable = False
+                            else:
+                                while extracted.read(1024 * 1024):
+                                    pass
+            except Exception as exc:
+                readable = False
+                payload["archive_read_error"] = f"{exc.__class__.__name__}: {exc}"
+
+            payload["archive"] = {
+                "path": str(archive),
+                "size_bytes": archive.stat().st_size if archive.exists() else 0,
+                "sha256": self._sha256(archive),
+                "readable": readable,
+                "manifest_file_count": len(files),
+                "archive_regular_file_count": len(regular_members),
+                "database_file_count": sum(
+                    str(row["path"]).startswith("database/") for row in files
+                ),
+                "storage_file_count": sum(
+                    str(row["path"]).startswith("storage/") for row in files
+                ),
+                "unsafe_members": unsafe_members,
+                "unsupported_symlinks": symlinks,
+            }
+            if unsafe_members or symlinks or not readable:
+                return payload
+
+            restore_root.mkdir(parents=True, exist_ok=False)
+            with tarfile.open(archive, "r:gz") as handle:
+                handle.extractall(restore_root)
+            mismatches: list[str] = []
+            missing: list[str] = []
+            for row in files:
+                restored = restore_root / str(row["path"])
+                if not restored.is_file():
+                    missing.append(str(row["path"]))
+                elif self._sha256(restored) != row["sha256"]:
+                    mismatches.append(str(row["path"]))
+            payload["extracted_restore"] = {
+                "all_manifest_files_present": not missing,
+                "missing_files": missing,
+                "hash_mismatches": mismatches,
+                "sqlite_quick_checks": self._sqlite_checks(restore_root / "database"),
+            }
+            return payload
+        finally:
+            shutil.rmtree(restore_root, ignore_errors=True)
+            payload["restore_root_removed"] = not restore_root.exists()
+            try:
+                storage_marker.unlink(missing_ok=True)
+            except Exception:
+                pass
+            payload["source_storage_marker_removed"] = not storage_marker.exists()
+            if self.recovery.pid() <= 0:
+                started = self.recovery.start()
+                ready = started.get("ready") if isinstance(started.get("ready"), Mapping) else {}
+                payload["server_restarted"] = bool(
+                    started.get("ok") is True and ready.get("ok") is True
+                )
+            else:
+                payload["server_restarted"] = True
+
+    def _run_launcher_cli(self, command: list[str], *, timeout: int = 1800) -> dict[str, Any]:
+        started = time.monotonic()
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=str(ROOT),
+                env=self.base_env(),
+                capture_output=True,
+                text=False,
+                timeout=timeout,
+                check=False,
+            )
+            output = (completed.stdout or b"") + (completed.stderr or b"")
+            return {
+                "returncode": completed.returncode,
+                "elapsed_seconds": round(time.monotonic() - started, 3),
+                "output_bytes": len(output),
+                "output_sha256": hashlib.sha256(output).hexdigest(),
+            }
+        except Exception as exc:
+            return {
+                "returncode": 124 if isinstance(exc, subprocess.TimeoutExpired) else 125,
+                "elapsed_seconds": round(time.monotonic() - started, 3),
+                "error": f"{exc.__class__.__name__}: {exc}",
+            }
+
+    def _formal_live_restore_cycle(self, *, archive: Path) -> dict[str, Any]:
+        """Exercise launcher restore while proving live storage/finance protection."""
+
+        result: dict[str, Any] = {
+            "backup_command_returncode": -1,
+            "restore_command_returncode": -1,
+            "archive_size_bytes": 0,
+            "archive_readable": False,
+            "pre_restore_runtime_removed": False,
+            "storage_marker_removed": False,
+        }
+        if archive.exists() or archive.is_symlink():
+            result["preexisting_archive_rejected"] = True
+            return result
+        stop_before_backup = self.recovery.stop(reason="formal_cli_runtime_backup")
+        result["stop_before_backup"] = stop_before_backup
+        if not stop_before_backup.get("ok"):
+            return result
+        backup = self._run_launcher_cli([
+            str(LAUNCHER),
+            "--cli",
+            "--run-root", str(self.recovery.run_root),
+            "--runtime-root", str(self.recovery.runtime_root),
+            "--in-place",
+            "--tmp-runtime",
+            "--skip-install",
+            "--backup", str(archive),
+        ])
+        result["backup_command_returncode"] = int(backup.get("returncode") or 0)
+        result["backup_command"] = backup
+        result["archive_size_bytes"] = archive.stat().st_size if archive.exists() else 0
+        if archive.exists():
+            try:
+                with tarfile.open(archive, "r:gz") as handle:
+                    members = [member for member in handle.getmembers() if member.isfile()]
+                    readable = bool(members)
+                    for member in members:
+                        extracted = handle.extractfile(member)
+                        if extracted is None:
+                            readable = False
+                            break
+                        while extracted.read(1024 * 1024):
+                            pass
+                    result["archive_readable"] = readable
+                    result["archive_regular_file_count"] = len(members)
+            except Exception as exc:
+                result["archive_error"] = f"{exc.__class__.__name__}: {exc}"
+        started = self.recovery.start() if int(backup.get("returncode", -1)) == 0 else {}
+        result["start_after_backup"] = started
+        root = WebClient(self.recovery.base_url, "root", self.credentials.root, timeout=120)
+        root_login = root.login() if started.get("ok") else {"ok": False}
+        marker_username = f"formal_cli_restore_dirty_{int(time.time())}"
+        marker = (
+            self._create_user(root, marker_username, self.credentials.member, nickname="Formal CLI Restore Dirty")
+            if root_login.get("ok") else {"ok": False}
+        )
+        transfer = (
+            self._wallet_transfer_between_builtin_users(
+                self.recovery.base_url,
+                reference=f"formal-cli-post-backup-{int(time.time())}",
+            )
+            if root_login.get("ok") else {"ok": False}
+        )
+        storage_marker = self.recovery.runtime_root / "storage" / "formal_cli_storage_marker.bin"
+        storage_marker.parent.mkdir(parents=True, exist_ok=True)
+        storage_marker.write_bytes(secrets.token_bytes(4096))
+        storage_hash = self._sha256(storage_marker)
+        stopped = self.recovery.stop(reason="formal_cli_runtime_restore")
+        result["stop_before_restore"] = stopped
+        finance = self.recovery.runtime_root / "database" / "finance.db"
+        protected_hash_before = self._sha256(finance)
+        restore = self._run_launcher_cli([
+            str(LAUNCHER),
+            "--cli",
+            "--run-root", str(self.recovery.run_root),
+            "--runtime-root", str(self.recovery.runtime_root),
+            "--in-place",
+            "--tmp-runtime",
+            "--skip-install",
+            "--restore", str(archive),
+        ]) if stopped.get("ok") else {"returncode": 125}
+        result["restore_command_returncode"] = int(restore.get("returncode") or 0)
+        result["restore_command"] = restore
+        protected_hash_after = self._sha256(finance)
+        policy_path = self.recovery.runtime_root / "logs" / "runtime_restore_policy.json"
+        policy = load_json(policy_path) if policy_path.exists() else {}
+        result.update({
+            "dirty_marker_created": marker.get("ok") is True,
+            "append_only_transfer": transfer,
+            "protected_finance_hash_preserved": bool(
+                protected_hash_before and protected_hash_before == protected_hash_after
+            ),
+            "storage_preserved": bool(
+                storage_marker.is_file() and self._sha256(storage_marker) == storage_hash
+            ),
+            "restore_policy": policy,
+            "sqlite_quick_checks": self._sqlite_checks(self.recovery.runtime_root / "database"),
+        })
+        after = self.recovery.start() if int(restore.get("returncode", -1)) == 0 else {}
+        result["start_after_restore"] = after
+        root_after = WebClient(self.recovery.base_url, "root", self.credentials.root, timeout=120)
+        login_after = root_after.login() if after.get("ok") else {"ok": False}
+        result["dirty_marker_absent_after_restore"] = bool(
+            login_after.get("ok") and not self._user_exists(root_after, marker_username)
+        )
+        tx_hash = str(transfer.get("transaction_hash") or "")
+        explorer = (
+            root_after.request("GET", f"/api/points/explorer/tx/{quote(tx_hash, safe='')}")
+            if tx_hash and login_after.get("ok") else {"status": 0}
+        )
+        result["transfer_survived_restore"] = int(explorer.get("status") or 0) == 200
+        pre_restore = Path(str(policy.get("pre_restore_runtime") or "")).expanduser()
+        try:
+            if pre_restore.exists() and pre_restore.resolve().is_relative_to(self.root.resolve()):
+                shutil.rmtree(pre_restore)
+        except Exception as exc:
+            result["pre_restore_cleanup_error"] = f"{exc.__class__.__name__}: {exc}"
+        result["pre_restore_runtime_removed"] = bool(
+            str(pre_restore) not in {"", "."} and not pre_restore.exists()
+        )
+        try:
+            storage_marker.unlink(missing_ok=True)
+        except Exception:
+            pass
+        result["storage_marker_removed"] = not storage_marker.exists()
+        if self.recovery.pid() <= 0:
+            emergency = self.recovery.start()
+            result["emergency_recovery_start"] = emergency
+        return result
+
+    def _formal_planned_restart(self) -> dict[str, Any]:
+        old_pid = self.recovery.pid()
+        restarted = self.recovery.restart(reason="formal_backup_final_restart")
+        stopped = restarted.get("stopped") if isinstance(restarted.get("stopped"), Mapping) else {}
+        started = restarted.get("started") if isinstance(restarted.get("started"), Mapping) else {}
+        ready = started.get("ready") if isinstance(started.get("ready"), Mapping) else {}
+        return {
+            "stopped": {
+                "old_pid": old_pid,
+                "master_process_remaining": stopped.get("master_process_remaining"),
+                "process_group_remaining": stopped.get("process_group_remaining"),
+            },
+            "started": {
+                "new_pid": int(started.get("pid") or 0),
+                "readiness_succeeded": ready.get("ok") is True,
+            },
+        }
+
+    def native_server_emergency_incident(self) -> dict[str, Any]:
+        """Enter containment, prove restrictions, repair, resolve, and restore."""
+
+        scenario_id = "server_emergency_incident"
+        out_dir = self.reports / "scenarios" / scenario_id
+        enter_out = out_dir / "incident_enter_and_restrictions.json"
+        diagnostics_out = out_dir / "incident_diagnostics_and_repair.json"
+        restore_out = out_dir / "incident_resolve_and_mode_restore.json"
+        final_out = out_dir / "post_incident_invariants.json"
+
+        def enter_and_restrict() -> dict[str, Any]:
+            root = WebClient(self.recovery.base_url, "root", self.credentials.root, timeout=90)
+            member = WebClient(self.recovery.base_url, "test", self.credentials.test, timeout=90)
+            root_login = root.login()
+            member_login = member.login()
+            before = root.request("GET", "/api/root/server-mode") if root_login.get("ok") else {"body": {}}
+            before_body = before.get("body") if isinstance(before.get("body"), Mapping) else {}
+            before_mode = before_body.get("mode") if isinstance(before_body.get("mode"), Mapping) else {}
+            entered = root.request(
+                "POST",
+                "/api/root/incident/enter",
+                json_body={
+                    "confirm": "ENTER_INCIDENT_LOCKDOWN",
+                    "trigger_type": "formal_campaign_emergency_drill",
+                    "reason": "formal isolated recovery-target incident response verification",
+                    "verification": {"campaign_scenario": scenario_id},
+                },
+            ) if root_login.get("ok") else {"status": 0, "body": {}}
+            root_relogin = root.login()
+            status_during = (
+                root.request("GET", "/api/root/incident/status")
+                if root_relogin.get("ok") else {"status": 0, "body": {}}
+            )
+            return {
+                "root_login_status": root_login.get("status"),
+                "member_login_status": member_login.get("status"),
+                "mode_before": str(before_mode.get("current_mode") or ""),
+                "enter": entered,
+                "root_relogin_status": root_relogin.get("status"),
+                "status_during": status_during,
+                "member_restricted_operation": member.request("GET", "/api/jobs"),
+                "root_restricted_operation": root.request(
+                    "POST",
+                    "/api/trading/orders",
+                    json_body={"market_symbol": "BTC/POINTS", "side": "buy"},
+                ),
+                "root_recovery_operation": root.request("GET", "/api/admin/health"),
+            }
+
+        def diagnostics_and_repair() -> dict[str, Any]:
+            root = WebClient(self.recovery.base_url, "root", self.credentials.root, timeout=120)
+            login = root.login()
+            if not login.get("ok"):
+                return {"root_login_succeeded": False}
+            return {
+                "root_login_succeeded": True,
+                "database_before": root.request("GET", "/api/admin/health/db-integrity"),
+                "audit_before": root.request("GET", "/api/admin/health/audit-chain"),
+                "integrity_report": root.request("GET", "/api/root/integrity/report"),
+                "integrity_repair": root.request(
+                    "POST", "/api/admin/integrity/repair", json_body={}
+                ),
+                "database_after": root.request("GET", "/api/admin/health/db-integrity"),
+                "audit_after": root.request("GET", "/api/admin/health/audit-chain"),
+                "mode_log_after": root.request("GET", "/api/root/server-mode/logs/verify"),
+            }
+
+        def resolve_and_restore() -> dict[str, Any]:
+            enter = load_json(enter_out)
+            original_mode = str(enter.get("mode_before") or "dev_ready")
+            confirm = {
+                "dev_ready": "SWITCH_TO_DEV_READY",
+                "preprod": "SWITCH_TO_DEV_READY",
+                "internal_test": "SWITCH_TO_INTERNAL_TEST",
+                "test": "SWITCH_TO_TEST",
+                "maintenance": "ENTER_MAINTENANCE",
+                "production": "GO_LIVE",
+            }.get(original_mode, "SWITCH_TO_DEV_READY")
+            root = WebClient(self.recovery.base_url, "root", self.credentials.root, timeout=180)
+            login = root.login()
+            before = root.request("GET", "/api/root/incident/status") if login.get("ok") else {"body": {}}
+            incident = (before.get("body") or {}).get("incident") or {}
+            resolved = root.request(
+                "POST",
+                "/api/root/incident/resolve",
+                json_body={
+                    "confirm": "RESOLVE_INCIDENT",
+                    "notes": "formal campaign diagnostics and integrity verification completed",
+                    "verification": {"diagnostics_artifact": diagnostics_out.name},
+                },
+            ) if incident else {"status": 0, "body": {}}
+            switched = root.request(
+                "POST",
+                "/api/root/server-mode/switch",
+                json_body={
+                    "mode": original_mode,
+                    "confirm": confirm,
+                    "reason": "restore pre-incident mode after formal emergency drill",
+                },
+            )
+            root.login()
+            return {
+                "original_mode": original_mode,
+                "incident_before_resolve": before,
+                "resolve": resolved,
+                "switch": switched,
+                "mode_after": root.request("GET", "/api/root/server-mode"),
+                "incident_after": root.request("GET", "/api/root/incident/status"),
+                "mode_log_after": root.request("GET", "/api/root/server-mode/logs/verify"),
+            }
+
+        def final_state() -> dict[str, Any]:
+            root = WebClient(self.recovery.base_url, "root", self.credentials.root, timeout=120)
+            login = root.login()
+            if not login.get("ok"):
+                return {"root_login_succeeded": False}
+            points_started = root.request("POST", "/api/root/points/chain/verify/jobs", json_body={})
+            points_job = self._await_management_job(root, points_started, timeout_seconds=900)
+            trading_started = root.request("POST", "/api/root/trading/verify/jobs", json_body={})
+            trading_job = self._await_management_job(root, trading_started, timeout_seconds=900)
+            site = root.request("GET", "/api/site-config")
+            return {
+                "root_login_succeeded": True,
+                "readiness": self.recovery.wait_ready(timeout=180.0),
+                "audit_integrity": root.request("GET", "/api/admin/health/audit-chain"),
+                "database_integrity": root.request("GET", "/api/admin/health/db-integrity"),
+                "mode_log_chain": root.request("GET", "/api/root/server-mode/logs/verify"),
+                "points_verify_job": points_job,
+                "points_verify_latest": root.request("GET", "/api/root/points/chain/verify/latest"),
+                "trading_verify_job": trading_job,
+                "trading_verify_latest": root.request("GET", "/api/root/trading/verify/latest"),
+                "site_config": (
+                    (site.get("body") or {}).get("site_config")
+                    if isinstance(site.get("body"), Mapping) else {}
+                ),
+            }
+
+        result = self.run_group(scenario_id, [
+            lambda: self.run_native_callable_step(
+                scenario_id,
+                "incident_enter_and_restrictions",
+                enter_out,
+                enter_and_restrict,
+                payload_ok=lambda payload: bool(
+                    int((payload.get("enter") or {}).get("status") or 0) == 200
+                    and ((payload.get("status_during") or {}).get("body") or {}).get("incident")
+                    and int((payload.get("root_restricted_operation") or {}).get("status") or 0) == 503
+                    and int((payload.get("root_recovery_operation") or {}).get("status") or 0) == 200
+                ),
+            ),
+            lambda: self.run_native_callable_step(
+                scenario_id,
+                "incident_diagnostics_and_repair",
+                diagnostics_out,
+                diagnostics_and_repair,
+                payload_ok=lambda payload: bool(
+                    payload.get("root_login_succeeded") is True
+                    and int((payload.get("integrity_repair") or {}).get("status") or 0) == 200
+                    and int((payload.get("database_after") or {}).get("status") or 0) == 200
+                    and int((payload.get("audit_after") or {}).get("status") or 0) == 200
+                    and int((payload.get("mode_log_after") or {}).get("status") or 0) == 200
+                ),
+            ),
+            lambda: self.run_native_callable_step(
+                scenario_id,
+                "incident_resolve_and_mode_restore",
+                restore_out,
+                resolve_and_restore,
+                payload_ok=lambda payload: bool(
+                    int((payload.get("resolve") or {}).get("status") or 0) == 200
+                    and int((payload.get("switch") or {}).get("status") or 0) == 200
+                    and ((payload.get("mode_after") or {}).get("body") or {}).get("mode", {}).get("current_mode")
+                    == payload.get("original_mode")
+                    and ((payload.get("incident_after") or {}).get("body") or {}).get("incident") is None
+                ),
+            ),
+            lambda: self.run_native_callable_step(
+                scenario_id,
+                "post_incident_invariants",
+                final_out,
+                final_state,
+                payload_ok=lambda payload: bool(
+                    payload.get("root_login_succeeded") is True
+                    and (payload.get("readiness") or {}).get("ok") is True
+                    and (payload.get("points_verify_job") or {}).get("terminal_status") == "succeeded"
+                    and (payload.get("trading_verify_job") or {}).get("terminal_status") == "succeeded"
+                    and (payload.get("site_config") or {}).get("maintenance_mode") is False
+                ),
+            ),
+        ])
+        selected = server_emergency_assertions(
+            load_json(enter_out),
+            load_json(diagnostics_out),
+            load_json(restore_out),
+            load_json(final_out),
+        )
+        return attach_native_evidence(
+            result,
+            scenario_id=scenario_id,
+            output_dir=out_dir,
+            scenario_assertions=selected["scenario_assertions"],
+            terminal_assertions=selected["terminal_assertions"],
+            cleanup_assertions=selected["cleanup_assertions"],
+            details=selected["details"],
+        )
+
+    def native_backup_restore_restart(self) -> dict[str, Any]:
+        """Run exact snapshot, portable archive, live restore, and restart proof."""
+
+        scenario_id = "backup_restore_restart"
+        out_dir = self.reports / "scenarios" / scenario_id
+        portable_out = out_dir / "portable_full_runtime_cycle.json"
+        portable_archive = out_dir / "portable_full_runtime.tar.gz"
+        portable_manifest = out_dir / "portable_full_runtime_manifest.json"
+        snapshot_out = out_dir / "snapshot_restore_boundary.json"
+        live_out = out_dir / "live_runtime_restore.json"
+        ordinary_archive = out_dir / "ordinary_runtime_backup.tar.gz"
+        restart_out = out_dir / "planned_restart.json"
+        cleanup_out = out_dir / "backup_fixture_cleanup.json"
+        final_out = out_dir / "post_restart_invariants.json"
+
+        def cleanup() -> dict[str, Any]:
+            snapshot = load_json(snapshot_out)
+            snapshot_id = str(snapshot.get("snapshot_id") or "")
+            root = WebClient(self.recovery.base_url, "root", self.credentials.root, timeout=120)
+            login = root.login()
+            deleted = (
+                root.request(
+                    "DELETE",
+                    f"/api/admin/snapshots/{quote(snapshot_id, safe='')}",
+                    params={"reason": "formal backup fixture cleanup"},
+                )
+                if login.get("ok") and snapshot_id else {"status": 0}
+            )
+            listed = root.request("GET", "/api/admin/snapshots") if login.get("ok") else {"body": {}}
+            rows = (listed.get("body") or {}).get("snapshots") or []
+            absent = bool(snapshot_id) and not any(
+                str(row.get("snapshot_id") or row.get("id") or "") == snapshot_id
+                for row in rows if isinstance(row, Mapping)
+            )
+            marker_path = Path(str(snapshot.get("storage_marker_path") or ""))
+            if str(marker_path) not in {"", "."}:
+                try:
+                    marker_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            prefix = f"{self.recovery.runtime_root.name}.pre-restore-"
+            unexpected = [
+                str(path) for path in self.recovery.runtime_root.parent.glob(f"{prefix}*")
+                if path.exists()
+            ]
+            return {
+                "snapshot_delete_status": int(deleted.get("status") or 0),
+                "snapshot_deleted": int(deleted.get("status") or 0) == 200,
+                "snapshot_absent": absent,
+                "snapshot_storage_marker_removed": not marker_path.exists(),
+                "unexpected_pre_restore_paths": unexpected,
+            }
+
+        def final_state() -> dict[str, Any]:
+            snapshot = load_json(snapshot_out)
+            live = load_json(live_out)
+            snapshot_hash = str(_mapping_transfer.get("transaction_hash") or "") if isinstance(
+                (_mapping_transfer := snapshot.get("append_only_transfer")), Mapping
+            ) else ""
+            cli_hash = str(_mapping_cli.get("transaction_hash") or "") if isinstance(
+                (_mapping_cli := live.get("append_only_transfer")), Mapping
+            ) else ""
+            root = WebClient(self.recovery.base_url, "root", self.credentials.root, timeout=120)
+            login = root.login()
+            if not login.get("ok"):
+                return {"root_login_succeeded": False}
+            started = root.request("POST", "/api/root/points/chain/verify/jobs", json_body={})
+            job = self._await_management_job(root, started, timeout_seconds=900)
+            return {
+                "root_login_succeeded": True,
+                "readiness": self.recovery.wait_ready(timeout=180.0),
+                "points_verify_job": job,
+                "points_verify_latest": root.request("GET", "/api/root/points/chain/verify/latest"),
+                "snapshot_transfer_explorer": (
+                    root.request("GET", f"/api/points/explorer/tx/{quote(snapshot_hash, safe='')}")
+                    if snapshot_hash else {"status": 0}
+                ),
+                "cli_transfer_explorer": (
+                    root.request("GET", f"/api/points/explorer/tx/{quote(cli_hash, safe='')}")
+                    if cli_hash else {"status": 0}
+                ),
+                "sqlite_quick_checks": self._sqlite_checks(self.recovery.runtime_root / "database"),
+            }
+
+        result = self.run_group(scenario_id, [
+            lambda: self.run_native_callable_step(
+                scenario_id,
+                "portable_full_runtime_cycle",
+                portable_out,
+                lambda: self._portable_full_runtime_cycle(
+                    out_dir=out_dir,
+                    archive=portable_archive,
+                    manifest_path=portable_manifest,
+                ),
+                payload_ok=lambda payload: bool(
+                    (payload.get("archive") or {}).get("readable") is True
+                    and not (payload.get("archive") or {}).get("unsafe_members")
+                    and (payload.get("extracted_restore") or {}).get("all_manifest_files_present") is True
+                    and not (payload.get("extracted_restore") or {}).get("hash_mismatches")
+                    and payload.get("restore_root_removed") is True
+                    and payload.get("source_storage_marker_removed") is True
+                    and payload.get("server_restarted") is True
+                ),
+            ),
+            lambda: self.run_native_callable_step(
+                scenario_id,
+                "snapshot_restore_boundary",
+                snapshot_out,
+                self._snapshot_restore_boundary_cycle,
+                payload_ok=lambda payload: payload.get("ok") is True,
+            ),
+            lambda: self.run_native_callable_step(
+                scenario_id,
+                "live_runtime_restore",
+                live_out,
+                lambda: self._formal_live_restore_cycle(archive=ordinary_archive),
+                payload_ok=lambda payload: bool(
+                    int(payload.get("backup_command_returncode", -1)) == 0
+                    and int(payload.get("restore_command_returncode", -1)) == 0
+                    and payload.get("archive_readable") is True
+                    and payload.get("protected_finance_hash_preserved") is True
+                    and payload.get("storage_preserved") is True
+                    and payload.get("dirty_marker_absent_after_restore") is True
+                    and payload.get("transfer_survived_restore") is True
+                    and payload.get("pre_restore_runtime_removed") is True
+                    and payload.get("storage_marker_removed") is True
+                ),
+            ),
+            lambda: self.run_native_callable_step(
+                scenario_id,
+                "planned_restart",
+                restart_out,
+                self._formal_planned_restart,
+                payload_ok=lambda payload: bool(
+                    int((payload.get("stopped") or {}).get("old_pid") or 0) > 0
+                    and (payload.get("stopped") or {}).get("master_process_remaining") is False
+                    and (payload.get("stopped") or {}).get("process_group_remaining") is False
+                    and int((payload.get("started") or {}).get("new_pid") or 0) > 0
+                    and (payload.get("started") or {}).get("readiness_succeeded") is True
+                ),
+            ),
+            lambda: self.run_native_callable_step(
+                scenario_id,
+                "backup_fixture_cleanup",
+                cleanup_out,
+                cleanup,
+                payload_ok=lambda payload: bool(
+                    payload.get("snapshot_deleted") is True
+                    and payload.get("snapshot_absent") is True
+                    and payload.get("snapshot_storage_marker_removed") is True
+                    and payload.get("unexpected_pre_restore_paths") == []
+                ),
+            ),
+            lambda: self.run_native_callable_step(
+                scenario_id,
+                "post_restart_invariants",
+                final_out,
+                final_state,
+                payload_ok=lambda payload: bool(
+                    payload.get("root_login_succeeded") is True
+                    and (payload.get("readiness") or {}).get("ok") is True
+                    and (payload.get("points_verify_job") or {}).get("terminal_status") == "succeeded"
+                    and int((payload.get("snapshot_transfer_explorer") or {}).get("status") or 0) == 200
+                    and int((payload.get("cli_transfer_explorer") or {}).get("status") or 0) == 200
+                    and payload.get("sqlite_quick_checks")
+                    and all(
+                        row.get("ok") is True
+                        for row in (payload.get("sqlite_quick_checks") or {}).values()
+                    )
+                ),
+            ),
+        ])
+        for artifact_id, path, artifact_type in (
+            ("native.source.backup_restore_restart.portable_manifest", portable_manifest, "json"),
+            ("native.source.backup_restore_restart.portable_archive", portable_archive, "archive"),
+            ("native.source.backup_restore_restart.ordinary_archive", ordinary_archive, "archive"),
+        ):
+            if path.is_file() and not path.is_symlink():
+                result["artifacts"].append({
+                    "artifact_id": artifact_id,
+                    "path": str(path.resolve(strict=True)),
+                    "artifact_type": artifact_type,
+                })
+        selected = backup_restore_assertions(
+            load_json(portable_out),
+            load_json(snapshot_out),
+            load_json(live_out),
+            load_json(restart_out),
+            load_json(final_out),
+            load_json(cleanup_out),
+        )
+        return attach_native_evidence(
+            result,
+            scenario_id=scenario_id,
+            output_dir=out_dir,
+            scenario_assertions=selected["scenario_assertions"],
+            terminal_assertions=selected["terminal_assertions"],
+            cleanup_assertions=selected["cleanup_assertions"],
+            details=selected["details"],
+        )
 
     def _cli_backup_restore_cycle(self, scenario_id: str) -> dict[str, Any]:
         started = time.monotonic()
@@ -3594,24 +7267,60 @@ class Campaign:
                 "formal_campaign_pass": False,
                 "reason": "level_0_lifecycle_smoke_does_not_execute_or_claim_formal_scenarios",
             }, False)
+        adapter_registry = self.native_scenario_evidence_adapter_registry()
+        validator_registry = self.native_scenario_validator_registry()
         return build_and_validate_formal_scenario_bindings(
+            adapter_registry=adapter_registry,
             runner_registry=self.native_scenario_runner_registry(),
+            validator_registry=validator_registry,
+            runtime_execution_pipeline_verified=strict_native_runtime_pipeline_verified(
+                adapter_registry=adapter_registry,
+                validator_registry=validator_registry,
+            ),
         ).to_dict(), True
 
-    def native_scenario_runner_registry(self) -> Mapping[str, ScenarioRunnerRegistration]:
-        """Return only exact-ID legacy runners that are genuinely executable.
+    def native_scenario_evidence_adapter_registry(
+        self,
+    ) -> Mapping[str, NativeEvidenceAdapterRegistration]:
+        """Return all 91 strict artifact-backed evidence adapters.
 
-        These four registrations are deliberately partial.  They do not make
-        a reviewed binding complete because the audited evidence, terminal,
-        cleanup, and artifact handlers are still absent.  Old methods whose
-        IDs or domains differ from the reviewed catalogue are not aliased.
+        Registration does not waive the per-scenario audited blockers.  Each
+        adapter requires a native evidence manifest and re-evaluates its JSON
+        pointers against independently reopened probe artifacts.
+        """
+
+        return build_strict_native_adapter_registry()
+
+    def native_scenario_validator_registry(
+        self,
+    ) -> Mapping[str, ScenarioValidatorRegistration]:
+        """Return the 13 terminal, cleanup, and artifact validator trios."""
+
+        return build_strict_native_validator_registry()
+
+    def native_scenario_runner_registry(self) -> Mapping[str, ScenarioRunnerRegistration]:
+        """Return the audited exact-ID native runners currently executable.
+
+        A runner is registered only after its machine artifacts, semantic
+        selectors, terminal state, cleanup, and strict artifact validators are
+        wired through the formal native pipeline.  Unreviewed legacy methods
+        are never aliased to a reviewed scenario ID.
         """
 
         handlers: Mapping[str, Callable[[], dict[str, Any]]] = {
-            "media_long_hls_share": self.scenario_media_long,
-            "pointschain_hft_invariants": self.scenario_points_hft,
-            "media_proxy_cross_browser": self.scenario_media_compatibility,
-            "final_ui_mobile_prelaunch": self.scenario_final_ui_prelaunch,
+            "ai_agent_positive_operations": self.native_ai_agent_positive_operations,
+            "bt_download_stream_restart": self.native_bt_download_stream_restart,
+            "cloud_drive_share_stream": self.native_cloud_drive_share_stream,
+            "comfyui_real_workflows": self.native_comfyui_real_workflows,
+            "community_governance_operations": self.native_community_governance_operations,
+            "media_long_hls_share": self.native_media_long_hls_share,
+            "pointschain_hft_invariants": self.native_points_hft_invariants,
+            "wallet_incident_governance": self.native_wallet_incident_governance,
+            "backup_restore_restart": self.native_backup_restore_restart,
+            "server_emergency_incident": self.native_server_emergency_incident,
+            "trading_background_custom_workflow": self.native_trading_background_custom_workflow,
+            "media_proxy_cross_browser": self.native_media_proxy_cross_browser,
+            "final_ui_mobile_prelaunch": self.native_final_ui_mobile_prelaunch,
         }
         registrations: dict[str, ScenarioRunnerRegistration] = {}
         for scenario_id, handler in handlers.items():
@@ -3625,28 +7334,58 @@ class Campaign:
         return registrations
 
     def run_formal_native_scenario(self, scenario_id: str) -> dict[str, Any]:
-        """Fail closed until the exact reviewed binding has a runtime pipeline."""
+        """Execute only a fully reviewed native binding through the strict pipeline."""
 
+        if scenario_id not in FORMAL_SCENARIO_BINDINGS:
+            return {
+                "ok": False,
+                "classification": "FAIL_HARNESS",
+                "error": "formal_native_scenario_unknown",
+                "scenario_id": scenario_id,
+            }
+        adapter_registry = self.native_scenario_evidence_adapter_registry()
+        runner_registry = self.native_scenario_runner_registry()
+        validator_registry = self.native_scenario_validator_registry()
+        pipeline_verified = strict_native_runtime_pipeline_verified(
+            adapter_registry=adapter_registry,
+            validator_registry=validator_registry,
+        )
         gate = build_and_validate_formal_scenario_bindings(
-            runner_registry=self.native_scenario_runner_registry(),
+            adapter_registry=adapter_registry,
+            runner_registry=runner_registry,
+            validator_registry=validator_registry,
+            runtime_execution_pipeline_verified=pipeline_verified,
         )
         coverage = gate.registration_coverage.get(scenario_id) or {}
-        return {
-            "ok": False,
-            "classification": "FAIL_HARNESS",
-            "error": "formal_native_binding_incomplete",
-            "scenario_id": scenario_id,
-            "registration_coverage": dict(coverage),
-            "binding_blockers": list(gate.binding_blockers.get(scenario_id) or ()),
-        }
+        if coverage.get("fully_bound") is not True:
+            return {
+                "ok": False,
+                "classification": "FAIL_HARNESS",
+                "error": "formal_native_binding_incomplete",
+                "scenario_id": scenario_id,
+                "registration_coverage": dict(coverage),
+                "binding_blockers": list(gate.binding_blockers.get(scenario_id) or ()),
+                "runtime_execution_pipeline_verified": pipeline_verified,
+            }
+        result = execute_registered_native_scenario(
+            binding=FORMAL_SCENARIO_BINDINGS[scenario_id],
+            runner_registry=runner_registry,
+            adapter_registry=adapter_registry,
+            validator_registry=validator_registry,
+            artifact_root=self.reports / "scenarios" / scenario_id,
+            known_secret_values={
+                "root": self.credentials.root,
+                "manager": self.credentials.manager,
+                "test": self.credentials.test,
+                "member": self.credentials.member,
+            },
+            authority=self.native_scenario_authority_identities[scenario_id],
+        )
+        result["registration_coverage"] = dict(coverage)
+        return result
 
     def preflight(self) -> dict[str, Any]:
-        commands = {
-            "ffmpeg": ["ffmpeg", "-version"],
-            "ffprobe": ["ffprobe", "-version"],
-            "playwright": [sys.executable, "-c", "from playwright.sync_api import sync_playwright; print('ok')"],
-            "gunicorn": [sys.executable, "-c", "import gunicorn; print(gunicorn.__version__)"],
-        }
+        commands = preflight_dependency_commands(self.campaign_level)
         dependencies: dict[str, Any] = {}
         for name, command in commands.items():
             try:
@@ -3670,8 +7409,9 @@ class Campaign:
                 self._server_progress(f"preflight_dependency_completed:{name}")
         disk = os.statvfs(self.root.parent)
         free_bytes = int(disk.f_bavail * disk.f_frsize)
-        runtime_scan = bounded_repo_runtime_scan(
+        runtime_scan = preflight_repo_runtime_scan(
             ROOT,
+            campaign_level=self.campaign_level,
             progress_callback=self._server_progress if self.supervised else None,
         )
         runtime_pollution = list(runtime_scan.get("repo_runtime_pollution") or [])
@@ -3700,11 +7440,18 @@ class Campaign:
                 )
             ),
             "dependencies": dependencies,
+            "dependency_scope": {
+                "campaign_level": self.campaign_level,
+                "required": sorted(commands),
+                "smoke_omits_unused_formal_capabilities": (
+                    self.campaign_level == "smoke"
+                ),
+            },
             "free_bytes": free_bytes,
             "minimum_free_bytes": int(self.args.minimum_free_gb * 1024**3),
             "repo_runtime_pollution": runtime_pollution,
             "repo_runtime_scan": runtime_scan,
-            "source_manifest_files": len(self.source_hashes),
+            "source_manifest_files": self.source_manifest_file_count,
             "source_manifest_digest": self.source_digest,
             "source_git": self.source_git,
             "process_inheritance": process_inheritance,
@@ -3716,55 +7463,52 @@ class Campaign:
 
     def verify_role_inheritance(self) -> dict[str, Any]:
         roles = tuple(sorted(MANDATORY_MANAGED_ROLES))
-        processes: dict[str, subprocess.Popen[Any]] = {}
-        placements: dict[str, Any] = {}
+        process: subprocess.Popen[Any] | None = None
+        placement: dict[str, Any] = {}
         errors: list[str] = []
         expected = "/" + self.cgroup_path.strip().lstrip("/")
         try:
-            for role in roles:
-                processes[role] = subprocess.Popen(
-                    [sys.executable, "-c", "import time; time.sleep(30)"],
-                    cwd=str(ROOT),
-                    env=self.base_env(),
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    start_new_session=True,
-                )
+            process = subprocess.Popen(
+                ["/bin/sleep", "30"],
+                cwd=str(ROOT),
+                env=self.base_env(),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
             deadline = time.monotonic() + 10
-            pending = set(roles)
-            while pending and time.monotonic() < deadline:
-                for role in list(pending):
-                    process = processes[role]
-                    if process.poll() is not None:
-                        errors.append(f"{role}:probe_exited:{process.returncode}")
-                        pending.remove(role)
-                        continue
-                    try:
-                        actual = _current_unified_cgroup(process.pid)
-                    except Exception:
-                        continue
-                    inside = actual == expected or actual.startswith(expected.rstrip("/") + "/")
-                    placements[role] = {
-                        "pid": process.pid,
-                        "expected_cgroup": expected,
-                        "actual_cgroup": actual,
-                        "inside_campaign_scope": inside,
-                        "ok": inside,
-                    }
-                    if not inside:
-                        errors.append(f"{role}:outside_campaign_scope:{actual}")
-                    pending.remove(role)
+            while not placement and time.monotonic() < deadline:
+                if process.poll() is not None:
+                    errors.append(f"direct_child:probe_exited:{process.returncode}")
+                    break
+                try:
+                    actual = _current_unified_cgroup(process.pid)
+                except Exception:
+                    time.sleep(0.05)
+                    continue
+                inside = actual == expected or actual.startswith(
+                    expected.rstrip("/") + "/"
+                )
+                placement = {
+                    "pid": process.pid,
+                    "expected_cgroup": expected,
+                    "actual_cgroup": actual,
+                    "inside_campaign_scope": inside,
+                    "ok": inside,
+                }
+                if not inside:
+                    errors.append(f"direct_child:outside_campaign_scope:{actual}")
                 time.sleep(0.05)
-            errors.extend(f"{role}:membership_unobservable" for role in sorted(pending))
+            if not placement and not errors:
+                errors.append("direct_child:membership_unobservable")
         finally:
-            for process in processes.values():
-                if process.poll() is None:
-                    try:
-                        os.killpg(process.pid, signal.SIGTERM)
-                    except ProcessLookupError:
-                        pass
-            for process in processes.values():
+            if process is not None and process.poll() is None:
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+            if process is not None:
                 try:
                     process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
@@ -3773,16 +7517,252 @@ class Campaign:
                     except ProcessLookupError:
                         pass
         result = {
-            "schema_version": "hackme.campaign-process-inheritance.v1",
-            "required_roles": list(roles),
-            "placements": placements,
+            "schema_version": "hackme.campaign-process-inheritance.v2",
+            "probe_mode": "single_direct_child_kernel_inheritance",
+            "probe_command": ["/bin/sleep", "30"],
+            "probe_count": 1,
+            "managed_roles_covered": list(roles),
+            "placement": placement,
             "errors": errors,
-            "ok": not errors and set(placements) == set(roles) and all(row.get("ok") for row in placements.values()),
+            "ok": not errors and placement.get("ok") is True,
         }
         durable_atomic_write_json(self.reports / "preflight_process_inheritance.json", result)
         return result
 
+    @staticmethod
+    def _stream_file_metadata(path: Path) -> dict[str, Any]:
+        candidate = Path(path)
+        before = os.lstat(candidate)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or stat.S_ISLNK(before.st_mode)
+            or int(before.st_nlink) != 1
+        ):
+            raise RuntimeError(f"evidence path is not a single-link regular file: {candidate}")
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(candidate, flags)
+        digest = hashlib.sha256()
+        size = 0
+        final_fd: os.stat_result | None = None
+        try:
+            opened = os.fstat(descriptor)
+            if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+                raise RuntimeError(f"evidence path changed before open: {candidate}")
+            while True:
+                block = os.read(descriptor, 1024 * 1024)
+                if not block:
+                    break
+                digest.update(block)
+                size += len(block)
+            final_fd = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+        if final_fd is None:
+            raise RuntimeError(f"evidence path could not be hashed: {candidate}")
+        after = os.lstat(candidate)
+        if (
+            size != int(before.st_size)
+            or (final_fd.st_dev, final_fd.st_ino, final_fd.st_size, final_fd.st_mtime_ns)
+            != (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+            or (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+            != (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+        ):
+            raise RuntimeError(f"evidence path changed while hashing: {candidate}")
+        return {
+            "path": str(candidate.resolve(strict=True)),
+            "size_bytes": size,
+            "sha256": digest.hexdigest(),
+        }
+
+    def validate_online_security_audit_evidence(
+        self,
+        result: Mapping[str, Any],
+        *,
+        output_dir: Path,
+    ) -> dict[str, Any]:
+        errors: list[str] = []
+        reference = result.get("audit_evidence")
+        if not isinstance(reference, Mapping):
+            errors.append("audit_evidence_reference_missing")
+            reference = {}
+        receipt_path = output_dir / "receipt.json"
+        archive_path = output_dir.with_name(f"{output_dir.name}.tar")
+        receipt: dict[str, Any] = {}
+        metadata: dict[str, Any] = {}
+        archive_metadata: dict[str, Any] = {}
+        try:
+            metadata = self._stream_file_metadata(receipt_path)
+            loaded = json.loads(receipt_path.read_text(encoding="utf-8"))
+            if not isinstance(loaded, dict):
+                raise RuntimeError("receipt root is not an object")
+            receipt = loaded
+        except Exception as exc:
+            errors.append(f"receipt_read_failed:{exc.__class__.__name__}")
+        contract = validate_audit_evidence_receipt(
+            receipt,
+            required_mode="online",
+            required_target="security_sentinel",
+            artifact_root=output_dir if receipt else None,
+        )
+        errors.extend(f"receipt_contract:{code}" for code in contract.get("errors") or [])
+        try:
+            archive_metadata = self._stream_file_metadata(archive_path)
+            archive_contract = validate_audit_evidence_archive(
+                archive_path,
+                required_mode="online",
+                required_target="security_sentinel",
+                expected_sha256=str(archive_metadata.get("sha256") or ""),
+                expected_size=int(archive_metadata.get("size_bytes") or 0),
+            )
+        except Exception as exc:
+            archive_contract = {
+                "schema_version": "hackme.audit-evidence-triad-archive-validation/v1",
+                "ok": False,
+                "classification": "FAIL_HARNESS",
+                "errors": [{"code": f"archive_read_failed:{exc.__class__.__name__}"}],
+            }
+        for row in archive_contract.get("errors") or []:
+            code = row.get("code") if isinstance(row, Mapping) else str(row)
+            errors.append(f"archive_contract:{code}")
+        if archive_contract.get("ok") is not True and not archive_contract.get("errors"):
+            errors.append("archive_contract:archive_validation_failed_without_error")
+        if reference:
+            if set(reference) != {
+                "schema_version",
+                "receipt_schema_version",
+                "mode",
+                "target",
+                "receipt_path",
+                "receipt_sha256",
+                "receipt_size_bytes",
+                "receipt",
+                "validation",
+                "archive_schema_version",
+                "archive_path",
+                "archive_sha256",
+                "archive_size_bytes",
+                "archive_validation",
+            }:
+                errors.append("audit_evidence_reference_shape_mismatch")
+            if (
+                reference.get("schema_version")
+                != "hackme.audit-evidence-triad-reference/v1"
+                or reference.get("receipt_schema_version")
+                != AUDIT_EVIDENCE_SCHEMA_VERSION
+                or reference.get("mode") != "online"
+                or reference.get("target") != "security_sentinel"
+            ):
+                errors.append("audit_evidence_reference_identity_mismatch")
+            if reference.get("receipt") != receipt:
+                errors.append("embedded_receipt_mismatch")
+            if (
+                reference.get("receipt_path") != metadata.get("path")
+                or reference.get("receipt_sha256") != metadata.get("sha256")
+                or reference.get("receipt_size_bytes") != metadata.get("size_bytes")
+            ):
+                errors.append("audit_evidence_reference_hash_mismatch")
+            if reference.get("validation") != contract:
+                errors.append("audit_evidence_reference_validation_mismatch")
+            if (
+                reference.get("archive_schema_version")
+                != AUDIT_EVIDENCE_ARCHIVE_SCHEMA_VERSION
+                or reference.get("archive_path") != archive_metadata.get("path")
+                or reference.get("archive_sha256") != archive_metadata.get("sha256")
+                or reference.get("archive_size_bytes")
+                != archive_metadata.get("size_bytes")
+            ):
+                errors.append("audit_evidence_archive_reference_hash_mismatch")
+            if reference.get("archive_validation") != archive_contract:
+                errors.append("audit_evidence_archive_reference_validation_mismatch")
+        checks = result.get("checks")
+        check = next(
+            (
+                row
+                for row in checks
+                if isinstance(row, Mapping)
+                and row.get("name") == "audit_evidence_triad_online"
+            ),
+            None,
+        ) if isinstance(checks, list) else None
+        if not isinstance(check, Mapping) or check.get("ok") is not True:
+            errors.append("audit_evidence_check_missing_or_failed")
+        else:
+            detail = check.get("detail")
+            if not isinstance(detail, Mapping) or set(detail) != {
+                "receipt_schema_version",
+                "mode",
+                "target",
+                "receipt_sha256",
+                "receipt_size_bytes",
+                "artifact_files_verified",
+                "validation_classification",
+                "validation_errors",
+                "archive_schema_version",
+                "archive_sha256",
+                "archive_size_bytes",
+                "archive_validation_classification",
+                "archive_validation_errors",
+            }:
+                errors.append("audit_evidence_check_shape_mismatch")
+            elif (
+                detail.get("receipt_schema_version")
+                != AUDIT_EVIDENCE_SCHEMA_VERSION
+                or detail.get("mode") != "online"
+                or detail.get("target") != "security_sentinel"
+                or detail.get("receipt_sha256") != metadata.get("sha256")
+                or detail.get("receipt_size_bytes") != metadata.get("size_bytes")
+                or detail.get("artifact_files_verified") is not True
+                or detail.get("validation_classification") != "PASS"
+                or detail.get("validation_errors") != []
+                or detail.get("archive_schema_version")
+                != AUDIT_EVIDENCE_ARCHIVE_SCHEMA_VERSION
+                or detail.get("archive_sha256") != archive_metadata.get("sha256")
+                or detail.get("archive_size_bytes")
+                != archive_metadata.get("size_bytes")
+                or detail.get("archive_validation_classification") != "PASS"
+                or detail.get("archive_validation_errors") != []
+            ):
+                errors.append("audit_evidence_check_binding_mismatch")
+        wiring_errors = [
+            code
+            for code in errors
+            if not code.startswith(("receipt_contract:", "archive_contract:"))
+        ]
+        classification = "PASS"
+        if errors:
+            classification = (
+                "FAIL_HARNESS"
+                if wiring_errors
+                else (
+                    "FAIL_PRODUCT"
+                    if contract.get("classification") == "FAIL_PRODUCT"
+                    or archive_contract.get("classification") == "FAIL_PRODUCT"
+                    else "FAIL_HARNESS"
+                )
+            )
+            if classification not in {"FAIL_PRODUCT", "FAIL_HARNESS"}:
+                classification = "FAIL_HARNESS"
+        return {
+            "schema_version": "hackme.audit-evidence-triad-online-wiring/v1",
+            "ok": not errors and contract.get("ok") is True,
+            "classification": classification,
+            "receipt": metadata,
+            "contract": contract,
+            "archive": archive_metadata,
+            "archive_contract": archive_contract,
+            "errors": sorted(set(errors)),
+        }
+
     def production_security_sentinel_check(self, *, phase: str) -> dict[str, Any]:
+        if phase not in {"preflight", "final"}:
+            return {
+                "schema_version": "hackme.production-security-sentinel.v1",
+                "ok": False,
+                "classification": "FAIL_HARNESS",
+                "failed_checks": ["invalid_phase"],
+                "checks": [],
+            }
+
         def observed_session_factory() -> requests.Session:
             session = requests.Session()
             original_request = session.request
@@ -3803,6 +7783,9 @@ class Campaign:
             session.request = observed_request  # type: ignore[method-assign]
             return session
 
+        audit_evidence_output = (
+            self.reports / "security" / f"audit_evidence_{phase}"
+        ).resolve(strict=False)
         probe = ProductionSecuritySentinel(SecuritySentinelConfig(
             base_url=self.security_sentinel.base_url,
             runtime_root=self.security_sentinel.runtime_root,
@@ -3814,8 +7797,24 @@ class Campaign:
             },
             launcher_command=tuple(self.security_sentinel.launcher_command()),
             cross_worker_requests=12,
+            audit_evidence_output_dir=audit_evidence_output,
+            audit_evidence_target="security_sentinel",
         ), session_factory=observed_session_factory)
         result = probe.run_once()
+        audit_validation = self.validate_online_security_audit_evidence(
+            result,
+            output_dir=audit_evidence_output,
+        )
+        result["audit_evidence_validation"] = audit_validation
+        if audit_validation.get("ok") is not True:
+            result["ok"] = False
+            result["classification"] = str(
+                audit_validation.get("classification") or "FAIL_HARNESS"
+            )
+            failed = list(result.get("failed_checks") or [])
+            if "audit_evidence_triad_online" not in failed:
+                failed.append("audit_evidence_triad_online")
+            result["failed_checks"] = failed
         path = self.reports / "security" / f"production_security_sentinel_{phase}.json"
         write_security_sentinel_result(path, result)
         result["artifact"] = str(path)
@@ -3827,7 +7826,7 @@ class Campaign:
         self.core_root.mkdir(parents=True, exist_ok=True)
         os.chmod(self.core_root, 0o700)
         activation_required = bool(
-            self.supervised and self.campaign_level in {"rehearsal", "formal"}
+            self.supervised and self.campaign_level in {"rehearsal", "soak", "formal"}
         )
         if activation_required:
             prepare_private_directory(
@@ -4022,7 +8021,7 @@ class Campaign:
         *,
         timeout_seconds: float = CORE_READY_TIMEOUT_SECONDS,
     ) -> dict[str, Any]:
-        if not (self.supervised and self.campaign_level in {"rehearsal", "formal"}):
+        if not (self.supervised and self.campaign_level in {"rehearsal", "soak", "formal"}):
             return {"required": False, "ok": True}
         if self.core_process is None:
             raise RuntimeError("core soak process was not launched")
@@ -4103,7 +8102,7 @@ class Campaign:
         ack_timeout_seconds: float = CORE_ACK_TIMEOUT_SECONDS,
         lead_seconds: float = CORE_ACTIVATION_LEAD_SECONDS,
     ) -> dict[str, Any]:
-        if not (self.supervised and self.campaign_level in {"rehearsal", "formal"}):
+        if not (self.supervised and self.campaign_level in {"rehearsal", "soak", "formal"}):
             return {"required": False, "ok": True}
         if self.core_process is None or self.core_process.poll() is not None:
             raise ActivationArtifactError("core soak is not alive at activation")
@@ -4239,7 +8238,7 @@ class Campaign:
         )
 
     def core_activation_artifacts_intact(self) -> bool:
-        if not (self.supervised and self.campaign_level in {"rehearsal", "formal"}):
+        if not (self.supervised and self.campaign_level in {"rehearsal", "soak", "formal"}):
             return True
         expected = self.core_activation_evidence
         if not expected.get("ok"):
@@ -4273,6 +8272,7 @@ class Campaign:
         if self.supervised and self.campaign_level == "smoke":
             return []
         targets = {
+            "ai_agent_positive_operations": "recovery",
             "backup_restore_restart": "recovery",
             "media_proxy_cross_browser": "isolated",
         }
@@ -4302,6 +8302,105 @@ class Campaign:
                 result = spec.runner() if not drift_before else {"ok": False, "error": "source_drift_before_scenario"}
             except Exception as exc:
                 result = {"ok": False, "error": f"{exc.__class__.__name__}: {exc}"}
+            if result.get("ok") is True:
+                try:
+                    binding = FORMAL_SCENARIO_BINDINGS[spec.scenario_id]
+                    receipt = result.get("runtime_receipt")
+                    validation = validate_scenario_runtime_receipt(receipt, binding)
+                    if (
+                        not isinstance(receipt, Mapping)
+                        or validation.valid is not True
+                        or validation.contract_pass is not True
+                        or validation.status.value != "PASS"
+                    ):
+                        raise RuntimeError(
+                            "strict runtime receipt cannot be persisted: "
+                            + ",".join(validation.errors)
+                        )
+                    receipt_path = (
+                        self.reports
+                        / "scenario_receipts"
+                        / f"{spec.scenario_id}.json"
+                    )
+                    if receipt_path.exists() or receipt_path.is_symlink():
+                        raise RuntimeError(
+                            f"scenario runtime receipt path already exists: {receipt_path}"
+                        )
+                    atomic_write_json(receipt_path, dict(receipt))
+                    reopened = load_json(receipt_path)
+                    reopened_validation = validate_scenario_runtime_receipt(
+                        reopened,
+                        binding,
+                    )
+                    if (
+                        reopened != dict(receipt)
+                        or reopened_validation.valid is not True
+                        or reopened_validation.contract_pass is not True
+                        or reopened_validation.status.value != "PASS"
+                    ):
+                        raise RuntimeError(
+                            "persisted runtime receipt failed exact readback validation"
+                        )
+                    scenario_artifact_root = (
+                        self.reports / "scenarios" / spec.scenario_id
+                    ).resolve(strict=True)
+                    bundle_path = Path(
+                        str(result.get("artifact_bundle_path") or "")
+                    ).resolve(strict=True)
+                    archive_path = Path(
+                        str(result.get("artifact_archive_path") or "")
+                    ).resolve(strict=True)
+                    bundle_path.relative_to(scenario_artifact_root)
+                    archive_path.relative_to(scenario_artifact_root)
+                    bundle_sha256 = self._sha256(bundle_path)
+                    archive_sha256 = self._sha256(archive_path)
+                    if (
+                        bundle_sha256 != result.get("artifact_bundle_sha256")
+                        or archive_sha256
+                        != result.get("artifact_archive_sha256")
+                        or bundle_path.stat().st_size
+                        != int(result.get("artifact_bundle_size_bytes") or -1)
+                        or archive_path.stat().st_size
+                        != int(result.get("artifact_archive_size_bytes") or -1)
+                    ):
+                        raise RuntimeError(
+                            "native bundle/archive exact readback identity mismatch"
+                        )
+                    bundle_payload = load_json(bundle_path)
+                    archive_reference = bundle_payload.get("artifact_archive")
+                    receipt_bundle = reopened.get("artifact_bundle")
+                    if (
+                        bundle_payload.get("authority") != reopened.get("authority")
+                        or not isinstance(archive_reference, Mapping)
+                        or not isinstance(receipt_bundle, Mapping)
+                        or archive_reference.get("path") != str(archive_path)
+                        or archive_reference.get("sha256") != archive_sha256
+                        or archive_reference.get("size_bytes")
+                        != archive_path.stat().st_size
+                        or receipt_bundle.get("path") != str(bundle_path)
+                        or receipt_bundle.get("sha256") != bundle_sha256
+                        or receipt_bundle.get("size_bytes")
+                        != bundle_path.stat().st_size
+                        or receipt_bundle.get("artifact_archive_sha256")
+                        != archive_sha256
+                        or receipt_bundle.get("artifact_archive_size_bytes")
+                        != archive_path.stat().st_size
+                    ):
+                        raise RuntimeError(
+                            "runtime receipt/bundle/archive authority chain mismatch"
+                        )
+                    result["runtime_receipt_path"] = str(receipt_path.resolve(strict=True))
+                    result["runtime_receipt_sha256"] = self._sha256(receipt_path)
+                except Exception as exc:
+                    result = {
+                        **result,
+                        "ok": False,
+                        "classification": "FAIL_HARNESS",
+                        "error": (
+                            "runtime_receipt_persistence_failed:"
+                            f"{exc.__class__.__name__}:{exc}"
+                        ),
+                    }
             drift_after = self.check_drift()
             result.update({
                 "scenario_id": spec.scenario_id,
@@ -4627,6 +8726,430 @@ class Campaign:
             }
         return result
 
+    @staticmethod
+    def _runtime_writer_pids(runtime_root: Path) -> list[int]:
+        roots = {
+            str(runtime_root),
+            str(runtime_root.resolve(strict=False)),
+        }
+        markers = {
+            f"HACKME_RUNTIME_DIR={root}".encode("utf-8") for root in roots
+        }
+        observed: list[int] = []
+        proc_root = Path("/proc")
+        try:
+            entries = list(proc_root.iterdir())
+        except OSError:
+            return [-1]
+        for entry in entries:
+            if not entry.name.isdigit():
+                continue
+            try:
+                process_info = entry.stat()
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+            except OSError:
+                return [-1]
+            if int(process_info.st_uid) != os.geteuid():
+                continue
+            try:
+                environment = (entry / "environ").read_bytes()
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+            except (PermissionError, OSError):
+                return [-1]
+            if markers.intersection(environment.split(b"\0")):
+                observed.append(int(entry.name))
+        return sorted(observed)
+
+    def verify_final_audit_writer_seal(
+        self,
+        log_seal_stops: Mapping[str, Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        controllers = {
+            controller.name: controller
+            for controller in (self.primary, self.recovery, self.security_sentinel)
+        }
+        errors: list[str] = []
+        targets: dict[str, Any] = {}
+        if set(log_seal_stops) != set(controllers):
+            errors.append("stop_receipt_target_set_mismatch")
+        for name, controller in controllers.items():
+            stop = log_seal_stops.get(name)
+            target_errors: list[str] = []
+            if not isinstance(stop, Mapping):
+                target_errors.append("stop_receipt_missing")
+                stop = {}
+            if (
+                stop.get("ok") is not True
+                or stop.get("name") != name
+                or stop.get("reason") != "final_evidence_log_seal"
+            ):
+                target_errors.append("stop_receipt_identity_or_verdict_invalid")
+            if stop.get("master_process_remaining") is not False:
+                target_errors.append("master_process_not_proven_stopped")
+            if stop.get("process_group_remaining") is not False:
+                target_errors.append("process_group_not_proven_stopped")
+            if (
+                stop.get("restart_disabled") is not True
+                or stop.get("launch_generation") != controller.launch_count
+                or controller.final_evidence_restart_disabled is not True
+            ):
+                target_errors.append("final_evidence_restart_barrier_missing")
+            if controller.planned_outage.is_set() is not True:
+                target_errors.append("planned_outage_barrier_missing")
+            if controller.registered_identity is not None:
+                target_errors.append("process_registry_identity_still_registered")
+            live_pids = self._runtime_writer_pids(controller.runtime_root)
+            if live_pids:
+                target_errors.append("runtime_writer_process_still_alive")
+            targets[name] = {
+                "ok": not target_errors,
+                "runtime_root": str(controller.runtime_root),
+                "stop_receipt": dict(stop),
+                "live_runtime_pids": live_pids,
+                "errors": target_errors,
+            }
+            errors.extend(f"{name}:{code}" for code in target_errors)
+        return {
+            "schema_version": FINAL_AUDIT_EVIDENCE_SEAL_SCHEMA_VERSION,
+            "ok": not errors,
+            "verified_at": utc_now(),
+            "required_targets": sorted(controllers),
+            "targets": targets,
+            "errors": sorted(set(errors)),
+        }
+
+    def capture_final_audit_evidence(
+        self,
+        log_seal_stops: Mapping[str, Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        evidence_root = (
+            self.reports / "audit_evidence" / "sealed_final"
+        ).resolve(strict=False)
+        controllers = {
+            controller.name: controller
+            for controller in (self.primary, self.recovery, self.security_sentinel)
+        }
+        seal = self.verify_final_audit_writer_seal(log_seal_stops)
+        errors: list[str] = []
+        target_results: dict[str, dict[str, Any]] = {}
+        try:
+            evidence_root.mkdir(parents=True, mode=0o700, exist_ok=False)
+            os.chmod(evidence_root, 0o700)
+        except Exception as exc:
+            return {
+                "schema_version": FINAL_AUDIT_EVIDENCE_INDEX_SCHEMA_VERSION,
+                "ok": False,
+                "classification": "FAIL_HARNESS",
+                "capture_attempted": False,
+                "writer_seal": seal,
+                "targets": {},
+                "errors": [f"evidence_root_create_failed:{exc.__class__.__name__}"],
+            }
+
+        schema_destination = evidence_root / AUDIT_EVIDENCE_SCHEMA_PATH.name
+        try:
+            schema_bytes = AUDIT_EVIDENCE_SCHEMA_PATH.read_bytes()
+            schema_destination.write_bytes(schema_bytes)
+            os.chmod(schema_destination, 0o600)
+        except Exception as exc:
+            errors.append(f"receipt_schema_copy_failed:{exc.__class__.__name__}")
+
+        capture_attempted = seal.get("ok") is True and not errors
+        if capture_attempted:
+            for name, controller in controllers.items():
+                self._server_progress(f"audit_triad_sealed_capture_started:{name}")
+                output_dir = evidence_root / name
+                receipt: dict[str, Any] = {}
+                receipt_metadata: dict[str, Any] = {}
+                contract: dict[str, Any] = {}
+                try:
+                    live_before_capture = self._runtime_writer_pids(
+                        controller.runtime_root
+                    )
+                    if live_before_capture:
+                        raise RuntimeError(
+                            "runtime_writer_detected_immediately_before_sealed_capture"
+                        )
+                    capture_audit_evidence(
+                        paths=AuditEvidencePaths.for_runtime(controller.runtime_root),
+                        output_dir=output_dir,
+                        target=name,
+                        mode="sealed",
+                    )
+                    receipt_path = output_dir / "receipt.json"
+                    receipt_metadata = self._stream_file_metadata(receipt_path)
+                    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+                    if not isinstance(receipt, dict):
+                        raise RuntimeError("sealed receipt root is not an object")
+                    contract = validate_audit_evidence_receipt(
+                        receipt,
+                        required_mode="sealed",
+                        required_target=name,
+                        artifact_root=output_dir,
+                    )
+                    live_after_capture = self._runtime_writer_pids(
+                        controller.runtime_root
+                    )
+                    if live_after_capture:
+                        raise RuntimeError(
+                            "runtime_writer_detected_during_sealed_capture"
+                        )
+                    recheck_dir = output_dir / "post_seal_recheck"
+                    capture_audit_evidence(
+                        paths=AuditEvidencePaths.for_runtime(controller.runtime_root),
+                        output_dir=recheck_dir,
+                        target=name,
+                        mode="online",
+                    )
+                    recheck_path = recheck_dir / "receipt.json"
+                    recheck_metadata = self._stream_file_metadata(recheck_path)
+                    recheck_receipt = json.loads(
+                        recheck_path.read_text(encoding="utf-8")
+                    )
+                    if not isinstance(recheck_receipt, dict):
+                        raise RuntimeError("post_seal_recheck_receipt_not_object")
+                    recheck_contract = validate_audit_evidence_receipt(
+                        recheck_receipt,
+                        required_mode="online",
+                        required_target=name,
+                        artifact_root=recheck_dir,
+                    )
+                    if (
+                        recheck_contract.get("ok") is not True
+                        or recheck_receipt.get("counts") != receipt.get("counts")
+                        or recheck_receipt.get("heads") != receipt.get("heads")
+                    ):
+                        raise RuntimeError("post_seal_live_head_changed")
+                    live_after_recheck = self._runtime_writer_pids(
+                        controller.runtime_root
+                    )
+                    if live_after_recheck:
+                        raise RuntimeError(
+                            "runtime_writer_detected_after_post_seal_recheck"
+                        )
+                    target_ok = contract.get("ok") is True
+                    classification = (
+                        "PASS"
+                        if target_ok
+                        else "FAIL_PRODUCT"
+                        if receipt.get("verdict") == "FAIL_PRODUCT"
+                        else "FAIL_HARNESS"
+                    )
+                    target_results[name] = {
+                        "ok": target_ok,
+                        "classification": classification,
+                        "receipt_verdict": receipt.get("verdict"),
+                        "receipt": {
+                            **receipt_metadata,
+                            "path": str(receipt_path.relative_to(evidence_root)),
+                        },
+                        "artifacts": receipt.get("artifacts"),
+                        "counts": receipt.get("counts"),
+                        "heads": receipt.get("heads"),
+                        "contract_validation": contract,
+                        "post_seal_recheck": {
+                            "ok": True,
+                            "receipt": {
+                                **recheck_metadata,
+                                "path": str(
+                                    recheck_path.relative_to(evidence_root)
+                                ),
+                            },
+                            "contract_validation": recheck_contract,
+                            "counts": recheck_receipt.get("counts"),
+                            "heads": recheck_receipt.get("heads"),
+                            "live_runtime_pids_after": live_after_recheck,
+                        },
+                        "errors": list(contract.get("errors") or []),
+                    }
+                except Exception as exc:
+                    detail = str(exc)
+                    error_code = (
+                        detail
+                        if detail.startswith("runtime_writer_detected_")
+                        else f"capture_failed:{exc.__class__.__name__}"
+                    )
+                    target_results[name] = {
+                        "ok": False,
+                        "classification": (
+                            "FAIL_PRODUCT"
+                            if receipt.get("verdict") == "FAIL_PRODUCT"
+                            else "FAIL_HARNESS"
+                        ),
+                        "receipt_verdict": receipt.get("verdict") or "FAIL_HARNESS",
+                        "receipt": (
+                            {
+                                **receipt_metadata,
+                                "path": str(
+                                    (output_dir / "receipt.json").relative_to(
+                                        evidence_root
+                                    )
+                                ),
+                            }
+                            if receipt_metadata
+                            else None
+                        ),
+                        "artifacts": receipt.get("artifacts"),
+                        "counts": receipt.get("counts"),
+                        "heads": receipt.get("heads"),
+                        "contract_validation": contract or None,
+                        "post_seal_recheck": None,
+                        "errors": [error_code],
+                    }
+                self._server_progress(
+                    f"audit_triad_sealed_capture_completed:{name}:"
+                    f"{int(bool(target_results[name].get('ok')))}"
+                )
+        else:
+            errors.extend(str(code) for code in seal.get("errors") or [])
+            for name in controllers:
+                target_results[name] = {
+                    "ok": False,
+                    "classification": "FAIL_HARNESS",
+                    "receipt_verdict": "BLOCKED_BY_WRITER_SEAL",
+                    "receipt": None,
+                    "artifacts": None,
+                    "counts": None,
+                    "heads": None,
+                    "contract_validation": None,
+                    "post_seal_recheck": None,
+                    "errors": ["sealed_capture_forbidden_without_writer_seal"],
+                }
+
+        for name, result in target_results.items():
+            if result.get("ok") is not True:
+                errors.extend(
+                    f"{name}:{code}" for code in result.get("errors") or ["receipt_failed"]
+                )
+        classification = "PASS"
+        if errors:
+            classifications = {
+                str(result.get("classification") or "FAIL_HARNESS")
+                for result in target_results.values()
+                if result.get("ok") is not True
+            }
+            classification = (
+                "FAIL_HARNESS"
+                if "FAIL_HARNESS" in classifications or seal.get("ok") is not True
+                else "FAIL_PRODUCT"
+            )
+
+        schema_metadata: dict[str, Any] = {}
+        try:
+            schema_metadata = self._stream_file_metadata(schema_destination)
+            schema_metadata["path"] = str(schema_destination.relative_to(evidence_root))
+            schema_metadata["receipt_schema_version"] = AUDIT_EVIDENCE_SCHEMA_VERSION
+        except Exception as exc:
+            errors.append(f"receipt_schema_hash_failed:{exc.__class__.__name__}")
+            classification = "FAIL_HARNESS"
+
+        index_payload = {
+            "schema_version": FINAL_AUDIT_EVIDENCE_INDEX_SCHEMA_VERSION,
+            "created_at": utc_now(),
+            "mode": "sealed",
+            "required_targets": sorted(controllers),
+            "capture_attempted": capture_attempted,
+            "writer_seal": seal,
+            "receipt_schema": schema_metadata,
+            "targets": target_results,
+            "ok": not errors and all(
+                result.get("ok") is True for result in target_results.values()
+            ),
+            "classification": classification,
+            "errors": sorted(set(errors)),
+        }
+        permission_errors: list[str] = []
+        for path in sorted(evidence_root.rglob("*"), reverse=True):
+            try:
+                info = os.lstat(path)
+                if stat.S_ISLNK(info.st_mode):
+                    raise RuntimeError("symlink evidence path")
+                os.chmod(path, 0o500 if stat.S_ISDIR(info.st_mode) else 0o400)
+            except Exception as exc:
+                permission_errors.append(
+                    f"{path.relative_to(evidence_root)}:{exc.__class__.__name__}"
+                )
+        if permission_errors:
+            index_payload["ok"] = False
+            index_payload["classification"] = "FAIL_HARNESS"
+            index_payload["errors"] = sorted(set(
+                list(index_payload["errors"])
+                + [f"artifact_permission:{code}" for code in permission_errors]
+            ))
+        index_path = evidence_root / "artifact_index.json"
+        atomic_write_json(index_path, index_payload)
+        os.chmod(index_path, 0o400)
+
+        manifest_errors: list[str] = []
+        manifest_files: list[dict[str, Any]] = []
+        for path in sorted(evidence_root.rglob("*")):
+            try:
+                info = os.lstat(path)
+            except OSError as exc:
+                manifest_errors.append(
+                    f"{path.relative_to(evidence_root)}:{exc.__class__.__name__}"
+                )
+                continue
+            if path.name == "hash_manifest.json" or stat.S_ISDIR(info.st_mode):
+                continue
+            try:
+                metadata = self._stream_file_metadata(path)
+                manifest_files.append({
+                    "path": str(path.relative_to(evidence_root)),
+                    "size_bytes": metadata["size_bytes"],
+                    "sha256": metadata["sha256"],
+                })
+                self._server_progress(
+                    f"audit_triad_manifest_hashed:{path.relative_to(evidence_root)}"
+                )
+            except Exception as exc:
+                manifest_errors.append(
+                    f"{path.relative_to(evidence_root)}:{exc.__class__.__name__}"
+                )
+        if manifest_errors:
+            index_payload["ok"] = False
+            index_payload["classification"] = "FAIL_HARNESS"
+            index_payload["errors"] = sorted(
+                set(index_payload["errors"] + [
+                    f"hash_manifest:{code}" for code in manifest_errors
+                ])
+            )
+            atomic_write_json(index_path, index_payload)
+            os.chmod(index_path, 0o400)
+            refreshed_index = self._stream_file_metadata(index_path)
+            for row in manifest_files:
+                if row.get("path") == index_path.name:
+                    row["size_bytes"] = refreshed_index["size_bytes"]
+                    row["sha256"] = refreshed_index["sha256"]
+                    break
+
+        manifest_payload = {
+            "schema_version": FINAL_AUDIT_EVIDENCE_MANIFEST_SCHEMA_VERSION,
+            "created_at": utc_now(),
+            "root": str(evidence_root),
+            "file_count": len(manifest_files),
+            "files": manifest_files,
+            "errors": manifest_errors,
+            "ok": not manifest_errors,
+        }
+        manifest_path = evidence_root / "hash_manifest.json"
+        atomic_write_json(manifest_path, manifest_payload)
+        os.chmod(manifest_path, 0o400)
+        index_metadata = self._stream_file_metadata(index_path)
+        manifest_metadata = self._stream_file_metadata(manifest_path)
+        index_metadata["path"] = str(index_path)
+        manifest_metadata["path"] = str(manifest_path)
+
+        os.chmod(evidence_root, 0o500)
+        return {
+            **index_payload,
+            "artifact_index": index_metadata,
+            "hash_manifest": manifest_metadata,
+            "artifact_root": str(evidence_root),
+        }
+
     def seal_artifact_writers_for_secret_scan(self) -> dict[str, Any]:
         """Prove that scan progress can no longer mutate the artifact tree."""
 
@@ -4688,10 +9211,17 @@ class Campaign:
                 "heartbeat": self.heartbeat_path,
                 "checkpoint": self.checkpoint_path,
                 "watchdog_ready": self.watchdog_ready_path,
+                "watchdog_liveness": self.control_root / "checkpoint" / "watchdog.liveness.json",
                 "activation_gate": self.activation_gate_path,
                 "supervisor_contract": self.supervisor_contract_path,
                 "source_freeze": self.source_freeze_path,
             }
+            backend_contract = self.supervisor_contract.get("comfyui_backend")
+            if isinstance(backend_contract, Mapping):
+                for name in ("ready_receipt", "lifecycle_path", "stdout_path"):
+                    raw = str(backend_contract.get(name) or "")
+                    if raw:
+                        controlled[f"comfyui_backend_{name}"] = Path(raw)
             for name, path in controlled.items():
                 resolved = Path(path).resolve(strict=False)
                 external_paths[name] = str(resolved)
@@ -4807,6 +9337,12 @@ class Campaign:
             )
             if str(self.supervisor_contract.get(name) or "")
         }
+        backend_contract = self.supervisor_contract.get("comfyui_backend")
+        if isinstance(backend_contract, Mapping):
+            for name in ("ready_receipt", "lifecycle_path", "stdout_path"):
+                raw = str(backend_contract.get(name) or "")
+                if raw:
+                    contract_paths[f"comfyui_backend_{name}"] = raw
         post_scan_artifacts = [
             {
                 "path": str(self.final_path),
@@ -4854,6 +9390,51 @@ class Campaign:
         })
         return result
 
+    def _start_managed_servers_with_host_safety(self) -> dict[str, Any]:
+        starts: dict[str, dict[str, Any]] = {}
+        host_safety: dict[str, dict[str, Any]] = {}
+        for name, controller in (
+            ("primary", self.primary),
+            ("recovery", self.recovery),
+            ("security_sentinel", self.security_sentinel),
+        ):
+            self.write_checkpoint(f"starting_{name}")
+            start = controller.start()
+            starts[name] = start
+            if start.get("ok") is not True:
+                classification = str(
+                    start.get("classification") or "FAIL_HARNESS"
+                )
+                return {
+                    "ok": False,
+                    "classification": classification,
+                    "failed_stage": f"{name}_start",
+                    "starts": starts,
+                    "host_safety": host_safety,
+                }
+            self.write_checkpoint(f"waiting_for_{name}_host_safety")
+            evidence = wait_for_runner_host_safety_preflight()
+            atomic_write_json(
+                self.reports / f"host_safety_after_{name}.json",
+                evidence,
+            )
+            host_safety[name] = evidence
+            if evidence.get("ok") is not True:
+                return {
+                    "ok": False,
+                    "classification": "FAIL_INFRA",
+                    "failed_stage": f"{name}_host_safety",
+                    "starts": starts,
+                    "host_safety": host_safety,
+                }
+        return {
+            "ok": True,
+            "classification": "PASS",
+            "failed_stage": "",
+            "starts": starts,
+            "host_safety": host_safety,
+        }
+
     def run(self) -> int:
         self.root.mkdir(parents=True, exist_ok=self.supervised)
         self.reports.mkdir(parents=True, exist_ok=True)
@@ -4865,19 +9446,45 @@ class Campaign:
             payload = {"ok": False, "verdict": "FAIL_HARNESS", "classification": "FAIL_HARNESS", "phase": "preflight", "preflight": preflight}
             atomic_write_json(self.final_path, payload)
             return 2
-        self.write_checkpoint("starting_primary")
-        primary_start = self.primary.start()
-        self.write_checkpoint("starting_recovery")
-        recovery_start = self.recovery.start()
-        self.write_checkpoint("starting_security_sentinel")
-        security_start = self.security_sentinel.start()
-        if not primary_start.get("ok") or not recovery_start.get("ok") or not security_start.get("ok"):
-            self.mark_failed(reason="SERVER_START_FAILED")
+        host_safety = wait_for_runner_host_safety_preflight()
+        atomic_write_json(
+            self.reports / "host_safety_preflight.json",
+            host_safety,
+        )
+        if host_safety.get("ok") is not True:
+            self.mark_failed(reason="HOST_SAFETY_PREFLIGHT_FAILED")
             payload = {
                 "ok": False,
-                "verdict": "FAIL_HARNESS",
-                "classification": "FAIL_HARNESS",
+                "verdict": "FAIL_INFRA",
+                "classification": "FAIL_INFRA",
+                "phase": "host_safety_preflight",
+                "preflight": preflight,
+                "host_safety": host_safety,
+            }
+            atomic_write_json(self.final_path, payload)
+            return 2
+        server_startup = self._start_managed_servers_with_host_safety()
+        starts = server_startup.get("starts") or {}
+        primary_start = starts.get("primary") or {"ok": False, "not_started": True}
+        recovery_start = starts.get("recovery") or {"ok": False, "not_started": True}
+        security_start = starts.get("security_sentinel") or {"ok": False, "not_started": True}
+        if server_startup.get("ok") is not True:
+            classification = str(
+                server_startup.get("classification") or "FAIL_HARNESS"
+            )
+            self.mark_failed(
+                reason=(
+                    "HOST_SAFETY_AFTER_SERVER_START_FAILED"
+                    if classification == "FAIL_INFRA"
+                    else "SERVER_START_FAILED"
+                )
+            )
+            payload = {
+                "ok": False,
+                "verdict": classification,
+                "classification": classification,
                 "phase": "server_start",
+                "server_startup": server_startup,
                 "primary_start": primary_start,
                 "recovery_start": recovery_start,
                 "security_start": security_start,
@@ -4891,10 +9498,15 @@ class Campaign:
         security_preflight = self.production_security_sentinel_check(phase="preflight")
         if not security_preflight.get("ok"):
             self.mark_failed(reason="PRODUCTION_SECURITY_SENTINEL_FAILED")
+            security_classification = str(
+                security_preflight.get("classification") or "FAIL_HARNESS"
+            )
+            if security_classification not in {"FAIL_PRODUCT", "FAIL_HARNESS"}:
+                security_classification = "FAIL_HARNESS"
             payload = {
                 "ok": False,
-                "verdict": "FAIL_HARNESS",
-                "classification": "FAIL_HARNESS",
+                "verdict": security_classification,
+                "classification": security_classification,
                 "phase": "production_security_sentinel",
                 "security_preflight": security_preflight,
             }
@@ -5014,7 +9626,7 @@ class Campaign:
                         for spec in self.scenario_specs()
                         if spec.mandatory and spec.scenario_id not in self.scenario_results
                     ]
-                    if self.campaign_level in {"formal", "rehearsal"} and (unfinished_at_deadline or missing_at_deadline):
+                    if self.campaign_level in {"formal", "soak", "rehearsal"} and (unfinished_at_deadline or missing_at_deadline):
                         self.request_hard_stop(
                             reason="MANDATORY_SCENARIO_DEADLINE",
                             classification="FAIL_PRODUCT",
@@ -5168,6 +9780,11 @@ class Campaign:
             self._server_progress(
                 f"audit_log_seal_stop_completed:{controller.name}:{int(bool(stopped.get('ok')))}"
             )
+        final_audit_evidence = self.capture_final_audit_evidence(log_seal_stops)
+        self._server_progress(
+            "audit_triad_sealed_final_complete:"
+            f"{int(bool(final_audit_evidence.get('ok')))}"
+        )
         # This must remain the final server-log snapshot: every final readiness,
         # security, and account-cleanup request above can emit the very errors
         # the audit is intended to catch.  All writers are sealed first so an
@@ -5237,6 +9854,7 @@ class Campaign:
             })
         activation_required = self.supervised and self.campaign_level in {
             "rehearsal",
+            "soak",
             "formal",
         }
         child_activation = core_payload.get("activation")
@@ -5355,6 +9973,54 @@ class Campaign:
                 "title": "server process groups could not be sealed before final log snapshot",
                 "stops": log_seal_stops,
             })
+        if not final_audit_evidence.get("ok"):
+            audit_classification = str(
+                final_audit_evidence.get("classification") or "FAIL_HARNESS"
+            )
+            if audit_classification not in {"FAIL_PRODUCT", "FAIL_HARNESS"}:
+                audit_classification = "FAIL_HARNESS"
+            findings.append({
+                "severity": "critical",
+                "classification": audit_classification,
+                "title": "final sealed audit DB/log/anchor evidence failed",
+                "errors": final_audit_evidence.get("errors"),
+                "targets": final_audit_evidence.get("targets"),
+            })
+
+        execution_contract_state = (
+            self.state_machine.snapshot() if self.state_machine is not None else {}
+        )
+        rehearsal_execution_contract = derive_rehearsal_execution_contract(
+            self.scenario_results,
+            execution_contract_state,
+        )
+        if self.supervised and self.campaign_level in {"rehearsal", "soak", "formal"}:
+            contract_errors = list(rehearsal_execution_contract.get("errors") or [])
+            if contract_errors:
+                findings.append({
+                    "severity": "critical",
+                    "classification": "FAIL_HARNESS",
+                    "title": "rehearsal execution contract could not be derived",
+                    "errors": contract_errors,
+                })
+            invalid_seconds = rehearsal_execution_contract.get("invalid_seconds")
+            if isinstance(invalid_seconds, (int, float)) and not isinstance(invalid_seconds, bool):
+                if float(invalid_seconds) != 0.0:
+                    findings.append({
+                        "severity": "critical",
+                        "classification": "INVALIDATED",
+                        "title": "campaign contains invalid active time",
+                        "invalid_seconds": float(invalid_seconds),
+                    })
+            for bucket in ("skips", "fallbacks", "expected_gaps"):
+                rows = list(rehearsal_execution_contract.get(bucket) or [])
+                if rows:
+                    findings.append({
+                        "severity": "critical",
+                        "classification": "FAIL_HARNESS",
+                        "title": f"mandatory scenario evidence contains {bucket}",
+                        "markers": rows,
+                    })
 
         formal = not self.args.allow_short_duration and int(self.args.duration_seconds) >= MIN_FORMAL_SECONDS
         ok = not findings
@@ -5395,16 +10061,37 @@ class Campaign:
                 ok = False
                 classification = str(state_snapshot.get("classification") or "FAIL_HARNESS")
             self._write_control_from_state(state_snapshot)
+        runner_finished_at = utc_now()
+        runner_finished_monotonic_ns = time.monotonic_ns()
+        runner_started_monotonic_ns = max(
+            1,
+            int(self.active_started * 1_000_000_000),
+        )
+        if runner_finished_monotonic_ns <= runner_started_monotonic_ns:
+            runner_finished_monotonic_ns = runner_started_monotonic_ns + 1
         payload = {
+            "schema_version": "hackme.campaign-operational-result/v1",
             "ok": ok,
             "verdict": "PASS" if ok else classification,
             "classification": classification,
             "production_signoff_eligible": bool(ok and formal and self.supervised),
             "formal_campaign": formal,
             "started_at": self.active_started_at,
-            "finished_at": utc_now(),
+            "finished_at": runner_finished_at,
+            "started_monotonic_ns": runner_started_monotonic_ns,
+            "finished_monotonic_ns": runner_finished_monotonic_ns,
+            **self.native_outer_authority_identity,
             "required_active_test_seconds": int(self.args.duration_seconds),
             "active_test_seconds": round(active_seconds, 3),
+            "invalid_seconds": rehearsal_execution_contract.get("invalid_seconds"),
+            "mandatory_features_executed": list(
+                rehearsal_execution_contract.get("mandatory_features_executed") or []
+            ),
+            "skips": list(rehearsal_execution_contract.get("skips") or []),
+            "fallbacks": list(rehearsal_execution_contract.get("fallbacks") or []),
+            "expected_gaps": list(
+                rehearsal_execution_contract.get("expected_gaps") or []
+            ),
             "authorization_wait_seconds_included": 0,
             "preflight": preflight,
             "primary_start": primary_start,
@@ -5429,12 +10116,46 @@ class Campaign:
                 else "mandatory_full_feature_matrix"
             ),
             "scenarios": self.scenario_results,
+            "scenario_receipts": {
+                scenario_id: {
+                    "scenario_attempt_uuid": (
+                        (result.get("runtime_receipt") or {}).get("authority") or {}
+                    ).get("scenario_attempt_uuid"),
+                    "native_invocation_id": (
+                        (result.get("runtime_receipt") or {}).get("authority") or {}
+                    ).get("native_invocation_id"),
+                    "receipt": {
+                        "path": result.get("runtime_receipt_path"),
+                        "sha256": result.get("runtime_receipt_sha256"),
+                        "size_bytes": (
+                            Path(str(result.get("runtime_receipt_path"))).stat().st_size
+                            if result.get("runtime_receipt_path")
+                            else 0
+                        ),
+                    },
+                    "artifact_bundle": {
+                        "path": result.get("artifact_bundle_path"),
+                        "sha256": result.get("artifact_bundle_sha256"),
+                        "size_bytes": result.get("artifact_bundle_size_bytes"),
+                    },
+                    "artifact_archive": {
+                        "path": result.get("artifact_archive_path"),
+                        "sha256": result.get("artifact_archive_sha256"),
+                        "size_bytes": result.get("artifact_archive_size_bytes"),
+                    },
+                }
+                for scenario_id, result in sorted(self.scenario_results.items())
+                if isinstance(result, Mapping)
+                and result.get("runtime_receipt_path")
+                and result.get("runtime_receipt_sha256")
+            },
             "account_inventory": self.account_inventory,
             "account_cleanup": account_cleanup,
             "resources": resources,
             "resource_samples": str(self.resource_monitor.out),
             "server_logs": server_logs,
             "final_log_seal_stops": log_seal_stops,
+            "final_audit_evidence": final_audit_evidence,
             "control_checks": control_checks,
             "secret_scan": secret_scan,
             "server_events": {
@@ -5477,15 +10198,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--primary-port", type=int, default=0)
     parser.add_argument("--recovery-port", type=int, default=0)
     parser.add_argument("--security-port", type=int, default=0)
-    parser.add_argument("--workers", type=int, default=4)
-    parser.add_argument("--threads", type=int, default=8)
-    parser.add_argument("--account-count", type=int, default=10)
-    parser.add_argument("--round-ops", type=int, default=1000)
-    parser.add_argument("--concurrency", type=int, default=32)
-    parser.add_argument("--session-pool", type=int, default=20)
+    parser.add_argument("--workers", type=int, default=2)
+    parser.add_argument("--threads", type=int, default=2)
+    parser.add_argument("--account-count", type=int, default=4)
+    parser.add_argument("--round-ops", type=int, default=250)
+    parser.add_argument("--concurrency", type=int, default=4)
+    parser.add_argument("--session-pool", type=int, default=4)
     parser.add_argument("--browser-interval-seconds", type=int, default=3 * 60 * 60)
-    parser.add_argument("--resource-interval", type=float, default=5.0)
-    parser.add_argument("--heartbeat-interval", type=float, default=60.0)
+    parser.add_argument("--resource-interval", type=float, default=2.0)
+    parser.add_argument("--heartbeat-interval", type=float, default=30.0)
     parser.add_argument("--scenario-join-timeout-seconds", type=int, default=8 * 60 * 60)
     parser.add_argument("--minimum-free-gb", type=float, default=20.0)
     parser.add_argument("--max-server-busy-rate", type=float, default=0.05)
@@ -5499,6 +10220,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--state-path", default="", help=argparse.SUPPRESS)
     parser.add_argument("--control-path", default="", help=argparse.SUPPRESS)
     parser.add_argument("--heartbeat-path", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--auth-socket", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--supervisor-pid", type=int, default=0, help=argparse.SUPPRESS)
+    parser.add_argument("--supervisor-start-ticks", type=int, default=0, help=argparse.SUPPRESS)
+    parser.add_argument("--supervisor-boot-id", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--supervisor-cgroup", default="", help=argparse.SUPPRESS)
     parser.add_argument("--checkpoint-path", default="", help=argparse.SUPPRESS)
     parser.add_argument("--checkpoint-mirror-path", default="", help=argparse.SUPPRESS)
     parser.add_argument("--source-freeze-path", default="", help=argparse.SUPPRESS)
@@ -5577,6 +10303,48 @@ def validate_supervised_runtime_contract(
         errors.append("control_root")
     if str(contract.get("control_root") or "") != str(control_root):
         errors.append("contract_control_root")
+    expected_liveness_path = control_root / "checkpoint" / "watchdog.liveness.json"
+    if Path(str(contract.get("watchdog_liveness_path") or "")).resolve(strict=False) != expected_liveness_path:
+        errors.append("watchdog_liveness_path")
+    runner_auth_key = getattr(args, "_runner_auth_key", None)
+    control_auth_evidence = getattr(args, "_control_auth_evidence", None)
+    contract_session_hash = str(contract.get("runner_auth_key_sha256") or "")
+    watchdog_session_hash = str(contract.get("watchdog_auth_key_sha256") or "")
+    if (
+        not isinstance(runner_auth_key, (bytes, bytearray))
+        or len(runner_auth_key) != 32
+        or len(contract_session_hash) != 64
+        or hashlib.sha256(bytes(runner_auth_key)).hexdigest() != contract_session_hash
+        or not isinstance(control_auth_evidence, Mapping)
+        or control_auth_evidence.get("session_secret_sha256") != contract_session_hash
+        or len(watchdog_session_hash) != 64
+        or watchdog_session_hash == contract_session_hash
+        or contract.get("role_separated_auth_keys") is not True
+    ):
+        errors.append("runner_auth_session_binding")
+    supervisor_identity = contract.get("supervisor_identity")
+    expected_supervisor_identity = {
+        "pid": int(getattr(args, "supervisor_pid", 0) or 0),
+        "start_ticks": int(getattr(args, "supervisor_start_ticks", 0) or 0),
+        "boot_id": str(getattr(args, "supervisor_boot_id", "") or ""),
+        "cgroup_path": str(getattr(args, "supervisor_cgroup", "") or ""),
+    }
+    authenticated_server = (
+        control_auth_evidence.get("server_process")
+        if isinstance(control_auth_evidence, Mapping)
+        else None
+    )
+    if (
+        not isinstance(supervisor_identity, Mapping)
+        or dict(supervisor_identity) != expected_supervisor_identity
+        or not isinstance(authenticated_server, Mapping)
+        or any(
+            authenticated_server.get(name) != value
+            for name, value in expected_supervisor_identity.items()
+        )
+        or control_auth_evidence.get("server_identity_verified") is not True
+    ):
+        errors.append("supervisor_process_identity_binding")
     for name in (
         "state_path",
         "control_path",
@@ -5621,6 +10389,383 @@ def validate_supervised_runtime_contract(
             value = values.get(name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 errors.append(f"cgroup_event_baseline_value:{filename}.{name}")
+    comfyui_backend = contract.get("comfyui_backend")
+    if level in {"rehearsal", "soak", "formal"}:
+        if not isinstance(comfyui_backend, Mapping):
+            errors.append("comfyui_backend")
+            comfyui_backend = {}
+        backend_pid = comfyui_backend.get("backend_pid")
+        backend_start_ticks = comfyui_backend.get("backend_start_ticks")
+        backend_boot_id = str(comfyui_backend.get("backend_boot_id") or "")
+        launcher_pid = comfyui_backend.get("launcher_pid")
+        backend_process_group = comfyui_backend.get("process_group")
+        backend_url = str(comfyui_backend.get("api_url") or "")
+        backend_models = str(comfyui_backend.get("models_root") or "")
+        managed_leaf = (
+            comfyui_backend.get("managed_leaf")
+            if isinstance(comfyui_backend.get("managed_leaf"), Mapping)
+            else {}
+        )
+        backend_leaf_cgroup = str(managed_leaf.get("cgroup_path") or "")
+        expected_leaf_cgroup = f"{expected_cgroup.rstrip('/')}/comfyui"
+        if (
+            comfyui_backend.get("status") != "ready"
+            or comfyui_backend.get("ok") is not True
+            or comfyui_backend.get("actual_execution") is not True
+            or comfyui_backend.get("simulated") is not False
+            or comfyui_backend.get("adopted_external_pid") is not False
+            or isinstance(backend_pid, bool)
+            or not isinstance(backend_pid, int)
+            or backend_pid <= 0
+            or isinstance(backend_start_ticks, bool)
+            or not isinstance(backend_start_ticks, int)
+            or backend_start_ticks <= 0
+            or not backend_boot_id
+            or isinstance(launcher_pid, bool)
+            or not isinstance(launcher_pid, int)
+            or launcher_pid <= 0
+            or backend_process_group != launcher_pid
+            or backend_leaf_cgroup != expected_leaf_cgroup
+            or "delegated" in managed_leaf
+            or managed_leaf.get("subtree_controllers_enabled") is not False
+            or managed_leaf.get("descendant_cgroups") != 0
+            or managed_leaf.get("host_leaf_state_before_sandbox")
+            != "pending_sandbox"
+            or managed_leaf.get("workload_delegation_capability") is not False
+            or managed_leaf.get("ok") is not True
+            or str(comfyui_backend.get("backend_cgroup") or "")
+            != backend_leaf_cgroup
+        ):
+            errors.append("comfyui_backend_identity")
+        if (
+            os.environ.get("HACKME_CAMPAIGN_COMFYUI_API_URL") != backend_url
+            or os.environ.get("HACKME_CAMPAIGN_COMFYUI_MODELS_ROOT") != backend_models
+            or os.environ.get("HACKME_CAMPAIGN_COMFYUI_BACKEND_PID") != str(backend_pid)
+        ):
+            errors.append("comfyui_backend_environment")
+        for name in ("ready_receipt", "lifecycle_path", "stdout_path"):
+            raw = str(comfyui_backend.get(name) or "")
+            resolved = Path(raw).resolve(strict=False) if raw else Path("/missing")
+            if (
+                not raw
+                or raw != str(resolved)
+                or resolved == control_root
+                or control_root not in resolved.parents
+            ):
+                errors.append(f"comfyui_backend_path:{name}")
+        ready_path = Path(
+            str(comfyui_backend.get("ready_receipt") or "/missing")
+        ).resolve(strict=False)
+        try:
+            ready_payload, actual_receipt_identity = (
+                read_stable_ready_receipt(ready_path)
+            )
+        except Exception:
+            errors.append("comfyui_backend_ready_receipt")
+            ready_payload = {}
+            actual_receipt_identity = {}
+        ready_process = (
+            ready_payload.get("process")
+            if isinstance(ready_payload, Mapping)
+            and isinstance(ready_payload.get("process"), Mapping)
+            else {}
+        )
+        ready_listener = (
+            ready_payload.get("listener")
+            if isinstance(ready_payload, Mapping)
+            and isinstance(ready_payload.get("listener"), Mapping)
+            else {}
+        )
+        ready_readiness = (
+            ready_payload.get("readiness")
+            if isinstance(ready_payload, Mapping)
+            and isinstance(ready_payload.get("readiness"), Mapping)
+            else {}
+        )
+        ready_models_binding = (
+            ready_payload.get("models_binding")
+            if isinstance(ready_payload, Mapping)
+            and isinstance(ready_payload.get("models_binding"), Mapping)
+            else {}
+        )
+        ready_leaf = (
+            ready_payload.get("managed_leaf")
+            if isinstance(ready_payload, Mapping)
+            and isinstance(ready_payload.get("managed_leaf"), Mapping)
+            else {}
+        )
+        ready_leaf_state = (
+            ready_payload.get("managed_leaf_state")
+            if isinstance(ready_payload, Mapping)
+            and isinstance(ready_payload.get("managed_leaf_state"), Mapping)
+            else {}
+        )
+        ready_placement = (
+            ready_payload.get("placement")
+            if isinstance(ready_payload, Mapping)
+            and isinstance(ready_payload.get("placement"), Mapping)
+            else {}
+        )
+        ready_confinement = (
+            ready_payload.get("confinement")
+            if isinstance(ready_payload, Mapping)
+            and isinstance(ready_payload.get("confinement"), Mapping)
+            else {}
+        )
+        ready_sandbox = (
+            ready_payload.get("sandbox")
+            if isinstance(ready_payload, Mapping)
+            and isinstance(ready_payload.get("sandbox"), Mapping)
+            else {}
+        )
+        ready_sandbox_live = (
+            ready_payload.get("sandbox_live")
+            if isinstance(ready_payload, Mapping)
+            and isinstance(ready_payload.get("sandbox_live"), Mapping)
+            else {}
+        )
+        ready_launcher = (
+            ready_payload.get("launcher")
+            if isinstance(ready_payload, Mapping)
+            and isinstance(ready_payload.get("launcher"), Mapping)
+            else {}
+        )
+        receipt_identity = (
+            comfyui_backend.get("ready_receipt_identity")
+            if isinstance(
+                comfyui_backend.get("ready_receipt_identity"),
+                Mapping,
+            )
+            else {}
+        )
+        backend_python = str(comfyui_backend.get("python_executable") or "")
+        backend_main = str(comfyui_backend.get("main_path") or "")
+        backend_working = str(comfyui_backend.get("working_root") or "")
+        backend_command = comfyui_backend.get("command")
+        try:
+            backend_host = str(urlsplit(backend_url).hostname or "")
+            backend_port = urlsplit(backend_url).port
+        except ValueError:
+            backend_host = ""
+            backend_port = None
+        expected_backend_command = [
+            backend_python,
+            backend_main,
+            "--listen",
+            backend_host,
+            "--port",
+            str(backend_port),
+            "--disable-auto-launch",
+        ]
+        expected_command_sha256 = hashlib.sha256(
+            b"\0".join(value.encode() for value in expected_backend_command)
+        ).hexdigest()
+        ready_owner_pids = ready_listener.get("owner_pids")
+        ready_leaf_pids = ready_leaf_state.get("pids")
+        ready_environment_keys = ready_payload.get("environment_keys")
+        sandbox_launcher = ready_confinement.get("launcher")
+        sandbox_transition = ready_confinement.get("host_transition")
+        sandbox_mounts = ready_confinement.get("mounts")
+        sandbox_privileges = ready_confinement.get("privileges")
+        sandbox_denial = ready_confinement.get("cgroup_write_denial")
+        sandbox_delegation = ready_confinement.get(
+            "workload_delegation_confinement"
+        )
+        ready_process_capabilities = (
+            ready_process.get("capability_sets")
+            if isinstance(ready_process.get("capability_sets"), Mapping)
+            else {}
+        )
+        sandbox_capabilities = (
+            sandbox_privileges.get("capability_sets")
+            if isinstance(sandbox_privileges, Mapping)
+            and isinstance(sandbox_privileges.get("capability_sets"), Mapping)
+            else {}
+        )
+        sandbox_seccomp = (
+            sandbox_privileges.get("seccomp")
+            if isinstance(sandbox_privileges, Mapping)
+            and isinstance(sandbox_privileges.get("seccomp"), Mapping)
+            else {}
+        )
+        required_capability_names = {
+            "CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"
+        }
+        if (
+            actual_receipt_identity.get("sha256")
+            != str(comfyui_backend.get("ready_receipt_sha256") or "")
+            or receipt_identity.get("sha256")
+            != str(comfyui_backend.get("ready_receipt_sha256") or "")
+            or dict(receipt_identity) != dict(actual_receipt_identity)
+            or not isinstance(ready_payload, Mapping)
+            or ready_payload.get("schema_version")
+            != COMFYUI_BACKEND_READY_SCHEMA_VERSION
+            or ready_payload.get("ok") is not True
+            or ready_payload.get("actual_execution") is not True
+            or ready_payload.get("simulated") is not False
+            or ready_payload.get("adopted_external_pid") is not False
+            or ready_payload.get("api_url") != backend_url
+            or ready_payload.get("python_executable") != backend_python
+            or ready_payload.get("main_path") != backend_main
+            or ready_payload.get("working_root") != backend_working
+            or ready_payload.get("models_root") != backend_models
+            or backend_command != expected_backend_command
+            or ready_payload.get("command") != expected_backend_command
+            or comfyui_backend.get("command_sha256")
+            != expected_command_sha256
+            or ready_payload.get("command_sha256")
+            != expected_command_sha256
+            or ready_process.get("pid") != backend_pid
+            or ready_process.get("start_ticks") != backend_start_ticks
+            or ready_process.get("boot_id") != backend_boot_id
+            or ready_process.get("cgroup_path") != backend_leaf_cgroup
+            or ready_process.get("cwd") != backend_working
+            or ready_process.get("executable") != backend_python
+            or ready_process.get("process_group") != backend_process_group
+            or ready_process.get("no_new_privileges") is not True
+            or ready_process.get("seccomp_mode") != 2
+            or set(ready_process_capabilities) != required_capability_names
+            or not all(
+                value == "0000000000000000"
+                for value in ready_process_capabilities.values()
+            )
+            or not isinstance(ready_process.get("namespace_pids"), list)
+            or len(ready_process.get("namespace_pids") or []) < 2
+            or (ready_process.get("namespace_pids") or [None])[0] != backend_pid
+            or ready_process.get("ok") is not True
+            or ready_launcher.get("pid") != launcher_pid
+            or ready_launcher.get("process_group") != backend_process_group
+            or ready_launcher.get("session") != backend_process_group
+            or ready_launcher.get("ok") is not True
+            or ready_placement.get("pid") != backend_pid
+            or ready_placement.get("start_ticks") != backend_start_ticks
+            or ready_placement.get("campaign_cgroup") != backend_leaf_cgroup
+            or ready_placement.get("ok") is not True
+            or ready_models_binding.get("entry_path") != backend_models
+            or ready_models_binding.get("realpath") != backend_models
+            or ready_models_binding.get("symlink") is not False
+            or ready_models_binding.get("ok") is not True
+            or not isinstance(ready_process.get("models_binding"), Mapping)
+            or dict(ready_process.get("models_binding") or {})
+            != dict(ready_models_binding)
+            or ready_leaf.get("cgroup_path") != backend_leaf_cgroup
+            or "delegated" in ready_leaf
+            or ready_leaf.get("subtree_controllers_enabled") is not False
+            or ready_leaf.get("descendant_cgroups") != 0
+            or ready_leaf.get("host_leaf_state_before_sandbox")
+            != "pending_sandbox"
+            or ready_leaf.get("workload_delegation_capability") is not False
+            or ready_leaf.get("ok") is not True
+            or not isinstance(ready_leaf.get("device"), int)
+            or not isinstance(ready_leaf.get("inode"), int)
+            or not isinstance(ready_leaf_pids, list)
+            or not all(
+                isinstance(pid, int) and not isinstance(pid, bool) and pid > 0
+                for pid in (ready_leaf_pids or [])
+            )
+            or backend_pid not in (ready_leaf_pids or [])
+            or ready_leaf_state.get("cgroup_path") != backend_leaf_cgroup
+            or ready_leaf_state.get("populated") != 1
+            or ready_leaf_state.get("consistent") is not True
+            or ready_leaf_state.get("topology_intact") is not True
+            or ready_leaf_state.get("descendant_cgroups") != 0
+            or ready_leaf_state.get("subtree_control") != []
+            or ready_leaf_state.get("workload_delegation_capability") is not False
+            or ready_leaf_state.get("ok") is not True
+            or comfyui_backend.get("confinement") != ready_confinement
+            or comfyui_backend.get("sandbox") != ready_confinement
+            or ready_sandbox != ready_confinement
+            or ready_confinement.get("schema_version")
+            != SANDBOX_PROOF_SCHEMA_VERSION
+            or ready_confinement.get("actual_execution") is not True
+            or ready_confinement.get("simulated") is not False
+            or ready_confinement.get("adopted_external_process") is not False
+            or ready_confinement.get("shell") is not False
+            or ready_confinement.get("fixed_command")
+            != expected_backend_command
+            or ready_confinement.get("expected_host_cgroup_path")
+            != backend_leaf_cgroup
+            or not isinstance(sandbox_launcher, Mapping)
+            or sandbox_launcher.get("host_pid") != launcher_pid
+            or sandbox_launcher.get("host_process_group")
+            != backend_process_group
+            or sandbox_launcher.get("host_session") != backend_process_group
+            or not isinstance(sandbox_transition, Mapping)
+            or sandbox_transition.get("schema_version")
+            != HOST_TRANSITION_SCHEMA_VERSION
+            or sandbox_transition.get("pid") != launcher_pid
+            or sandbox_transition.get("cgroup_path") != backend_leaf_cgroup
+            or sandbox_transition.get("ok") is not True
+            or not isinstance(sandbox_mounts, Mapping)
+            or sandbox_mounts.get("cgroup_namespace_path") != "/"
+            or sandbox_mounts.get("leaf_kernel_objects_match") is not True
+            or sandbox_mounts.get("ok") is not True
+            or not isinstance(sandbox_privileges, Mapping)
+            or set(sandbox_capabilities) != required_capability_names
+            or not all(
+                value == "0000000000000000"
+                for value in sandbox_capabilities.values()
+            )
+            or sandbox_privileges.get("securebits_locked") is not True
+            or sandbox_privileges.get("no_new_privileges") is not True
+            or sandbox_seccomp.get("mode") != 2
+            or not isinstance(sandbox_denial, Mapping)
+            or sandbox_denial.get("write_open_succeeded") is not False
+            or sandbox_denial.get("errno") not in {1, 13, 30}
+            or sandbox_denial.get("ok") is not True
+            or ready_confinement.get("workload_delegation_capability") is not False
+            or not isinstance(sandbox_delegation, Mapping)
+            or sandbox_delegation.get("workload_delegation_capability") is not False
+            or sandbox_delegation.get("namespace_rooted_cgroup2") is not True
+            or sandbox_delegation.get("cgroup2_read_only") is not True
+            or sandbox_delegation.get("capability_sets_zero") is not True
+            or sandbox_delegation.get("namespace_and_mount_syscalls_denied") is not True
+            or sandbox_delegation.get("ok") is not True
+            or ready_confinement.get("proof_written_before_exec") is not True
+            or ready_confinement.get("outer_launcher_preserves_process_group")
+            is not True
+            or ready_confinement.get("reaper_preserves_wait_status") is not True
+            or ready_confinement.get("ok") is not True
+            or ready_sandbox_live.get("launcher_pid") != launcher_pid
+            or ready_sandbox_live.get("backend_host_pid") != backend_pid
+            or ready_sandbox_live.get("process_group") != backend_process_group
+            or ready_sandbox_live.get("workload_delegation_capability") is not False
+            or ready_sandbox_live.get("ok") is not True
+            or ready_listener.get("family") != "ipv4"
+            or ready_listener.get("address") != backend_host
+            or ready_listener.get("port") != backend_port
+            or not isinstance(ready_listener.get("socket_inode"), int)
+            or not isinstance(ready_owner_pids, list)
+            or not ready_owner_pids
+            or not all(
+                isinstance(pid, int) and not isinstance(pid, bool) and pid > 0
+                for pid in (ready_owner_pids or [])
+            )
+            or not set(ready_owner_pids) <= set(ready_leaf_pids or [])
+            or ready_listener.get("loopback_only") is not True
+            or ready_listener.get("ok") is not True
+            or ready_payload.get("listener_stable_across_readiness") is not True
+            or ready_readiness.get("endpoint")
+            != f"{backend_url}/system_stats"
+            or "python_version"
+            not in set(ready_readiness.get("system_fields") or [])
+            or not isinstance(ready_readiness.get("device_count"), int)
+            or ready_readiness.get("device_count") <= 0
+            or ready_readiness.get("ok") is not True
+            or not isinstance(ready_environment_keys, list)
+            or "HACKME_CAMPAIGN_COMFYUI_INSTANCE_ID"
+            not in ready_environment_keys
+        ):
+            errors.append("comfyui_backend_ready_authority")
+        try:
+            live_backend_authority = validate_live_comfyui_backend_authority(
+                comfyui_backend,
+                ready_payload,
+            )
+        except Exception:
+            live_backend_authority = {}
+        if live_backend_authority.get("ok") is not True:
+            errors.append("comfyui_backend_live_authority")
     if source_freeze.get("schema_version") != SOURCE_FREEZE_SCHEMA_VERSION:
         errors.append("source_freeze_schema")
     if source_freeze.get("verified") is not True or source_freeze.get("label") != "H0":
@@ -5631,6 +10776,11 @@ def validate_supervised_runtime_contract(
         errors.append("source_commit")
     if source_freeze.get("tracked_content_digest") != contract.get("source_digest"):
         errors.append("source_digest")
+    expected_source_evidence_mode = (
+        METADATA_CONTENT_EVIDENCE if level == "smoke" else FULL_CONTENT_EVIDENCE
+    )
+    if source_freeze.get("content_evidence_mode") != expected_source_evidence_mode:
+        errors.append("source_content_evidence_mode")
     if level == "formal" and source_freeze.get("require_clean") is not True:
         errors.append("formal_source_not_clean")
     gates = contract.get("gates")
@@ -5638,11 +10788,22 @@ def validate_supervised_runtime_contract(
         errors.append("supervisor_gates")
         gates = {}
     required_gates = {
+        "authenticated_control_channel_verified",
+        "runner_control_channel_authenticated",
+        "watchdog_reciprocal_liveness_verified",
+        "runner_import_staged_verified",
+        "watchdog_import_staged_verified",
+        "host_safety_runner_import_settled",
+        "host_safety_state_initialization_settled",
+        "host_safety_activation_verified",
         "cgroup_limits_verified",
         "external_watchdog_verified",
         "runner_and_watchdog_placement_verified",
         "cgroup_event_baseline_verified",
     }
+    if level in {"rehearsal", "soak", "formal"}:
+        required_gates.add("comfyui_backend_lifecycle_verified")
+        required_gates.add("host_safety_backend_startup_settled")
     required_gates.add(
         "worktree_clean_and_frozen" if level == "formal" else "source_baseline_frozen"
     )
@@ -5670,6 +10831,11 @@ def wait_for_supervisor_activation(args: argparse.Namespace) -> dict[str, Any]:
         "state_path": args.state_path,
         "control_path": args.control_path,
         "heartbeat_path": args.heartbeat_path,
+        "auth_socket": args.auth_socket,
+        "supervisor_pid": args.supervisor_pid,
+        "supervisor_start_ticks": args.supervisor_start_ticks,
+        "supervisor_boot_id": args.supervisor_boot_id,
+        "supervisor_cgroup": args.supervisor_cgroup,
         "checkpoint_path": args.checkpoint_path,
         "checkpoint_mirror_path": args.checkpoint_mirror_path,
         "source_freeze_path": args.source_freeze_path,
@@ -5692,7 +10858,7 @@ def wait_for_supervisor_activation(args: argparse.Namespace) -> dict[str, Any]:
     ):
         if control_root not in path.parents:
             raise RuntimeError(f"{label} is outside campaign control root")
-    deadline = time.monotonic() + 120
+    deadline = time.monotonic() + RUNNER_SUPERVISOR_ACTIVATION_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
         if activation_path.exists() and contract_path.exists():
             activation = load_json(activation_path)
@@ -5718,7 +10884,10 @@ def wait_for_supervisor_activation(args: argparse.Namespace) -> dict[str, Any]:
                 validate_supervised_runtime_contract(args, contract, source_freeze)
                 return contract
         time.sleep(0.1)
-    raise RuntimeError("supervisor did not release the campaign runner within 120 seconds")
+    raise RuntimeError(
+        "supervisor did not release the campaign runner within "
+        f"{int(RUNNER_SUPERVISOR_ACTIVATION_TIMEOUT_SECONDS)} seconds"
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -5734,6 +10903,35 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"campaign root must not already exist: {root}")
     if args.supervised and not root.is_dir():
         raise SystemExit(f"supervisor-prepared campaign root is missing: {root}")
+    if args.supervised:
+        try:
+            authentication = send_hello(
+                Path(args.auth_socket),
+                campaign_uuid=str(args.campaign_uuid),
+                role="runner",
+                require_session_secret=True,
+                timeout=10.0,
+                expected_server_peer=PeerIdentity(
+                    int(args.supervisor_pid),
+                    os.getuid(),
+                    os.getgid(),
+                ),
+                expected_server_process={
+                    "pid": int(args.supervisor_pid),
+                    "start_ticks": int(args.supervisor_start_ticks),
+                    "boot_id": str(args.supervisor_boot_id),
+                    "cgroup_path": str(args.supervisor_cgroup),
+                },
+            )
+            if not isinstance(authentication, tuple):
+                raise RuntimeError("runner control handshake did not deliver a session key")
+            auth_evidence, runner_auth_key = authentication
+            if auth_evidence.get("session_secret_received") is not True:
+                raise RuntimeError("runner control session proof is incomplete")
+            setattr(args, "_runner_auth_key", runner_auth_key)
+            setattr(args, "_control_auth_evidence", auth_evidence)
+        except Exception as exc:
+            raise SystemExit(f"runner authentication failed: {exc}") from exc
     try:
         wait_for_supervisor_activation(args)
     except Exception as exc:

@@ -8,6 +8,13 @@ from flask import send_file
 
 from services.comfyui.template import errors as template_errors
 from services.comfyui.template.capability import rewrite_workflow_model_inputs_to_local_options
+from services.comfyui.template.cleanup import (
+    cleanup_run_temp_files,
+    purge_comfyui_run_input,
+    record_run_input_ref,
+    register_run_dir,
+    run_cleanup_maintenance_daemon,
+)
 from services.comfyui.template.gguf_workflow import (
     GgufWorkflowError,
     apply_gguf_workflow_profile,
@@ -320,6 +327,7 @@ def register_comfyui_workflow_routes(app, ctx):
     assert_workflow_dependencies_or_error = ctx["assert_workflow_dependencies_or_error"]
     create_workflow_run = ctx["create_workflow_run"]
     create_generation_job = ctx["create_generation_job"]
+    update_generation_job = ctx.get("update_generation_job")
     capture_request_audit_meta = ctx["capture_request_audit_meta"]
     run_comfyui_workflow_preset_job = ctx["run_comfyui_workflow_preset_job"]
     comfyui_paid_api_policy = ctx.get("comfyui_paid_api_policy")
@@ -328,6 +336,93 @@ def register_comfyui_workflow_routes(app, ctx):
     threading = ctx["threading"]
     resolve_file_storage_path = ctx.get("resolve_file_storage_path")
     storage_root = ctx.get("storage_root")
+    configured_comfyui_project_dir = ctx.get("configured_comfyui_project_dir") or (lambda: None)
+
+    def _cleanup_callback(
+        *,
+        run_id,
+        user_id,
+        backend_url="",
+        input_refs=None,
+        upload_attempted=False,
+    ):
+        active_cleanup_client = client_for_url(backend_url) if backend_url else None
+        try:
+            project_dir = configured_comfyui_project_dir()
+        except Exception:
+            project_dir = None
+        return purge_comfyui_run_input(
+            run_id=run_id,
+            user_id=user_id,
+            backend_url=backend_url,
+            input_refs=list(input_refs or []),
+            upload_attempted=bool(upload_attempted),
+            client=active_cleanup_client,
+            local_base_dir=project_dir,
+        )
+
+    def _cleanup_receipt(*, run_id, actor, reason):
+        if not run_id:
+            return None
+        return cleanup_run_temp_files(
+            run_id=run_id,
+            user_id=int(actor_value(actor, "id")),
+            cleanup_callback=_cleanup_callback,
+            audit=audit,
+            audit_user=actor_value(actor, "username") or "-",
+            audit_ip=get_client_ip(),
+            audit_ua=get_ua(),
+            reason=reason,
+            return_receipt=True,
+        )
+
+    def _tracked_upload_callback(*, active_client, run_id, actor, backend_url):
+        upload = _default_upload_callback(
+            active_client,
+            storage_root=storage_root,
+            resolve_file_storage_path=resolve_file_storage_path,
+        )
+
+        def _upload(*, file_row, target_filename, run_id=run_id):
+            # Record the deterministic intended ref *before* the HTTP upload.
+            # This covers a backend accept followed by a lost response.
+            record_run_input_ref(
+                run_id=run_id,
+                user_id=int(actor_value(actor, "id")),
+                backend_url=backend_url,
+                input_ref={
+                    "filename": target_filename,
+                    "subfolder": run_id,
+                    "type": "input",
+                },
+            )
+            result = upload(file_row=file_row, target_filename=target_filename, run_id=run_id)
+            record_run_input_ref(
+                run_id=run_id,
+                user_id=int(actor_value(actor, "id")),
+                backend_url=backend_url,
+                input_ref={
+                    "filename": result.get("filename") or target_filename,
+                    "subfolder": result.get("subfolder") or run_id,
+                    "type": result.get("type") or "input",
+                },
+            )
+            return result
+
+        return _upload
+
+    # A fresh process reaps only entries owned by a dead/mismatched process.
+    # Keep startup non-blocking because a remote backend may itself be down.
+    threading.Thread(
+        target=run_cleanup_maintenance_daemon,
+        kwargs={
+            "cleanup_callback": _cleanup_callback,
+            "audit": audit,
+            "max_cycles": 1 if app.testing else None,
+        },
+        daemon=True,
+        name="comfyui-input-cleanup-maintenance",
+    ).start()
 
     def _apply_legacy_workflow_user_inputs(workflow_json, user_inputs):
         if not isinstance(workflow_json, dict) or not isinstance(user_inputs, dict):
@@ -1012,6 +1107,7 @@ def register_comfyui_workflow_routes(app, ctx):
             if isinstance(body.get("image_field_assignments"), dict)
             else {}
         )
+        media_remap_run_id = secrets.token_hex(16) if image_field_assignments else ""
         multi_compare = body.get("multi_compare") if isinstance(body.get("multi_compare"), dict) else {}
         upscale_breakpoint = (
             body.get("upscale_breakpoint")
@@ -1169,12 +1265,28 @@ def register_comfyui_workflow_routes(app, ctx):
             # replace template defaults. Let the strict run gate validate the final
             # patched workflow instead of blocking on stale official defaults.
 
+            # Reject paid/API-node policy before Gate 5 can upload any protected
+            # media.  A policy rejection therefore has no temp input side effect.
+            prompt_extra_data = {}
+            if comfyui_paid_api_policy:
+                prompt_extra_data, paid_api_error = comfyui_paid_api_policy(
+                    workflow_json,
+                    confirm=bool(body.get("confirm_paid_api_nodes")),
+                )
+                if paid_api_error:
+                    return paid_api_error
             # 5-gate enforcement before any job is created — failed gates
             # never produce a job_id so the user gets immediate feedback
             # instead of polling status.
             if strict_mode:
                 import uuid as _uuid
-                gate_run_id = _uuid.uuid4().hex
+                gate_run_id = media_remap_run_id or _uuid.uuid4().hex
+                if media_remap_run_id:
+                    register_run_dir(
+                        run_id=media_remap_run_id,
+                        user_id=int(actor_value(actor, "id")),
+                        backend_url=comfyui_url,
+                    )
                 try:
                     gate_result = run_workflow_through_gates(
                         raw_workflow=workflow_json,
@@ -1185,10 +1297,11 @@ def register_comfyui_workflow_routes(app, ctx):
                         run_id=gate_run_id,
                         conn=conn,
                         comfyui_client=active_client,
-                        upload_callback=_default_upload_callback(
-                            active_client,
-                            storage_root=storage_root,
-                            resolve_file_storage_path=resolve_file_storage_path,
+                        upload_callback=_tracked_upload_callback(
+                            active_client=active_client,
+                            run_id=gate_run_id,
+                            actor=actor,
+                            backend_url=comfyui_url,
                         ),
                         fetch_file_row=lambda gate_conn, cloud_file_id: _workflow_template_fetch_file_row(
                             gate_conn,
@@ -1197,6 +1310,15 @@ def register_comfyui_workflow_routes(app, ctx):
                         ),
                     )
                 except RunGateFailure as exc:
+                    cleanup_receipt = (
+                        _cleanup_receipt(
+                            run_id=media_remap_run_id,
+                            actor=actor,
+                            reason=f"sync_gate_failure:{exc.stage}",
+                        )
+                        if media_remap_run_id
+                        else None
+                    )
                     audit(
                         "COMFYUI_TEMPLATE_RUN_GATE_FAIL",
                         get_client_ip(),
@@ -1214,6 +1336,7 @@ def register_comfyui_workflow_routes(app, ctx):
                         "stage": exc.stage,
                         "gate": exc.gate,
                         "audit_detail": exc.audit_detail,
+                        "input_cleanup": cleanup_receipt,
                     }), exc.http_status
                 workflow_json = gate_result.workflow
                 final_dependency_row = dict(row)
@@ -1238,7 +1361,6 @@ def register_comfyui_workflow_routes(app, ctx):
             elif user_inputs:
                 workflow_json = _apply_legacy_workflow_user_inputs(workflow_json, user_inputs)
                 workflow_json = apply_workflow_compatibility_fixes(workflow_json)
-            media_remap_run_id = ""
             if not strict_mode:
                 workflow_json = rewrite_workflow_model_inputs_to_local_options(
                     workflow_json,
@@ -1264,7 +1386,11 @@ def register_comfyui_workflow_routes(app, ctx):
                         "dependency_status": final_dependency_status,
                     }), 409
                 if image_field_assignments:
-                    media_remap_run_id = secrets.token_hex(16)
+                    register_run_dir(
+                        run_id=media_remap_run_id,
+                        user_id=int(actor_value(actor, "id")),
+                        backend_url=comfyui_url,
+                    )
                     try:
                         workflow_json = remap_load_image_to_cloud_file(
                             workflow_json,
@@ -1272,10 +1398,11 @@ def register_comfyui_workflow_routes(app, ctx):
                             actor=actor,
                             conn=conn,
                             run_id=media_remap_run_id,
-                            upload_callback=_default_upload_callback(
-                                active_client,
-                                storage_root=storage_root,
-                                resolve_file_storage_path=resolve_file_storage_path,
+                            upload_callback=_tracked_upload_callback(
+                                active_client=active_client,
+                                run_id=media_remap_run_id,
+                                actor=actor,
+                                backend_url=comfyui_url,
                             ),
                             fetch_file_row=lambda gate_conn, cloud_file_id: _workflow_template_fetch_file_row(
                                 gate_conn,
@@ -1284,6 +1411,11 @@ def register_comfyui_workflow_routes(app, ctx):
                             ),
                         )
                     except SafetyError as exc:
+                        cleanup_receipt = _cleanup_receipt(
+                            run_id=media_remap_run_id,
+                            actor=actor,
+                            reason="sync_media_remap_failure",
+                        )
                         audit(
                             "COMFYUI_TEMPLATE_MEDIA_REMAP_FAIL",
                             get_client_ip(),
@@ -1297,16 +1429,8 @@ def register_comfyui_workflow_routes(app, ctx):
                             "msg": str(exc),
                             "stage": "media_remap_failed",
                             "image_field_assignments": image_field_assignments,
+                            "input_cleanup": cleanup_receipt,
                         }), 400
-
-            prompt_extra_data = {}
-            if comfyui_paid_api_policy:
-                prompt_extra_data, paid_api_error = comfyui_paid_api_policy(
-                    workflow_json,
-                    confirm=bool(body.get("confirm_paid_api_nodes")),
-                )
-                if paid_api_error:
-                    return paid_api_error
 
             workflow_run_params = _workflow_snapshot_params(default_params, workflow_json)
             for key in (
@@ -1410,20 +1534,110 @@ def register_comfyui_workflow_routes(app, ctx):
                 workflow_json=workflow_json,
             )
             conn.commit()
+        except Exception as exc:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            cleanup_receipt = (
+                _cleanup_receipt(
+                    run_id=media_remap_run_id,
+                    actor=actor,
+                    reason="sync_workflow_setup_failure",
+                )
+                if media_remap_run_id
+                else None
+            )
+            audit(
+                "COMFYUI_WORKFLOW_RUN_SETUP_ERROR",
+                get_client_ip(),
+                user=actor_value(actor, "username") or "-",
+                success=False,
+                ua=get_ua(),
+                detail=f"preset_id={preset_id} error={type(exc).__name__}: {str(exc)[:300]}",
+            )
+            return json_resp({
+                "ok": False,
+                "msg": "建立 ComfyUI workflow 工作失敗",
+                "stage": "workflow_run_setup_failed",
+                "input_cleanup": cleanup_receipt,
+            }), 500
         finally:
             conn.close()
-        job_id = create_generation_job(actor)
-        request_meta = capture_request_audit_meta()
-        worker = threading.Thread(
-            target=run_comfyui_workflow_preset_job,
-            args=(job_id, dict(actor), dict(row), run_id, DEFAULT_GENERATION_TIMEOUT_SECONDS, request_meta, prompt_extra_data, workflow_json),
-            daemon=True,
-        )
-        worker.start()
+        job_id = None
+        try:
+            job_id = create_generation_job(actor)
+            request_meta = capture_request_audit_meta()
+            worker = threading.Thread(
+                target=run_comfyui_workflow_preset_job,
+                args=(job_id, dict(actor), dict(row), run_id, DEFAULT_GENERATION_TIMEOUT_SECONDS, request_meta, prompt_extra_data, workflow_json),
+                daemon=True,
+            )
+            worker.start()
+        except Exception as exc:
+            cleanup_receipt = (
+                _cleanup_receipt(
+                    run_id=media_remap_run_id,
+                    actor=actor,
+                    reason="sync_worker_start_failure",
+                )
+                if media_remap_run_id
+                else None
+            )
+            try:
+                failed_conn = get_db()
+                try:
+                    failed_conn.execute(
+                        "UPDATE comfyui_workflow_runs SET status='error', error=? WHERE id=?",
+                        ("背景工作啟動失敗", int(run_id)),
+                    )
+                    failed_conn.commit()
+                finally:
+                    failed_conn.close()
+            except Exception:
+                pass
+            if job_id and update_generation_job is not None:
+                try:
+                    update_generation_job(
+                        job_id,
+                        status="error",
+                        error="背景工作啟動失敗",
+                        result={
+                            "workflow_run_id": run_id,
+                            "input_cleanup": cleanup_receipt,
+                            "input_assignment_count": len(image_field_assignments),
+                        },
+                        progress={
+                            "phase": "error",
+                            "percent": 100,
+                            "completed": False,
+                            "detail": "背景工作啟動失敗",
+                            "input_cleanup": cleanup_receipt,
+                        },
+                    )
+                except Exception:
+                    pass
+            audit(
+                "COMFYUI_WORKFLOW_RUN_START_ERROR",
+                get_client_ip(),
+                user=actor_value(actor, "username") or "-",
+                success=False,
+                ua=get_ua(),
+                detail=f"preset_id={preset_id} run_id={run_id} error={type(exc).__name__}: {str(exc)[:300]}",
+            )
+            return json_resp({
+                "ok": False,
+                "msg": "啟動 ComfyUI workflow 背景工作失敗",
+                "stage": "workflow_worker_start_failed",
+                "workflow_run_id": run_id,
+                "input_cleanup": cleanup_receipt,
+            }), 500
         return json_resp({
             "ok": True,
             "async": True,
             "workflow_run_id": run_id,
+            "media_remap_run_id": media_remap_run_id,
+            "input_assignment_count": len(image_field_assignments),
             "dependency_status": dependency_status,
             "strict_mode": bool(strict_mode),
             "job": {

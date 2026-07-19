@@ -970,7 +970,7 @@ CREATE TABLE IF NOT EXISTS violation_appeals (
             pre_status              TEXT    NOT NULL DEFAULT 'active',
             pre_role                TEXT    NOT NULL DEFAULT 'user',
             reason                  TEXT    NOT NULL,
-            status                  TEXT    NOT NULL DEFAULT 'pending',  /* pending / approved / rejected */
+            status                  TEXT    NOT NULL DEFAULT 'pending',  /* pending / reviewing_approve / approved / rejected */
             reviewed_by             TEXT,
             reviewed_at             TEXT,
             review_note             TEXT,
@@ -983,6 +983,9 @@ CREATE INDEX IF NOT EXISTS idx_appeal_created_at ON violation_appeals(created_at
 CREATE INDEX IF NOT EXISTS idx_appeal_status     ON violation_appeals(status);
 
 CREATE INDEX IF NOT EXISTS idx_appeal_user      ON violation_appeals(user_id);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_appeal_user_violation
+    ON violation_appeals(user_id, latest_violation_id);
 
 CREATE TABLE IF NOT EXISTS admin_sanction_appeal_contexts (
             id                    INTEGER PRIMARY KEY AUTOINCREMENT,
