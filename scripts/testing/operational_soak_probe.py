@@ -49,12 +49,28 @@ from scripts.testing.campaign_activation import (  # noqa: E402
     secure_write_once_json,
 )
 from scripts.testing.campaign_state import process_start_ticks  # noqa: E402
-from scripts.testing.operational_campaign_24h import (  # noqa: E402
-    EFFECTIVE_LOAD_EVIDENCE_SCHEMA_VERSION,
-    OPERATIONAL_SOAK_REPORT_SCHEMA_VERSION,
-    SUPERVISED_LOAD_POLICIES,
-    SUPERVISED_RUNNER_PROFILES,
-)
+try:
+    from scripts.testing.operational_campaign_24h import (  # noqa: E402
+        EFFECTIVE_LOAD_EVIDENCE_SCHEMA_VERSION,
+        OPERATIONAL_SOAK_REPORT_SCHEMA_VERSION,
+        SUPERVISED_LOAD_POLICIES,
+        SUPERVISED_RUNNER_PROFILES,
+    )
+    _IMPORT_ERROR: ModuleNotFoundError | None = None
+except ModuleNotFoundError as exc:  # pragma: no cover - exercised by bare runners
+    # Keep --help and the operator-facing preflight usable even when the QA
+    # environment has not installed the runtime dependency set yet.
+    _IMPORT_ERROR = exc
+    EFFECTIVE_LOAD_EVIDENCE_SCHEMA_VERSION = "unavailable"
+    OPERATIONAL_SOAK_REPORT_SCHEMA_VERSION = "unavailable"
+    SUPERVISED_LOAD_POLICIES = {
+        "formal": {
+            "ramp_levels": [],
+            "minimum_ramp_stage_seconds": {},
+            "minimum_target_load_coverage": 0.0,
+        }
+    }
+    SUPERVISED_RUNNER_PROFILES = {}
 
 SYSTEM_STRESS = ROOT / "scripts" / "testing" / "system_stress_probe.py"
 POINTS_STRESS = ROOT / "scripts" / "testing" / "points_chain_destructive_stress.py"
@@ -1294,6 +1310,21 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     process_started = time.monotonic()
     args = parse_args()
+    if _IMPORT_ERROR is not None:
+        missing = getattr(_IMPORT_ERROR, "name", None) or str(_IMPORT_ERROR)
+        print(
+            json.dumps(
+                {
+                    "ok": False,
+                    "status": "DEPENDENCY_MISSING",
+                    "missing_module": missing,
+                    "remediation": "python3 -m pip install -r requirements.txt",
+                },
+                ensure_ascii=False,
+            ),
+            file=sys.stderr,
+        )
+        return 2
     requests.packages.urllib3.disable_warnings()
     if args.duration_seconds < MIN_SIGNOFF_SECONDS and not args.allow_short_duration:
         raise SystemExit(f"production operational soak requires at least {MIN_SIGNOFF_SECONDS} seconds; use --allow-short-duration only for development smoke")
