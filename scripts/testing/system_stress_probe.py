@@ -280,9 +280,9 @@ class Stats:
                 parsed.get("feature")
                 or parsed.get("feature_label")
                 or parsed.get("feature_description")
-                or '"feature"' in lowered
-                or '"feature_label"' in lowered
-                or '"feature_description"' in lowered
+                or '"feature":' in lowered
+                or '"feature_label":' in lowered
+                or '"feature_description":' in lowered
                 or "feature_" in lowered
                 or "此功能目前已由 root 關閉" in body
             ):

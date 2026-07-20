@@ -187,6 +187,18 @@ def test_server_busy_body_without_rejection_proof_is_a_hard_failure():
     assert summary["ops"]["mutation"]["unexpected_503"] == 1
 
 
+def test_truncated_server_busy_feature_gate_is_not_feature_disabled():
+    stats = Stats()
+    body = '{"error":"server_busy","gate":"feature","message":"請稍候 2 秒後再試。"'
+
+    stats.record("profile", status=503, elapsed_ms=1.0, ok=False, error=body, body_sample=body)
+    summary = stats.summary()
+
+    assert summary["hard_failures_excluding_controlled_503"] == 1
+    assert summary["ops"]["profile"]["unexpected_503"] == 1
+    assert summary["ops"]["profile"]["feature_disabled_503"] == 0
+
+
 def test_defensive_latency_is_separated_from_ordinary_latency():
     stats = Stats()
 

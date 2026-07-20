@@ -1102,6 +1102,15 @@ def install_backpressure(app, settings_provider=None, root_priority_detector=Non
     def _backpressure_after_request(response):
         state = app.config.get("HACKME_BACKPRESSURE") or {}
         traffic = state.get("traffic")
+        rejected = bool(getattr(g, "_backpressure_rejected", False))
+        if rejected and response.status_code == 503:
+            # Preserve the machine-readable contract even when another response
+            # hook replaces or rebuilds the original busy response.
+            response.headers.setdefault("X-Hackme-Backpressure-Rejected", "1")
+            response.headers.setdefault(
+                "Retry-After",
+                str(max(1, int(state.get("retry_after") or 2))),
+            )
         label = getattr(g, "_backpressure_traffic_label", None)
         qos_class = getattr(g, "_hackme_qos_class", None)
         if qos_class:
@@ -1114,11 +1123,11 @@ def install_backpressure(app, settings_provider=None, root_priority_detector=Non
             traffic.record(
                 label,
                 response.status_code,
-                bool(getattr(g, "_backpressure_rejected", False)),
+                rejected,
                 upload_bytes=_safe_request_content_length(),
                 download_bytes=_safe_response_content_length(response),
             )
-        if response.status_code >= 500 and not bool(getattr(g, "_backpressure_rejected", False)):
+        if response.status_code >= 500 and not rejected:
             _record_backpressure_anomaly(app, {
                 "event": "hard_5xx_response",
                 "gate": label or "unknown",
