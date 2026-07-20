@@ -1951,6 +1951,11 @@ class ServerController:
             "ROOT_PASSWORD": self.credentials.root,
             "MANAGER_PASSWORD": self.credentials.manager,
             "TEST_PASSWORD": self.credentials.test,
+            # The campaign itself already runs from a dependency-validated
+            # interpreter.  Reuse that exact environment for each fresh
+            # isolated runtime; --skip-install must not silently fall back to
+            # an unrelated system python and then demand a reinstall.
+            "PYTHON_BIN": sys.executable,
             "PYTHONDONTWRITEBYTECODE": "1",
             "HACKME_MEDIA_REALTIME_PROXY_ENABLED": "1",
             "HACKME_MEDIA_REALTIME_PROXY_MAX_CONCURRENT": "2",

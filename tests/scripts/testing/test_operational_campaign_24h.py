@@ -1939,6 +1939,7 @@ def test_managed_server_environment_disables_mutable_capacity_defaults(
     probe_env = campaign.base_env()
 
     assert env["HACKME_DEV_USE_CAPACITY_DEFAULTS"] == "0"
+    assert env["PYTHON_BIN"] == sys.executable
     assert "HACKME_DEV_CAPACITY_DEFAULTS_FILE" not in env
     assert "HACKME_DEV_CAPACITY_REPORT_FILE" not in env
     for child_env in (env, probe_env):
