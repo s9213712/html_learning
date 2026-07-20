@@ -1472,6 +1472,31 @@ def test_git_metadata_disables_optional_index_locks(
     )
 
 
+def test_unsupervised_native_authority_uses_git_target_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target_commit = "d" * 40
+    monkeypatch.setattr(
+        campaign_module,
+        "git_metadata",
+        lambda: {
+            "target_commit": target_commit,
+            "target_branch": "test-branch",
+            "worktree_dirty": False,
+            "worktree_change_count": 0,
+        },
+    )
+
+    campaign = Campaign(campaign_args(tmp_path))
+
+    assert campaign.native_outer_authority_identity["commit"] == target_commit
+    assert {
+        authority["commit"]
+        for authority in campaign.native_scenario_authority_identities.values()
+    } == {target_commit}
+
+
 def test_campaign_matrix_contains_every_mandatory_operational_category(tmp_path: Path) -> None:
     campaign = Campaign(campaign_args(tmp_path))
     specs = campaign.scenario_specs()
@@ -2389,6 +2414,180 @@ def test_web_client_publishes_completed_request_errors(
     assert progress == ["request_error:POST:TimeoutError"]
 
 
+def test_campaign_retries_only_explicit_controlled_backpressure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    campaign = Campaign(campaign_args(tmp_path))
+    progress: list[str] = []
+    sleeps: list[float] = []
+    monkeypatch.setattr(campaign, "_server_progress", progress.append)
+    monkeypatch.setattr(campaign_module.time, "sleep", sleeps.append)
+
+    class ControlledClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def request(self, *_args: object, **_kwargs: object) -> dict[str, object]:
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "ok": False,
+                    "status": 429,
+                    "body": {
+                        "error": "edge_rate_limited",
+                        "retry_after_seconds": 2,
+                    },
+                }
+            return {"ok": True, "status": 200, "body": {"ok": True}}
+
+    controlled = ControlledClient()
+    result = campaign._request_with_controlled_backpressure_retry(
+        controlled,  # type: ignore[arg-type]
+        "GET",
+        "/api/admin/users",
+    )
+
+    assert result["status"] == 200
+    assert controlled.calls == 2
+    assert sleeps == [2.0]
+    assert progress == [
+        "controlled_backpressure_retry:GET:/api/admin/users:attempt=1:status=429"
+    ]
+
+    class UncontrolledClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def request(self, *_args: object, **_kwargs: object) -> dict[str, object]:
+            self.calls += 1
+            return {
+                "ok": False,
+                "status": 503,
+                "body": {"error": "dependency_unavailable"},
+            }
+
+    uncontrolled = UncontrolledClient()
+    result = campaign._request_with_controlled_backpressure_retry(
+        uncontrolled,  # type: ignore[arg-type]
+        "GET",
+        "/api/admin/users",
+    )
+
+    assert result["status"] == 503
+    assert uncontrolled.calls == 1
+    assert sleeps == [2.0]
+
+
+def test_campaign_storage_quota_override_is_scoped_and_verified(
+    tmp_path: Path,
+) -> None:
+    campaign = Campaign(campaign_args(tmp_path))
+    calls: list[tuple[str, str, dict[str, object]]] = []
+
+    class FakeClient:
+        def request(
+            self,
+            method: str,
+            path: str,
+            **kwargs: object,
+        ) -> dict[str, object]:
+            calls.append((method, path, kwargs))
+            return {
+                "ok": True,
+                "status": 200,
+                "body": {
+                    "ok": True,
+                    "user": {
+                        "total_bytes": 1024 * 1024 * 1024,
+                        "max_file_size_bytes": 512 * 1024 * 1024,
+                        "upload_rate_limit_per_day": 100,
+                        "can_upload": True,
+                    },
+                },
+            }
+
+    result = campaign._configure_campaign_storage_quota(
+        FakeClient(),  # type: ignore[arg-type]
+        42,
+    )
+
+    assert result["ok"] is True
+    assert calls == [
+        (
+            "PUT",
+            "/api/root/storage/users/42/quota-override",
+            {
+                "json_body": {
+                    "quota_mb": 1024,
+                    "max_file_size_mb": 512,
+                    "upload_rate_limit_per_day": 100,
+                    "can_upload": True,
+                    "enabled": True,
+                    "reason": "isolated 24h campaign HLS and high-load upload fixture",
+                },
+                "params": None,
+            },
+        )
+    ]
+
+
+def test_campaign_provisioning_configures_storage_for_each_account(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    campaign = Campaign(campaign_args(tmp_path))
+    created_ids: list[int] = []
+    quota_ids: list[int] = []
+
+    class FakeClient:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+        def login(self) -> dict[str, object]:
+            return {"ok": True, "status": 200}
+
+    def fake_create(
+        _root: object,
+        username: str,
+        _password: str,
+        *,
+        nickname: str,
+    ) -> dict[str, object]:
+        assert nickname.startswith("Campaign ")
+        user_id = len(created_ids) + 101
+        created_ids.append(user_id)
+        return {
+            "ok": True,
+            "create_status": 201,
+            "search_status": 200,
+            "user_id": user_id,
+            "username": username,
+        }
+
+    def fake_quota(_root: object, user_id: int) -> dict[str, object]:
+        quota_ids.append(user_id)
+        return {
+            "ok": True,
+            "status": 200,
+            "user_id": user_id,
+            "quota_bytes": 1024 * 1024 * 1024,
+            "max_file_size_bytes": 512 * 1024 * 1024,
+            "upload_rate_limit_per_day": 100,
+            "can_upload": True,
+        }
+
+    monkeypatch.setattr(campaign_module, "WebClient", FakeClient)
+    monkeypatch.setattr(campaign, "_create_user", fake_create)
+    monkeypatch.setattr(campaign, "_configure_campaign_storage_quota", fake_quota)
+
+    accounts = campaign.provision_accounts()
+
+    assert len(accounts) == 4
+    assert quota_ids == created_ids == [101, 102, 103, 104]
+    assert all(row["storage_quota"]["ok"] for row in campaign.account_inventory)
+
+
 def test_campaign_account_cleanup_deletes_and_verifies_exact_names(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2434,6 +2633,7 @@ def test_campaign_account_cleanup_fails_on_cleanup_warning(
 ) -> None:
     campaign = Campaign(campaign_args(tmp_path))
     campaign.account_inventory = [{"username": "campaign-user", "user_id": 42, "source": "campaign_runner"}]
+    deleted = False
 
     class FakeClient:
         def __init__(self, *_args: object, **_kwargs: object):
@@ -2443,13 +2643,16 @@ def test_campaign_account_cleanup_fails_on_cleanup_warning(
             return {"ok": True, "status": 200}
 
         def request(self, method: str, _path: str, **_kwargs: object) -> dict[str, object]:
+            nonlocal deleted
             if method == "DELETE":
+                deleted = True
                 return {
                     "ok": True,
                     "status": 200,
                     "body": {"ok": True, "cleanup": {"warnings": [{"scope": "storage"}]}},
                 }
-            return {"ok": True, "status": 200, "body": {"users": []}}
+            users = [] if deleted else [{"id": 42, "username": "campaign-user"}]
+            return {"ok": True, "status": 200, "body": {"users": users}}
 
     monkeypatch.setattr(campaign_module, "WebClient", FakeClient)
 
@@ -2457,6 +2660,99 @@ def test_campaign_account_cleanup_fails_on_cleanup_warning(
 
     assert result["ok"] is False
     assert result["records"][0]["cleanup_warnings"] == [{"scope": "storage"}]
+
+
+def test_campaign_account_cleanup_retries_controlled_backpressure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    campaign = Campaign(campaign_args(tmp_path))
+    campaign.account_inventory = [
+        {"username": "campaign-user", "user_id": 42, "source": "campaign_runner"}
+    ]
+    deleted = False
+    get_calls = 0
+    delete_calls = 0
+    sleeps: list[float] = []
+
+    class FakeClient:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+        def login(self) -> dict[str, object]:
+            return {"ok": True, "status": 200}
+
+        def request(self, method: str, _path: str, **_kwargs: object) -> dict[str, object]:
+            nonlocal deleted, get_calls, delete_calls
+            if method == "DELETE":
+                delete_calls += 1
+                if delete_calls == 1:
+                    return {
+                        "ok": False,
+                        "status": 503,
+                        "body": {"error": "server_busy", "retry_after_seconds": 0},
+                    }
+                deleted = True
+                return {
+                    "ok": True,
+                    "status": 200,
+                    "body": {"ok": True, "cleanup": {"warnings": []}},
+                }
+            get_calls += 1
+            if get_calls in {1, 3}:
+                return {
+                    "ok": False,
+                    "status": 429,
+                    "body": {
+                        "error": "edge_rate_limited",
+                        "retry_after_seconds": 0,
+                    },
+                }
+            users = [] if deleted else [{"id": 42, "username": "campaign-user"}]
+            return {"ok": True, "status": 200, "body": {"users": users}}
+
+    monkeypatch.setattr(campaign_module, "WebClient", FakeClient)
+    monkeypatch.setattr(campaign_module.time, "sleep", sleeps.append)
+
+    result = campaign.cleanup_campaign_accounts()
+
+    assert result["ok"] is True
+    assert result["records"][0]["lookup_status"] == 200
+    assert result["records"][0]["verify_status"] == 200
+    assert get_calls == 4
+    assert delete_calls == 2
+    assert sleeps == [0.25, 0.25, 0.25]
+
+
+def test_campaign_account_cleanup_accepts_proven_prior_absence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    campaign = Campaign(campaign_args(tmp_path))
+    campaign.account_inventory = [
+        {"username": "campaign-user", "user_id": 42, "source": "campaign_runner"}
+    ]
+    methods: list[str] = []
+
+    class FakeClient:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+        def login(self) -> dict[str, object]:
+            return {"ok": True, "status": 200}
+
+        def request(self, method: str, _path: str, **_kwargs: object) -> dict[str, object]:
+            methods.append(method)
+            return {"ok": True, "status": 200, "body": {"users": []}}
+
+    monkeypatch.setattr(campaign_module, "WebClient", FakeClient)
+
+    result = campaign.cleanup_campaign_accounts()
+
+    assert result["ok"] is True
+    assert result["records"][0]["absent_before_cleanup"] is True
+    assert result["records"][0]["delete_status"] is None
+    assert methods == ["GET"]
 
 
 def test_final_control_checks_publish_main_thread_audit_progress(

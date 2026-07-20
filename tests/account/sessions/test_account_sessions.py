@@ -580,6 +580,10 @@ def test_delete_user_closes_wallet_and_soft_deletes_cloud_drive_without_breaking
             deleted_at TEXT,
             updated_at TEXT
         );
+        CREATE TABLE storage_quota_overrides (
+            user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+            enabled INTEGER NOT NULL DEFAULT 0
+        );
         CREATE TABLE video_comments (
             id INTEGER PRIMARY KEY,
             video_id INTEGER,
@@ -596,6 +600,7 @@ def test_delete_user_closes_wallet_and_soft_deletes_cloud_drive_without_breaking
     conn.execute("INSERT INTO uploaded_files (id, owner_user_id) VALUES ('f1', 7)")
     conn.execute("INSERT INTO storage_files (id, file_id, owner_user_id) VALUES ('sf1', 'f1', 7)")
     conn.execute("INSERT INTO storage_folders (id, owner_user_id) VALUES ('dir1', 7)")
+    conn.execute("INSERT INTO storage_quota_overrides (user_id, enabled) VALUES (7, 1)")
     conn.execute("INSERT INTO video_comments (id, video_id, user_id, content) VALUES (1, 100, 7, 'hello')")
     conn.commit()
     conn.close()
@@ -606,12 +611,16 @@ def test_delete_user_closes_wallet_and_soft_deletes_cloud_drive_without_breaking
 
     assert res.status_code == 200
     assert res.get_json()["ok"] is True
+    assert res.get_json()["cleanup"]["storage_quota_overrides_deleted"] == 1
     conn = sqlite3.connect(db_path)
     status = conn.execute("SELECT status FROM users WHERE id=7").fetchone()[0]
     wallet = conn.execute("SELECT wallet_status, risk_level FROM points_wallets WHERE user_id=7").fetchone()
     file_deleted_at = conn.execute("SELECT deleted_at FROM uploaded_files WHERE id='f1'").fetchone()[0]
     storage_row = conn.execute("SELECT is_trashed, deleted_at FROM storage_files WHERE id='sf1'").fetchone()
     folder_deleted_at = conn.execute("SELECT deleted_at FROM storage_folders WHERE id='dir1'").fetchone()[0]
+    quota_override_count = conn.execute(
+        "SELECT COUNT(*) FROM storage_quota_overrides WHERE user_id=7"
+    ).fetchone()[0]
     comment_count = conn.execute("SELECT COUNT(*) FROM video_comments WHERE user_id=7").fetchone()[0]
     assert status == "deleted"
     assert wallet == ("closed", "blocked")
@@ -619,6 +628,7 @@ def test_delete_user_closes_wallet_and_soft_deletes_cloud_drive_without_breaking
     assert storage_row[0] == 1
     assert storage_row[1] is not None
     assert folder_deleted_at is not None
+    assert quota_override_count == 0
     assert comment_count == 1
     conn.close()
 

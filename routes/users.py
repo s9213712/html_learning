@@ -226,6 +226,7 @@ def register_user_routes(app, deps):
             "folders_deleted": 0,
             "albums_deleted": 0,
             "videos_blocked": 0,
+            "storage_quota_overrides_deleted": 0,
             "wallet_closed": False,
             "warnings": [],
             "original_username": username,
@@ -402,6 +403,23 @@ def register_user_routes(app, deps):
                     )
             except sqlite3.Error as exc:
                 _warn("user_storage", exc)
+
+        # Account deletion is intentionally a soft delete, so the foreign-key
+        # ON DELETE CASCADE on this table never fires.  Remove privileged quota
+        # exceptions explicitly instead of leaving them attached to the
+        # tombstoned user row.
+        if _table_exists(conn, "storage_quota_overrides"):
+            try:
+                override_cur = conn.execute(
+                    "DELETE FROM storage_quota_overrides WHERE user_id=?",
+                    (int(user_id),),
+                )
+                summary["storage_quota_overrides_deleted"] = max(
+                    int(override_cur.rowcount or 0),
+                    0,
+                )
+            except sqlite3.Error as exc:
+                _warn("storage_quota_overrides", exc)
 
         if _table_exists(conn, "points_wallets"):
             wallet_cols = _table_column_meta(conn, "points_wallets")

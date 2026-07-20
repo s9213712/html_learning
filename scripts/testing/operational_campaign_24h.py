@@ -200,6 +200,10 @@ CAMPAIGN_SECRET_SCAN_PROGRESS_SECONDS = 30.0
 CAMPAIGN_CONTROL_SNAPSHOT_PROGRESS_BYTES = 32 * 1024 * 1024
 CAMPAIGN_CONTROL_SNAPSHOT_PROGRESS_ENTRIES = 4096
 CAMPAIGN_CONTROL_SNAPSHOT_PROGRESS_SECONDS = 30.0
+CAMPAIGN_STORAGE_QUOTA_MB = 1024
+CAMPAIGN_STORAGE_MAX_FILE_SIZE_MB = 512
+CAMPAIGN_STORAGE_UPLOAD_RATE_LIMIT_PER_DAY = 100
+CAMPAIGN_CONTROLLED_BACKPRESSURE_MAX_ATTEMPTS = 12
 PREFLIGHT_SCAN_MAX_ENTRIES = 500_000
 PREFLIGHT_SCAN_MAX_DEPTH = 64
 PREFLIGHT_SCAN_MAX_RUNTIME_PATHS = 10_000
@@ -2862,7 +2866,9 @@ class Campaign:
             scenario_authorities = projection["scenario_authorities"]
         else:
             h0 = self.source_h0_authority
-            commit = str(h0.get("commit") or self.source_git.get("commit") or "")
+            commit = str(
+                h0.get("commit") or self.source_git.get("target_commit") or ""
+            )
             if not re.fullmatch(r"[0-9a-f]{40}", commit):
                 commit = hashlib.sha1(
                     canonical_digest(self.source_git).encode("ascii")
@@ -6083,8 +6089,56 @@ class Campaign:
             ),
         ])
 
+    @staticmethod
+    def _is_controlled_backpressure(result: Mapping[str, Any]) -> bool:
+        body = result.get("body")
+        if not isinstance(body, Mapping):
+            return False
+        status = int(result.get("status") or 0)
+        error = str(body.get("error") or "")
+        return bool(
+            (status == 429 and error == "edge_rate_limited")
+            or (status == 503 and error == "server_busy")
+        )
+
+    def _request_with_controlled_backpressure_retry(
+        self,
+        client: WebClient,
+        method: str,
+        path: str,
+        *,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+        max_attempts: int = CAMPAIGN_CONTROLLED_BACKPRESSURE_MAX_ATTEMPTS,
+    ) -> dict[str, Any]:
+        attempts = max(1, int(max_attempts))
+        result: dict[str, Any] = {}
+        for attempt in range(1, attempts + 1):
+            result = client.request(
+                method,
+                path,
+                json_body=json_body,
+                params=params,
+            )
+            if not self._is_controlled_backpressure(result) or attempt >= attempts:
+                return result
+            body = result.get("body")
+            raw_retry_after = body.get("retry_after_seconds") if isinstance(body, Mapping) else None
+            try:
+                retry_after = float(raw_retry_after)
+            except (TypeError, ValueError):
+                retry_after = 0.0
+            delay = min(10.0, max(0.1, retry_after, 0.25 * attempt))
+            self._server_progress(
+                f"controlled_backpressure_retry:{method.upper()}:{path}:"
+                f"attempt={attempt}:status={int(result.get('status') or 0)}"
+            )
+            time.sleep(delay)
+        return result
+
     def _create_user(self, root: WebClient, username: str, password: str, *, nickname: str = "Campaign User") -> dict[str, Any]:
-        result = root.request(
+        result = self._request_with_controlled_backpressure_retry(
+            root,
             "POST",
             "/api/admin/users",
             json_body={
@@ -6097,7 +6151,12 @@ class Campaign:
                 "member_level": "normal",
             },
         )
-        search = root.request("GET", "/api/admin/users", params={"q": username, "page_size": 100})
+        search = self._request_with_controlled_backpressure_retry(
+            root,
+            "GET",
+            "/api/admin/users",
+            params={"q": username, "page_size": 100},
+        )
         users = ((search.get("body") or {}).get("users") or []) if isinstance(search.get("body"), dict) else []
         exact = next((item for item in users if str(item.get("username") or "") == username), None)
         return {
@@ -6108,8 +6167,62 @@ class Campaign:
             "username": username,
         }
 
+    def _configure_campaign_storage_quota(
+        self,
+        root: WebClient,
+        user_id: int,
+    ) -> dict[str, Any]:
+        payload = {
+            "quota_mb": CAMPAIGN_STORAGE_QUOTA_MB,
+            "max_file_size_mb": CAMPAIGN_STORAGE_MAX_FILE_SIZE_MB,
+            "upload_rate_limit_per_day": CAMPAIGN_STORAGE_UPLOAD_RATE_LIMIT_PER_DAY,
+            "can_upload": True,
+            "enabled": True,
+            "reason": "isolated 24h campaign HLS and high-load upload fixture",
+        }
+        result = self._request_with_controlled_backpressure_retry(
+            root,
+            "PUT",
+            f"/api/root/storage/users/{int(user_id)}/quota-override",
+            json_body=payload,
+        )
+        body = result.get("body") if isinstance(result.get("body"), Mapping) else {}
+        user = body.get("user") if isinstance(body, Mapping) else {}
+        user = user if isinstance(user, Mapping) else {}
+        expected_quota = CAMPAIGN_STORAGE_QUOTA_MB * 1024 * 1024
+        expected_max_file = CAMPAIGN_STORAGE_MAX_FILE_SIZE_MB * 1024 * 1024
+        ok = bool(
+            int(result.get("status") or 0) == 200
+            and body.get("ok") is True
+            and int(user.get("total_bytes") or 0) >= expected_quota
+            and int(user.get("max_file_size_bytes") or 0) >= expected_max_file
+            and user.get("can_upload") is True
+            and int(user.get("upload_rate_limit_per_day") or 0)
+            >= CAMPAIGN_STORAGE_UPLOAD_RATE_LIMIT_PER_DAY
+        )
+        return {
+            "ok": ok,
+            "status": int(result.get("status") or 0),
+            "user_id": int(user_id),
+            "quota_bytes": int(user.get("total_bytes") or 0),
+            "max_file_size_bytes": int(user.get("max_file_size_bytes") or 0),
+            "upload_rate_limit_per_day": int(
+                user.get("upload_rate_limit_per_day") or 0
+            ),
+            "can_upload": user.get("can_upload") is True,
+        }
+
     def _user_exists(self, root: WebClient, username: str) -> bool:
-        search = root.request("GET", "/api/admin/users", params={"q": username, "page_size": 100})
+        search = self._request_with_controlled_backpressure_retry(
+            root,
+            "GET",
+            "/api/admin/users",
+            params={"q": username, "page_size": 100},
+        )
+        if int(search.get("status") or 0) != 200:
+            # An inconclusive lookup must not be interpreted as proof that a
+            # restore marker or incident account vanished.
+            return True
         users = ((search.get("body") or {}).get("users") or []) if isinstance(search.get("body"), dict) else []
         return any(str(item.get("username") or "") == username for item in users)
 
@@ -7179,11 +7292,20 @@ class Campaign:
             created = self._create_user(root, username, self.credentials.member, nickname=f"Campaign {index:02d}")
             if not created.get("ok"):
                 raise RuntimeError(f"campaign account provisioning failed: {created}")
+            quota = self._configure_campaign_storage_quota(
+                root,
+                int(created.get("user_id") or 0),
+            )
+            if not quota.get("ok"):
+                raise RuntimeError(
+                    f"campaign account storage quota provisioning failed: {quota}"
+                )
             self.account_inventory.append({
                 "username": username,
                 "user_id": int(created.get("user_id") or 0),
                 "source": "campaign_runner",
                 "created_or_reused": int(created.get("create_status") or 0) in {200, 201, 409},
+                "storage_quota": quota,
             })
             member = WebClient(
                 self.primary.base_url,
@@ -7235,27 +7357,55 @@ class Campaign:
             self.account_cleanup = result
             return result
         for username, row in sorted(inventory.items()):
-            user_id = int(row.get("user_id") or 0)
-            if user_id <= 0:
-                lookup = root.request("GET", "/api/admin/users", params={"q": username, "page_size": 100})
-                self._server_progress(f"audit_account_lookup_completed:{username}")
-                users = ((lookup.get("body") or {}).get("users") or []) if isinstance(lookup.get("body"), dict) else []
-                exact = next((item for item in users if str(item.get("username") or "") == username), None)
-                user_id = int((exact or {}).get("id") or 0)
-            deleted = root.request("DELETE", f"/api/admin/users/{user_id}") if user_id > 0 else {
-                "ok": False,
-                "status": 404,
-                "body": {"msg": "account_not_found_before_cleanup"},
-            }
-            self._server_progress(f"audit_account_delete_completed:{username}")
-            verify = root.request("GET", "/api/admin/users", params={"q": username, "page_size": 100})
+            inventory_user_id = int(row.get("user_id") or 0)
+            lookup = self._request_with_controlled_backpressure_retry(
+                root,
+                "GET",
+                "/api/admin/users",
+                params={"q": username, "page_size": 100},
+            )
+            self._server_progress(f"audit_account_lookup_completed:{username}")
+            users = ((lookup.get("body") or {}).get("users") or []) if isinstance(lookup.get("body"), dict) else []
+            exact = next((item for item in users if str(item.get("username") or "") == username), None)
+            matched_user_id = int((exact or {}).get("id") or 0)
+            user_id = matched_user_id or inventory_user_id
+            absent_before_cleanup = bool(
+                int(lookup.get("status") or 0) == 200 and exact is None
+            )
+            if absent_before_cleanup:
+                deleted: dict[str, Any] = {
+                    "ok": True,
+                    "status": None,
+                    "body": {"cleanup": {"warnings": []}},
+                }
+                verify = lookup
+            elif matched_user_id > 0:
+                deleted = self._request_with_controlled_backpressure_retry(
+                    root,
+                    "DELETE",
+                    f"/api/admin/users/{matched_user_id}",
+                )
+                self._server_progress(f"audit_account_delete_completed:{username}")
+                verify = self._request_with_controlled_backpressure_retry(
+                    root,
+                    "GET",
+                    "/api/admin/users",
+                    params={"q": username, "page_size": 100},
+                )
+            else:
+                deleted = {
+                    "ok": False,
+                    "status": None,
+                    "body": {"msg": "account_lookup_failed_before_cleanup"},
+                }
+                verify = lookup
             self._server_progress(f"audit_account_verify_completed:{username}")
             verify_users = ((verify.get("body") or {}).get("users") or []) if isinstance(verify.get("body"), dict) else []
             residual = [item for item in verify_users if str(item.get("username") or "") == username]
             cleanup_detail = (deleted.get("body") or {}).get("cleanup") or {}
             warnings = cleanup_detail.get("warnings") or []
             record_ok = bool(
-                int(deleted.get("status") or 0) == 200
+                (absent_before_cleanup or int(deleted.get("status") or 0) == 200)
                 and not residual
                 and not warnings
                 and int(verify.get("status") or 0) == 200
@@ -7263,7 +7413,10 @@ class Campaign:
             result["records"].append({
                 "username": username,
                 "user_id": user_id,
+                "inventory_user_id": inventory_user_id,
                 "source": row.get("source"),
+                "lookup_status": lookup.get("status"),
+                "absent_before_cleanup": absent_before_cleanup,
                 "delete_status": deleted.get("status"),
                 "verify_status": verify.get("status"),
                 "residual_exact_count": len(residual),
