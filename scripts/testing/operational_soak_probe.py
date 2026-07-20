@@ -629,10 +629,18 @@ class ApiClient:
             "retry_after_seconds": retry_after_seconds,
         }
 
-    def request(self, method: str, path: str, *, json_body: dict | None = None) -> dict[str, Any]:
+    def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json_body: dict | None = None,
+        retry_csrf: bool = True,
+    ) -> dict[str, Any]:
         method = method.upper()
         with self.lock:
             started = time.perf_counter()
+            csrf_retried = False
             try:
                 headers: dict[str, str] = {}
                 if method not in {"GET", "HEAD", "OPTIONS"}:
@@ -664,7 +672,35 @@ class ApiClient:
                     rotated_csrf = self.session.cookies.get("csrf_token")
                     if rotated_csrf:
                         self.csrf = str(rotated_csrf)
-                return self.capture(response, started)
+                if (
+                    retry_csrf
+                    and method not in {"GET", "HEAD", "OPTIONS"}
+                    and response.status_code == 403
+                ):
+                    try:
+                        rejection = response.json()
+                    except Exception:
+                        rejection = {}
+                    if isinstance(rejection, dict) and rejection.get("error") == "csrf_invalid":
+                        if self.refresh_csrf():
+                            headers["X-CSRF-Token"] = self.csrf
+                            started = time.perf_counter()
+                            response = self.session.request(
+                                method,
+                                f"{self.base_url}{path}",
+                                json=json_body,
+                                headers=headers,
+                                timeout=self.timeout,
+                            )
+                            csrf_retried = True
+                            rotated_csrf = self.session.cookies.get("csrf_token")
+                            if rotated_csrf:
+                                self.csrf = str(rotated_csrf)
+                captured = self.capture(response, started)
+                if csrf_retried:
+                    captured["csrf_retried"] = True
+                    captured["initial_status"] = 403
+                return captured
             except Exception as exc:
                 return {
                     "ok": False,

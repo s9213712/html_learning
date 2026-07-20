@@ -88,6 +88,52 @@ def test_setup_request_does_not_retry_permission_denial(monkeypatch):
     assert waits == []
 
 
+def test_soak_api_client_refreshes_and_retries_exact_csrf_rejection(monkeypatch):
+    class Response:
+        def __init__(self, status, body):
+            self.status_code = status
+            self._body = body
+            self.headers = {}
+            self.content = b"{}"
+            self.text = json.dumps(body)
+
+        def json(self):
+            return self._body
+
+    class Session:
+        def __init__(self):
+            self.verify = False
+            self.cookies = {"csrf_token": "stale-csrf"}
+            self.calls = 0
+
+        def get(self, _url, **_kwargs):
+            self.cookies["csrf_token"] = "fresh-csrf"
+            return Response(200, {"ok": True, "csrf_token": "fresh-csrf"})
+
+        def request(self, method, _url, *, headers=None, **_kwargs):
+            assert method == "PUT"
+            self.calls += 1
+            if self.calls == 1:
+                assert headers["X-CSRF-Token"] == "stale-csrf"
+                return Response(403, {"ok": False, "error": "csrf_invalid"})
+            assert headers["X-CSRF-Token"] == "fresh-csrf"
+            self.cookies["csrf_token"] = "rotated-csrf"
+            return Response(200, {"ok": True})
+
+    monkeypatch.setattr("scripts.testing.operational_soak_probe.requests.Session", Session)
+    client = ApiClient("https://soak.invalid", "root", "secret")
+    client.csrf = "stale-csrf"
+
+    result = client.request("PUT", "/api/root/storage/users/42/quota-override")
+
+    assert result["ok"] is True
+    assert result["status"] == 200
+    assert result["csrf_retried"] is True
+    assert result["initial_status"] == 403
+    assert client.csrf == "rotated-csrf"
+    assert client.session.calls == 2
+
+
 def test_soak_storage_quota_is_scoped_and_verified():
     class FakeRoot:
         def __init__(self):

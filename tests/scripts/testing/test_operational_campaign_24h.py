@@ -2387,6 +2387,86 @@ def test_web_client_tracks_csrf_cookie_rotated_by_each_write(
     assert client.session.write_count == 12
 
 
+def test_web_client_refreshes_and_retries_one_rejected_authenticated_csrf(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Response:
+        def __init__(self, status: int, body: dict[str, object]):
+            self.status_code = status
+            self._body = body
+            self.content = b"{}"
+            self.text = ""
+
+        def json(self) -> dict[str, object]:
+            return self._body
+
+    class Session:
+        def __init__(self):
+            self.verify = False
+            self.cookies = {"csrf_token": "stale-csrf"}
+            self.write_count = 0
+
+        def get(self, _url: str, **_kwargs: object) -> Response:
+            self.cookies["csrf_token"] = "fresh-csrf"
+            return Response(200, {"ok": True, "csrf_token": "fresh-csrf"})
+
+        def request(self, method: str, _url: str, *, headers=None, **_kwargs: object) -> Response:
+            assert method == "PUT"
+            self.write_count += 1
+            if self.write_count == 1:
+                assert (headers or {}).get("X-CSRF-Token") == "stale-csrf"
+                return Response(403, {"ok": False, "error": "csrf_invalid"})
+            assert self.write_count == 2
+            assert (headers or {}).get("X-CSRF-Token") == "fresh-csrf"
+            self.cookies["csrf_token"] = "rotated-csrf"
+            return Response(200, {"ok": True})
+
+    monkeypatch.setattr(campaign_module.requests, "Session", Session)
+    client = WebClient("https://campaign.invalid", "root", "secret")
+    client.csrf = "stale-csrf"
+
+    result = client.request("PUT", "/api/root/storage/users/42/quota-override")
+
+    assert result["ok"] is True
+    assert result["status"] == 200
+    assert result["csrf_retried"] is True
+    assert result["initial_status"] == 403
+    assert client.csrf == "rotated-csrf"
+    assert client.session.write_count == 2
+
+
+def test_web_client_does_not_retry_non_csrf_permission_denial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Response:
+        status_code = 403
+        content = b"{}"
+        text = ""
+
+        def json(self) -> dict[str, object]:
+            return {"ok": False, "error": "permission_denied"}
+
+    class Session:
+        def __init__(self):
+            self.verify = False
+            self.cookies = {"csrf_token": "valid-csrf"}
+            self.write_count = 0
+
+        def request(self, _method: str, _url: str, **_kwargs: object) -> Response:
+            self.write_count += 1
+            return Response()
+
+    monkeypatch.setattr(campaign_module.requests, "Session", Session)
+    client = WebClient("https://campaign.invalid", "root", "secret")
+    client.csrf = "valid-csrf"
+
+    result = client.request("PUT", "/api/root/storage/users/42/quota-override")
+
+    assert result["ok"] is False
+    assert result["status"] == 403
+    assert client.session.write_count == 1
+
+
 def test_web_client_publishes_completed_request_errors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

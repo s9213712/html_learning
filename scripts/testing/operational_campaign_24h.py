@@ -1615,6 +1615,7 @@ class WebClient:
         json_body: dict[str, Any] | None = None,
         params: dict[str, Any] | None = None,
         retry_login: bool = True,
+        retry_csrf: bool = True,
     ) -> dict[str, Any]:
         method = method.upper()
         headers: dict[str, str] = {}
@@ -1643,11 +1644,38 @@ class WebClient:
             )
             if response.status_code == 401 and retry_login:
                 self.login()
-                return self.request(method, path, json_body=json_body, params=params, retry_login=False)
+                return self.request(
+                    method,
+                    path,
+                    json_body=json_body,
+                    params=params,
+                    retry_login=False,
+                    retry_csrf=retry_csrf,
+                )
             try:
                 body: Any = response.json()
             except Exception:
                 body = {"raw": response.text[:1000]}
+            if (
+                retry_csrf
+                and method not in {"GET", "HEAD", "OPTIONS"}
+                and response.status_code == 403
+                and isinstance(body, Mapping)
+                and body.get("error") == "csrf_invalid"
+            ):
+                refreshed = self.refresh_csrf()
+                if refreshed.get("ok"):
+                    retried = self.request(
+                        method,
+                        path,
+                        json_body=json_body,
+                        params=params,
+                        retry_login=retry_login,
+                        retry_csrf=False,
+                    )
+                    retried["csrf_retried"] = True
+                    retried["initial_status"] = 403
+                    return retried
             return {
                 "ok": 200 <= response.status_code < 300 and (not isinstance(body, dict) or body.get("ok") is not False),
                 "status": response.status_code,
