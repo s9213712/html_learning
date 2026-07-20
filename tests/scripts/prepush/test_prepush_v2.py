@@ -20,6 +20,7 @@ from scripts.prepush.checks import (
     release_check,
     scripts_index_check,
     secrets_check,
+    smoke_server_check,
 )
 from scripts.prepush.context import PrepushContext
 from scripts.prepush.result import FAIL, SKIP, CheckResult
@@ -28,29 +29,40 @@ from scripts.prepush.result import FAIL, SKIP, CheckResult
 ROOT = Path(__file__).resolve().parents[3]
 
 
-def test_runner_help_works_outside_repository(tmp_path):
+def test_prepush_entrypoints_help_work_outside_repository_without_source_cache(tmp_path):
     cache_dirs = (
         ROOT / "scripts" / "__pycache__",
         ROOT / "scripts" / "prepush" / "__pycache__",
         ROOT / "scripts" / "prepush" / "checks" / "__pycache__",
     )
-    for cache_dir in cache_dirs:
-        shutil.rmtree(cache_dir, ignore_errors=True)
     env = os.environ.copy()
     env.pop("PYTHONDONTWRITEBYTECODE", None)
     env.pop("PYTHONPYCACHEPREFIX", None)
-    completed = subprocess.run(
-        [sys.executable, str(ROOT / "scripts" / "prepush" / "runner.py"), "--help"],
-        cwd=tmp_path,
-        check=False,
-        capture_output=True,
-        text=True,
-        env=env,
-    )
+    for entrypoint in ("runner.py", "pre_push_checks.py"):
+        for cache_dir in cache_dirs:
+            shutil.rmtree(cache_dir, ignore_errors=True)
+        completed = subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "prepush" / entrypoint), "--help"],
+            cwd=tmp_path,
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
 
-    assert completed.returncode == 0, completed.stderr
-    assert "--full" in completed.stdout
-    assert all(not cache_dir.exists() for cache_dir in cache_dirs)
+        assert completed.returncode == 0, completed.stderr
+        assert "--full" in completed.stdout
+        assert all(not cache_dir.exists() for cache_dir in cache_dirs)
+
+
+def test_smoke_server_uses_external_runtime_and_allows_slow_cold_start():
+    source = (ROOT / "scripts/prepush/checks/smoke_server_check.py").read_text(encoding="utf-8")
+
+    assert '"HACKME_RUNTIME_DIR": str(runtime_root)' in source
+    assert '"PYTHONPYCACHEPREFIX": str(runtime_root / "pycache")' in source
+    assert '"HTML_LEARNING_ROOT_PASSWORD": "root"' in source
+    assert '"ROOT_PASSWORD": credentials["root"]' in source
+    assert "def wait_for_server(base_urls: list[str], deadline: int = 90)" in source
 
 
 def make_ctx(tmp_path, **kwargs):
@@ -391,6 +403,12 @@ def test_db_log_storage_report_artifacts_are_forbidden():
     assert forbidden_paths_check.is_forbidden("storage/u1/file.bin")
     assert forbidden_paths_check.is_forbidden("reports/bugs/bug.md")
     assert forbidden_paths_check.is_forbidden("security/audit_exports/server_mode/run.json")
+    assert forbidden_paths_check.is_forbidden("output/generated.png")
+    assert forbidden_paths_check.is_forbidden("public/generated/generated.png")
+    assert forbidden_paths_check.is_forbidden("docs/games/evidence/run/_runtime/report.md")
+    assert forbidden_paths_check.is_forbidden("database/database.db-wal")
+    assert forbidden_paths_check.is_forbidden("runtime-copy/.server_mode_log_hmac_key")
+    assert forbidden_paths_check.is_forbidden("runtime-copy/.filekey")
     assert forbidden_paths_check.is_forbidden("docs/WEBCHAT/AGENT_SKILL_PROPOSAL.md:Zone.Identifier")
 
 

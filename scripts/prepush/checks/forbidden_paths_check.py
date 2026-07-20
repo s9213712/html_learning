@@ -9,14 +9,26 @@ from scripts.prepush.result import CheckResult
 
 FORBIDDEN_PATTERNS = (
     "*.db",
+    "*.db-wal",
+    "*.db-shm",
+    "*.db-journal",
     "*.sqlite",
+    "*.sqlite-wal",
+    "*.sqlite-shm",
+    "*.sqlite-journal",
     "*.sqlite3",
+    "*.sqlite3-wal",
+    "*.sqlite3-shm",
+    "*.sqlite3-journal",
     "*.log",
     "*.pem",
     "*.key",
     ".csrfkey",
+    ".fkey",
+    ".filekey",
     ".integrity_key",
     ".chain_seed",
+    ".server_mode_log_hmac_key",
     "integrity_manifest.json",
     "**/__pycache__/**",
     ".pytest_cache/**",
@@ -30,9 +42,27 @@ def is_forbidden(rel: str) -> bool:
         return False
     if rel.endswith(":Zone.Identifier"):
         return True
-    if any(rel == prefix or rel.startswith(prefix + "/") for prefix in ("anchors", "chats", "reports", "security/audit_exports", "storage", "logs", "runtime", "hackme_web_runtime", "html_learning_storage", "node_modules", "dist", "build")):
+    root_artifact_prefixes = (
+        "anchors",
+        "chats",
+        "reports",
+        "security/audit_exports",
+        "storage",
+        "logs",
+        "runtime",
+        "hackme_web_runtime",
+        "html_learning_storage",
+        "output",
+        "public/generated",
+        "node_modules",
+        "dist",
+        "build",
+    )
+    if any(rel == prefix or rel.startswith(prefix + "/") for prefix in root_artifact_prefixes):
         return True
     path = PurePosixPath(rel)
+    if path.parts[:3] == ("docs", "games", "evidence") and "_runtime" in path.parts[3:]:
+        return True
     return any(path.match(pattern) for pattern in FORBIDDEN_PATTERNS)
 
 

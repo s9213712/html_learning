@@ -52,6 +52,8 @@ def test_pytest_wrapper_only_auto_removes_its_own_run_root():
     assert 'RUN_ROOT="$(mktemp -d /tmp/hackme_web_pytest_XXXXXX)"' in text
     assert 'AUTO_RUN_ROOT=1' in text
     assert '"$AUTO_RUN_ROOT" == "1"' in text
+    assert 'find "$RUN_ROOT" -depth ! -type l -exec chmod u+rwX -- {} +' in text
+    assert 'rm -rf -- "$RUN_ROOT"' in text
     assert "kept caller-selected tmp root" in text
 
 
@@ -62,3 +64,5 @@ def test_pytest_wrapper_keeps_runtime_and_artifacts_outside_copied_checkout():
     assert 'export HACKME_TEST_OUTPUT_ROOT="$RUN_ROOT/test_artifacts"' in text
     assert 'export TMPDIR="$RUN_ROOT/tmp"' in text
     assert 'HACKME_RUNTIME_DIR="$COPY_ROOT/runtime"' not in text
+    assert "--exclude='./output'" in text
+    assert "--exclude='./public/generated'" in text

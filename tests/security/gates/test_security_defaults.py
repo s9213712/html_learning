@@ -67,6 +67,7 @@ def test_server_upload_request_limit_is_env_driven_and_has_413_handler():
 
 def test_runtime_artifacts_share_external_runtime_root_and_not_legacy_repo_folders():
     server_py = (ROOT / "server.py").read_text(encoding="utf-8")
+    assert server_py.index("sys.dont_write_bytecode = True") < server_py.index("from services.")
     assert 'default_runtime_root,' in server_py
     assert 'RUNTIME_DIR = _env_path("HACKME_RUNTIME_DIR", default_runtime_root())' in server_py
     assert 'DB_DIR = _env_path("HTML_LEARNING_DB_DIR", os.path.join(RUNTIME_DIR, "database"))' in server_py

@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from services.core.sqlite_hardening import connect_sqlite
+from services.server.runtime import default_runtime_root_path
 
 
 ASSET_SCALE = 100_000_000
@@ -66,8 +67,7 @@ def default_runtime_root(base_dir=None):
     explicit = expand_server_path(os.environ.get("HACKME_RUNTIME_DIR"))
     if explicit:
         return explicit
-    root = Path(base_dir).resolve() if base_dir else Path(__file__).resolve().parents[2]
-    return root / "runtime"
+    return default_runtime_root_path()
 
 
 def default_btc_trade_project_dir(base_dir=None):

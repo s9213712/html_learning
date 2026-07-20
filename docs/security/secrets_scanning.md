@@ -49,10 +49,10 @@ The pre-push gitleaks check materializes its candidate files below `/tmp` and
 removes that tree when the check ends. Quick and pre-commit runs scan staged,
 unstaged, untracked, and canonical deployment documentation. Full runs scan all
 tracked product files. The dedicated CI secrets workflow uses full strict mode.
-Unchanged bulk historical evidence below
-`docs/AGENTS/reports/` and generated `output/` assets are omitted from repeated
-full scans; a staged, unstaged, or untracked change in either path is still
-included. `.gitleaks.toml` handles remaining runtime/generated exclusions.
+Unchanged bulk historical evidence below `docs/AGENTS/reports/` is omitted from
+repeated full scans; a staged, unstaged, or untracked change in that path is
+still included. Generated root paths such as `output/` are forbidden outright,
+and `.gitleaks.toml` handles remaining runtime exclusions.
 
 Run the checks manually:
 

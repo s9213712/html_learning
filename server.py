@@ -8,6 +8,9 @@ CSRF tokens, strict CSP, full security headers, rate-limit amplification.
 import argparse
 import gzip
 import os, sqlite3, re, json, time, hashlib, secrets, hmac, threading, random, base64, fcntl, subprocess, signal, sys, platform, smtplib, ssl, urllib.parse, socket, tempfile
+
+sys.dont_write_bytecode = True
+
 from ipaddress import ip_address
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
@@ -247,8 +250,6 @@ from services.security.upload_security import ensure_upload_security_schema
 from services.system.notifications import create_root_notification_if_enabled
 from services.trading.trading_engine import TradingEngineService, ensure_trading_schema
 from services.trading.streams import TradingPriceStreamHub
-
-sys.dont_write_bytecode = True
 
 # ── Paths ───────────────────────────────────────────────────────────────────
 BASE_DIR   = os.path.dirname(os.path.abspath(__file__))

@@ -1018,6 +1018,7 @@ def test_btc_trade_bridge_script_lives_in_hackme_project():
 
     assert "BtcTradeBridge" in text
     assert "--btc-trade-dir" in text
+    assert "Path(__file__).resolve().parents[3]" in text
     assert "/NN/BTC_trade/btc_signal_bridge.py" not in text
 
 
@@ -1042,17 +1043,19 @@ def test_btc_trade_bridge_dry_run_does_not_advance_state(tmp_path):
     assert not (runtime / "bridge_state.json").exists()
 
 
-def test_btc_trade_bridge_defaults_runtime_files_to_runtime_subdir(monkeypatch, tmp_path):
+def test_btc_trade_bridge_defaults_runtime_files_to_external_state(monkeypatch, tmp_path):
     hackme_dir = tmp_path / "hackme"
     monkeypatch.delenv("HACKME_RUNTIME_DIR", raising=False)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     bridge = BtcTradeBridge(
         hackme_dir=hackme_dir,
         btc_trade_dir=tmp_path / "BTC_trade",
     )
 
-    assert bridge.runtime_root == hackme_dir / "runtime"
-    assert bridge.db_path == hackme_dir / "runtime" / "database" / "database.db"
-    assert bridge.chain_seed_path == hackme_dir / "runtime" / ".chain_seed"
+    runtime_root = (tmp_path / "state" / "hackme_web").resolve()
+    assert bridge.runtime_root == runtime_root
+    assert bridge.db_path == runtime_root / "database" / "database.db"
+    assert bridge.chain_seed_path == runtime_root / ".chain_seed"
 
 
 def test_btc_trade_bridge_honors_explicit_runtime_root(monkeypatch, tmp_path):

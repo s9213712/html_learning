@@ -93,4 +93,4 @@ PYEOF
 bump_version
 
 echo "pre-push: running blocking validation suite"
-PYTHONPATH=. python3 scripts/prepush/pre_push_checks.py --clean --yes --ci
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python3 scripts/prepush/pre_push_checks.py --clean --yes --ci

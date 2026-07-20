@@ -22,7 +22,6 @@ paths = [
   '''^runtime/logs/.*\.log$''',
   '''^runtime/anchors/.*\.(json|jsonl)$''',
   '''^runtime/chats/.*\.jsonl$''',
-  '''^docs/games/evidence/stockfish_teacher/.*/_runtime/''',
   '''^runtime/cert\.pem$''',
   '''^runtime/key\.pem$''',
   '''^runtime/\.chain_seed$''',

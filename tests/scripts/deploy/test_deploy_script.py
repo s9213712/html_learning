@@ -111,7 +111,8 @@ def test_dev_launcher_prints_access_location_but_redacts_credentials():
     assert '[dev-tmp] transmission_user:     ${TRANSMISSION_RPC_USERNAME:-<blank>}' in script
     assert '[dev-tmp] transmission_password: configured (not printed)' in script
     assert '${TRANSMISSION_RPC_PASSWORD:-<blank>}' not in script
-    assert 'say "[dev-tmp] bootstrap accounts: root, admin, test (passwords are not printed)"\n  print_transmission_access_summary' in script
+    assert "fi\n  print_transmission_access_summary" in script
+    assert "fi\nprint_transmission_access_summary" in script
     assert script.count('say "[dev-tmp] bootstrap accounts: root, admin, test (passwords are not printed)"') == 2
     assert '--root-password "$ROOT_PASSWORD"' not in script
     assert '--manager-password "$MANAGER_PASSWORD"' not in script
@@ -238,12 +239,24 @@ def test_ci_workflows_call_current_script_paths():
     assert "--mode full" in secrets
     assert "python scripts/security/gate/scan_plaintext_secrets.py" in secrets
     assert "scripts/security/scan_plaintext_secrets.py" not in secrets
+    assert "HACKME_TEST_OUTPUT_ROOT: /tmp/hackme_web_test_artifacts" in secrets
+    assert "security/reports/gitleaks_report.json" not in secrets
+    assert "/tmp/hackme_web_test_artifacts/reports/security/" in secrets
 
 
 def test_gitignore_only_ignores_repo_root_runtime_directory():
     gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
 
     assert "/runtime/" in gitignore
+    assert "/output/" in gitignore
+    assert "/public/generated/" in gitignore
+    assert "docs/games/evidence/**/_runtime/" in gitignore
     assert ".hackme_capacity_defaults.env" in gitignore
     assert "\nruntime/\n" not in gitignore
     assert "\nstorage/\n" not in gitignore
+
+
+def test_dev_copy_excludes_generated_public_images():
+    script = (ROOT / "test_for_develop.sh").read_text(encoding="utf-8")
+
+    assert "--exclude='public/generated'" in script

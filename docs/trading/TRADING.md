@@ -313,6 +313,10 @@ python3 scripts/trading/bridges/btc_signal_bridge.py --btc-trade-dir /path/to/BT
 python3 scripts/trading/bridges/btc_signal_bridge.py --btc-trade-dir /path/to/BTC_trade
 ```
 
+Bridge 自身的 hackme_web 資料庫、狀態與 chain seed 使用
+`HACKME_RUNTIME_DIR`；若未設定則落在外部 XDG state 目錄，而不是專案內的
+`runtime/`。上列 BTC_trade 的 `runtime/` 路徑只屬於外部訊號來源專案。
+
 The bridge expects a normal hackme_web user named `btc_bridge` by default. You
 can override this with `--bridge-username` or `BTC_TRADE_BRIDGE_USERNAME`. It
 uses the configured market `BTC/USDT` by default and maps BTC_trade events as:

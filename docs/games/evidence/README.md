@@ -11,4 +11,6 @@ Archive location on this machine:
 
 Keep narrative development history under `docs/games/chess_debug/` and
 `docs/games/archive/chess_debug/`. Do not re-add raw replay, FEN, move, JSONL,
-or training evidence files to this directory.
+or training evidence files to this directory. `_runtime/` subtrees are forbidden;
+new run output belongs under `/tmp/hackme_web_test_artifacts` (or an explicitly
+configured external test-artifact root).

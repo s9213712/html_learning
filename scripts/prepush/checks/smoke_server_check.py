@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import secrets
 import ssl
 import subprocess
 import sys
@@ -20,7 +21,7 @@ def probe(base_url: str) -> bool:
         return response.status == 200
 
 
-def wait_for_server(base_urls: list[str], deadline: int = 25) -> str:
+def wait_for_server(base_urls: list[str], deadline: int = 90) -> str:
     started = time.time()
     last_error: Exception | None = None
     while time.time() - started < deadline:
@@ -38,6 +39,7 @@ def start_server(ctx: PrepushContext, runtime_root: Path, port: int):
     env = os.environ.copy()
     env.update(
         {
+            "HACKME_RUNTIME_DIR": str(runtime_root),
             "HTML_LEARNING_DB_DIR": str(runtime_root / "database"),
             "HTML_LEARNING_LOG_DIR": str(runtime_root / "logs"),
             "HTML_LEARNING_CHAT_DIR": str(runtime_root / "chats"),
@@ -46,12 +48,14 @@ def start_server(ctx: PrepushContext, runtime_root: Path, port: int):
             "HTML_LEARNING_REPORTS_DIR": str(runtime_root / "reports"),
             "HTML_LEARNING_SECRET_DIR": str(runtime_root / "secrets"),
             "HTML_LEARNING_UPLOAD_DIR": str(runtime_root / "uploads"),
-            "HTML_LEARNING_HOST": "0.0.0.0",
+            "HTML_LEARNING_HOST": "127.0.0.1",
             "HTML_LEARNING_DISABLE_TRUSTED_HOSTS": "1",
             "HTML_LEARNING_PORT": str(port),
             "HTML_LEARNING_ROOT_PASSWORD": "root",
             "HTML_LEARNING_MANAGER_PASSWORD": "admin",
             "HTML_LEARNING_TEST_PASSWORD": "test",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONPYCACHEPREFIX": str(runtime_root / "pycache"),
             "PYTHONUNBUFFERED": "1",
             "PYTHONPATH": str(ctx.repo_root),
         }
@@ -73,6 +77,10 @@ def start_server(ctx: PrepushContext, runtime_root: Path, port: int):
 def run(ctx: PrepushContext) -> CheckResult:
     runtime_root = ctx.ensure_temp_root()
     port = utils.find_free_port()
+    credentials = {
+        role: f"{role.title()}Smoke-7-{secrets.token_urlsafe(24)}!"
+        for role in ("root", "manager", "test")
+    }
     proc = None
     log_file = None
     success = False
@@ -82,9 +90,9 @@ def run(ctx: PrepushContext) -> CheckResult:
         smoke = ctx.repo_root / "tests" / "security" / "smoke" / "smoke_suite.py"
         smoke_env = os.environ.copy()
         smoke_env.update({
-            "ROOT_PASSWORD": "RootSmoke123!",
-            "MANAGER_PASSWORD": "ManagerSmoke123!",
-            "TEST_PASSWORD": "TestSmoke123!",
+            "ROOT_PASSWORD": credentials["root"],
+            "MANAGER_PASSWORD": credentials["manager"],
+            "TEST_PASSWORD": credentials["test"],
         })
         proc_smoke = utils.run_command(
             [sys.executable, str(smoke), "--base-url", base_url, "--suite", "all"],

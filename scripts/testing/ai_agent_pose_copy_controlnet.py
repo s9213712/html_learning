@@ -4,12 +4,20 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import sys
 import time
 from pathlib import Path
 from typing import Any
 
 from PIL import Image
 from playwright.sync_api import sync_playwright
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+sys.dont_write_bytecode = True
+
+from scripts.test_artifacts import test_artifact_path  # noqa: E402
 
 from ai_agent_real_i2i_edit_audit import (
     ai_agent_preflight,
@@ -25,13 +33,8 @@ from ai_agent_real_i2i_edit_audit import (
 )
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_SOURCE = REPO_ROOT / "output/qwen_squat_double_v_white_longhair_cat_ears.png"
-DEFAULT_CLOTHES_REF = Path("/mnt/c/share/ComfyUI/output/test/clothes/purple_sheer_lingerie_set.JPG")
-DEFAULT_POSE_REF = Path("/mnt/c/share/ComfyUI/output/test/pose/lying_back_legs_up_pose.JPG")
+DEFAULT_SOURCE = REPO_ROOT / "scripts/testing/fixtures/ai_agent/qwen_squat_double_v_white_longhair_cat_ears.png"
 DEFAULT_CONTROLNET_MODEL = "QWEN\\Qwen-Image-2512-Fun-Controlnet-Union-2602.safetensors"
-DEFAULT_POSE_COPY_OUTPUT = REPO_ROOT / "output/qwen_pose_copy_controlnet_lying_legs_up_purple.png"
-DEFAULT_MAIN_OUTPUT = REPO_ROOT / "output/qwen_multiref_controlnet_resume_lying_legs_up_purple.png"
 
 
 def write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -196,8 +199,8 @@ def write_markdown_report(out_dir: Path, report: dict[str, Any]) -> Path:
         f"- Control strength/start/end: `{args.get('control_strength')}` / `{args.get('control_start')}` / `{args.get('control_end')}`",
         f"- Job ID: `{case.get('job_id') or '-'}`",
         f"- Job status: `{case.get('job_status') or '-'}`",
-        f"- Pose-copy output: `{case.get('pose_copy_output') or ''}`",
-        f"- Main output replaced: `{case.get('main_output_copy') or ''}`",
+        f"- Pose-copy result: `{case.get('pose_copy_output') or ''}`",
+        f"- Legacy main output copy: `{case.get('main_output_copy') or ''}`",
         "",
         "## Routing evidence",
         "",
@@ -249,8 +252,8 @@ def main() -> int:
     parser.add_argument("--api-base-url", default="http://127.0.0.1:11434/v1")
     parser.add_argument("--comfyui-api-url", default="http://127.0.0.1:8189")
     parser.add_argument("--source-image", default=str(DEFAULT_SOURCE))
-    parser.add_argument("--clothes-ref", default=str(DEFAULT_CLOTHES_REF))
-    parser.add_argument("--pose-ref", default=str(DEFAULT_POSE_REF))
+    parser.add_argument("--clothes-ref", required=True)
+    parser.add_argument("--pose-ref", required=True)
     parser.add_argument("--steps", type=int, default=4)
     parser.add_argument("--cfg", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=640768203)
@@ -266,7 +269,7 @@ def main() -> int:
     args = parser.parse_args()
 
     stamp = time.strftime("%Y-%m-%d_%H%M_ai_agent_pose_copy_controlnet")
-    out_dir = Path(args.out_dir or (REPO_ROOT / "docs/AGENTS/reports" / stamp)).resolve()
+    out_dir = Path(args.out_dir).resolve() if args.out_dir else test_artifact_path("reports", stamp).resolve()
     assets_dir = out_dir / "assets"
     results_dir = out_dir / "results"
     assets_dir.mkdir(parents=True, exist_ok=True)
@@ -404,10 +407,8 @@ def main() -> int:
                 preview_path = Path(preview["path"])
                 case["result_image_rel"] = str(preview_path.relative_to(out_dir))
                 case["visual_artifacts"] = detect_visual_artifacts(preview_path)
-                copy_asset(preview_path, DEFAULT_POSE_COPY_OUTPUT)
-                copy_asset(preview_path, DEFAULT_MAIN_OUTPUT)
-                case["pose_copy_output"] = str(DEFAULT_POSE_COPY_OUTPUT)
-                case["main_output_copy"] = str(DEFAULT_MAIN_OUTPUT)
+                case["pose_copy_output"] = str(preview_path)
+                case["main_output_copy"] = ""
                 report["ok"] = str(case["job_status"]).lower() in {"completed", "completed_pending_result"} and not bool(
                     case["visual_artifacts"].get("has_blocking_artifact")
                 )

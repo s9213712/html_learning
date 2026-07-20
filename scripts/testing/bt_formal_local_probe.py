@@ -1842,7 +1842,7 @@ class FormalBTProbe:
             {
                 "ids": [torrent_id],
                 "downloadLimited": True,
-                "downloadLimit": int(self.args.download_limit_kbps),
+                "downloadLimit": int(self.args.download_limit_kib_per_second),
                 "honorsSessionLimits": True,
             },
         )
@@ -1929,7 +1929,7 @@ class FormalBTProbe:
             {
                 "ids": [recovered_torrent_id],
                 "downloadLimited": True,
-                "downloadLimit": int(self.args.download_limit_kbps),
+                "downloadLimit": int(self.args.download_limit_kib_per_second),
                 "honorsSessionLimits": True,
             },
         )
@@ -2299,7 +2299,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-id", default="", help="Optional caller-supplied unique run id")
     parser.add_argument("--timeout-seconds", type=int, default=300, help="Per-download terminal deadline")
     parser.add_argument("--payload-bytes", type=int, default=8 * 1024 * 1024, help="Minimum generated video fixture size")
-    parser.add_argument("--download-limit-kbps", type=int, default=192, help="Magnet download throttle used to expose lifecycle state")
+    parser.add_argument(
+        "--download-limit-kib-per-second",
+        type=int,
+        default=192,
+        help="Magnet download throttle in KiB/s used to expose lifecycle state",
+    )
     parser.add_argument("--pause-after-bytes", type=int, default=256 * 1024, help="Minimum magnet progress before pause")
     parser.add_argument("--pause-observation-seconds", type=float, default=2.0, help="Stopped-state observation window")
     return parser
@@ -2310,8 +2315,8 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         parser.error("--timeout-seconds must be at least 60")
     if args.payload_bytes < 2 * 1024 * 1024:
         parser.error("--payload-bytes must be at least 2 MiB")
-    if not (16 <= args.download_limit_kbps <= 4096):
-        parser.error("--download-limit-kbps must be between 16 and 4096")
+    if not (16 <= args.download_limit_kib_per_second <= 4096):
+        parser.error("--download-limit-kib-per-second must be between 16 and 4096")
     if not (64 * 1024 <= args.pause_after_bytes < args.payload_bytes // 2):
         parser.error("--pause-after-bytes must be at least 64 KiB and below half the payload")
     if not (0.5 <= args.pause_observation_seconds <= 30):

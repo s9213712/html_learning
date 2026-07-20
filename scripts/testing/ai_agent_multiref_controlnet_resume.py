@@ -4,12 +4,20 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import sys
 import time
 from pathlib import Path
 from typing import Any
 
 from PIL import Image
 from playwright.sync_api import sync_playwright
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+sys.dont_write_bytecode = True
+
+from scripts.test_artifacts import test_artifact_path  # noqa: E402
 
 from ai_agent_real_i2i_edit_audit import (
     api_fetch,
@@ -24,10 +32,7 @@ from ai_agent_real_i2i_edit_audit import (
 )
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_SOURCE = REPO_ROOT / "output/qwen_squat_double_v_white_longhair_cat_ears.png"
-DEFAULT_CLOTHES_REF = Path("/mnt/c/share/ComfyUI/output/test/clothes/purple_sheer_lingerie_set.JPG")
-DEFAULT_POSE_REF = Path("/mnt/c/share/ComfyUI/output/test/pose/lying_back_legs_up_pose.JPG")
+DEFAULT_SOURCE = REPO_ROOT / "scripts/testing/fixtures/ai_agent/qwen_squat_double_v_white_longhair_cat_ears.png"
 DEFAULT_CONTROLNET_MODEL = "QWEN\\Qwen-Image-2512-Fun-Controlnet-Union-2602.safetensors"
 
 
@@ -194,7 +199,7 @@ def write_markdown_report(out_dir: Path, report: dict[str, Any]) -> Path:
         f"- Steps/cfg/profile: `{args.get('steps')}` / `{args.get('cfg')}` / `{args.get('qwen_controlnet_profile')}`",
         f"- Job ID: `{case.get('job_id') or '-'}`",
         f"- Job status: `{case.get('job_status') or '-'}`",
-        f"- Result copied to output: `{case.get('output_copy') or ''}`",
+        f"- Result path: `{case.get('output_copy') or ''}`",
         "",
         "## Routing evidence",
         "",
@@ -248,8 +253,8 @@ def main() -> int:
     parser.add_argument("--api-base-url", default="http://127.0.0.1:11434/v1")
     parser.add_argument("--comfyui-api-url", default="http://127.0.0.1:8189")
     parser.add_argument("--source-image", default=str(DEFAULT_SOURCE))
-    parser.add_argument("--clothes-ref", default=str(DEFAULT_CLOTHES_REF))
-    parser.add_argument("--pose-ref", default=str(DEFAULT_POSE_REF))
+    parser.add_argument("--clothes-ref", required=True)
+    parser.add_argument("--pose-ref", required=True)
     parser.add_argument("--steps", type=int, default=28)
     parser.add_argument("--cfg", type=float, default=4.0)
     parser.add_argument("--seed", type=int, default=640768201)
@@ -261,7 +266,7 @@ def main() -> int:
     args = parser.parse_args()
 
     stamp = time.strftime("%Y-%m-%d_%H%M_ai_agent_multiref_controlnet_resume")
-    out_dir = Path(args.out_dir or (REPO_ROOT / "docs/AGENTS/reports" / stamp)).resolve()
+    out_dir = Path(args.out_dir).resolve() if args.out_dir else test_artifact_path("reports", stamp).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     assets_dir = out_dir / "assets"
     results_dir = out_dir / "results"
@@ -395,9 +400,7 @@ def main() -> int:
                 preview_path = Path(preview["path"])
                 case["result_image_rel"] = str(preview_path.relative_to(out_dir))
                 case["visual_artifacts"] = detect_visual_artifacts(preview_path)
-                output_copy = REPO_ROOT / "output/qwen_multiref_controlnet_resume_lying_legs_up_purple.png"
-                copy_asset(preview_path, output_copy)
-                case["output_copy"] = str(output_copy)
+                case["output_copy"] = str(preview_path)
                 report["ok"] = str(case["job_status"]).lower() in {"completed", "completed_pending_result"} and not bool(
                     case["visual_artifacts"].get("has_blocking_artifact")
                 )

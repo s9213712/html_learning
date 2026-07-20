@@ -5,6 +5,7 @@ from __future__ import annotations
 import pathlib
 import sys
 
+sys.dont_write_bytecode = True
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:

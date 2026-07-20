@@ -1,6 +1,19 @@
 # Update Summary
 
-Release ID: `05_2026.07.15-001`
+Release ID: `05_2026.07.20-001`
+
+## 05_2026.07.20-001
+
+- Removed generated image trees from `output/` and `public/generated/`, plus
+  residual game evidence `_runtime` reports. Added ignore and pre-push guards
+  for generated roots, SQLite sidecars, runtime keys, and nested evidence
+  runtime paths.
+- Moved the one reusable AI image-edit input into an explicit test fixture and
+  redirected AI Agent probe reports/results to the external test-artifact root.
+  Isolated test and development copies now exclude generated public images.
+- Prevented Python entrypoints and hooks from creating bytecode in source,
+  moved CI secret reports to `/tmp`, and corrected the BTC bridge root/runtime
+  fallback so standalone use writes to external XDG state.
 
 ## 05_2026.07.15-001
 

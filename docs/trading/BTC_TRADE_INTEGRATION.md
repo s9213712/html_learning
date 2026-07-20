@@ -38,6 +38,10 @@ PYTHONPATH=. python3 scripts/trading/bridges/btc_signal_bridge.py \
   --status
 ```
 
+hackme_web 的 bridge 狀態、資料庫與 chain seed 寫入
+`HACKME_RUNTIME_DIR`；未設定時使用外部 XDG state 目錄
+（通常為 `~/.local/state/hackme_web`），不會寫入 source checkout。
+
 乾跑 bridge，不下單：
 
 ```bash

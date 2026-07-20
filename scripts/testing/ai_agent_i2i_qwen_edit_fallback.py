@@ -4,12 +4,20 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import sys
 import time
 from pathlib import Path
 from typing import Any
 
 from PIL import Image
 from playwright.sync_api import sync_playwright
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+sys.dont_write_bytecode = True
+
+from scripts.test_artifacts import test_artifact_path  # noqa: E402
 
 from ai_agent_real_i2i_edit_audit import (
     ai_agent_preflight,
@@ -25,13 +33,7 @@ from ai_agent_real_i2i_edit_audit import (
 )
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_SOURCE = REPO_ROOT / "output/qwen_squat_double_v_white_longhair_cat_ears.png"
-DEFAULT_CLOTHES_REF = Path("/mnt/c/share/ComfyUI/output/test/clothes/purple_sheer_lingerie_set.JPG")
-DEFAULT_POSE_REF = Path("/mnt/c/share/ComfyUI/output/test/pose/lying_back_legs_up_pose.JPG")
-DEFAULT_CONTROLNET_RESULT = REPO_ROOT / "output/qwen_multiref_controlnet_resume_lying_legs_up_purple.png"
-DEFAULT_FALLBACK_OUTPUT = REPO_ROOT / "output/qwen_edit_fallback_lying_legs_up_purple.png"
-DEFAULT_POSE_CLEANUP_OUTPUT = REPO_ROOT / "output/qwen_pose_copy_cleaned_lying_legs_up_purple.png"
+DEFAULT_SOURCE = REPO_ROOT / "scripts/testing/fixtures/ai_agent/qwen_squat_double_v_white_longhair_cat_ears.png"
 
 
 def write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -189,8 +191,8 @@ def write_markdown_report(out_dir: Path, report: dict[str, Any]) -> Path:
         f"- Steps/cfg/profile: `{args.get('steps')}` / `{args.get('cfg')}` / `{args.get('qwen_edit_profile')}`",
         f"- Job ID: `{case.get('job_id') or '-'}`",
         f"- Job status: `{case.get('job_status') or '-'}`",
-        f"- Fallback output: `{case.get('fallback_output_copy') or ''}`",
-        f"- Replaced interrupted output: `{case.get('replaced_controlnet_output') or ''}`",
+        f"- Result path: `{case.get('fallback_output_copy') or ''}`",
+        f"- Legacy interrupted-output replacement: `{case.get('replaced_controlnet_output') or ''}`",
         "",
         "## ControlNet failure carried forward",
         "",
@@ -248,8 +250,13 @@ def main() -> int:
     parser.add_argument("--api-base-url", default="http://127.0.0.1:11434/v1")
     parser.add_argument("--comfyui-api-url", default="http://127.0.0.1:8189")
     parser.add_argument("--source-image", default=str(DEFAULT_SOURCE))
-    parser.add_argument("--clothes-ref", default=str(DEFAULT_CLOTHES_REF))
-    parser.add_argument("--pose-ref", default=str(DEFAULT_POSE_REF))
+    parser.add_argument("--clothes-ref", required=True)
+    parser.add_argument("--pose-ref", required=True)
+    parser.add_argument(
+        "--controlnet-result",
+        default="",
+        help="Optional prior ControlNet result to preserve with the report.",
+    )
     parser.add_argument("--steps", type=int, default=4)
     parser.add_argument("--cfg", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=640768202)
@@ -262,7 +269,7 @@ def main() -> int:
     args = parser.parse_args()
 
     stamp = time.strftime("%Y-%m-%d_%H%M_ai_agent_qwen_edit_i2i_fallback")
-    out_dir = Path(args.out_dir or (REPO_ROOT / "docs/AGENTS/reports" / stamp)).resolve()
+    out_dir = Path(args.out_dir).resolve() if args.out_dir else test_artifact_path("reports", stamp).resolve()
     assets_dir = out_dir / "assets"
     results_dir = out_dir / "results"
     assets_dir.mkdir(parents=True, exist_ok=True)
@@ -294,9 +301,10 @@ def main() -> int:
             "pose": image_summary(pose_path),
         },
     }
-    if DEFAULT_CONTROLNET_RESULT.is_file():
+    controlnet_result = Path(args.controlnet_result).expanduser().resolve() if args.controlnet_result else None
+    if controlnet_result and controlnet_result.is_file():
         report["controlnet_failed_pose_output"] = copy_asset(
-            DEFAULT_CONTROLNET_RESULT,
+            controlnet_result,
             results_dir / "controlnet_failed_pose_output.png",
         )
     write_json(out_dir / "report.json", report)
@@ -398,15 +406,10 @@ def main() -> int:
                 preview_path = Path(preview["path"])
                 case["result_image_rel"] = str(preview_path.relative_to(out_dir))
                 case["visual_artifacts"] = detect_visual_artifacts(preview_path)
-                fallback_output = DEFAULT_FALLBACK_OUTPUT
-                replaced_output = DEFAULT_CONTROLNET_RESULT
-                copy_asset(preview_path, fallback_output)
-                copy_asset(preview_path, replaced_output)
-                case["fallback_output_copy"] = str(fallback_output)
-                case["replaced_controlnet_output"] = str(replaced_output)
+                case["fallback_output_copy"] = str(preview_path)
+                case["replaced_controlnet_output"] = ""
                 if args.cleanup_pose_guides:
-                    copy_asset(preview_path, DEFAULT_POSE_CLEANUP_OUTPUT)
-                    case["pose_cleanup_output_copy"] = str(DEFAULT_POSE_CLEANUP_OUTPUT)
+                    case["pose_cleanup_output_copy"] = str(preview_path)
                 report["ok"] = str(case["job_status"]).lower() in {"completed", "completed_pending_result"} and not bool(
                     case["visual_artifacts"].get("has_blocking_artifact")
                 )

@@ -41,6 +41,7 @@ tar -C "$SOURCE_ROOT" \
   --exclude='./runtime' \
   --exclude='./docs/AGENTS/reports' \
   --exclude='./output' \
+  --exclude='./public/generated' \
   --exclude='./playwright-report' \
   --exclude='./test-results' \
   --exclude='*/.pytest_cache' \
@@ -70,7 +71,11 @@ echo "[pytest-in-tmp] exit code: $status"
 
 if [[ "$status" == "0" && "$KEEP_TMP" != "1" && "$AUTO_RUN_ROOT" == "1" ]]; then
   echo "[pytest-in-tmp] cleanup:   removing $RUN_ROOT"
-  rm -rf "$RUN_ROOT"
+  # Formal campaign tests deliberately seal evidence read-only. Restore only
+  # this wrapper-owned temporary tree before deleting it so a green pytest run
+  # cannot be turned into a false failure by cleanup permissions.
+  find "$RUN_ROOT" -depth ! -type l -exec chmod u+rwX -- {} + 2>/dev/null || true
+  rm -rf -- "$RUN_ROOT"
 elif [[ "$status" == "0" && "$AUTO_RUN_ROOT" != "1" ]]; then
   echo "[pytest-in-tmp] kept caller-selected tmp root: $COPY_ROOT"
 else

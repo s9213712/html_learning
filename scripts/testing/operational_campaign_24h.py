@@ -4240,7 +4240,7 @@ class Campaign:
                     "--runtime-root", str(bt_runtime_parent),
                     "--timeout-seconds", "600",
                     "--payload-bytes", str(8 * 1024 * 1024),
-                    "--download-limit-kbps", "192",
+                    "--download-limit-kib-per-second", "192",
                     "--pause-after-bytes", str(256 * 1024),
                     "--pause-observation-seconds", "2",
                 ],

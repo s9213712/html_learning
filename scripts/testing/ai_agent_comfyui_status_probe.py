@@ -3,12 +3,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import time
 import urllib.request
 from pathlib import Path
 from typing import Any
 
 from playwright.sync_api import sync_playwright
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+sys.dont_write_bytecode = True
+
+from scripts.test_artifacts import test_artifact_path  # noqa: E402
 
 from ai_agent_real_i2i_edit_audit import (
     ai_agent_preflight,
@@ -104,7 +112,11 @@ def main() -> int:
     args = parser.parse_args()
 
     stamp = time.strftime("%Y%m%d_%H%M%S")
-    out_dir = Path(args.out_dir or f"docs/AGENTS/reports/{stamp}_ai_agent_comfyui_status_probe").resolve()
+    out_dir = (
+        Path(args.out_dir).resolve()
+        if args.out_dir
+        else test_artifact_path("reports", f"{stamp}_ai_agent_comfyui_status_probe").resolve()
+    )
     report: dict[str, Any] = {
         "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "base_url": args.base_url.rstrip("/"),

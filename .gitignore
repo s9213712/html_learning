@@ -1,9 +1,20 @@
 __pycache__/
 *.pyc
+*.db-wal
+*.db-shm
+*.db-journal
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
+*.sqlite3-wal
+*.sqlite3-shm
+*.sqlite3-journal
 .pytest_cache/
 .venv/
 /cache/
 /storage/
+/output/
+/public/generated/
 test_backtest_full.py
 /runtime/
 # Generated QA, stress, and security probe outputs. Keep durable conclusions in
@@ -14,6 +25,8 @@ test_backtest_full.py
 
 *.log
 *.json
+!scripts/comfyui/generation_probe_config.example.json
+!tests/contracts/api_contract_snapshot.json
 !scripts/testing/schemas/audit_evidence_triad.schema.json
 !services/games/models/
 !services/games/models/*.json
@@ -49,9 +62,7 @@ public/data/workflow_template_benchmarks_*.json
 !docs/games/evidence/**/
 !docs/games/evidence/**/*.json
 !docs/games/evidence/**/*.jsonl
-docs/games/evidence/**/_runtime/**/*.db
-docs/games/evidence/**/_runtime/**/*.sqlite
-docs/games/evidence/**/_runtime/**/*.sqlite3
+docs/games/evidence/**/_runtime/
 !docs/games/experiments/
 !docs/games/experiments/**/
 !docs/games/experiments/**/*.md

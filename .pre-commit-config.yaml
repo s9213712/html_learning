@@ -5,9 +5,9 @@ repos:
         name: gitleaks secrets scan
         language: system
         pass_filenames: false
-        entry: python3 -m scripts.prepush.checks.secrets_check --mode quick --strict
+        entry: env PYTHONDONTWRITEBYTECODE=1 python3 -m scripts.prepush.checks.secrets_check --mode quick --strict
       - id: plaintext-secrets-scan
         name: plaintext secrets scan
         language: system
         pass_filenames: false
-        entry: python3 scripts/security/gate/scan_plaintext_secrets.py --fail-on high
+        entry: env PYTHONDONTWRITEBYTECODE=1 python3 scripts/security/gate/scan_plaintext_secrets.py --fail-on high

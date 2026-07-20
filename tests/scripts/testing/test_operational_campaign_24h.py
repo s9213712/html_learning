@@ -3075,6 +3075,7 @@ def test_h24_sealed_triad_requires_writer_seal_and_indexes_all_targets(
             suffix=suffix,
             monkeypatch=monkeypatch,
         )
+    monkeypatch.setattr(campaign, "_runtime_writer_pids", lambda _root: [])
     stops = _valid_final_log_seal_stops(campaign)
 
     result = campaign.capture_final_audit_evidence(stops)
@@ -3190,6 +3191,7 @@ def test_h24_manifest_rehashes_index_after_fail_closed_manifest_error(
         return original(path)
 
     monkeypatch.setattr(campaign, "_stream_file_metadata", fail_schema_during_manifest)
+    monkeypatch.setattr(campaign, "_runtime_writer_pids", lambda _root: [])
 
     result = campaign.capture_final_audit_evidence(
         _valid_final_log_seal_stops(campaign)
@@ -3227,6 +3229,7 @@ def test_h24_cross_source_integrity_failure_is_classified_as_product(
         campaign_module.json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+    monkeypatch.setattr(campaign, "_runtime_writer_pids", lambda _root: [])
 
     result = campaign.capture_final_audit_evidence(
         _valid_final_log_seal_stops(campaign)

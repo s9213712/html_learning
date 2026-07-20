@@ -83,13 +83,16 @@ Only truly shared cross-domain templates should live outside subsystem folders.
 
 ## Runtime Artifact Rule
 
-Scripts may write to:
+Operational scripts may write to the configured external runtime root:
 
 - `runtime/reports/...`
 - `runtime/logs/...`
 - other explicit runtime-only paths
 
-Scripts must not write reports back into the repository tree.
+Test and QA scripts must use `HACKME_TEST_OUTPUT_ROOT` or
+`/tmp/hackme_web_test_artifacts`.
+
+Scripts must not write reports or runtime data back into the source checkout.
 
 Legacy paths like `security/reports/` are forbidden.
 
