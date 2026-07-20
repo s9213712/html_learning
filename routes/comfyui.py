@@ -3034,6 +3034,18 @@ def register_comfyui_routes(app, deps):
             int(image_count or 0) > 0
             and (_coerce_bool(params.get("agent_review_required")) or semantic_edit)
         )
+        preservation_checks = []
+        if semantic_edit:
+            # Make the preservation obligation explicit for the vision reviewer.
+            # These are advisory contract fields; the reviewer still owns the
+            # visual judgement and can report a hard failure when a gate is lost.
+            preservation_checks.extend(["requested_edit_applied", "unrequested_content_preserved"])
+            if params.get("source_image_ref"):
+                preservation_checks.append("source_identity_and_composition_preserved")
+            if mode in {"inpaint", "outpaint"}:
+                preservation_checks.append("edit_boundary_respected")
+            if params.get("reference_image_ref"):
+                preservation_checks.append("reference_used_only_for_requested_attributes")
         review_context = {
             "agent_review_required": review_required,
             "agent_review_mode": str(params.get("agent_review_mode") or "vision_iterative_gate")[:80],
@@ -3059,6 +3071,9 @@ def register_comfyui_routes(app, deps):
             "source_image_ref": _bounded_json_clone(params.get("source_image_ref"), max_chars=3000),
             "reference_image_ref": _bounded_json_clone(params.get("reference_image_ref"), max_chars=3000),
             "control_image_ref": _bounded_json_clone(control_image_ref, max_chars=3000),
+            "semantic_edit": semantic_edit,
+            "preservation_checks": preservation_checks,
+            "preservation_failure_policy": "hard_fail",
         }
         return {
             "delivery_status": "review_required" if review_required else "ready",
