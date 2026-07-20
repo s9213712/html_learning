@@ -4023,6 +4023,41 @@ def register_video_routes(app, deps):
         finally:
             conn.close()
 
+    @app.route("/api/videos/<int:video_id>/hls/status", methods=["GET"])
+    @require_csrf_safe
+    def video_hls_status(video_id):
+        """Return owner-scoped HLS readiness without probing a playlist URL."""
+        actor = get_current_user_ctx()
+        conn = get_db()
+        try:
+            ensure_media_stream_schema(conn)
+            video = get_video(conn, video_id, actor=actor, for_stream=True)
+            if not video:
+                return json_resp({"ok": False, "msg": "找不到影片", "error": "not_found"}), 404
+            file_id = str(video["cloud_file_id"])
+            row = _load_stream_file(conn, file_id=file_id)
+            asset = get_stream_status(conn, file_row=row, include_segments=False) or {}
+            job = get_platform_job_by_source(conn, "media_hls_prepare", _hls_job_source_ref(file_id))
+            return json_resp({
+                "ok": True,
+                "video_id": int(video_id),
+                "ready": bool(asset.get("status") == "ready" and asset.get("master_manifest_path")),
+                "asset": asset,
+                "hls_job": ({
+                    "job_uuid": job.get("job_uuid"),
+                    "status": job.get("status"),
+                    "progress_percent": job.get("progress_percent", 0),
+                    "stage": job.get("stage") or "queued",
+                } if job else None),
+                "retry_after_seconds": 5,
+            })
+        except PermissionError as exc:
+            return _error_response(exc)
+        except ValueError as exc:
+            return _error_response(exc)
+        finally:
+            conn.close()
+
     @app.route("/api/videos/<int:video_id>/hls/<variant>/playlist.m3u8", methods=["GET"])
     @require_csrf_safe
     def video_hls_variant_playlist(video_id, variant):
