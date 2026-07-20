@@ -2839,6 +2839,26 @@ def test_comfyui_i2i_result_requires_persisted_semantic_review(tmp_path):
     assert job["result"]["review_contract"]["agent_review_strategy"] == "pairwise_reference_merge"
     assert job["result"]["review_contract"]["agent_review_plan"] == "source -> clothes -> vision gate"
 
+    rejected = client.post(
+        f"/api/comfyui/jobs/{job_id}/review",
+        json={
+            "pass": True,
+            "score": 0.99,
+            "hard_fail": False,
+            "issues": [],
+            "passed_gates": ["outfit", "identity"],
+            "failed_gates": [],
+            "source": "ai_agent_vision_client",
+        },
+    )
+    assert rejected.status_code == 200, rejected.get_json()
+    assert rejected.get_json()["review"]["pass"] is False
+    assert rejected.get_json()["review"]["hard_fail"] is True
+    assert any(
+        gate.startswith("preservation:")
+        for gate in rejected.get_json()["review"]["failed_gates"]
+    )
+
     reviewed = client.post(
         f"/api/comfyui/jobs/{job_id}/review",
         json={
