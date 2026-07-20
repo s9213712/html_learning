@@ -20,10 +20,12 @@ from scripts.testing.operational_soak_probe import (
     main as operational_soak_main,
     measured_active_workers,
     normalized_32_throughput,
+    login_with_setup_backoff,
     request_command_stop,
     round_rotation_offset,
     sanitized_command,
     start_command,
+    setup_request_with_backoff,
     stop_control_reason,
     validate_run_policy,
 )
@@ -38,6 +40,46 @@ from scripts.testing.system_stress_probe import (
     rotation_operation_account,
     run_operation,
 )
+
+
+def test_setup_login_retries_controlled_rate_limit(monkeypatch):
+    class FakeClient:
+        def __init__(self):
+            self.results = [
+                {"ok": False, "status": 429, "retry_after_seconds": 2.0},
+                {"ok": True, "status": 200},
+            ]
+
+        def login(self):
+            return dict(self.results.pop(0))
+
+    waits = []
+    monkeypatch.setattr("scripts.testing.operational_soak_probe.time.sleep", waits.append)
+    result = login_with_setup_backoff(FakeClient(), attempts=3)
+
+    assert result["ok"] is True
+    assert result["attempts"] == 2
+    assert result["setup_retry_wait_seconds"] == 2.0
+    assert waits == [2.0]
+
+
+def test_setup_request_does_not_retry_permission_denial(monkeypatch):
+    class FakeClient:
+        calls = 0
+
+        def request(self, method, path, *, json_body=None):
+            self.calls += 1
+            return {"ok": False, "status": 403}
+
+    waits = []
+    client = FakeClient()
+    monkeypatch.setattr("scripts.testing.operational_soak_probe.time.sleep", waits.append)
+    result = setup_request_with_backoff(client, "POST", "/api/admin/users", attempts=8)
+
+    assert result["status"] == 403
+    assert result["attempts"] == 1
+    assert client.calls == 1
+    assert waits == []
 
 
 def test_native_worker_telemetry_does_not_treat_idle_executor_capacity_as_active():

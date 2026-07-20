@@ -110,6 +110,8 @@ MINIMUM_TARGET_LOAD_COVERAGE = float(
 SYSTEM_STRESS_NON_WORKER_THREADS = 3
 CORE_ACTIVATION_MAX_FUTURE_SECONDS = 30.0
 CORE_ACTIVATION_LATE_TOLERANCE_SECONDS = 0.25
+SETUP_RETRY_ATTEMPTS = 8
+SETUP_RETRY_MAX_SECONDS = 30.0
 
 
 class CoreActivationStopped(RuntimeError):
@@ -602,12 +604,18 @@ class ApiClient:
             payload = {"raw": response.text[:500]}
         if not isinstance(payload, dict):
             payload = {"body": payload}
+        retry_after_raw = response.headers.get("Retry-After") or payload.get("retry_after_seconds")
+        try:
+            retry_after_seconds = max(0.0, float(retry_after_raw or 0.0))
+        except (TypeError, ValueError):
+            retry_after_seconds = 0.0
         return {
             "ok": 200 <= response.status_code < 300 and payload.get("ok") is not False,
             "status": int(response.status_code),
             "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
             "body": payload,
             "backpressure_rejected": response.headers.get("X-Hackme-Backpressure-Rejected") == "1",
+            "retry_after_seconds": retry_after_seconds,
         }
 
     def request(self, method: str, path: str, *, json_body: dict | None = None) -> dict[str, Any]:
@@ -654,6 +662,61 @@ class ApiClient:
                     "error": f"{exc.__class__.__name__}: {str(exc)[:400]}",
                     "body": {},
                 }
+
+
+def _setup_retry_delay(result: dict[str, Any], attempt: int) -> float | None:
+    status = int(result.get("status") or 0)
+    controlled = status == 429 or (
+        status == 503 and bool(result.get("backpressure_rejected"))
+    )
+    if not controlled:
+        return None
+    advertised = float(result.get("retry_after_seconds") or 0.0)
+    exponential = min(SETUP_RETRY_MAX_SECONDS, float(2 ** max(0, attempt - 1)))
+    return min(SETUP_RETRY_MAX_SECONDS, max(1.0, advertised, exponential))
+
+
+def login_with_setup_backoff(
+    client: ApiClient,
+    *,
+    attempts: int = SETUP_RETRY_ATTEMPTS,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {"ok": False, "status": 0}
+    total_wait = 0.0
+    for attempt in range(1, max(1, int(attempts)) + 1):
+        result = client.login()
+        result["attempts"] = attempt
+        result["setup_retry_wait_seconds"] = round(total_wait, 3)
+        if result.get("ok") is True:
+            return result
+        delay = _setup_retry_delay(result, attempt)
+        if delay is None or attempt >= attempts:
+            return result
+        time.sleep(delay)
+        total_wait += delay
+    return result
+
+
+def setup_request_with_backoff(
+    client: ApiClient,
+    method: str,
+    path: str,
+    *,
+    json_body: dict | None = None,
+    attempts: int = SETUP_RETRY_ATTEMPTS,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {"ok": False, "status": 0}
+    total_wait = 0.0
+    for attempt in range(1, max(1, int(attempts)) + 1):
+        result = client.request(method, path, json_body=json_body)
+        result["attempts"] = attempt
+        result["setup_retry_wait_seconds"] = round(total_wait, 3)
+        delay = _setup_retry_delay(result, attempt)
+        if delay is None or attempt >= attempts:
+            return result
+        time.sleep(delay)
+        total_wait += delay
+    return result
 
 
 class SentinelStats:
@@ -760,10 +823,15 @@ def provision_accounts(root: ApiClient, *, prefix: str, count: int, password: st
     accounts: list[tuple[str, str]] = []
     for index in range(1, max(1, int(count)) + 1):
         username = f"{prefix}{index:02d}"
-        search = root.request("GET", f"/api/admin/users?q={username}&page_size=100")
+        search = setup_request_with_backoff(
+            root,
+            "GET",
+            f"/api/admin/users?q={username}&page_size=100",
+        )
         users = (search.get("body") or {}).get("users") or []
         if not any(str(item.get("username") or "") == username for item in users):
-            created = root.request(
+            created = setup_request_with_backoff(
+                root,
                 "POST",
                 "/api/admin/users",
                 json_body={
@@ -779,7 +847,7 @@ def provision_accounts(root: ApiClient, *, prefix: str, count: int, password: st
             if int(created.get("status") or 0) not in {200, 201, 409}:
                 raise RuntimeError(f"failed to provision {username}: {created}")
         probe = ApiClient(root.base_url, username, password)
-        login = probe.login()
+        login = login_with_setup_backoff(probe)
         if not login.get("ok"):
             raise RuntimeError(f"provisioned account cannot login: {username}: {login}")
         accounts.append((username, password))
@@ -1413,8 +1481,8 @@ def main() -> int:
 
     root = ApiClient(args.base_url, args.root_username, args.root_password)
     manager = ApiClient(args.base_url, args.manager_username, args.manager_password)
-    root_login = root.login()
-    manager_login = manager.login()
+    root_login = login_with_setup_backoff(root)
+    manager_login = login_with_setup_backoff(manager)
     if not root_login.get("ok") or not manager_login.get("ok"):
         payload = {
             "schema_version": OPERATIONAL_SOAK_REPORT_SCHEMA_VERSION,
