@@ -70,6 +70,10 @@ def test_ai_agent_explicit_readonly_guard_executes_semantics_without_skipping_pr
               "aiAgentUserTextIsNonExecutingContext",
               "aiAgentUserTextHasAffirmativeWriteAfterNegation",
             );
+            const aiAgentUserTextExplicitlyRequestsComfyuiStatus = load(
+              "aiAgentUserTextExplicitlyRequestsComfyuiStatus",
+              "aiAgentUserTextExplicitlyRequestsReadonly",
+            );
             const aiAgentUserTextExplicitlyRequestsReadonly = load(
               "aiAgentUserTextExplicitlyRequestsReadonly",
               "aiAgentUserTextExplicitlyRequestsWrite",
@@ -80,7 +84,7 @@ def test_ai_agent_explicit_readonly_guard_executes_semantics_without_skipping_pr
             );
             const aiAgentUserTextNegatesWrite = load(
               "aiAgentUserTextNegatesWrite",
-              "aiAgentUserTextExplicitlyRequestsReadonly",
+              "aiAgentUserTextExplicitlyRequestsComfyuiStatus",
             );
             const aiAgentDeterministicToolPlan = load(
               "aiAgentDeterministicToolPlan",
@@ -139,6 +143,21 @@ def test_ai_agent_explicit_readonly_guard_executes_semantics_without_skipping_pr
               true,
               "safety-boundary bypass text must never gain write intent",
             );
+            const comfyuiStatusQuestion = "目前 ComfyUI 是否還在生圖？請查站內可見狀態與進度；若有 job，請告訴我是 running、pending 或卡住。";
+            assert.equal(
+              aiAgentUserTextExplicitlyRequestsComfyuiStatus(comfyuiStatusQuestion),
+              true,
+              "an ongoing ComfyUI status question must be classified as read-only",
+            );
+            assert.equal(
+              aiAgentUserTextExplicitlyRequestsComfyuiStatus("請用本站 ComfyUI 產生一張夜景圖片並送出"),
+              false,
+              "an explicit generation request must remain a write request",
+            );
+            const localComfyuiStatusPlan = aiAgentDeterministicToolPlan(comfyuiStatusQuestion, {}, null);
+            assert.equal(localComfyuiStatusPlan.action, "readonly");
+            assert.equal(localComfyuiStatusPlan.readonly_scope, "comfyui");
+            assert.equal(localComfyuiStatusPlan.execute_write, false);
 
             let providerCalls = 0;
             function aiAgentShouldUseToolPlanner() { return true; }
@@ -181,6 +200,17 @@ def test_ai_agent_explicit_readonly_guard_executes_semantics_without_skipping_pr
               assert.equal(plan.planner_strategy, "local_readonly_guard");
               assert.equal(plan.repaired_from_action, "write_tool");
               assert.equal(plan.repaired_from_tool, "write_server_restart");
+
+              const comfyuiPlan = await aiAgentPlanToolAction(
+                comfyuiStatusQuestion,
+                {mode: "text", hasImage: false},
+              );
+              assert.equal(providerCalls, 2, "ComfyUI status guard must preserve the provider path");
+              assert.equal(comfyuiPlan.action, "readonly");
+              assert.equal(comfyuiPlan.readonly_scope, "comfyui");
+              assert.equal(comfyuiPlan.execute_write, false);
+              assert.equal(comfyuiPlan.repaired_from_action, "write_tool");
+              assert.equal(comfyuiPlan.repaired_from_tool, "write_server_restart");
             })().catch((error) => {
               console.error(error);
               process.exitCode = 1;

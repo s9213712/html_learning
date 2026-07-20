@@ -2584,9 +2584,24 @@ function aiAgentUserTextNegatesWrite(userText = "") {
   return negatedWrite && !aiAgentUserTextHasAffirmativeWriteAfterNegation(raw);
 }
 
+function aiAgentUserTextExplicitlyRequestsComfyuiStatus(userText = "") {
+  const raw = String(userText || "").trim().toLowerCase();
+  if (!raw) return false;
+  const comfyuiContext = /comfy\s*ui|comfyui|生圖|產圖|生成圖片|圖像生成|image\s+generation|image\s+job/i;
+  const statusIntent = /(?:目前|現在|當前|是否|有沒有|還在|正在).{0,32}(?:生圖|產圖|生成|執行|跑|處理)|(?:狀態|進度|佇列|隊列|排隊|卡住|完成了嗎|好了嗎)|\b(?:status|progress|queue|queued|pending|running|stuck|still\s+generating|in\s+progress)\b/i;
+  if (!comfyuiContext.test(raw) || !statusIntent.test(raw)) return false;
+
+  // A status sentence often contains the noun/ongoing form "生圖".  Do not
+  // mistake that for consent to create a new job.  Only a separate, explicit
+  // create/rerun imperative turns a mixed sentence back into a write request.
+  const explicitGeneration = /(?:請|幫我|麻煩|立即|直接)(?:真的)?(?:用(?:本站)?\s*comfy\s*ui)?\s*(?:生圖|產圖|生成(?:一張|圖片)|產生一張)|(?:開始|建立|新增|送出|提交).{0,24}(?:生圖|產圖|生成|job|任務)|(?:再生圖|重跑|重新生成|重新產圖)|\b(?:generate|create|submit|rerun|retry)\b.{0,24}\b(?:image|generation|job)\b/i;
+  return !explicitGeneration.test(raw);
+}
+
 function aiAgentUserTextExplicitlyRequestsReadonly(userText = "") {
   const raw = String(userText || "").trim().toLowerCase();
   if (!raw) return false;
+  if (aiAgentUserTextExplicitlyRequestsComfyuiStatus(raw)) return true;
   const readonlyIntent = /唯讀|只讀|read[ -]?only|僅(?:查詢|查看|讀取|檢視)|只(?:要|需|需要)?(?:查詢|查看|讀取|檢視|確認|判斷)|(?:請|幫我|麻煩)?(?:實際)?查詢|不要(?:執行|修改|寫入|切換)/i;
   if (!readonlyIntent.test(raw)) return false;
   const writeAction = "(?:執行|送出|建立|新增|修改|更新|切換|上線|啟動|停止|重啟|下單|掛單|轉帳|匯款|下載|刪除|移除|發布|發佈|審核|獎勵|懲處|回測|生圖|產圖)";
@@ -2875,12 +2890,13 @@ function aiAgentDeterministicToolPlan(userText = "", context = {}, error = null)
   const raw = String(userText || "");
   if (aiAgentUserTextExplicitlyRequestsReadonly(raw)) {
     const serverScope = /伺服器|server|上線|launch|production|安全|security|audit/i.test(raw);
+    const comfyuiScope = aiAgentUserTextExplicitlyRequestsComfyuiStatus(raw);
     return {
       action: "readonly",
       confidence: 0.96,
       reason: "Local verifier preserved the user's explicit read-only request and blocked write-tool promotion.",
       question: null,
-      readonly_scope: serverScope ? "server_mode" : "all",
+      readonly_scope: comfyuiScope ? "comfyui" : (serverScope ? "server_mode" : "all"),
       merge_strategy: null,
       execute_write: false,
       tool: "",

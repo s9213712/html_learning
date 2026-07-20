@@ -6,6 +6,7 @@ import json
 import sys
 import time
 import urllib.request
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +19,7 @@ sys.dont_write_bytecode = True
 
 from scripts.test_artifacts import test_artifact_path  # noqa: E402
 
-from ai_agent_real_i2i_edit_audit import (
+from scripts.testing.ai_agent_real_i2i_edit_audit import (
     ai_agent_preflight,
     api_fetch,
     ensure_live_ai_agent_settings,
@@ -36,6 +37,58 @@ def fetch_url_json(url: str, *, timeout: float = 10.0) -> dict[str, Any]:
             return json.loads(res.read().decode("utf-8", errors="replace") or "{}")
     except Exception as exc:
         return {"ok": False, "error": str(exc), "url": url}
+
+
+def chat_response_message(response: Any) -> str:
+    """Return a printable message for both success and error response shapes."""
+
+    if not isinstance(response, Mapping):
+        return ""
+    message = response.get("message")
+    if isinstance(message, Mapping):
+        content = message.get("content")
+        if content is not None:
+            return str(content)
+    elif message is not None:
+        return str(message)
+    fallback = response.get("msg")
+    return "" if fallback is None else str(fallback)
+
+
+def chat_event_succeeded(event: Any) -> bool:
+    """Reject transport errors and application-level error payloads."""
+
+    if not isinstance(event, Mapping):
+        return False
+    try:
+        status = int(event.get("status") or 0)
+    except (TypeError, ValueError):
+        return False
+    response = event.get("response")
+    if not isinstance(response, Mapping):
+        return False
+    return (
+        200 <= status < 300
+        and response.get("ok") is not False
+        and not str(response.get("error") or "").strip()
+    )
+
+
+def probe_succeeded(report: Any) -> bool:
+    """Require a terminal successful chat response, not merely a UI click."""
+
+    if not isinstance(report, Mapping):
+        return False
+    send_result = report.get("send_result")
+    events = report.get("chat_events")
+    return bool(
+        isinstance(send_result, Mapping)
+        and send_result.get("ok") is True
+        and report.get("send_disabled_after") is False
+        and isinstance(events, list)
+        and events
+        and all(chat_event_succeeded(event) for event in events)
+    )
 
 
 def write_report(report: dict[str, Any], out_dir: Path) -> None:
@@ -65,8 +118,9 @@ def write_report(report: dict[str, Any], out_dir: Path) -> None:
         "",
     ]
     for event in report.get("chat_events", []):
-        usage = (event.get("response") or {}).get("usage") or {}
-        message = ((event.get("response") or {}).get("message") or {}).get("content") or (event.get("response") or {}).get("msg") or ""
+        response = event.get("response")
+        usage = response.get("usage") or {} if isinstance(response, Mapping) else {}
+        message = chat_response_message(response)
         lines.extend([
             f"- HTTP `{event.get('status')}`, elapsed `{event.get('elapsed_seconds')}` sec, usage `{json.dumps(usage, ensure_ascii=False)}`",
             "",
@@ -186,7 +240,7 @@ def main() -> int:
         report["send_disabled_after"] = page.locator("#ai-agent-send-btn").is_disabled()
         report["readonly_comfyui_after"] = api_fetch(page, "GET", "/api/ai-agent/readonly?scope=comfyui&limit=20").get("body")
         report["comfyui_queue"] = fetch_url_json(args.comfyui_api_url.rstrip("/") + "/queue")
-        report["status"] = "ok" if report["send_result"].get("ok") and not report["send_disabled_after"] else "needs_review"
+        report["status"] = "ok" if probe_succeeded(report) else "needs_review"
         browser.close()
 
     write_report(report, out_dir)
