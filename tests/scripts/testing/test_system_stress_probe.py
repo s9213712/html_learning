@@ -5,7 +5,11 @@ import threading
 import time
 from pathlib import Path
 
-from scripts.testing.points_chain_destructive_stress import chain_seed_path, ensure_official_hot_wallet
+from scripts.testing.points_chain_destructive_stress import (
+    chain_seed_path,
+    create_or_get_user,
+    ensure_official_hot_wallet,
+)
 from scripts.testing.operational_soak_probe import (
     ApiClient,
     FORMAL_RAMP_LEVELS,
@@ -1006,6 +1010,29 @@ def test_points_chain_fixture_onboarding_retries_controlled_server_busy(monkeypa
 
     assert ensure_official_hot_wallet(client) == "pc0stress"
     assert client.calls == 4
+
+
+def test_points_chain_user_provisioning_retries_management_rate_limit(monkeypatch):
+    class Client:
+        def __init__(self):
+            self.responses = [
+                {"status": 429, "error": "edge_rate_limited", "retry_after_seconds": 3},
+                {"status": 200, "users": []},
+                {"status": 429, "error": "edge_rate_limited", "retry_after_seconds": 2},
+                {"status": 200, "ok": True},
+                {"status": 200, "users": [{"id": 42, "username": "stress-user"}]},
+            ]
+
+        def request(self, _method, _path, **_kwargs):
+            return self.responses.pop(0)
+
+    waits = []
+    monkeypatch.setattr("scripts.testing.points_chain_destructive_stress.time.sleep", waits.append)
+
+    result = create_or_get_user(Client(), "stress-user", "unused-test-password")
+
+    assert result == {"id": 42, "username": "stress-user", "created": True}
+    assert waits == [3.0, 2.0]
 
 
 def test_bad_login_operation_treats_auth_rejection_as_expected():

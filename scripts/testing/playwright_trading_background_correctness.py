@@ -32,6 +32,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from services.points_chain import BURN_WALLET_ADDRESS, PointsLedgerService, create_official_hot_wallet
+from services.server.finance_database import get_finance_db
 
 
 DEFAULT_USER_PASSWORD = os.environ.get("HACKME_TRADING_PROBE_USER_PASSWORD") or secrets.token_urlsafe(24)
@@ -284,7 +285,7 @@ def assert_api_ok(rec: Recorder, name: str, res: dict[str, Any], *, statuses={20
     rec.require(name, ok, f"status={res.get('status')} body={json.dumps(payload, ensure_ascii=False)[:240]}")
 
 
-def create_user(page, db_path: Path, username: str, index: int, *, password: str = DEFAULT_USER_PASSWORD) -> int:
+def create_user(page, identity_db_path: Path, username: str, index: int, *, password: str = DEFAULT_USER_PASSWORD) -> int:
     payload = {
         "username": username,
         "password": password,
@@ -301,18 +302,29 @@ def create_user(page, db_path: Path, username: str, index: int, *, password: str
     created = api(page, "POST", "/admin/users", payload)
     if int(created["status"]) not in {200, 409}:
         raise RuntimeError(f"create user failed {username}: {created}")
-    row = db_one(db_path, "SELECT id FROM users WHERE username=?", (username,))
+    row = db_one(identity_db_path, "SELECT id FROM users WHERE username=?", (username,))
     if row:
         return int(row["id"])
     raise RuntimeError(f"created user not found in database: {username}")
 
 
-def points_service(db_path: Path, runtime_dir: Path) -> PointsLedgerService:
+def points_service(
+    finance_db_path: Path,
+    runtime_dir: Path,
+    *,
+    identity_db_path: Path | None = None,
+) -> PointsLedgerService:
     seed_path = runtime_dir / ".chain_seed"
     chain_seed = seed_path.read_text(encoding="utf-8").strip() if seed_path.exists() else "test-secret"
+    identity_path = identity_db_path or finance_db_path
 
     def get_db():
-        conn = connect(db_path)
+        if finance_db_path.resolve() != identity_path.resolve():
+            return get_finance_db(
+                finance_db_path,
+                core_db_path=identity_path,
+            )
+        conn = connect(finance_db_path)
         conn.execute("PRAGMA foreign_keys=ON")
         return conn
 
@@ -411,16 +423,21 @@ def set_governance_timelock_ready(service: PointsLedgerService, proposal_uuid: s
 
 
 def governed_treasury_grant(
-    db_path: Path,
+    finance_db_path: Path,
+    identity_db_path: Path,
     runtime_dir: Path,
     *,
     user_id: int,
     amount: int,
     request_uuid: str,
 ) -> dict[str, Any]:
-    service = points_service(db_path, runtime_dir)
-    root = actor_row(db_path, username="root")
-    manager = actor_row(db_path, role="manager")
+    service = points_service(
+        finance_db_path,
+        runtime_dir,
+        identity_db_path=identity_db_path,
+    )
+    root = actor_row(identity_db_path, username="root")
+    manager = actor_row(identity_db_path, role="manager")
     destination_wallet = official_hot_wallet(service, user_id)
     root_wallet = official_hot_wallet(service, root["id"])
     manager_wallet = official_hot_wallet(service, manager["id"])
@@ -598,7 +615,8 @@ def deplete_trial_credits(db_path: Path, user_ids: list[int]) -> None:
 
 
 def drain_hot_wallet_for_margin_liquidation(
-    db_path: Path,
+    finance_db_path: Path,
+    identity_db_path: Path,
     runtime_dir: Path,
     *,
     user_id: int,
@@ -606,9 +624,13 @@ def drain_hot_wallet_for_margin_liquidation(
     keep_points: int = 5,
     request_uuid: str,
 ) -> dict[str, Any]:
-    service = points_service(db_path, runtime_dir)
+    service = points_service(
+        finance_db_path,
+        runtime_dir,
+        identity_db_path=identity_db_path,
+    )
     wallet = official_hot_wallet(service, user_id)
-    actor = actor_row(db_path, username=username)
+    actor = actor_row(identity_db_path, username=username)
     conn = service.get_db()
     try:
         service.ensure_schema(conn)
@@ -659,6 +681,19 @@ def wait_until(rec: Recorder, name: str, predicate, *, timeout: float = 15.0, in
 
 def background_run_marker(db_path: Path) -> int:
     return int(db_one(db_path, "SELECT COALESCE(MAX(id), 0) AS id FROM trading_background_job_runs")["id"] or 0)
+
+
+def resolve_probe_database_paths(runtime_dir: Path) -> tuple[Path, Path]:
+    """Return identity/core and routed finance DB paths for a runtime.
+
+    New runtimes route trading and PointsChain tables to ``finance.db`` while
+    identity rows remain in ``database.db``.  Legacy single-DB fixtures still
+    use the core DB for both roles.
+    """
+
+    identity = runtime_dir / "database" / "database.db"
+    finance = runtime_dir / "database" / "finance.db"
+    return identity, finance if finance.exists() else identity
 
 
 def trigger_background_jobs(
@@ -734,29 +769,74 @@ def run_stress_burst(page, count: int) -> list[dict[str, Any]]:
         """
         async ({count}) => {
           async function one(i) {
-            const csrfRes = await fetch('/api/csrf-token', {credentials: 'same-origin'});
-            const csrfJson = await csrfRes.json().catch(() => ({}));
-            const res = await fetch('/api/trading/orders', {
-              method: 'POST',
-              credentials: 'same-origin',
-              headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrfJson.csrf_token || ''},
-              body: JSON.stringify({
-                market_symbol: 'ETH/POINTS',
-                side: 'buy',
-                order_type: 'market',
-                quantity: '0.01'
-              })
-            });
-            const text = await res.text();
-            let body = {};
-            try { body = JSON.parse(text); } catch (_) { body = {raw: text}; }
-            return {index: i, status: res.status, ok: body.ok === true, body};
+            let latest = {index: i, status: 0, ok: false, body: {}, attempts: 0};
+            for (let attempt = 1; attempt <= 6; attempt += 1) {
+              // This application rotates a one-time CSRF token after a
+              // mutation. Concurrent requests in the same browser session
+              // may therefore invalidate each other's token before use.
+              // Stagger only those explicit CSRF rejections and leave all
+              // other failures untouched for the probe to classify.
+              if (attempt > 1) {
+                await new Promise(resolve => setTimeout(resolve, 25 * attempt + 5 * (i % 8)));
+              }
+              const csrfRes = await fetch('/api/csrf-token', {credentials: 'same-origin'});
+              const csrfJson = await csrfRes.json().catch(() => ({}));
+              const res = await fetch('/api/trading/orders', {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrfJson.csrf_token || ''},
+                body: JSON.stringify({
+                  market_symbol: 'ETH/POINTS',
+                  side: 'buy',
+                  order_type: 'market',
+                  quantity: '0.01'
+                })
+              });
+              const text = await res.text();
+              let body = {};
+              try { body = JSON.parse(text); } catch (_) { body = {raw: text}; }
+              latest = {index: i, status: res.status, ok: body.ok === true, body, attempts: attempt};
+              const csrfRejected = res.status === 403 && /csrf/i.test(JSON.stringify(body));
+              if (!csrfRejected) return latest;
+            }
+            return latest;
           }
           return Promise.all(Array.from({length: count}, (_, i) => one(i)));
         }
         """,
         {"count": int(count)},
     )
+
+
+def stress_result_is_controlled_server_busy(row: dict[str, Any]) -> bool:
+    body = row.get("body") if isinstance(row.get("body"), dict) else {}
+    return int(row.get("status") or 0) == 503 and str(body.get("error") or "") == "server_busy"
+
+
+def restore_feature_flags_via_fresh_browser(
+    base_url: str,
+    root_password: str,
+    feature_snapshot: dict[str, bool],
+) -> bool:
+    """Best-effort emergency cleanup for a probe interrupted by an exception."""
+
+    if not feature_snapshot:
+        return False
+    with sync_playwright() as cleanup_playwright:
+        browser = cleanup_playwright.chromium.launch(headless=True)
+        context = browser.new_context(ignore_https_errors=True)
+        try:
+            page = context.new_page()
+            authenticated = login(page, base_url, "root", root_password)
+            if int(authenticated.get("status") or 0) != 200:
+                return False
+            restored = api(page, "PUT", "/admin/features", feature_snapshot)
+            return int(restored.get("status") or 0) == 200 and bool(
+                (restored.get("body") or {}).get("ok")
+            )
+        finally:
+            context.close()
+            browser.close()
 
 
 def main() -> int:
@@ -768,6 +848,12 @@ def main() -> int:
     parser.add_argument("--user-password", default=DEFAULT_USER_PASSWORD)
     parser.add_argument("--out", default="")
     parser.add_argument("--stress-orders", type=int, default=30)
+    parser.add_argument(
+        "--max-controlled-server-busy-rate",
+        type=float,
+        default=0.65,
+        help="Maximum accepted fraction of explicit 503 server_busy backpressure responses during the stress burst.",
+    )
     parser.add_argument("--trigger-mode", choices=("auto", "run-once"), default="auto")
     parser.add_argument(
         "--keep-mutated-settings",
@@ -778,16 +864,24 @@ def main() -> int:
 
     base_url = args.base_url.rstrip("/")
     runtime_dir = Path(args.runtime_dir).expanduser().resolve()
-    db_path = runtime_dir / "database" / "database.db"
+    identity_db_path, db_path = resolve_probe_database_paths(runtime_dir)
     out_dir = Path(args.out).expanduser().resolve() if args.out else runtime_dir / "reports" / "qa" / f"trading_background_{int(time.time())}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     rec = Recorder()
-    scenario: dict[str, Any] = {"db_path": str(db_path), "base_url": base_url, "trigger_mode": args.trigger_mode, "users": {}}
-    if not db_path.exists():
-        raise SystemExit(f"database not found: {db_path}")
+    scenario: dict[str, Any] = {
+        "db_path": str(db_path),
+        "identity_db_path": str(identity_db_path),
+        "database_routing": "split_finance" if db_path != identity_db_path else "legacy_single_db",
+        "base_url": base_url,
+        "trigger_mode": args.trigger_mode,
+        "users": {},
+    }
+    if not identity_db_path.exists() or not db_path.exists():
+        raise SystemExit(f"required database not found: identity={identity_db_path} finance={db_path}")
     runtime_snapshot = snapshot_trading_probe_runtime(db_path)
     restore_state = {"done": False}
+    feature_restore_state: dict[str, Any] = {"done": False, "snapshot": {}}
 
     def restore_probe_runtime_once() -> None:
         if restore_state["done"] or args.keep_mutated_settings:
@@ -797,6 +891,22 @@ def main() -> int:
         scenario["runtime_settings_restored"] = True
 
     atexit.register(restore_probe_runtime_once)
+
+    def restore_feature_flags_once() -> None:
+        if feature_restore_state["done"] or not feature_restore_state["snapshot"]:
+            return
+        try:
+            feature_restore_state["done"] = restore_feature_flags_via_fresh_browser(
+                base_url,
+                args.root_password,
+                feature_restore_state["snapshot"],
+            )
+            scenario["feature_flags_emergency_restored"] = feature_restore_state["done"]
+        except Exception:
+            # Cleanup must never hide the original correctness failure.
+            scenario["feature_flags_emergency_restored"] = False
+
+    atexit.register(restore_feature_flags_once)
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -814,6 +924,7 @@ def main() -> int:
                 "feature_reports_notifications_enabled",
             )
         }
+        feature_restore_state["snapshot"] = dict(feature_snapshot)
         scenario["feature_flags_before"] = feature_snapshot
         assert_api_ok(
             rec,
@@ -850,11 +961,12 @@ def main() -> int:
         }
         user_ids: dict[str, int] = {}
         for index, (role, username) in enumerate(users.items(), start=1):
-            user_id = create_user(root_page, db_path, username, index, password=args.user_password)
+            user_id = create_user(root_page, identity_db_path, username, index, password=args.user_password)
             user_ids[role] = user_id
             seed_points = 60 if role == "margin_liq" else 50000
             grant = governed_treasury_grant(
                 db_path,
+                identity_db_path,
                 runtime_dir,
                 user_id=user_id,
                 amount=seed_points,
@@ -950,6 +1062,7 @@ def main() -> int:
         assert_api_ok(rec, "margin liquidation seed open", orders["margin_liq_open"])
         drain = drain_hot_wallet_for_margin_liquidation(
             db_path,
+            identity_db_path,
             runtime_dir,
             user_id=user_ids["margin_liq"],
             username=users["margin_liq"],
@@ -1257,19 +1370,42 @@ def main() -> int:
             stress_results.extend(run_stress_burst(page, max(1, int(args.stress_orders))))
         for ctx in stress_contexts:
             ctx.close()
-        no_5xx = all(int(row.get("status") or 0) < 500 for row in stress_results)
         success_count = sum(1 for row in stress_results if row.get("ok"))
+        controlled_busy = [row for row in stress_results if stress_result_is_controlled_server_busy(row)]
+        unexpected_5xx = [
+            row
+            for row in stress_results
+            if int(row.get("status") or 0) >= 500 and not stress_result_is_controlled_server_busy(row)
+        ]
+        unexpected_4xx = [
+            row
+            for row in stress_results
+            if 400 <= int(row.get("status") or 0) < 500
+        ]
+        server_busy_rate = len(controlled_busy) / max(1, len(stress_results))
         scenario["concurrent_stress"] = {
             "requested_per_user": max(1, int(args.stress_orders)),
             "request_count": len(stress_results),
             "success_count": success_count,
             "statuses": sorted({int(row.get("status") or 0) for row in stress_results}),
-            "no_5xx": no_5xx,
+            "controlled_server_busy_count": len(controlled_busy),
+            "controlled_server_busy_rate": round(server_busy_rate, 6),
+            "max_controlled_server_busy_rate": float(args.max_controlled_server_busy_rate),
+            "unexpected_4xx_count": len(unexpected_4xx),
+            "unexpected_5xx_count": len(unexpected_5xx),
         }
         rec.require(
-            "Playwright concurrent order stress has no 5xx and produces fills",
-            no_5xx and success_count > 0,
-            f"requests={len(stress_results)} success={success_count} statuses={sorted({row.get('status') for row in stress_results})}",
+            "Playwright concurrent order stress preserves correctness under controlled backpressure",
+            not unexpected_4xx
+            and not unexpected_5xx
+            and success_count > 0
+            and server_busy_rate <= float(args.max_controlled_server_busy_rate),
+            (
+                f"requests={len(stress_results)} success={success_count} "
+                f"controlled_busy={len(controlled_busy)} ({server_busy_rate:.3f}) "
+                f"unexpected_4xx={len(unexpected_4xx)} unexpected_5xx={len(unexpected_5xx)} "
+                f"statuses={sorted({row.get('status') for row in stress_results})}"
+            ),
         )
 
         verify_trading = api(root_page2, "GET", "/root/trading/verify")
@@ -1366,6 +1502,7 @@ def main() -> int:
         }
         scenario["feature_flags_after"] = feature_after
         scenario["feature_flags_restored"] = feature_after == feature_snapshot
+        feature_restore_state["done"] = feature_after == feature_snapshot
         rec.require(
             "trading probe feature flags restored exactly",
             feature_after == feature_snapshot,

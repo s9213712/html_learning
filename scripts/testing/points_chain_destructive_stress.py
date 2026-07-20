@@ -521,15 +521,28 @@ def request_with_server_busy_retry(
     attempts: int = 8,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    """Retry only explicit controlled backpressure during fixture setup."""
+    """Retry only explicit controlled backpressure during fixture setup.
+
+    Management-plane provisioning uses HTTP 429 ``edge_rate_limited`` while
+    the request-tier capacity gate uses HTTP 503 ``server_busy``.  Both are
+    advertised, retryable overload responses and must not abort a many-account
+    stress fixture before the financial invariant workload even begins.
+    """
 
     last: dict[str, Any] = {}
     for attempt in range(max(1, int(attempts))):
-        last = client.request(method, path, expected=set(expected) | {503}, **kwargs)
-        if int(last.get("status") or 0) != 503 or str(last.get("error") or "") != "server_busy":
+        last = client.request(method, path, expected=set(expected) | {429, 503}, **kwargs)
+        controlled = (
+            (int(last.get("status") or 0) == 503 and str(last.get("error") or "") == "server_busy")
+            or (
+                int(last.get("status") or 0) == 429
+                and str(last.get("error") or "") == "edge_rate_limited"
+            )
+        )
+        if not controlled:
             return last
         retry_after = float(last.get("retry_after_seconds") or 0.5)
-        time.sleep(min(3.0, max(0.1, retry_after, 0.25 * (attempt + 1))))
+        time.sleep(min(10.0, max(0.1, retry_after, 0.25 * (attempt + 1))))
     return last
 
 
@@ -556,11 +569,18 @@ def ensure_official_hot_wallet(client: ProbeClient) -> str:
 
 def create_or_get_user(root: ProbeClient, username: str, password: str) -> dict[str, Any]:
     search_path = f"/api/admin/users?q={username}&page_size=100"
-    users = root.request("GET", search_path, expected={200})
+    users = request_with_server_busy_retry(
+        root,
+        "GET",
+        search_path,
+        expected={200},
+        attempts=12,
+    )
     for item in users.get("users") or []:
         if item.get("username") == username:
             return {"id": int(item["id"]), "username": username, "created": False}
-    res = root.request(
+    res = request_with_server_busy_retry(
+        root,
         "POST",
         "/api/admin/users",
         json={
@@ -572,10 +592,17 @@ def create_or_get_user(root: ProbeClient, username: str, password: str) -> dict[
             "status": "active",
         },
         expected={200, 409},
+        attempts=12,
     )
     if int(res.get("status") or 0) not in {200, 409}:
         raise RuntimeError(f"user create failed: {username}: {res}")
-    users = root.request("GET", search_path, expected={200})
+    users = request_with_server_busy_retry(
+        root,
+        "GET",
+        search_path,
+        expected={200},
+        attempts=12,
+    )
     for item in users.get("users") or []:
         if item.get("username") == username:
             return {"id": int(item["id"]), "username": username, "created": int(res.get("status") or 0) == 200}
