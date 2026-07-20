@@ -3994,7 +3994,26 @@ def register_video_routes(app, deps):
             row = _load_stream_file(conn, file_id=video["cloud_file_id"])
             asset = get_stream_status(conn, file_row=row, include_segments=False)
             if not asset or asset.get("status") != "ready" or not asset.get("master_manifest_path"):
-                return json_resp({"ok": False, "msg": "影音串流尚未準備完成", "error": "stream_not_ready"}), 409
+                hls_job = get_platform_job_by_source(
+                    conn,
+                    "media_hls_prepare",
+                    _hls_job_source_ref(str(video["cloud_file_id"])),
+                )
+                job_payload = None
+                if hls_job:
+                    job_payload = {
+                        "job_uuid": hls_job.get("job_uuid"),
+                        "status": hls_job.get("status"),
+                        "progress_percent": hls_job.get("progress_percent", 0),
+                        "stage": hls_job.get("stage") or "queued",
+                    }
+                return json_resp({
+                    "ok": False,
+                    "msg": "影音串流尚未準備完成，請稍候再試",
+                    "error": "stream_not_ready",
+                    "retry_after_seconds": 5,
+                    "hls_job": job_payload,
+                }), 409
             path = resolve_file_storage_path(storage_root, {"storage_path": asset["master_manifest_path"]})
             return _send_hls_master_manifest(path)
         except PermissionError as exc:
