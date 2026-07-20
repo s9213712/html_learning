@@ -1072,6 +1072,9 @@ def test_comfyui_img2img_controlnet_generate_uploads_assets_and_records_history(
     assert body["history_id"] > 0
     assert body["review_required"] is True
     assert body["review_contract"]["control_image_ref"]["filename"] == "control.png"
+    assert body["review_contract"]["preservation_failure_policy"] == "hard_fail"
+    assert "requested_edit_applied" in body["review_contract"]["preservation_checks"]
+    assert "unrequested_content_preserved" in body["review_contract"]["preservation_checks"]
     assert FakeComfyUIClient.last_params["generation_mode"] == "img2img"
     assert FakeComfyUIClient.last_params["source_image_ref"]["filename"] == "source.png"
     assert FakeComfyUIClient.last_params["controlnet"]["image_ref"]["filename"] == "control.png"
