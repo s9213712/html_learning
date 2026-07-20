@@ -1941,6 +1941,23 @@ def register_comfyui_routes(app, deps):
                 "CREATE INDEX IF NOT EXISTS idx_comfyui_generation_jobs_owner "
                 "ON comfyui_generation_jobs(owner_user_id, updated_at DESC)"
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS comfyui_active_generations (
+                    generation_key TEXT PRIMARY KEY,
+                    user_id INTEGER NOT NULL,
+                    username TEXT NOT NULL DEFAULT '',
+                    role TEXT NOT NULL DEFAULT '',
+                    backend_url TEXT NOT NULL DEFAULT '',
+                    backend_scope TEXT NOT NULL DEFAULT 'primary',
+                    started_at REAL NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_comfyui_active_generations_backend "
+                "ON comfyui_active_generations(backend_url, started_at)"
+            )
             _prune_generation_job_inline_payloads(conn)
             conn.commit()
             generation_jobs_schema_ready["ready"] = True
@@ -2034,20 +2051,41 @@ def register_comfyui_routes(app, deps):
 
     def _register_active_generation(actor, *, backend_url="", backend_scope="primary"):
         generation_key = secrets.token_hex(12)
+        payload = {
+            "user_id": _generation_owner_id(actor),
+            "username": _actor_value(actor, "username", ""),
+            "role": _actor_value(actor, "role", ""),
+            "backend_url": _normalize_comfyui_backend_url(backend_url),
+            "backend_scope": str(backend_scope or "primary"),
+            "started_at": time.time(),
+        }
         with active_generations_lock:
-            active_generations[generation_key] = {
-                "user_id": _generation_owner_id(actor),
-                "username": _actor_value(actor, "username", ""),
-                "role": _actor_value(actor, "role", ""),
-                "backend_url": _normalize_comfyui_backend_url(backend_url),
-                "backend_scope": str(backend_scope or "primary"),
-                "started_at": time.time(),
-            }
+            active_generations[generation_key] = dict(payload)
+        conn = get_db()
+        try:
+            _ensure_generation_job_schema(conn)
+            conn.execute(
+                """INSERT OR REPLACE INTO comfyui_active_generations
+                   (generation_key, user_id, username, role, backend_url, backend_scope, started_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (generation_key, payload["user_id"], payload["username"], payload["role"],
+                 payload["backend_url"], payload["backend_scope"], payload["started_at"]),
+            )
+            conn.commit()
+        finally:
+            conn.close()
         return generation_key
 
     def _unregister_active_generation(token):
         with active_generations_lock:
             active_generations.pop(token, None)
+        conn = get_db()
+        try:
+            _ensure_generation_job_schema(conn)
+            conn.execute("DELETE FROM comfyui_active_generations WHERE generation_key=?", (str(token),))
+            conn.commit()
+        finally:
+            conn.close()
 
     def _create_generation_job(actor):
         job_id = secrets.token_hex(12)
@@ -2607,8 +2645,25 @@ def register_comfyui_routes(app, deps):
         return payload
 
     def _active_generation_snapshot():
+        persisted = []
+        try:
+            conn = get_db()
+            try:
+                _ensure_generation_job_schema(conn)
+                rows = conn.execute(
+                    "SELECT user_id, username, role, backend_url, backend_scope, started_at "
+                    "FROM comfyui_active_generations"
+                ).fetchall()
+                persisted = [dict(row) for row in rows]
+            finally:
+                conn.close()
+        except Exception:
+            persisted = []
         with active_generations_lock:
-            return list(active_generations.values())
+            local = list(active_generations.values())
+        if persisted:
+            return persisted
+        return local
 
     def _interrupt_policy(actor):
         if _actor_value(actor, "username") == "root":
