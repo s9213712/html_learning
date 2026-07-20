@@ -14,6 +14,7 @@ def _build_app(
     event_log=None,
     db_delete_session=None,
     db_get_user_from_token=None,
+    rate_limiter=None,
 ):
     app = Flask(__name__)
     app.testing = True
@@ -54,7 +55,7 @@ def _build_app(
         "hash_password": lambda value: value,
         "is_feature_enabled": lambda key: key == "feature_account_security_enabled",
         "is_ip_blocked": lambda ip: False,
-        "is_rate_limited": lambda *args, **kwargs: (False, {"limit": 30}),
+        "is_rate_limited": rate_limiter or (lambda *args, **kwargs: (False, {"limit": 30})),
         "json_resp": json_resp,
         "make_csrf_token": lambda: "csrf",
         "make_token": lambda username: f"token-{username}",
@@ -223,6 +224,65 @@ def test_account_security_locks_user_after_repeated_bad_passwords(tmp_path):
 
     assert row[0] == 2
     assert row[1]
+
+
+def test_login_rate_limits_shared_source_and_principal_independently(tmp_path):
+    db_path = tmp_path / "login-rate-scope.db"
+    _seed_db(db_path)
+    calls = []
+
+    def limiter(key, max_req, window_sec):
+        calls.append((key, max_req, window_sec))
+        if key[1] == "login_principal":
+            return True, {"limit": max_req, "retry_after_seconds": 7}
+        return False, {"limit": max_req, "retry_after_seconds": 0}
+
+    client = _build_app(
+        str(db_path),
+        {"max_login_failures": 3, "block_duration_minutes": 10},
+        ip_box={"ip": "10.0.0.9"},
+        rate_limiter=limiter,
+    ).test_client()
+
+    response = client.post("/api/login", json={"username": "alice", "password": "correct"})
+
+    assert response.status_code == 429
+    assert response.headers["Retry-After"] == "7"
+    assert response.get_json() == {
+        "ok": False,
+        "msg": "登入請求太頻繁，請稍後再試",
+        "error": "login_rate_limited",
+        "scope": "account",
+        "retry_after_seconds": 7,
+    }
+    assert calls == [
+        (("10.0.0.9", "login_ip"), 300, 60),
+        (("10.0.0.9", "login_principal", 1), 30, 60),
+    ]
+
+
+def test_login_source_rate_limit_is_structured_and_stops_before_lookup(tmp_path):
+    db_path = tmp_path / "login-source-rate.db"
+    _seed_db(db_path)
+
+    def limiter(key, max_req, window_sec):
+        assert key == ("10.0.0.8", "login_ip")
+        assert (max_req, window_sec) == (300, 60)
+        return True, {"limit": max_req, "retry_after_seconds": 11}
+
+    client = _build_app(
+        str(db_path),
+        {"max_login_failures": 3, "block_duration_minutes": 10},
+        ip_box={"ip": "10.0.0.8"},
+        rate_limiter=limiter,
+    ).test_client()
+
+    response = client.post("/api/login", json={"username": "alice", "password": "correct"})
+
+    assert response.status_code == 429
+    assert response.headers["Retry-After"] == "11"
+    assert response.get_json()["error"] == "login_rate_limited"
+    assert response.get_json()["scope"] == "source"
 
 
 def test_login_cookie_lifetime_uses_session_ttl_setting(tmp_path):

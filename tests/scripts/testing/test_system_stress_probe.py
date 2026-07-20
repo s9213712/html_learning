@@ -20,11 +20,13 @@ from scripts.testing.operational_soak_probe import (
     aggregate_rounds,
     build_effective_load_sample,
     campaign_load_policy,
+    configure_soak_storage_quota,
     finish_command,
     main as operational_soak_main,
     measured_active_workers,
     normalized_32_throughput,
     login_with_setup_backoff,
+    provision_accounts,
     request_command_stop,
     round_rotation_offset,
     sanitized_command,
@@ -84,6 +86,95 @@ def test_setup_request_does_not_retry_permission_denial(monkeypatch):
     assert result["attempts"] == 1
     assert client.calls == 1
     assert waits == []
+
+
+def test_soak_storage_quota_is_scoped_and_verified():
+    class FakeRoot:
+        def __init__(self):
+            self.calls = []
+
+        def request(self, method, path, *, json_body=None):
+            self.calls.append((method, path, json_body))
+            return {
+                "ok": True,
+                "status": 200,
+                "body": {
+                    "ok": True,
+                    "user": {
+                        "total_bytes": 1024 * 1024 * 1024,
+                        "max_file_size_bytes": 512 * 1024 * 1024,
+                        "upload_rate_limit_per_day": 10_000,
+                        "can_upload": True,
+                    },
+                },
+            }
+
+    root = FakeRoot()
+    result = configure_soak_storage_quota(root, 42)
+
+    assert result["ok"] is True
+    assert root.calls == [
+        (
+            "PUT",
+            "/api/root/storage/users/42/quota-override",
+            {
+                "quota_mb": 1024,
+                "max_file_size_mb": 512,
+                "upload_rate_limit_per_day": 10_000,
+                "can_upload": True,
+                "enabled": True,
+                "reason": "isolated operational soak high-load account",
+            },
+        )
+    ]
+
+
+def test_soak_account_provisioning_applies_quota_before_member_login(monkeypatch):
+    events = []
+
+    class FakeRoot:
+        base_url = "https://127.0.0.1:1"
+
+        def request(self, method, path, *, json_body=None):
+            events.append((method, path))
+            if method == "GET":
+                return {
+                    "ok": True,
+                    "status": 200,
+                    "body": {"users": [{"id": 42, "username": "soak01"}]},
+                }
+            return {
+                "ok": True,
+                "status": 200,
+                "body": {
+                    "ok": True,
+                    "user": {
+                        "total_bytes": 1024 * 1024 * 1024,
+                        "max_file_size_bytes": 512 * 1024 * 1024,
+                        "upload_rate_limit_per_day": 10_000,
+                        "can_upload": True,
+                    },
+                },
+            }
+
+    class FakeMember:
+        def __init__(self, _base_url, username, _password):
+            self.username = username
+
+        def login(self):
+            events.append(("LOGIN", self.username))
+            return {"ok": True, "status": 200}
+
+    monkeypatch.setattr("scripts.testing.operational_soak_probe.ApiClient", FakeMember)
+
+    accounts = provision_accounts(FakeRoot(), prefix="soak", count=1, password="secret")
+
+    assert accounts == [("soak01", "secret")]
+    assert events == [
+        ("GET", "/api/admin/users?q=soak01&page_size=100"),
+        ("PUT", "/api/root/storage/users/42/quota-override"),
+        ("LOGIN", "soak01"),
+    ]
 
 
 def test_native_worker_telemetry_does_not_treat_idle_executor_capacity_as_active():
@@ -297,6 +388,19 @@ def test_system_stress_clone_mode_uses_each_accounts_own_authenticated_seed():
     assert '"--max-ordinary-p95-ms"' in script
 
 
+def test_operational_soak_defers_cross_campaign_heavy_success_without_relabeling_fallbacks():
+    script = (ROOT / "scripts" / "testing" / "operational_soak_probe.py").read_text(encoding="utf-8")
+    command_start = script.index('str(SYSTEM_STRESS),')
+    command_end = script.index("if args.server_pids:", command_start)
+    system_round_command = script[command_start:command_end]
+
+    assert 'SOAK_DEFERRED_SUCCESS_OPERATIONS = frozenset({"hf_generate", "hls_master"})' in script
+    assert '"--require-all-accounts"' in system_round_command
+    assert '"--require-operation-coverage"' in system_round_command
+    assert '"--require-operation-success"' not in system_round_command
+    assert '"--require-account-success"' not in system_round_command
+
+
 def test_bt_reject_uses_rejected_torrent_url_instead_of_creating_magnet_task():
     calls = []
 
@@ -363,7 +467,8 @@ def test_hf_generate_zero_budget_records_status_fallback_not_positive_generate()
         ["alice"],
     )
     assert "hf_generate" in aggregate["missing_operations"]
-    assert "hf_generate" in aggregate["operations_without_success"]
+    assert "hf_generate" not in aggregate["operations_without_success"]
+    assert "hf_generate" in aggregate["deferred_success_operations"]
 
 
 def test_actual_result_operation_name_preserves_other_budget_fallbacks():

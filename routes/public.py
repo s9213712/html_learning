@@ -42,6 +42,13 @@ from services.users.profiles import (
 )
 
 
+# Keep brute-force protection principal-scoped while allowing many legitimate
+# members behind one office, carrier-grade NAT, reverse proxy, or load probe.
+# Backpressure still independently caps concurrent Argon2 work.
+LOGIN_IP_RATE_LIMIT_PER_MINUTE = 300
+LOGIN_PRINCIPAL_RATE_LIMIT_PER_MINUTE = 30
+
+
 def register_public_routes(app, deps):
     RESERVED_REGISTRATION_USERNAMES = {"root", "admin", "test", "system", "anonymous"}
     RESERVED_USERNAME_CONFUSABLE_TRANS = str.maketrans({
@@ -924,11 +931,24 @@ def register_public_routes(app, deps):
             timing_delay()  # still do delay so blocked vs not-blocked timing looks same
             return json_resp({"ok":False,"msg":"登入失敗（帳號或密碼錯誤）"}), 429
 
-        blocked, info = is_rate_limited(ip, max_req=30, window_sec=60)
+        blocked, info = is_rate_limited(
+            (ip, "login_ip"),
+            max_req=LOGIN_IP_RATE_LIMIT_PER_MINUTE,
+            window_sec=60,
+        )
         if blocked:
             audit("LOGIN_RATELIMIT", ip, ua=ua)
             timing_delay()
-            return json_resp({"ok":False,"msg":"請求太頻繁，請稍後再試"}), 429
+            retry_after = max(1, int(info.get("retry_after_seconds") or 1))
+            response = json_resp({
+                "ok": False,
+                "msg": "登入請求太頻繁，請稍後再試",
+                "error": "login_rate_limited",
+                "scope": "source",
+                "retry_after_seconds": retry_after,
+            }, 429)
+            response.headers["Retry-After"] = str(retry_after)
+            return response
 
         try:
             data = request.get_json(force=True)
@@ -966,6 +986,30 @@ def register_public_routes(app, deps):
                 "email, email_verified, birthdate, must_change_password, is_default_password, signup_bonus_deferred FROM users WHERE username=?",
                 (username,)
             ).fetchone()
+
+            # A shared source address must not make unrelated members consume
+            # one another's 30/minute allowance.  Unknown usernames share one
+            # source-scoped bucket so random names cannot grow memory without
+            # bound or evade the source-wide ceiling.
+            principal = int(user_row["id"]) if user_row else "unknown"
+            blocked, info = is_rate_limited(
+                (ip, "login_principal", principal),
+                max_req=LOGIN_PRINCIPAL_RATE_LIMIT_PER_MINUTE,
+                window_sec=60,
+            )
+            if blocked:
+                audit("LOGIN_RATELIMIT", ip, username, ua=ua, detail="scope=principal")
+                timing_delay()
+                retry_after = max(1, int(info.get("retry_after_seconds") or 1))
+                response = json_resp({
+                    "ok": False,
+                    "msg": "登入請求太頻繁，請稍後再試",
+                    "error": "login_rate_limited",
+                    "scope": "account",
+                    "retry_after_seconds": retry_after,
+                }, 429)
+                response.headers["Retry-After"] = str(retry_after)
+                return response
 
             # Always do timing-consuming verify to prevent timing oracles
             pw_hash = None

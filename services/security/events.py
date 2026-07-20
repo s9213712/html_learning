@@ -254,7 +254,14 @@ def _check_window_limit(bucket, key, *, max_req, window_sec):
             bucket[key] = recent
         else:
             bucket.pop(key, None)
-    return blocked, {"count": len(recent), "limit": max_req}
+    retry_after_seconds = 0
+    if blocked and recent:
+        retry_after_seconds = max(1, int((recent[0] + window_sec - now) + 0.999))
+    return blocked, {
+        "count": len(recent),
+        "limit": max_req,
+        "retry_after_seconds": retry_after_seconds,
+    }
 
 
 def normalize_security_event_type(event_type):
@@ -398,9 +405,14 @@ def clear_failed_logins(ip):
 def is_rate_limited(ip, max_req=30, window_sec=60):
     if _capacity_probe_unlimited():
         return False, {"count": 0, "limit": max_req, "disabled": "capacity_probe_unlimited"}
-    blocked, info = _check_window_limit(_RATE_LIMIT_BUCKETS, str(ip), max_req=max_req, window_sec=window_sec)
+    # A tuple lets callers isolate unrelated public endpoint buckets while
+    # retaining the real source IP in security evidence.  String callers keep
+    # the legacy behavior.
+    key = ip if isinstance(ip, tuple) else str(ip)
+    event_ip = str(ip[0]) if isinstance(ip, tuple) and ip else str(ip)
+    blocked, info = _check_window_limit(_RATE_LIMIT_BUCKETS, key, max_req=max_req, window_sec=window_sec)
     if blocked:
-        record_security_event("rate_limit", ip, detail=f"limit={max_req},window={window_sec}")
+        record_security_event("rate_limit", event_ip, detail=f"limit={max_req},window={window_sec}")
     return blocked, info
 
 

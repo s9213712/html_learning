@@ -381,8 +381,11 @@ def test_rate_limit_block_records_security_event(tmp_path):
             is_ip_blocking_enabled=lambda: False,
         )
 
-        assert security_events.is_rate_limited("10.0.0.9", max_req=1, window_sec=60)[0] is False
-        assert security_events.is_rate_limited("10.0.0.9", max_req=1, window_sec=60)[0] is True
+        scoped_key = ("10.0.0.9", "login_ip")
+        assert security_events.is_rate_limited(scoped_key, max_req=1, window_sec=60)[0] is False
+        blocked, info = security_events.is_rate_limited(scoped_key, max_req=1, window_sec=60)
+        assert blocked is True
+        assert 1 <= info["retry_after_seconds"] <= 60
     finally:
         security_events._STATE.clear()
         security_events._STATE.update(original_state)
