@@ -2846,7 +2846,11 @@ def test_comfyui_i2i_result_requires_persisted_semantic_review(tmp_path):
             "score": 0.92,
             "hard_fail": False,
             "issues": [],
-            "passed_gates": ["outfit", "identity"],
+            "passed_gates": [
+                "outfit", "identity", "requested_edit_applied",
+                "unrequested_content_preserved", "source_identity_and_composition_preserved",
+                "reference_used_only_for_requested_attributes",
+            ],
             "failed_gates": [],
             "source": "ai_agent_vision_client",
         },

@@ -924,12 +924,24 @@ def register_comfyui_runtime_routes(app, ctx):
             threshold = max(0.5, min(1.0, float(contract.get("agent_review_pass_threshold") or 0.8)))
         except Exception:
             threshold = 0.8
-        requested_pass = data.get("pass") is True
-        passed = bool(requested_pass and not hard_fail and score >= threshold)
 
         def _text_list(name):
             values = data.get(name) if isinstance(data.get(name), list) else []
             return [str(item or "").strip()[:500] for item in values[:20] if str(item or "").strip()]
+
+        requested_pass = data.get("pass") is True
+        passed_gates = _text_list("passed_gates")
+        failed_gates = _text_list("failed_gates")
+        required_preservation = [
+            str(item or "").strip()
+            for item in (contract.get("preservation_checks") or [])
+            if str(item or "").strip()
+        ]
+        missing_preservation = [item for item in required_preservation if item not in passed_gates]
+        if missing_preservation:
+            failed_gates.extend(f"preservation:{item}" for item in missing_preservation)
+            hard_fail = True
+        passed = bool(requested_pass and not hard_fail and score >= threshold)
 
         review = {
             "pass": passed,
@@ -938,8 +950,8 @@ def register_comfyui_runtime_routes(app, ctx):
             "threshold": threshold,
             "hard_fail": hard_fail,
             "issues": _text_list("issues"),
-            "passed_gates": _text_list("passed_gates"),
-            "failed_gates": _text_list("failed_gates"),
+            "passed_gates": passed_gates,
+            "failed_gates": failed_gates,
             "source": str(data.get("source") or "ai_agent_vision_client").strip()[:80],
         }
         result.update({
