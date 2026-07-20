@@ -274,7 +274,11 @@ class Stats:
                 parsed = {}
             error_code = str(parsed.get("error") or "").strip().lower()
             code = str(parsed.get("code") or error_code).strip().lower()
-            if backpressure_rejected and error_code == "server_busy":
+            server_busy_body = (
+                error_code == "server_busy"
+                or '"error":"server_busy"' in lowered.replace(" ", "")
+            )
+            if backpressure_rejected and server_busy_body:
                 return "server_busy_503"
             if (
                 parsed.get("feature")

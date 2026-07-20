@@ -199,6 +199,26 @@ def test_truncated_server_busy_feature_gate_is_not_feature_disabled():
     assert summary["ops"]["profile"]["feature_disabled_503"] == 0
 
 
+def test_truncated_server_busy_with_rejection_proof_is_controlled():
+    stats = Stats()
+    body = '{"error":"server_busy","gate":"heavy","message":"請稍候 2 秒後再試。"'
+
+    stats.record(
+        "drive_upload",
+        status=503,
+        elapsed_ms=1.0,
+        ok=False,
+        error=body,
+        body_sample=body,
+        backpressure_rejected=True,
+    )
+    summary = stats.summary()
+
+    assert summary["server_busy_503"] == 1
+    assert summary["hard_failures_excluding_controlled_503"] == 0
+    assert summary["ops"]["drive_upload"]["server_busy_503"] == 1
+
+
 def test_defensive_latency_is_separated_from_ordinary_latency():
     stats = Stats()
 
