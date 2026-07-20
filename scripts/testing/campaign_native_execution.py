@@ -488,13 +488,22 @@ def _artifact_records(
     *,
     started_epoch_ns: int,
     finished_epoch_ns: int,
+    started_monotonic_ns: int,
+    finished_monotonic_ns: int,
 ) -> dict[str, dict[str, Any]]:
     records: dict[str, dict[str, Any]] = {}
+    monotonic_elapsed_ns = max(0, finished_monotonic_ns - started_monotonic_ns)
+    earliest = min(
+        started_epoch_ns,
+        finished_epoch_ns - monotonic_elapsed_ns,
+    ) - _ARTIFACT_CLOCK_TOLERANCE_NS
+    latest = max(
+        finished_epoch_ns,
+        started_epoch_ns + monotonic_elapsed_ns,
+    ) + _ARTIFACT_CLOCK_TOLERANCE_NS
     for role, path in paths.items():
         identity = _inspect_native(path, label=f"native artifact {role}")
         _require(identity.uid == os.geteuid(), f"native artifact {role} owner mismatch")
-        earliest = started_epoch_ns - _ARTIFACT_CLOCK_TOLERANCE_NS
-        latest = finished_epoch_ns + _ARTIFACT_CLOCK_TOLERANCE_NS
         _require(
             earliest <= identity.ctime_ns <= latest,
             f"native artifact {role} was not created during the measured execution",
@@ -1124,7 +1133,18 @@ def _create_sealed_projection_memfd(payload: Mapping[str, Any]) -> tuple[int, st
         os, "MFD_ALLOW_SEALING", 0x0002
     )
     try:
-        descriptor = os.memfd_create("hackme-rehearsal-projection", flags=flags)
+        create_memfd = getattr(os, "memfd_create", None)
+        if callable(create_memfd):
+            descriptor = create_memfd("hackme-rehearsal-projection", flags=flags)
+        else:
+            libc = ctypes.CDLL(None, use_errno=True)
+            libc_memfd_create = libc.memfd_create
+            libc_memfd_create.argtypes = (ctypes.c_char_p, ctypes.c_uint)
+            libc_memfd_create.restype = ctypes.c_int
+            descriptor = int(libc_memfd_create(b"hackme-rehearsal-projection", flags))
+            if descriptor < 0:
+                error_number = ctypes.get_errno()
+                raise OSError(error_number, os.strerror(error_number))
     except (AttributeError, OSError) as exc:
         raise NativeExecutionError(
             f"sealed rehearsal projection memfd unavailable: {exc.__class__.__name__}: {exc}"
@@ -1142,9 +1162,11 @@ def _create_sealed_projection_memfd(payload: Mapping[str, Any]) -> tuple[int, st
             | getattr(fcntl, "F_SEAL_GROW", 0x0004)
             | getattr(fcntl, "F_SEAL_WRITE", 0x0008)
         )
-        fcntl.fcntl(descriptor, fcntl.F_ADD_SEALS, seals)
+        add_seals_command = getattr(fcntl, "F_ADD_SEALS", 1033)
+        get_seals_command = getattr(fcntl, "F_GET_SEALS", 1034)
+        fcntl.fcntl(descriptor, add_seals_command, seals)
         _require(
-            int(fcntl.fcntl(descriptor, fcntl.F_GET_SEALS)) & seals == seals,
+            int(fcntl.fcntl(descriptor, get_seals_command)) & seals == seals,
             "rehearsal projection memfd seal verification failed",
         )
     except Exception:
@@ -1543,6 +1565,8 @@ def execute_and_capture_gate(
             canonical_artifacts,
             started_epoch_ns=started_epoch_ns,
             finished_epoch_ns=finished_epoch_ns,
+            started_monotonic_ns=started_monotonic_ns,
+            finished_monotonic_ns=finished_monotonic_ns,
         )
         _reject_forbidden_artifact_markers(gate_name, canonical_artifacts)
         _reject_artifact_secrets(canonical_artifacts)

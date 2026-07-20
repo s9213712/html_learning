@@ -121,6 +121,35 @@ def test_contaminated_after_app_limit_round_is_not_recommended():
     assert recommendation["threads"] == 6
 
 
+def test_hls_recommendation_uses_external_ffmpeg_multicore_without_expanding_web_workers(monkeypatch):
+    monkeypatch.setattr(probe.os, "cpu_count", lambda: 24)
+    args = _args(target_p95_ms=1500, capacity_tier="highend")
+    results = [
+        {
+            "profile": {"workers": 4, "threads": 6, "label": "4x6"},
+            "rounds": [
+                {
+                    "accounts": 21,
+                    "contaminated_after_app_limit": False,
+                    "probe": _probe_summary(
+                        latency_ms={"p95": 600, "p99": 900, "max": 1200},
+                        cpu={"active_worker_peak": 4, "total_worker_cpu_peak_percent": 200},
+                    ),
+                }
+            ],
+        }
+    ]
+
+    recommendation = probe.choose_recommendation(results, args)
+
+    assert recommendation["workers"] == 4
+    assert recommendation["threads"] == 6
+    assert recommendation["suggested_env"]["HACKME_MEDIA_HLS_MAX_CONCURRENT"] == "3"
+    assert recommendation["suggested_env"]["HACKME_MEDIA_FFMPEG_THREADS"] == "2"
+    assert recommendation["hls_capacity_policy"]["basis"]["logical_cpus"] == 24
+    assert "external_ffmpeg_multicore_headroom" in recommendation["hls_capacity_policy"]["reasons"]
+
+
 def test_rc1_capacity_gate_is_machine_readable_for_selected_round():
     args = _args(target_p95_ms=500)
     results = [
@@ -309,6 +338,8 @@ def test_capacity_server_launcher_keeps_credentials_out_of_argv(monkeypatch, tmp
     assert "--manager-password" not in captured["command"]
     assert "--test-password" not in captured["command"]
     assert "capacity-root-secret" not in command_text
+    host_index = captured["command"].index("--host")
+    assert captured["command"][host_index + 1] == "127.0.0.1"
     assert captured["env"]["ROOT_PASSWORD"] == "capacity-root-secret"
     assert captured["env"]["MANAGER_PASSWORD"] == "capacity-manager-secret"
     assert captured["env"]["TEST_PASSWORD"] == "capacity-test-secret"

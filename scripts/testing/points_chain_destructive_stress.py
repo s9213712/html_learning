@@ -94,6 +94,10 @@ class ProbeClient:
                         timeout=self.timeout,
                         **kwargs,
                     )
+                if method in {"POST", "PUT", "PATCH", "DELETE"}:
+                    rotated_csrf = self.session.cookies.get("csrf_token")
+                    if rotated_csrf:
+                        self.csrf = str(rotated_csrf)
                 payload = _json_response(res)
                 management_headers = {
                     key: value
@@ -508,11 +512,33 @@ def active_wallet(client: ProbeClient) -> tuple[str, dict[str, Any]]:
     return address, wallet
 
 
+def request_with_server_busy_retry(
+    client: ProbeClient,
+    method: str,
+    path: str,
+    *,
+    expected: set[int],
+    attempts: int = 8,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Retry only explicit controlled backpressure during fixture setup."""
+
+    last: dict[str, Any] = {}
+    for attempt in range(max(1, int(attempts))):
+        last = client.request(method, path, expected=set(expected) | {503}, **kwargs)
+        if int(last.get("status") or 0) != 503 or str(last.get("error") or "") != "server_busy":
+            return last
+        retry_after = float(last.get("retry_after_seconds") or 0.5)
+        time.sleep(min(3.0, max(0.1, retry_after, 0.25 * (attempt + 1))))
+    return last
+
+
 def ensure_official_hot_wallet(client: ProbeClient) -> str:
     address, _wallet = active_wallet(client)
     if address:
         return address
-    res = client.request(
+    res = request_with_server_busy_retry(
+        client,
         "POST",
         "/api/points/wallet/onboarding",
         json={"mode": "official_hot"},

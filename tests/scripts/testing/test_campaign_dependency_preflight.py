@@ -234,7 +234,12 @@ def test_hls_preflight_disables_stdin_and_bounds_ffmpeg_threads(tmp_path: Path) 
             "",
         )
 
-    result = DependencyPreflight(tmp_path, {}, process_runner=runner)._hls()
+    result = DependencyPreflight(
+        tmp_path,
+        {},
+        process_runner=runner,
+        command_resolver=lambda command: command,
+    )._hls()
 
     assert result["status"] == "PASS"
     ffmpeg_command = commands[0]

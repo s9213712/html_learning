@@ -4,12 +4,22 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 import time
 from pathlib import Path
 from typing import Any
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from scripts.testing.ai_agent_real_i2i_edit_audit import (
+    ensure_live_ai_agent_settings,
+    restore_live_ai_agent_settings,
+    save_preview,
+)
 
 
 def api_fetch(page, method: str, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -47,6 +57,10 @@ def open_ai_agent(page, base_url: str) -> None:
     page.click("#tab-module-ai-agent")
     page.locator("#module-ai-agent.active").wait_for(state="visible", timeout=15_000)
     page.locator("#ai-agent-input").wait_for(state="visible", timeout=15_000)
+    page.wait_for_function(
+        "() => typeof AI_AGENT_STATE === 'object' && AI_AGENT_STATE.loaded && !AI_AGENT_STATE.loading",
+        timeout=60_000,
+    )
 
 
 def latest_output_ref(page) -> dict[str, Any]:
@@ -141,6 +155,17 @@ def main() -> int:
     add_root_password_argument(parser)
     parser.add_argument("--out-dir", default="")
     parser.add_argument("--timeout-seconds", type=int, default=900)
+    parser.add_argument("--model", default="qwen3.5:cloud")
+    parser.add_argument("--api-base-url", default="http://127.0.0.1:11434/v1")
+    parser.add_argument("--comfyui-api-url", default="http://127.0.0.1:8189")
+    parser.add_argument("--resume-job-id", default="")
+    parser.add_argument(
+        "--edit-prompt",
+        default=(
+            "請真的使用本站圖生圖功能，把剛剛那張站內圖片改成淡透明水彩風格，"
+            "保留構圖，使用 generation_mode img2img，denoise_strength 0.25，steps 1，batch_size 1。"
+        ),
+    )
     args = parser.parse_args()
 
     stamp = time.strftime("%Y%m%d_%H%M%S")
@@ -192,14 +217,44 @@ def main() -> int:
 
         base_url = args.base_url.rstrip("/")
         login(page, base_url, args.root_password)
+        settings_update = ensure_live_ai_agent_settings(
+            page,
+            model=args.model,
+            api_base_url=args.api_base_url,
+            comfyui_api_url=args.comfyui_api_url,
+        )
         open_ai_agent(page, base_url)
+        if args.resume_job_id:
+            job, job_polls = wait_for_job(page, args.resume_job_id, timeout_seconds=args.timeout_seconds)
+            result_images = ((job.get("result") or {}).get("images") or []) if isinstance(job, dict) else []
+            output_ref = result_images[0].get("image_ref") if result_images and isinstance(result_images[0], dict) else {}
+            result_preview = (
+                save_preview(page, output_ref, out_dir / "ai_agent_real_i2i_edit_result.png")
+                if isinstance(output_ref, dict) and output_ref.get("filename")
+                else {"ok": False, "error": "missing output image_ref"}
+            )
+            screenshot = out_dir / "ai_agent_real_i2i_edit.png"
+            page.screenshot(path=str(screenshot), full_page=True)
+            report = {
+                "ok": bool(job.get("status") == "completed" and result_preview.get("ok") and not browser_errors),
+                "resumed": True,
+                "job_id": args.resume_job_id,
+                "job": job,
+                "job_polls": job_polls,
+                "result_preview": result_preview,
+                "browser_errors": browser_errors,
+                "screenshot": str(screenshot),
+                "settings_restore": restore_live_ai_agent_settings(page, settings_update),
+            }
+            browser.close()
+            report_path = out_dir / "report.json"
+            report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+            print(json.dumps({"ok": report["ok"], "report": str(report_path), "job_status": job.get("status")}, ensure_ascii=False))
+            return 0 if report["ok"] else 1
         source_ref = latest_output_ref(page)
         seed_recent_image(page, source_ref)
 
-        prompt = (
-            "請真的使用本站圖生圖功能，把剛剛那張站內圖片改成淡透明水彩風格，"
-            "保留構圖，使用 generation_mode img2img，denoise_strength 0.25，steps 1，batch_size 1。"
-        )
+        prompt = args.edit_prompt
         started = time.perf_counter()
         page.fill("#ai-agent-input", prompt)
         page.click("#ai-agent-send-btn")
@@ -211,13 +266,25 @@ def main() -> int:
         job_id = ""
         while time.time() < deadline:
             job_id = write_call_job_id(write_calls)
-            if job_id:
+            if job_id or write_calls:
                 break
             time.sleep(1)
+        if not job_id:
+            job_id = write_call_job_id(write_calls) or thread_job_id(thread_text(page))
         job, job_polls = wait_for_job(page, job_id, timeout_seconds=args.timeout_seconds) if job_id else ({}, [])
         thread_tail = thread_text(page)[-4000:]
         thread_completed = "ComfyUI 產圖完成" in thread_tail and "輸出：" in thread_tail
         elapsed = round(time.perf_counter() - started, 3)
+
+        result_images = ((job.get("result") or {}).get("images") or []) if isinstance(job, dict) else []
+        output_ref = {}
+        if result_images and isinstance(result_images[0], dict):
+            output_ref = result_images[0].get("image_ref") or {}
+        result_preview = (
+            save_preview(page, output_ref, out_dir / "ai_agent_real_i2i_edit_result.png")
+            if isinstance(output_ref, dict) and output_ref.get("filename")
+            else {"ok": False, "error": "missing output image_ref"}
+        )
 
         final_job_id = job_id or write_call_job_id(write_calls) or thread_job_id(thread_tail)
         screenshot = out_dir / "ai_agent_real_i2i_edit.png"
@@ -232,10 +299,12 @@ def main() -> int:
             "write_calls": write_calls,
             "job": job,
             "job_polls": job_polls,
+            "result_preview": result_preview,
             "browser_errors": browser_errors,
             "thread_tail": thread_tail,
             "screenshot": str(screenshot),
         }
+        report["settings_restore"] = restore_live_ai_agent_settings(page, settings_update)
         browser.close()
 
     report_path = out_dir / "report.json"

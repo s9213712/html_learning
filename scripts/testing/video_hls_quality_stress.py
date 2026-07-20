@@ -275,6 +275,10 @@ def upload_video(
             "description": "Long video quality stress probe",
             "visibility": visibility,
             "privacy_mode": privacy_mode,
+            # This probe validates prepared HLS.  The product intentionally
+            # defaults standard-plain uploads to direct playback, so relying
+            # on the API default silently exercises the wrong streaming mode.
+            "streaming_modes": json.dumps(["prepared_hls", "realtime_proxy"]),
         }
     if visibility == "unlisted":
         fields["share_password"] = share_password
@@ -1081,6 +1085,38 @@ def anonymous_session_with_csrf(base_url: str) -> tuple[requests.Session, str, d
     return session, token, {"status": status, "elapsed_ms": round(elapsed * 1000, 2), "ok": status == 200 and bool(token)}
 
 
+def classify_browser_console_errors(
+    errors: list[str],
+    *,
+    password_prompt_seen: bool,
+) -> tuple[list[str], list[str]]:
+    """Split fatal console errors from the password gate's expected 401 probe.
+
+    The shared-video page probes playback before revealing its password form.
+    Chromium reports that expected 401 as a generic console error without the
+    request URL.  Ignore at most one exact authorization failure, and only when
+    the password prompt was actually observed; every other browser error stays
+    fatal.
+    """
+    fatal: list[str] = []
+    expected: list[str] = []
+    expected_auth_remaining = 1 if password_prompt_seen else 0
+    for error in errors:
+        normalized = error.lower()
+        is_expected_auth_probe = (
+            expected_auth_remaining > 0
+            and normalized.startswith("console.error:failed to load resource:")
+            and "status of 401" in normalized
+            and "unauthorized" in normalized
+        )
+        if is_expected_auth_probe:
+            expected.append(error)
+            expected_auth_remaining -= 1
+        else:
+            fatal.append(error)
+    return fatal, expected
+
+
 def fetch_text_result(session: requests.Session, url: str, *, timeout: int = 30) -> tuple[dict[str, Any], str]:
     started = time.perf_counter()
     try:
@@ -1151,10 +1187,12 @@ def browser_seek_shared_video(
         try:
             target = f"{base_url}{share_url}" if share_url.startswith("/") else share_url
             latency_origin = "share_page_navigation"
+            password_prompt_seen = False
             first_frame_origin_started = time.perf_counter()
             page.goto(target, wait_until="domcontentloaded", timeout=60_000)
             page.wait_for_selector("#share-password-form:not(.hidden), #player-host:not(.hidden)", timeout=30_000)
             if page.locator("#share-password-form:not(.hidden)").count():
+                password_prompt_seen = True
                 page.fill("#share-password", share_password)
                 latency_origin = "unlock_submit"
                 first_frame_origin_started = time.perf_counter()
@@ -1324,7 +1362,10 @@ def browser_seek_shared_video(
                     playerHeight: Math.round(document.querySelector('#shared-player')?.getBoundingClientRect().height || 0),
                 })"""
             )
-            fatal_errors = list(errors)
+            fatal_errors, expected_console_errors = classify_browser_console_errors(
+                errors,
+                password_prompt_seen=password_prompt_seen,
+            )
             first_frame_metadata = first_frame.get("frame_metadata") or {}
             first_frame_ok = (
                 first_frame.get("terminal_event") == "playing_and_video_frame"
@@ -1369,6 +1410,7 @@ def browser_seek_shared_video(
                 "seek": seek,
                 "layout": layout,
                 "fatal_errors": fatal_errors[:20],
+                "expected_console_errors": expected_console_errors[:20],
                 "console_errors": errors[:50],
             })
             return result
@@ -1589,11 +1631,19 @@ def parse_accounts(raw_accounts: list[str], accounts_json: str = "") -> list[tup
             accounts.append((username, password))
         return accounts
     for raw in raw_accounts:
-        username, sep, password = raw.partition(":")
-        username = username.strip()
-        if not username:
-            continue
-        accounts.append((username, password if sep else username))
+        # The other stress probes accept a comma-separated account list, and
+        # operators naturally reuse that form here.  argparse's ``nargs=*``
+        # otherwise treats the entire CSV as one password and produces a
+        # misleading login failure.  Split only at commas that introduce a
+        # new username:password item so ordinary commas in passwords remain
+        # usable.
+        entries = re.split(r",(?=[^,\s:]+:)", str(raw or ""))
+        for entry in entries:
+            username, sep, password = entry.partition(":")
+            username = username.strip()
+            if not username:
+                continue
+            accounts.append((username, password if sep else username))
     if not accounts:
         raise ValueError(
             "upload phase requires HACKME_HLS_STRESS_ACCOUNTS_JSON or explicit --accounts"
@@ -1752,9 +1802,51 @@ def generate_long_fixture(path: Path, *, duration_seconds: int, ffmpeg_bin: str,
     return result
 
 
-def write_result(path: Path, result: dict[str, Any]) -> None:
+_REPORT_SECRET_KEYS = {
+    "authorization",
+    "cookie",
+    "csrf_token",
+    "private_key",
+    "secret",
+    "set-cookie",
+    "share_session",
+    "share_session_id",
+    "token",
+}
+
+
+def redact_report_secrets(value: Any, *, key: str = "") -> Any:
+    """Return a report-safe copy without bearer/share/session credentials."""
+    normalized_key = str(key or "").strip().lower().replace("-", "_")
+    if normalized_key in {item.replace("-", "_") for item in _REPORT_SECRET_KEYS}:
+        return "[redacted]" if value not in (None, "") else value
+    if isinstance(value, dict):
+        return {
+            str(item_key): redact_report_secrets(item_value, key=str(item_key))
+            for item_key, item_value in value.items()
+        }
+    if isinstance(value, list):
+        return [redact_report_secrets(item) for item in value]
+    if isinstance(value, tuple):
+        return [redact_report_secrets(item) for item in value]
+    if not isinstance(value, str):
+        return value
+    redacted = re.sub(r"(/shared/videos/)[^/?#\s]+", r"\1[redacted]", value)
+    redacted = re.sub(r"(/api/videos/shared/)[^/?#\s]+", r"\1[redacted]", redacted)
+    redacted = re.sub(
+        r"([?&](?:share_session|csrf_token|token)=)[^&#\s]+",
+        r"\1[redacted]",
+        redacted,
+        flags=re.IGNORECASE,
+    )
+    return redacted
+
+
+def write_result(path: Path, result: dict[str, Any]) -> dict[str, Any]:
+    safe_result = redact_report_secrets(result)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    path.write_text(json.dumps(safe_result, ensure_ascii=False, indent=2), encoding="utf-8")
+    return safe_result
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1835,8 +1927,8 @@ def main(argv: list[str] | None = None) -> int:
                 "fixture_generation": fixture_generation,
                 "phases": [],
             }
-            write_result(Path(args.out), result)
-            print(json.dumps(result, ensure_ascii=False, indent=2), flush=True)
+            safe_result = write_result(Path(args.out), result)
+            print(json.dumps(safe_result, ensure_ascii=False, indent=2), flush=True)
             return 1
     source_media = probe_media_file(video_path, args.ffprobe_bin) if video_path.exists() else {"ok": False, "error": "video_missing"}
     source_checks = {
@@ -1869,8 +1961,8 @@ def main(argv: list[str] | None = None) -> int:
         "source_checks": source_checks,
         "phases": phases,
     }
-    write_result(Path(args.out), result)
-    print(json.dumps(result, ensure_ascii=False, indent=2), flush=True)
+    safe_result = write_result(Path(args.out), result)
+    print(json.dumps(safe_result, ensure_ascii=False, indent=2), flush=True)
     return 0 if ok else 1
 
 

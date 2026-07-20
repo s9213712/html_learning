@@ -6,15 +6,15 @@ AUTO_RUN_ROOT=0
 if [[ -n "${PYTEST_TMP_ROOT:-}" ]]; then
   RUN_ROOT="$(readlink -m -- "$PYTEST_TMP_ROOT")"
   case "$RUN_ROOT" in
-    /tmp/*) ;;
-    *)
-      echo "[pytest-in-tmp] ERROR: PYTEST_TMP_ROOT must resolve below /tmp" >&2
+    "$SOURCE_ROOT"|"$SOURCE_ROOT"/*)
+      echo "[pytest-in-tmp] ERROR: PYTEST_TMP_ROOT must stay outside the source checkout" >&2
       exit 2
       ;;
   esac
   case "$RUN_ROOT" in
-    "$SOURCE_ROOT"|"$SOURCE_ROOT"/*)
-      echo "[pytest-in-tmp] ERROR: PYTEST_TMP_ROOT must stay outside the source checkout" >&2
+    /tmp/*) ;;
+    *)
+      echo "[pytest-in-tmp] ERROR: PYTEST_TMP_ROOT must resolve below /tmp" >&2
       exit 2
       ;;
   esac

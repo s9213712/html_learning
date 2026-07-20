@@ -472,6 +472,7 @@ write_restart_shortcut_script() {
       HTML_LEARNING_BACKPRESSURE_THREAD_CAPACITY
       HACKME_MEDIA_HLS_MAX_CONCURRENT
       HACKME_MEDIA_HLS_SERIALIZE_ALL
+      HACKME_MEDIA_FFMPEG_THREADS
       HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL
       HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_PER_USER
       HACKME_BT_DOWNLOAD_STAGING_DIR
@@ -563,6 +564,11 @@ load_local_capacity_defaults() {
           export HACKME_MEDIA_HLS_SERIALIZE_ALL="$value"
         fi
         ;;
+      HACKME_MEDIA_FFMPEG_THREADS)
+        if [[ "$mode" == "force" || -z "${HACKME_MEDIA_FFMPEG_THREADS+x}" || "$(printf '%s' "${HACKME_MEDIA_FFMPEG_THREADS:-}" | tr '[:upper:]' '[:lower:]')" == "auto" ]]; then
+          export HACKME_MEDIA_FFMPEG_THREADS="$value"
+        fi
+        ;;
       HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL)
         if [[ "$mode" == "force" || -z "${HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL+x}" || "$(printf '%s' "${HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL:-}" | tr '[:upper:]' '[:lower:]')" == "auto" ]]; then
           export HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL="$value"
@@ -597,6 +603,7 @@ load_capacity_env_defaults_preview() {
   CAPACITY_ENV_BACKPRESSURE=""
   CAPACITY_ENV_HLS_MAX_CONCURRENT=""
   CAPACITY_ENV_HLS_SERIALIZE_ALL=""
+  CAPACITY_ENV_FFMPEG_THREADS=""
   CAPACITY_ENV_REMOTE_DOWNLOAD_GLOBAL=""
   CAPACITY_ENV_REMOTE_DOWNLOAD_PER_USER=""
   [[ -f "$CAPACITY_DEFAULTS_FILE" ]] || return 1
@@ -624,6 +631,7 @@ load_capacity_env_defaults_preview() {
       HTML_LEARNING_BACKPRESSURE_THREAD_CAPACITY) CAPACITY_ENV_BACKPRESSURE="$value" ;;
       HACKME_MEDIA_HLS_MAX_CONCURRENT) CAPACITY_ENV_HLS_MAX_CONCURRENT="$value" ;;
       HACKME_MEDIA_HLS_SERIALIZE_ALL) CAPACITY_ENV_HLS_SERIALIZE_ALL="$value" ;;
+      HACKME_MEDIA_FFMPEG_THREADS) CAPACITY_ENV_FFMPEG_THREADS="$value" ;;
       HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL) CAPACITY_ENV_REMOTE_DOWNLOAD_GLOBAL="$value" ;;
       HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_PER_USER) CAPACITY_ENV_REMOTE_DOWNLOAD_PER_USER="$value" ;;
     esac
@@ -640,6 +648,7 @@ load_capacity_report_defaults_preview() {
   CAPACITY_JSON_BACKPRESSURE=""
   CAPACITY_JSON_HLS_MAX_CONCURRENT=""
   CAPACITY_JSON_HLS_SERIALIZE_ALL=""
+  CAPACITY_JSON_FFMPEG_THREADS=""
   CAPACITY_JSON_REMOTE_DOWNLOAD_GLOBAL=""
   CAPACITY_JSON_REMOTE_DOWNLOAD_PER_USER=""
   CAPACITY_JSON_PROFILE=""
@@ -683,6 +692,7 @@ emit("CAPACITY_JSON_MAX_REQUESTS_JITTER", suggested_env.get("HACKME_DEV_GUNICORN
 emit("CAPACITY_JSON_BACKPRESSURE", suggested_env.get("HTML_LEARNING_BACKPRESSURE_THREAD_CAPACITY") or (max(4, int(threads or 0)) if threads else ""))
 emit("CAPACITY_JSON_HLS_MAX_CONCURRENT", suggested_env.get("HACKME_MEDIA_HLS_MAX_CONCURRENT") or "")
 emit("CAPACITY_JSON_HLS_SERIALIZE_ALL", suggested_env.get("HACKME_MEDIA_HLS_SERIALIZE_ALL") or "")
+emit("CAPACITY_JSON_FFMPEG_THREADS", suggested_env.get("HACKME_MEDIA_FFMPEG_THREADS") or "")
 emit("CAPACITY_JSON_REMOTE_DOWNLOAD_GLOBAL", suggested_env.get("HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL") or "")
 emit("CAPACITY_JSON_REMOTE_DOWNLOAD_PER_USER", suggested_env.get("HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_PER_USER") or "")
 emit("CAPACITY_JSON_PROFILE", f"{workers}x{threads}" if workers and threads else "")
@@ -1672,7 +1682,7 @@ print_resolved_config() {
   say "  server_runner:       $SERVER_RUNNER"
   if [[ "$SERVER_RUNNER" == "gunicorn" ]]; then
     say "  gunicorn:            workers=$GUNICORN_WORKERS threads=$GUNICORN_THREADS timeout=$GUNICORN_TIMEOUT backlog=$GUNICORN_BACKLOG max_requests=$GUNICORN_MAX_REQUESTS jitter=$GUNICORN_MAX_REQUESTS_JITTER"
-    say "  hls_slots:           max_concurrent=${HACKME_MEDIA_HLS_MAX_CONCURRENT:-<worker default 1>} serialize_all=${HACKME_MEDIA_HLS_SERIALIZE_ALL:-<worker default>} probe=$HLS_SLOT_PROBE_MODE"
+    say "  hls_slots:           max_concurrent=${HACKME_MEDIA_HLS_MAX_CONCURRENT:-<worker default 1>} ffmpeg_threads=${HACKME_MEDIA_FFMPEG_THREADS:-<worker default 1>} serialize_all=${HACKME_MEDIA_HLS_SERIALIZE_ALL:-<worker default>} probe=$HLS_SLOT_PROBE_MODE"
     say "  remote_download:     global=${HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL:-<root/env default 1>} per_user=${HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_PER_USER:-<root/env default 1>}"
     say "  bt_backend:          ${BT_DOWNLOAD_BACKEND:-${HACKME_BT_BACKEND:-auto}} transmission_rpc=${TRANSMISSION_RPC_URL:-${HACKME_TRANSMISSION_RPC_URL:-http://127.0.0.1:9091/transmission/rpc}}"
     say "  transmission_setup:  ${SETUP_TRANSMISSION_BACKEND:-0} helper=${TRANSMISSION_SETUP_SCRIPT:-scripts/storage/setup_transmission_backend.sh}"
@@ -2032,6 +2042,7 @@ emit("CAPACITY_REPORT_TOTAL_LANES", workers * threads if workers and threads els
 emit("CAPACITY_REPORT_BACKPRESSURE", suggested_env.get("HTML_LEARNING_BACKPRESSURE_THREAD_CAPACITY") or (max(4, threads) if threads else ""))
 emit("CAPACITY_REPORT_HLS_MAX_CONCURRENT", suggested_env.get("HACKME_MEDIA_HLS_MAX_CONCURRENT") or "")
 emit("CAPACITY_REPORT_HLS_SERIALIZE_ALL", suggested_env.get("HACKME_MEDIA_HLS_SERIALIZE_ALL") or "")
+emit("CAPACITY_REPORT_FFMPEG_THREADS", suggested_env.get("HACKME_MEDIA_FFMPEG_THREADS") or "")
 emit("CAPACITY_REPORT_HLS_POLICY", json.dumps(recommendation.get("hls_capacity_policy") or {}, sort_keys=True, separators=(",", ":")))
 emit("CAPACITY_REPORT_REMOTE_DOWNLOAD_GLOBAL", suggested_env.get("HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL") or "")
 emit("CAPACITY_REPORT_REMOTE_DOWNLOAD_PER_USER", suggested_env.get("HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_PER_USER") or "")
@@ -2094,6 +2105,9 @@ REPORTPY
     if [[ -n "${CAPACITY_REPORT_HLS_SERIALIZE_ALL:-}" ]]; then
       export HACKME_MEDIA_HLS_SERIALIZE_ALL="$CAPACITY_REPORT_HLS_SERIALIZE_ALL"
     fi
+    if [[ -n "${CAPACITY_REPORT_FFMPEG_THREADS:-}" ]]; then
+      export HACKME_MEDIA_FFMPEG_THREADS="$CAPACITY_REPORT_FFMPEG_THREADS"
+    fi
     if [[ -n "${CAPACITY_REPORT_REMOTE_DOWNLOAD_GLOBAL:-}" ]]; then
       export HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL="$CAPACITY_REPORT_REMOTE_DOWNLOAD_GLOBAL"
     fi
@@ -2108,6 +2122,7 @@ print_capacity_probe_conclusion() {
   local backpressure_capacity="${HTML_LEARNING_BACKPRESSURE_THREAD_CAPACITY:-auto}"
   local hls_max_concurrent="${HACKME_MEDIA_HLS_MAX_CONCURRENT:-auto}"
   local hls_serialize_all="${HACKME_MEDIA_HLS_SERIALIZE_ALL:-auto}"
+  local ffmpeg_threads="${HACKME_MEDIA_FFMPEG_THREADS:-auto}"
   local remote_download_global="${HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL:-auto}"
   local remote_download_per_user="${HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_PER_USER:-auto}"
   say "[dev-tmp] capacity probe conclusion:"
@@ -2172,6 +2187,7 @@ print_capacity_probe_conclusion() {
   say "  backpressure_thread_capacity:   $backpressure_capacity"
   say "  hls_max_concurrent:             $hls_max_concurrent"
   say "  hls_serialize_all:              $hls_serialize_all"
+  say "  hls_ffmpeg_threads_per_worker: $ffmpeg_threads"
   say "  remote_download_global:         $remote_download_global"
   say "  remote_download_per_user:       $remote_download_per_user"
   say "  gunicorn_max_requests:          $GUNICORN_MAX_REQUESTS"
@@ -3549,7 +3565,8 @@ ensure_official_workflows_source() {
 }
 
 python_has_runtime_dependencies() {
-  python3 - <<'PY' >/dev/null 2>&1 || return 1
+  local python_candidate="${1:-python3}"
+  "$python_candidate" - <<'PY' >/dev/null 2>&1 || return 1
 import argon2
 import cryptography
 import flask
@@ -3558,7 +3575,7 @@ import chess
 import websocket
 PY
   if [[ "${SERVER_RUNNER:-flask}" == "gunicorn" ]]; then
-    python3 - <<'PY' >/dev/null 2>&1 || return 1
+    "$python_candidate" - <<'PY' >/dev/null 2>&1 || return 1
 import gunicorn
 PY
   fi
@@ -3567,18 +3584,24 @@ PY
 
 resolve_python() {
   local venv_dir="$RUNTIME_ROOT/venv"
+  if [[ "$PYTHON_BIN" != "python3" && -x "$PYTHON_BIN" ]]; then
+    if python_has_runtime_dependencies "$PYTHON_BIN"; then
+      return 0
+    fi
+    [[ "$SKIP_INSTALL" != "1" ]] || die "--skip-install Python is missing runtime dependencies: $PYTHON_BIN"
+  fi
   if [[ -x "$venv_dir/bin/python3" ]]; then
     PYTHON_BIN="$venv_dir/bin/python3"
     return 0
   fi
   if [[ "$SKIP_INSTALL" == "1" ]]; then
-    if python_has_runtime_dependencies; then
+    if python_has_runtime_dependencies python3; then
       PYTHON_BIN="python3"
       return 0
     fi
     die "--skip-install requires either an existing tmp venv at $venv_dir or a ready system python3 environment"
   fi
-  if python_has_runtime_dependencies; then
+  if python_has_runtime_dependencies python3; then
     PYTHON_BIN="python3"
     return 0
   fi

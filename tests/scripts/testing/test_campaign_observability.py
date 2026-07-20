@@ -164,7 +164,11 @@ def test_host_pressure_trips_hard_stop(
     assert reason_code in sample["hard_limit_state"]["tripped"]
 
 
-def test_host_swap_and_load_trip_hard_stop(tmp_path: Path) -> None:
+def test_host_swap_and_load_trip_hard_stop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(observability.os, "cpu_count", lambda: 1)
     result = collector(tmp_path)
     result.config.maximum_host_load1_per_cpu = 0.01
     write(

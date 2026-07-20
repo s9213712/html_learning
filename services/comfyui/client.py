@@ -540,6 +540,9 @@ class ComfyUIClient:
     def interrupt(self, *, timeout_seconds=None):
         return comfy_execution.interrupt(self, timeout_seconds=timeout_seconds)
 
+    def get_queue(self, *, timeout_seconds=None):
+        return comfy_execution.get_queue(self, timeout_seconds=timeout_seconds)
+
     def delete_queue_items(self, prompt_ids, *, timeout_seconds=None):
         return comfy_execution.delete_queue_items(self, prompt_ids, timeout_seconds=timeout_seconds)
 

@@ -38,6 +38,55 @@ def test_share_token_from_url_handles_absolute_and_relative_links() -> None:
     assert probe.share_token_from_url("/api/videos/1") == ""
 
 
+def test_parse_accounts_accepts_csv_and_preserves_password_commas() -> None:
+    assert probe.parse_accounts(["alice:A1,bob:B2", "carol:hello,world"]) == [
+        ("alice", "A1"),
+        ("bob", "B2"),
+        ("carol", "hello,world"),
+    ]
+
+
+def test_write_result_redacts_session_credentials_and_share_urls(tmp_path: Path) -> None:
+    report = {
+        "csrf_token": "csrf-secret",
+        "nested": {
+            "token": "share-token",
+            "password_required": True,
+            "url": "/api/videos/shared/path-secret/hls/master.m3u8?share_session=session-secret",
+        },
+        "share_url": "/shared/videos/url-secret",
+    }
+    path = tmp_path / "report.json"
+
+    safe = probe.write_result(path, report)
+    written = path.read_text(encoding="utf-8")
+
+    assert safe["csrf_token"] == "[redacted]"
+    assert safe["nested"]["token"] == "[redacted]"
+    assert safe["nested"]["password_required"] is True
+    assert safe["nested"]["url"] == "/api/videos/shared/[redacted]/hls/master.m3u8?share_session=[redacted]"
+    assert safe["share_url"] == "/shared/videos/[redacted]"
+    for secret in ("csrf-secret", "share-token", "path-secret", "session-secret", "url-secret"):
+        assert secret not in written
+
+
+def test_browser_console_errors_ignore_only_expected_password_gate_401() -> None:
+    expected_401 = "console.error:Failed to load resource: the server responded with a status of 401 (UNAUTHORIZED)"
+    playback_404 = "console.error:Failed to load resource: the server responded with a status of 404 (NOT FOUND)"
+
+    fatal, expected = probe.classify_browser_console_errors(
+        [expected_401, playback_404, expected_401],
+        password_prompt_seen=True,
+    )
+
+    assert expected == [expected_401]
+    assert fatal == [playback_404, expected_401]
+    assert probe.classify_browser_console_errors(
+        [expected_401],
+        password_prompt_seen=False,
+    ) == ([expected_401], [])
+
+
 def test_filter_db_state_limits_jobs_and_media_to_this_upload() -> None:
     upload = {"uploads": [{"video_id": 2, "file_id": "file-b", "ok": True}]}
     state = {
@@ -125,6 +174,52 @@ def test_upload_phase_records_every_account_when_parallel_wait_times_out(
     assert result["ok"] is False
     assert {item["username"] for item in result["uploads"]} == {"a", "b"}
     assert all(item["error"] == "upload_phase_timeout" for item in result["uploads"])
+
+
+def test_hls_upload_explicitly_requests_prepared_hls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    video = tmp_path / "fixture.mp4"
+    video.write_bytes(b"fixture")
+    captured: dict[str, bytes] = {}
+
+    class FakeResponse:
+        status_code = 200
+
+        @staticmethod
+        def json() -> dict:
+            return {"ok": True, "video": {"id": 1}, "file": {"file_id": "file-1"}}
+
+    class FakeSession:
+        def post(self, _url: str, *, data, **_kwargs) -> FakeResponse:
+            chunks = []
+            while chunk := data.read(1024):
+                chunks.append(chunk)
+            captured["body"] = b"".join(chunks)
+            return FakeResponse()
+
+    monkeypatch.setattr(
+        probe,
+        "login",
+        lambda *_args, **_kwargs: {
+            "ok": True,
+            "session": FakeSession(),
+            "token": "csrf",
+            "csrf": {},
+            "login": {},
+        },
+    )
+
+    result = probe.upload_video(
+        base_url="https://127.0.0.1:1",
+        username="member",
+        password="secret",
+        video_path=video,
+        privacy_mode="standard_plain",
+        timeout_seconds=2,
+    )
+
+    assert result["ok"] is True
+    assert b'name="streaming_modes"' in captured["body"]
+    assert b'prepared_hls' in captured["body"]
 
 
 def test_wait_for_hls_rejects_failed_terminal_jobs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

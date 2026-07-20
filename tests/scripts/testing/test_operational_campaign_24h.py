@@ -26,6 +26,7 @@ from scripts.testing.operational_campaign_24h import (
     ServerController,
     WebClient,
     build_parser,
+    database_file_sizes,
     sanitized_command,
     source_manifest,
     validate_supervised_runtime_contract,
@@ -36,6 +37,28 @@ from scripts.testing.operation_coverage import CAMPAIGN_SCENARIO_CONTRACTS
 from scripts.testing.campaign_load import EffectiveLoadWindow
 from services.server.database import get_audit_db
 from services.system import audit as audit_service
+
+
+def test_database_file_sizes_ignores_disappearing_sqlite_sidecar(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_dir = tmp_path / "database"
+    database_dir.mkdir()
+    stable = database_dir / "database.db"
+    transient = database_dir / "database.db-shm"
+    stable.write_bytes(b"stable")
+    transient.write_bytes(b"transient")
+    original_stat = Path.stat
+
+    def racing_stat(path: Path, *args: object, **kwargs: object):
+        if path == transient:
+            raise FileNotFoundError(path)
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", racing_stat)
+
+    assert database_file_sizes(database_dir) == {"database.db": 6}
 
 
 def launch_core_activation_child(
@@ -2300,6 +2323,44 @@ def test_web_client_refreshes_user_csrf_after_login(monkeypatch: pytest.MonkeyPa
     ]
 
 
+def test_web_client_tracks_csrf_cookie_rotated_by_each_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Response:
+        status_code = 200
+        content = b"{}"
+        text = ""
+
+        def json(self) -> dict[str, object]:
+            return {"ok": True}
+
+    class Session:
+        def __init__(self):
+            self.verify = False
+            self.cookies = {"csrf_token": "csrf-1"}
+            self.expected_csrf = "csrf-1"
+            self.write_count = 0
+
+        def request(self, method: str, _url: str, *, headers=None, **_kwargs: object) -> Response:
+            assert method == "POST"
+            assert (headers or {}).get("X-CSRF-Token") == self.expected_csrf
+            self.write_count += 1
+            self.expected_csrf = f"csrf-{self.write_count + 1}"
+            self.cookies["csrf_token"] = self.expected_csrf
+            return Response()
+
+    monkeypatch.setattr(campaign_module.requests, "Session", Session)
+    client = WebClient("https://campaign.invalid", "root", "secret")
+    client.csrf = "csrf-1"
+
+    for index in range(12):
+        result = client.request("POST", "/api/admin/users", json_body={"index": index})
+        assert result["ok"] is True
+
+    assert client.csrf == "csrf-13"
+    assert client.session.write_count == 12
+
+
 def test_web_client_publishes_completed_request_errors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3066,6 +3127,7 @@ def test_h24_sealed_triad_requires_writer_seal_and_indexes_all_targets(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     campaign = Campaign(campaign_args(tmp_path))
+    monkeypatch.setattr(campaign, "_runtime_writer_pids", lambda _root: [])
     for suffix, controller in enumerate(
         (campaign.primary, campaign.recovery, campaign.security_sentinel),
         start=1,
@@ -3170,6 +3232,7 @@ def test_h24_manifest_rehashes_index_after_fail_closed_manifest_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     campaign = Campaign(campaign_args(tmp_path))
+    monkeypatch.setattr(campaign, "_runtime_writer_pids", lambda _root: [])
     for suffix, controller in enumerate(
         (campaign.primary, campaign.recovery, campaign.security_sentinel),
         start=7,
@@ -3213,6 +3276,7 @@ def test_h24_cross_source_integrity_failure_is_classified_as_product(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     campaign = Campaign(campaign_args(tmp_path))
+    monkeypatch.setattr(campaign, "_runtime_writer_pids", lambda _root: [])
     for suffix, controller in enumerate(
         (campaign.primary, campaign.recovery, campaign.security_sentinel),
         start=4,

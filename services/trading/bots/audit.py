@@ -1,6 +1,6 @@
 """Pure trading bot-audit helpers."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 def bot_audit_latest_map(rows):
@@ -24,7 +24,12 @@ def bot_audit_is_eligible(row, *, bot_kind, min_enabled_seconds, now_text, enabl
     if not bool(row.get("enabled")):
         return False, "disabled"
     enabled_at = enabled_at_func(row, now_text=now_text)
-    age_seconds = max(0, int((datetime.fromisoformat(now_text) - enabled_at).total_seconds()))
+    now_value = datetime.fromisoformat(now_text)
+    if now_value.tzinfo is None:
+        now_value = now_value.replace(tzinfo=timezone.utc)
+    if enabled_at.tzinfo is None:
+        enabled_at = enabled_at.replace(tzinfo=timezone.utc)
+    age_seconds = max(0, int((now_value - enabled_at).total_seconds()))
     has_trade = int(row.get("triggered_run_count") or 0) > 0 if bot_kind == "trading_bot" else int(row.get("total_trades") or 0) > 0
     if has_trade:
         return True, "has_trade"

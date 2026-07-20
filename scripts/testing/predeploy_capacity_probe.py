@@ -968,6 +968,8 @@ def start_isolated_server(args: argparse.Namespace, profile: Profile, run_root: 
         "--cli",
         "--run-root",
         str(run_root),
+        "--host",
+        "127.0.0.1",
         "--port",
         str(port),
         "--port-conflict",
@@ -2433,11 +2435,28 @@ def recommend_hls_capacity_policy(profile: dict[str, Any], probe: dict[str, Any]
 
     if max_concurrent == 1:
         reasons.append("protect_request_p95_p99_during_hls")
+    logical_cpus = max(1, int(os.cpu_count() or 1))
+    ffmpeg_threads = 1
+    if (
+        max_concurrent >= 2
+        and logical_cpus >= 8
+        and latency_ratio <= 0.65
+        and (cpu_peak <= 260 or cpu_peak == 0)
+    ):
+        # ffmpeg is an external process, so two threads per HLS slot use
+        # multiple cores without adding Python/SQLite writer processes. Keep
+        # at least half of the host's logical CPUs available for requests,
+        # governance writes, and the database.
+        ffmpeg_threads = min(2, max(1, (logical_cpus // 2) // max_concurrent))
+        if ffmpeg_threads > 1:
+            reasons.append("external_ffmpeg_multicore_headroom")
     return {
         "hls_max_concurrent": max_concurrent,
         "hls_serialize_all": 1,
+        "ffmpeg_threads": ffmpeg_threads,
         "basis": {
             "capacity_tier": tier,
+            "logical_cpus": logical_cpus,
             "worker_thread_lanes": lanes,
             "selected_round_p95_ms": p95,
             "target_p95_ms": target_p95,
@@ -2542,6 +2561,7 @@ def choose_recommendation(results: list[dict[str, Any]], args: argparse.Namespac
             "HTML_LEARNING_BACKPRESSURE_THREAD_CAPACITY": str(max(4, int(profile["threads"]))),
             "HACKME_MEDIA_HLS_MAX_CONCURRENT": str(hls_capacity["hls_max_concurrent"]),
             "HACKME_MEDIA_HLS_SERIALIZE_ALL": str(hls_capacity["hls_serialize_all"]),
+            "HACKME_MEDIA_FFMPEG_THREADS": str(hls_capacity["ffmpeg_threads"]),
             "HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL": str(remote_download_capacity["remote_download_max_concurrent_global"]),
             "HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_PER_USER": str(remote_download_capacity["remote_download_max_concurrent_per_user"]),
         },
@@ -2643,6 +2663,7 @@ def sync_capacity_defaults(
         "HTML_LEARNING_BACKPRESSURE_THREAD_CAPACITY",
         "HACKME_MEDIA_HLS_MAX_CONCURRENT",
         "HACKME_MEDIA_HLS_SERIALIZE_ALL",
+        "HACKME_MEDIA_FFMPEG_THREADS",
         "HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL",
         "HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_PER_USER",
     ]

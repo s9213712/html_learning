@@ -100,6 +100,18 @@ class CoreActivationStopped(RuntimeError):
     pass
 
 
+def campaign_load_policy(campaign_level: str) -> dict[str, Any]:
+    """Return a bounded policy for supervised and standalone probe runs."""
+
+    level = str(campaign_level or "").strip().lower()
+    if level == "standalone":
+        # Standalone is intentionally non-signoff evidence.  It still needs a
+        # complete, non-ramping policy so the default CLI mode can run instead
+        # of indexing the supervised-only policy table with an unsupported key.
+        return dict(SUPERVISED_LOAD_POLICIES["smoke"])
+    return dict(SUPERVISED_LOAD_POLICIES[level])
+
+
 def validate_run_policy(base_url: str, runtime_root: Path, *, owns_target: bool) -> None:
     parsed = urlparse(str(base_url or ""))
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
@@ -599,6 +611,9 @@ class ApiClient:
                     headers=headers,
                     timeout=self.timeout,
                 )
+                rotated_csrf = self.session.cookies.get("csrf_token")
+                if rotated_csrf:
+                    self.csrf = str(rotated_csrf)
                 if response.status_code == 401:
                     self.login()
                     if method not in {"GET", "HEAD", "OPTIONS"}:
@@ -611,6 +626,9 @@ class ApiClient:
                         headers=headers,
                         timeout=self.timeout,
                     )
+                    rotated_csrf = self.session.cookies.get("csrf_token")
+                    if rotated_csrf:
+                        self.csrf = str(rotated_csrf)
                 return self.capture(response, started)
             except Exception as exc:
                 return {
@@ -1157,6 +1175,12 @@ def aggregate_rounds(round_payloads: list[dict[str, Any]], configured_accounts: 
     }
 
 
+def round_rotation_offset(round_index: int, round_ops: int) -> int:
+    """Continue deterministic account coverage across subprocess rounds."""
+
+    return max(0, int(round_index) - 1) * max(1, int(round_ops))
+
+
 def aggregate_resource_evidence(round_payloads: list[dict[str, Any]], server_pids: str) -> dict[str, Any]:
     summaries = [
         payload.get("resource_monitor")
@@ -1472,7 +1496,7 @@ def main() -> int:
     external_control_reason = ""
     loop_error: BaseException | None = None
     effective_load_required = args.campaign_level in {"rehearsal", "formal"}
-    load_policy = SUPERVISED_LOAD_POLICIES[args.campaign_level]
+    load_policy = campaign_load_policy(args.campaign_level)
     ramp_minimum_stage_seconds = dict(
         RAMP_MINIMUM_STAGE_SECONDS.get(
             args.campaign_level,
@@ -1934,6 +1958,7 @@ def main() -> int:
                 "--ops", str(max(args.round_ops, args.account_count)),
                 "--concurrency", str(scheduled_load_level),
                 "--operation-mode", "rotation",
+                "--rotation-offset", str(round_rotation_offset(round_index, max(args.round_ops, args.account_count))),
                 "--require-all-accounts",
                 "--require-operation-coverage",
                 "--require-operation-success",

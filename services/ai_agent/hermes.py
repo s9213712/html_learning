@@ -1281,6 +1281,18 @@ def _backend_timeout(settings):
     return parse_int_setting(settings, "ai_agent_request_timeout_seconds", 120, 5, 600)
 
 
+def _health_timeout(settings):
+    """Keep status polling from occupying request workers behind an offline backend."""
+    raw = (settings or {}).get("ai_agent_health_timeout_seconds")
+    if raw in (None, ""):
+        raw = os.environ.get("HACKME_AI_AGENT_HEALTH_TIMEOUT_SECONDS", "2")
+    try:
+        value = int(float(str(raw).strip()))
+    except Exception:
+        value = 2
+    return max(1, min(8, value))
+
+
 def _backend_headers(settings, *, session_key=""):
     headers = {"Content-Type": "application/json"}
     api_key = validate_ai_agent_api_key((settings or {}).get("ai_agent_api_key"), allow_blank=True) or ""
@@ -1977,9 +1989,10 @@ def run_ai_agent_audit_scan(settings, *, get_db, get_audit_db=None, actor=None, 
 
 def ai_agent_health(settings):
     provider = normalize_ai_agent_provider((settings or {}).get("ai_agent_provider")) or DEFAULT_AI_AGENT_PROVIDER
+    timeout_seconds = _health_timeout(settings)
     if provider == "openai_compatible":
         try:
-            payload = _json_request(settings, "GET", "/models", timeout=min(_backend_timeout(settings), 8))
+            payload = _json_request(settings, "GET", "/models", timeout=timeout_seconds)
             return {"ok": True, "url": urljoin(_backend_base_url(settings).rstrip("/") + "/", "models"), "payload": payload}
         except AiAgentError as exc:
             return {"ok": False, "url": urljoin(_backend_base_url(settings).rstrip("/") + "/", "models"), "msg": str(exc), "status": exc.status, "payload": exc.payload}
@@ -1993,10 +2006,14 @@ def ai_agent_health(settings):
     urls.append(f"{parsed.scheme}://{parsed.netloc}/health")
 
     last_error = ""
+    deadline = monotonic() + timeout_seconds
     for health_url in urls:
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            break
         req = urllib_request.Request(health_url, headers=_backend_headers(settings), method="GET")
         try:
-            with urllib_request.urlopen(req, timeout=min(_backend_timeout(settings), 8)) as resp:
+            with urllib_request.urlopen(req, timeout=max(0.1, remaining)) as resp:
                 raw = resp.read(1024 * 1024)
                 payload = json.loads(raw.decode("utf-8")) if raw else {}
                 service = ""

@@ -98,6 +98,13 @@ class Api:
             headers=headers,
             timeout=timeout,
         )
+        # Successful authenticated mutations rotate the double-submit CSRF
+        # cookie.  Long governance/chat lifecycles must use the rotated value
+        # on the next write or they eventually fail after the server prunes
+        # older tokens from its bounded acceptance window.
+        rotated_csrf = self.session.cookies.get("csrf_token")
+        if rotated_csrf:
+            self.csrf = str(rotated_csrf)
         return _record(response)
 
 
@@ -217,14 +224,20 @@ def browser_checks(
             )
             page.evaluate("threadId => openCommunityThread(threadId)", thread_id)
             page.wait_for_function(
-                "title => (document.querySelector('#community-thread-detail')?.innerText || '').includes(title)",
+                """title => [
+                  document.querySelector('#community-thread-heading')?.innerText || '',
+                  document.querySelector('#community-thread-detail')?.innerText || '',
+                ].join('\\n').includes(title)""",
                 arg=thread_title,
                 timeout=30_000,
             )
             community_state = page.evaluate(
                 """() => ({
                   active: document.querySelector('#module-community')?.classList.contains('active') === true,
-                  thread_text: document.querySelector('#community-thread-detail')?.innerText || '',
+                  thread_text: [
+                    document.querySelector('#community-thread-heading')?.innerText || '',
+                    document.querySelector('#community-thread-detail')?.innerText || '',
+                  ].join('\\n'),
                   overflow_px: Math.max(0, document.documentElement.scrollWidth - document.documentElement.clientWidth),
                 })"""
             )

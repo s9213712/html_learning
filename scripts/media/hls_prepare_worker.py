@@ -9,7 +9,7 @@ import os
 import sqlite3
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from cryptography.fernet import Fernet
@@ -46,6 +46,11 @@ DEFAULT_HLS_MAX_CONCURRENT = 1
 
 def _now_iso():
     return datetime.now().replace(microsecond=0).isoformat()
+
+
+def _utc_now_iso():
+    """Return Job Center timestamps in the same naive-UTC convention it uses."""
+    return datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0).isoformat()
 
 
 def _build_fernet(secret):
@@ -363,9 +368,9 @@ def _sync_hls_platform_job(
                 "metadata_json": metadata,
             }
             if status == "running" and not existing.get("started_at"):
-                updates["started_at"] = _now_iso()
+                updates["started_at"] = _utc_now_iso()
             if status in {"succeeded", "failed", "cancelled", "expired"}:
-                updates["finished_at"] = _now_iso()
+                updates["finished_at"] = _utc_now_iso()
             if result is not None:
                 updates["result_json"] = result
             if error_message:

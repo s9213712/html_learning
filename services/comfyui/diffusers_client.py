@@ -1212,8 +1212,6 @@ class DiffusersClient:
         return ""
 
     def _cuda_memory_payload(self, torch):
-        if importlib.util.find_spec("torch") is None:
-            return {}
         if not getattr(torch, "cuda", None) or not torch.cuda.is_available():
             return {}
         payload = {}

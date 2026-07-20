@@ -326,7 +326,11 @@ def _auto_fast_lane_reserved(thread_capacity: int, settings: dict | None = None)
     if thread_capacity <= 3:
         return 1
     if thread_capacity <= 6:
-        return min(4, max(1, thread_capacity - 2))
+        # Keep two gthread slots available for health/auth/root fast-lane work,
+        # while allowing a measured 6-thread worker to admit four ordinary or
+        # heavy requests.  Reserving four here reduced the feature gate to two
+        # and prevented a four-slot external HLS pool from ever being filled.
+        return min(2, max(1, thread_capacity - 2))
     if thread_capacity <= 8:
         return min(3, max(1, thread_capacity - 2))
     return min(max(2, thread_capacity // 3), max(1, thread_capacity - 2))
@@ -848,7 +852,11 @@ def _record_backpressure_anomaly(app, payload: dict) -> None:
 def _build_backpressure_state(settings: dict | None = None, previous_state: dict | None = None) -> dict:
     mode = _setting_mode(settings)
     enabled = _env_bool("HTML_LEARNING_BACKPRESSURE_ENABLED", True)
-    enabled = _setting_bool(settings, "server_backpressure_enabled", enabled)
+    # An explicit process-level switch is authoritative.  Capacity probes and
+    # emergency operators must be able to turn the gate off even when the
+    # persisted settings row still contains its default ``true`` value.
+    if "HTML_LEARNING_BACKPRESSURE_ENABLED" not in os.environ:
+        enabled = _setting_bool(settings, "server_backpressure_enabled", enabled)
     if mode == "off":
         enabled = False
     retry_after_default = _env_int("HTML_LEARNING_BACKPRESSURE_RETRY_AFTER_SECONDS", 2, 1, 60)

@@ -28,6 +28,7 @@ from services.storage.catalog import (
     trash_cloud_file_to_storage,
     trash_storage_file,
     trash_storage_folder,
+    unique_storage_path,
 )
 from services.storage.albums import (
     _is_album_media_storage_row as _album_media_storage_row_impl,

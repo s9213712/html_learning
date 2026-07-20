@@ -2026,6 +2026,48 @@ def test_ai_agent_comfyui_write_tool_maps_checkpoint_to_model(tmp_path):
     assert captured["checkpoint"] == "JANKU-V777.safetensors"
 
 
+def test_ai_agent_comfyui_txt2img_rejects_incompatible_inpaint_shortcut(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "write",
+            "ai_agent_allowed_tools": "write_comfyui_generate",
+        },
+    )
+    captured = {}
+
+    @app.route("/api/comfyui/models", methods=["GET"])
+    def fake_comfyui_models():
+        return _json_resp({"ok": True, "models": ["sd_xl_base_1.0.safetensors"]})
+
+    @app.route("/api/comfyui/generate", methods=["POST"])
+    def fake_comfyui_generate():
+        captured.update(request.get_json(silent=True) or {})
+        return _json_resp({"ok": True, "job": {"job_id": "job-txt2img", "status": "queued"}})
+
+    response = app.test_client().post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_comfyui_generate",
+        "confirm": "EXECUTE",
+        "arguments": {
+            "prompt": "a clean half-body character edit benchmark source image",
+            "generation_mode": "txt2img",
+            "official_workflow_id": "origin_sdxl_checkpoint_inpaint",
+            "confirm_billing": True,
+        },
+    })
+    payload = response.get_json()
+
+    assert response.status_code == 200, payload
+    assert payload["ok"] is True
+    assert captured["generation_mode"] == "txt2img"
+    assert captured["official_workflow_id"] == "origin_sdxl_txt2img"
+    assert "source_image_ref" not in captured
+    assert "mask_image_ref" not in captured
+
+
 def test_ai_agent_comfyui_write_tool_preserves_controlnet_pose_args(tmp_path):
     db_path = tmp_path / "ai_agent_routes.db"
     _build_db(db_path)
@@ -2476,7 +2518,10 @@ def test_ai_agent_comfyui_write_tool_preserves_image_edit_args(tmp_path):
 
     assert response.status_code == 200
     assert payload["ok"] is True
-    assert captured["user_inputs"]["494"]["prompt"] == "turn the existing portrait into watercolor style"
+    effective_prompt = captured["user_inputs"]["494"]["prompt"]
+    assert effective_prompt.startswith("transform the source image into this requested visual style")
+    assert "turn the existing portrait into watercolor style" in effective_prompt
+    assert captured["prompt"] == effective_prompt
     assert captured["image_field_assignments"]["78"] == "cloud-source-1"
     assert "79" not in captured["image_field_assignments"]
     assert "78" not in captured["user_inputs"]
@@ -2499,6 +2544,51 @@ def test_ai_agent_comfyui_write_tool_preserves_image_edit_args(tmp_path):
         for item in payload["result"].get("workflow_bridge_adjustments", [])
     )
     assert "492" not in captured["user_inputs"]
+
+
+def test_ai_agent_comfyui_write_tool_derives_english_style_edit_instruction(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "write",
+            "ai_agent_allowed_tools": "write_comfyui_generate",
+        },
+    )
+    captured = _register_fake_comfyui_workflow_routes(
+        app,
+        workflow_id="origin_qwen_image_edit_2509",
+        preset_id=76,
+    )
+
+    @app.route("/api/comfyui/models", methods=["GET"])
+    def fake_comfyui_models_for_style_edit():
+        return _json_resp({"ok": True, "models": ["JANKUTrainedChenkinNoobai_v777.safetensors"]})
+
+    source_ref = {"filename": "source.png", "subfolder": "", "type": "input", "cloud_file_id": "cloud-source-1"}
+    response = app.test_client().post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_comfyui_generate",
+        "confirm": "EXECUTE",
+        "arguments": {
+            "prompt": "light transparent watercolor style, soft pastel colors, gentle brushstrokes",
+            "official_workflow_id": "origin_qwen_image_edit_2509",
+            "generation_mode": "img2img",
+            "source_image_ref": source_ref,
+            "denoise_strength": 0.25,
+            "confirm_billing": True,
+        },
+    })
+    payload = response.get_json()
+
+    assert response.status_code == 200, payload
+    assert payload["ok"] is True
+    prompt = captured["user_inputs"]["494"]["prompt"]
+    assert prompt.startswith("transform the source image into this requested visual style")
+    assert "watercolor style" in prompt
+    assert "preserve the original subject identity" in prompt
+    assert captured["prompt"] == prompt
 
 
 def test_ai_agent_comfyui_write_tool_extracts_denoise_strength_from_prompt_text(tmp_path):
@@ -2611,6 +2701,62 @@ def test_ai_agent_comfyui_write_tool_extracts_inline_qwen_edit_instruction(tmp_p
         item.get("code") == "qwen_edit_instruction_prompt_applied"
         for item in payload["result"].get("workflow_bridge_adjustments", [])
     )
+
+
+def test_ai_agent_comfyui_write_tool_extracts_edit_instruction_assignment(tmp_path):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(
+        db_path,
+        {"id": 1, "username": "root", "role": "user"},
+        settings={
+            "ai_agent_operation_mode": "write",
+            "ai_agent_allowed_tools": "write_comfyui_generate",
+        },
+    )
+    captured = _register_fake_comfyui_workflow_routes(
+        app,
+        workflow_id="origin_qwen_image_edit_2509",
+        preset_id=79,
+    )
+
+    @app.route("/api/comfyui/models", methods=["GET"])
+    def fake_comfyui_models_for_assignment():
+        return _json_resp({"ok": True, "models": ["JANKUTrainedChenkinNoobai_v777.safetensors"]})
+
+    instruction = (
+        "replace the entire blackboard and every visible written character with a completely blank pale cream wall; "
+        "change the girl's visible dress to vivid solid red; preserve the same girl identity, face, hair, hands, "
+        "pose and composition; do not add any text, letters, watermark or logo"
+    )
+    source_ref = {"filename": "source.png", "subfolder": "", "type": "input", "cloud_file_id": "cloud-source-1"}
+    response = app.test_client().post("/api/ai-agent/write-tools/execute", json={
+        "tool": "write_comfyui_generate",
+        "confirm": "EXECUTE",
+        "arguments": {
+            "prompt": (
+                "請真的使用本站 ComfyUI 圖生圖語意編輯剛剛那張站內圖片。"
+                "generation_mode=img2img，denoise_strength=0.85，steps=4，batch_size=1。"
+                f"edit_instruction={instruction}。"
+            ),
+            "official_workflow_id": "origin_qwen_image_edit_2509",
+            "generation_mode": "img2img",
+            "source_image_ref": source_ref,
+            "confirm_billing": True,
+        },
+    })
+    payload = response.get_json()
+
+    assert response.status_code == 200, payload
+    assert payload["ok"] is True
+    qwen_prompt = captured["user_inputs"]["494"]["prompt"]
+    assert qwen_prompt.startswith(instruction)
+    assert "Style and preservation context:" in qwen_prompt
+    assert "請真的使用本站" not in qwen_prompt
+    assert "generation_mode=" not in qwen_prompt
+    assert captured["edit_instruction"] == instruction
+    assert captured["prompt"] == qwen_prompt
+    assert captured["user_inputs"]["499"]["denoise"] == 0.85
 
 
 def test_ai_agent_comfyui_write_tool_sanitizes_duplicated_stage_instruction_style_context(tmp_path):
@@ -3986,6 +4132,31 @@ def test_ai_agent_chat_session_key_is_user_isolated(tmp_path, monkeypatch):
     assert calls[0]["actor"] != calls[1]["actor"]
     assert calls[0]["session_key"] == "hackme:2:shared-session"
     assert calls[1]["session_key"] == "hackme:3:shared-session"
+
+
+def test_ai_agent_chat_allows_client_to_lower_backend_timeout(tmp_path, monkeypatch):
+    db_path = tmp_path / "ai_agent_routes.db"
+    _build_db(db_path)
+    app = _build_app(db_path, {"id": 2, "username": "userA", "role": "user"}, settings={
+        "module_ai_agent_min_role": "user",
+        "ai_agent_api_base_url": "http://127.0.0.1:8642/v1",
+        "ai_agent_request_timeout_seconds": 120,
+    })
+    captured = {}
+
+    def fake_chat(settings, **_kwargs):
+        captured.update(settings)
+        return {"content": "ok", "model": "hermes-agent", "usage": {}}
+
+    monkeypatch.setattr("routes.ai_agent.ai_agent_chat", fake_chat)
+    response = app.test_client().post("/api/ai-agent/chat", json={
+        "session_id": "planner-timeout",
+        "messages": [{"role": "user", "content": "規劃一個站內任務"}],
+        "request_timeout_seconds": 40,
+    })
+
+    assert response.status_code == 200
+    assert captured["ai_agent_request_timeout_seconds"] == 40
 
 
 def test_ai_agent_chat_session_key_is_bound_to_login_session_token(tmp_path, monkeypatch):

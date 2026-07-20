@@ -399,6 +399,7 @@ class DependencyPreflight:
         *,
         browser_launcher: Callable[[str], Mapping[str, Any]] = _default_browser_launcher,
         process_runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+        command_resolver: Callable[[str], str | None] = shutil.which,
         ffmpeg: str = "ffmpeg",
         ffprobe: str = "ffprobe",
     ) -> None:
@@ -406,6 +407,7 @@ class DependencyPreflight:
         self.external_probes = dict(external_probes)
         self.browser_launcher = browser_launcher
         self.process_runner = process_runner
+        self.command_resolver = command_resolver
         self.ffmpeg = ffmpeg
         self.ffprobe = ffprobe
 
@@ -455,8 +457,8 @@ class DependencyPreflight:
 
     def _hls(self) -> dict[str, Any]:
         started = time.monotonic()
-        ffmpeg_path = shutil.which(self.ffmpeg)
-        ffprobe_path = shutil.which(self.ffprobe)
+        ffmpeg_path = self.command_resolver(self.ffmpeg)
+        ffprobe_path = self.command_resolver(self.ffprobe)
         if not ffmpeg_path or not ffprobe_path:
             return _result("ffmpeg_hls", PreflightStatus.BLOCKED, started, ffmpeg=ffmpeg_path, ffprobe=ffprobe_path)
         work = self.artifact_root / "ffmpeg_hls"

@@ -1,11 +1,11 @@
 import hashlib
 import secrets
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 def _now_text():
-    return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _as_utc_client_time(value):

@@ -363,6 +363,23 @@ def test_ai_agent_health_checks_base_path_when_present(monkeypatch):
     assert result["payload"] == {"ok": True}
 
 
+def test_ai_agent_health_uses_short_total_status_timeout(monkeypatch):
+    timeouts = []
+
+    def fake_urlopen(_req, timeout=5):
+        timeouts.append(timeout)
+        raise urllib_error.URLError("offline")
+
+    monkeypatch.setenv("HACKME_AI_AGENT_HEALTH_TIMEOUT_SECONDS", "2")
+    monkeypatch.setattr(hermes_client.urllib_request, "urlopen", fake_urlopen)
+
+    result = hermes_client.ai_agent_health({"ai_agent_api_base_url": "http://127.0.0.1:8642/v1"})
+
+    assert result["ok"] is False
+    assert len(timeouts) == 2
+    assert all(0 < timeout <= 2 for timeout in timeouts)
+
+
 def test_ai_agent_health_marks_mock_backend_as_unhealthy(monkeypatch):
     class FakeResponse:
         def __init__(self, payload):

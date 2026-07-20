@@ -14,7 +14,7 @@ import subprocess
 import tempfile
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from io import BytesIO
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse, urlunparse
@@ -99,6 +99,7 @@ from services.storage.storage_albums import (
     create_storage_file_entry,
     ensure_output_album,
     ensure_storage_album_schema,
+    unique_storage_path,
 )
 
 
@@ -469,7 +470,25 @@ def register_comfyui_routes(app, deps):
 
     def _record_generation_history(conn, *, actor, params, backend_url="", result_payload=None):
         _ensure_comfyui_generation_history_schema(conn)
-        now = datetime.now().isoformat()
+        owner_user_id = int(_actor_value(actor, "id"))
+        now_value = datetime.now()
+        previous = conn.execute(
+            """
+            SELECT created_at FROM comfyui_generation_history
+            WHERE owner_user_id=?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (owner_user_id,),
+        ).fetchone()
+        if previous and previous["created_at"]:
+            try:
+                previous_value = datetime.fromisoformat(str(previous["created_at"]))
+                if previous_value.tzinfo == now_value.tzinfo and now_value <= previous_value:
+                    now_value = previous_value + timedelta(microseconds=1)
+            except (TypeError, ValueError):
+                pass
+        now = now_value.isoformat()
         params = dict(params or {})
         try:
             payload = json.loads(json.dumps(params, ensure_ascii=False, default=str))
@@ -517,7 +536,7 @@ def register_comfyui_routes(app, deps):
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                int(_actor_value(actor, "id")),
+                owner_user_id,
                 _normalize_comfyui_backend_url(backend_url),
                 str(payload["generation_mode"] or "txt2img"),
                 json.dumps(payload, ensure_ascii=False, sort_keys=True),
@@ -1719,6 +1738,22 @@ def register_comfyui_routes(app, deps):
             return capabilities, None
         if mode_definition.get("workflow_only"):
             return capabilities, "這個模式需要透過支援的大模型 workflow 模板執行，請先匯入或選擇對應 workflow。"
+        if mode != "upscale":
+            checkpoint_options = list((capabilities or {}).get("models") or [])
+            if not checkpoint_options and hasattr(active_client, "get_models"):
+                try:
+                    checkpoint_options = list(active_client.get_models() or [])
+                except Exception:
+                    checkpoint_options = []
+            requested_checkpoint = str((params or {}).get("model") or "").strip()
+            resolved_checkpoint = (
+                resolve_model_option(requested_checkpoint, checkpoint_options)
+                if checkpoint_options
+                else requested_checkpoint
+            )
+            if checkpoint_options and not resolved_checkpoint:
+                return None, f"Checkpoint 模型不可用或 basename 不唯一：{requested_checkpoint}"
+            params["model"] = resolved_checkpoint
         required_nodes = {"CheckpointLoaderSimple", "CLIPTextEncode", "KSampler", "VAEDecode", "SaveImage"}
         if mode == "img2img":
             required_nodes.update({"LoadImage", "VAEEncode"})
@@ -2058,7 +2093,7 @@ def register_comfyui_routes(app, deps):
                     progress_percent=0,
                     stage="queued",
                     stage_detail="已建立產圖工作",
-                    cancellable=False,
+                    cancellable=True,
                     metadata={"comfyui_job_id": job_id},
                 )
                 conn.commit()
@@ -2084,10 +2119,21 @@ def register_comfyui_routes(app, deps):
 
     def _update_generation_job(job_id, **changes):
         job_id = str(job_id or "")
+        durable_job = _load_generation_job_from_db(job_id)
         with generation_jobs_lock:
             job = generation_jobs.get(job_id)
+        requested_status = str(changes.get("status") or "").strip().lower()
+        durable_status = str((durable_job or {}).get("status") or "").strip().lower()
+        if durable_status == "cancelled" and requested_status not in {"", "cancelled"}:
+            with generation_jobs_lock:
+                generation_jobs[job_id] = durable_job
+            return dict(durable_job)
+        if requested_status == "cancelled" and durable_status in {"completed", "error", "cancelled"}:
+            with generation_jobs_lock:
+                generation_jobs[job_id] = durable_job
+            return dict(durable_job)
         if not job:
-            job = _load_generation_job_from_db(job_id)
+            job = durable_job
             if job:
                 with generation_jobs_lock:
                     generation_jobs[job_id] = job
@@ -2112,7 +2158,13 @@ def register_comfyui_routes(app, deps):
 
                     platform_job = get_job_by_source(conn, "comfyui", job_id)
                     if platform_job:
-                        status_map = {"completed": "succeeded", "error": "failed", "running": "running", "queued": "queued"}
+                        status_map = {
+                            "completed": "succeeded",
+                            "error": "failed",
+                            "cancelled": "cancelled",
+                            "running": "running",
+                            "queued": "queued",
+                        }
                         next_status = status_map.get(str(updated.get("status") or ""), None)
                         terminal = next_status in {"succeeded", "failed", "cancelled", "expired"}
                         progress_data = updated.get("progress") if isinstance(updated.get("progress"), dict) else {}
@@ -2183,10 +2235,15 @@ def register_comfyui_routes(app, deps):
     def _update_generation_job_progress(job_id, progress):
         job_id = str(job_id or "")
         now = time.time()
+        durable_job = _load_generation_job_from_db(job_id)
+        if str((durable_job or {}).get("status") or "").strip().lower() == "cancelled":
+            with generation_jobs_lock:
+                generation_jobs[job_id] = durable_job
+            return dict(durable_job)
         with generation_jobs_lock:
             job = generation_jobs.get(job_id)
         if not job:
-            job = _load_generation_job_from_db(job_id)
+            job = durable_job
             if job:
                 with generation_jobs_lock:
                     generation_jobs[job_id] = job
@@ -2297,6 +2354,75 @@ def register_comfyui_routes(app, deps):
                 return dict(job.get("progress") or {})
         job = _load_generation_job_from_db(job_id)
         return dict((job or {}).get("progress") or {})
+
+    def _generation_job_cancelled(job_id):
+        job = _load_generation_job_from_db(job_id)
+        return str((job or {}).get("status") or "").strip().lower() == "cancelled"
+
+    def _queue_prompt_ids(queue_payload, queue_name):
+        values = queue_payload.get(queue_name) if isinstance(queue_payload, dict) else []
+        prompt_ids = []
+        for item in values or []:
+            prompt_id = ""
+            if isinstance(item, (list, tuple)) and len(item) > 1:
+                prompt_id = str(item[1] or "").strip()
+            elif isinstance(item, dict):
+                prompt_id = str(item.get("prompt_id") or item.get("id") or "").strip()
+            if prompt_id:
+                prompt_ids.append(prompt_id)
+        return prompt_ids
+
+    def _cancel_generation_job_backend(active_client, prompt_id, *, timeout_seconds=2.0):
+        prompt_id = str(prompt_id or "").strip()
+        if not prompt_id:
+            return {"backend_action": "deferred", "backend_interrupted": False}
+        get_queue = getattr(active_client, "get_queue", None)
+        if callable(get_queue):
+            try:
+                queue_payload = get_queue(timeout_seconds=timeout_seconds)
+            except TypeError:
+                queue_payload = get_queue()
+        else:
+            queue_payload = active_client._json_request("/queue", timeout=timeout_seconds)
+        running = _queue_prompt_ids(queue_payload, "queue_running")
+        pending = _queue_prompt_ids(queue_payload, "queue_pending")
+        if prompt_id in pending:
+            delete_queue_items = getattr(active_client, "delete_queue_items", None)
+            if not callable(delete_queue_items):
+                raise ComfyUIError("ComfyUI 不支援精準刪除排隊工作")
+            try:
+                delete_queue_items([prompt_id], timeout_seconds=timeout_seconds)
+            except TypeError:
+                delete_queue_items([prompt_id])
+            return {
+                "backend_action": "queue_delete",
+                "backend_interrupted": False,
+                "deleted_prompt_id": prompt_id,
+                "running_prompt_ids": running,
+            }
+        if prompt_id in running:
+            other_running = [item for item in running if item != prompt_id]
+            if other_running:
+                return {
+                    "backend_action": "refused_shared_running",
+                    "backend_interrupted": False,
+                    "other_running_prompt_ids": other_running,
+                }
+            try:
+                active_client.interrupt(timeout_seconds=timeout_seconds)
+            except TypeError:
+                active_client.interrupt()
+            return {
+                "backend_action": "interrupt_verified_running",
+                "backend_interrupted": True,
+                "running_prompt_id": prompt_id,
+            }
+        return {
+            "backend_action": "prompt_not_in_queue",
+            "backend_interrupted": False,
+            "running_prompt_ids": running,
+            "pending_prompt_ids": pending,
+        }
 
     def _diffusers_error_progress(job_id, exc):
         previous = _generation_job_progress_snapshot(job_id)
@@ -3036,6 +3162,7 @@ def register_comfyui_routes(app, deps):
                     "current_file": str(params.get("diffusers_gguf_file") or ""),
                     "timeout_seconds": timeout_value,
                     "timeout_unlimited": timeout_value <= 0,
+                    "backend_url": getattr(active_client, "base_url", ""),
                 }
             return {
                 "phase": "downloading",
@@ -3046,6 +3173,7 @@ def register_comfyui_routes(app, deps):
                 "current_file": str(params.get("diffusers_gguf_file") or ""),
                 "timeout_seconds": timeout_value,
                 "timeout_unlimited": timeout_value <= 0,
+                "backend_url": getattr(active_client, "base_url", ""),
             }
         return {
             "phase": "queued",
@@ -3053,6 +3181,7 @@ def register_comfyui_routes(app, deps):
             "detail": "已送出至 ComfyUI 背景工作",
             "timeout_seconds": timeout_value,
             "timeout_unlimited": timeout_value <= 0,
+            "backend_url": getattr(active_client, "base_url", ""),
         }
 
     def _configured_native_comfyui_url():
@@ -3495,6 +3624,8 @@ def register_comfyui_routes(app, deps):
         audit_ua = request_meta.get("user_agent") or "-"
         _update_generation_job(job_id, status="running")
         _update_generation_job_progress(job_id, _initial_generation_progress(active_client, params, timeout_seconds))
+        if _generation_job_cancelled(job_id):
+            return
         try:
             active_client, backend_binding, params = _maybe_prepare_diffusers_gguf_auto_route(
                 job_id,
@@ -3503,20 +3634,48 @@ def register_comfyui_routes(app, deps):
                 params,
                 backend_binding,
             )
+            if _generation_job_cancelled(job_id):
+                return
             generation_token = _register_active_generation(
                 actor,
                 backend_url=backend_binding.get("url"),
                 backend_scope=backend_binding.get("backend_scope"),
             )
+
+            def generation_progress_callback(progress):
+                if _generation_job_cancelled(job_id):
+                    prompt_id = str((progress or {}).get("prompt_id") or "").strip()
+                    if prompt_id:
+                        try:
+                            _cancel_generation_job_backend(active_client, prompt_id)
+                        except Exception:
+                            pass
+                    return None
+                return _update_generation_job_progress(job_id, progress)
+
             result = active_client.generate_image(
                 params,
                 **_maybe_fetch_outputs_kwarg(
                     active_client.generate_image,
                     timeout_seconds=timeout_seconds,
-                    progress_callback=lambda progress: _update_generation_job_progress(job_id, progress),
+                    progress_callback=generation_progress_callback,
                     fetch_outputs=True,
                 ),
             )
+            if _generation_job_cancelled(job_id):
+                prompt_id = str((result or {}).get("prompt_id") or "").strip()
+                result_images = (result or {}).get("images") if isinstance((result or {}).get("images"), list) else []
+                if not result_images and isinstance((result or {}).get("image_ref"), dict):
+                    result_images = [{"image_ref": result.get("image_ref")}]
+                for item in result_images:
+                    image_ref = item.get("image_ref") if isinstance(item, dict) else None
+                    if not isinstance(image_ref, dict):
+                        continue
+                    try:
+                        active_client.discard_image(image_ref, prompt_id=prompt_id)
+                    except Exception:
+                        pass
+                return
             _assert_comfyui_final_images_usable(result)
             billing = {"charged": False, "exempt": "root"} if not quote else None
             if quote:
@@ -3594,6 +3753,8 @@ def register_comfyui_routes(app, deps):
             )
             _update_generation_job_progress(job_id, completed_progress)
         except ComfyUIError as exc:
+            if _generation_job_cancelled(job_id):
+                return
             error_progress = {
                 "phase": "error",
                 "percent": 100,
@@ -3608,6 +3769,8 @@ def register_comfyui_routes(app, deps):
             _update_generation_job_progress(job_id, error_progress)
             audit("COMFYUI_GENERATE_ERROR", audit_ip, user=_actor_value(actor, "username"), success=False, ua=audit_ua, detail=str(exc)[:180])
         except Exception as exc:
+            if _generation_job_cancelled(job_id):
+                return
             error_progress = {
                 "phase": "error",
                 "percent": 100,
@@ -4684,7 +4847,15 @@ def register_comfyui_routes(app, deps):
         file_row = conn.execute("SELECT * FROM uploaded_files WHERE id=?", (upload_result["file_id"],)).fetchone()
         virtual_path = str(data.get("virtual_path") or "").strip()
         if not virtual_path:
-            virtual_path = f"/output/{filename}"
+            try:
+                virtual_path = unique_storage_path(
+                    conn,
+                    int(_actor_value(actor, "id")),
+                    f"/output/{filename}",
+                    filename,
+                )
+            except ValueError:
+                return None, None, None, "output storage path 無法配置唯一名稱"
         default_output_album = None
         if virtual_path.replace("\\", "/").strip().lower().startswith("/output/"):
             default_output_album, msg = _find_or_create_output_album(conn, actor=actor)
@@ -4919,6 +5090,7 @@ def register_comfyui_routes(app, deps):
         "request": request,
         "actor_or_401": _actor_or_401,
         "actor_value": _actor_value,
+        "assert_generation_job_owner": _assert_generation_job_owner,
         "json_resp": json_resp,
         "require_csrf": require_csrf,
         "get_client_ip": get_client_ip,
@@ -5001,6 +5173,7 @@ def register_comfyui_routes(app, deps):
         "active_generation_snapshot": _active_generation_snapshot,
         "actor_or_401": _actor_or_401,
         "actor_value": _actor_value,
+        "assert_generation_job_owner": _assert_generation_job_owner,
         "assert_reasonable_image_size": _assert_reasonable_image_size,
         "client": _client,
         "client_for_url": _client_for_url,
@@ -5013,12 +5186,14 @@ def register_comfyui_routes(app, deps):
         "generation_owner_id": _generation_owner_id,
         "image_ref_payload": _image_ref_payload,
         "interrupt_policy": _interrupt_policy,
+        "cancel_generation_job_backend": _cancel_generation_job_backend,
         "is_root": _is_root,
         "json_error_from_comfy": _json_error_from_comfy,
         "load_comfyui_image_ref_record": _load_comfyui_image_ref_record,
         "list_generation_history": _list_generation_history,
         "normalize_comfyui_backend_url": _normalize_comfyui_backend_url,
         "register_comfyui_image_refs": _register_comfyui_image_refs,
+        "update_generation_job": _update_generation_job,
         "resolve_file_storage_path": resolve_file_storage_path,
         "safe_text": _safe_text,
         "save_fetched_image": _save_fetched_image,

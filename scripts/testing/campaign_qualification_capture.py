@@ -1149,7 +1149,9 @@ def read_sealed_rehearsal_projection_context(
             | getattr(fcntl, "F_SEAL_GROW", 0x0004)
             | getattr(fcntl, "F_SEAL_WRITE", 0x0008)
         )
-        actual_seals = int(fcntl.fcntl(descriptor, fcntl.F_GET_SEALS))
+        actual_seals = int(
+            fcntl.fcntl(descriptor, getattr(fcntl, "F_GET_SEALS", 1034))
+        )
         _require(
             actual_seals & required_seals == required_seals,
             "rehearsal projection memfd is not fully sealed",

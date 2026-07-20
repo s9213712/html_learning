@@ -12,7 +12,7 @@ import subprocess
 import sys
 import tempfile
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from flask import Response, request, send_file, session, stream_with_context
 
@@ -637,7 +637,7 @@ def register_video_routes(app, deps):
                     pass
             payload = {
                 **context,
-                "ts": datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+                "ts": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
                 "metrics": dict(stream_info.get("metrics") or {}),
             }
             _write_realtime_proxy_metrics(payload)

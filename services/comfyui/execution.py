@@ -141,6 +141,13 @@ def interrupt(client, *, timeout_seconds=None):
     )
 
 
+def get_queue(client, *, timeout_seconds=None):
+    return client._json_request(
+        "/queue",
+        timeout=timeout_seconds,
+    )
+
+
 def delete_queue_items(client, prompt_ids, *, timeout_seconds=None):
     ids = [str(item) for item in (prompt_ids or []) if str(item or "").strip()]
     if not ids:

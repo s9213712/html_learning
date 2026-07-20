@@ -38,6 +38,10 @@ AI_AGENT_COMFYUI_SHORTCUT_WORKFLOWS = {
     "inpaint": "origin_sdxl_checkpoint_inpaint",
     "outpaint": "origin_flux_fill_outpaint_gguf_q3",
 }
+AI_AGENT_COMFYUI_SHORTCUT_WORKFLOW_MODES = {
+    workflow_id: mode
+    for mode, workflow_id in AI_AGENT_COMFYUI_SHORTCUT_WORKFLOWS.items()
+}
 AI_AGENT_COMFYUI_LEGACY_SHORTCUT_WORKFLOWS = {"", "origin_sdxl_txt2img"}
 
 
@@ -2731,6 +2735,16 @@ def register_ai_agent_routes(app, deps):
         if mode:
             normalized["generation_mode"] = mode
         requested_workflow_id = str(normalized.get("official_workflow_id") or "").strip()
+        expected_shortcut_mode = AI_AGENT_COMFYUI_SHORTCUT_WORKFLOW_MODES.get(requested_workflow_id)
+        if mode and expected_shortcut_mode and mode != expected_shortcut_mode:
+            # Treat an explicit generation_mode as authoritative.  Planners can
+            # otherwise attach the inpaint/outpaint shortcut to a plain txt2img
+            # request, which makes an image-less job fail on LoadImage nodes.
+            if mode == "txt2img":
+                normalized["official_workflow_id"] = "origin_sdxl_txt2img"
+            else:
+                normalized.pop("official_workflow_id", None)
+            requested_workflow_id = str(normalized.get("official_workflow_id") or "").strip()
         wants_anything2real = bool(re.search(
             r"anything\s*2\s*real|anything2real|realistic\s+photograph|photoreal",
             prompt_text,
@@ -2836,9 +2850,10 @@ def register_ai_agent_routes(app, deps):
         if not text:
             return ""
         match = re.search(
-            r"(?:use\s+a\s+short\s+english\s+edit\s+instruction\s+internally|"
+            r"(?:edit[_\s-]*(?:instruction|prompt)|"
+            r"use\s+a\s+short\s+english\s+edit\s+instruction\s+internally|"
             r"short\s+english\s+edit\s+instruction|internal\s+edit\s+instruction)"
-            r"\s*[:：]\s*(.+?)\s*$",
+            r"\s*[:=：]\s*(.+?)\s*$",
             text,
             re.IGNORECASE | re.DOTALL,
         )
@@ -2941,9 +2956,30 @@ def register_ai_agent_routes(app, deps):
 
     def _derive_qwen_edit_instruction_from_prompt(prompt):
         text = re.sub(r"\s+", " ", str(prompt or "")).strip()
-        if not text or not _prompt_has_cjk(text):
+        if not text:
             return ""
         lower = text.lower()
+        if not _prompt_has_cjk(text):
+            compact = re.sub(r"[\W_]+", "", lower)
+            base_style_only = compact in {
+                "byogipoteanimestyle1girl",
+                "animestyle1girl",
+                "1girl",
+            }
+            explicit_style_description = bool(re.search(
+                r"\b(watercolou?r|pastel|sketch|line\s*art|oil\s+painting|"
+                r"ink\s+wash|gouache|comic|cel[-\s]*shaded|photoreal(?:istic)?|"
+                r"semi[-\s]*realistic|art\s+style|painting\s+style|illustration\s+style)\b",
+                lower,
+                re.IGNORECASE,
+            ))
+            if explicit_style_description and not base_style_only:
+                return (
+                    f"transform the source image into this requested visual style: {text}; "
+                    "preserve the original subject identity, pose, composition, framing, and background layout; "
+                    "do not add text, watermark, signature, logo, or unrelated objects."
+                )[:1200]
+            return ""
         preserve_identity = "preserve face, expression, hairstyle, hands, pose, body, and background"
         wants_remove_hairclips = (
             ("移除" in text or "刪除" in text or "拿掉" in text or "remove" in lower or "delete" in lower)
@@ -4331,7 +4367,7 @@ def register_ai_agent_routes(app, deps):
                 "input_name": "image2",
                 "reference_node_id": "79",
             })
-        return user_inputs, adjustments
+        return user_inputs, adjustments, prompt
 
     def _workflow_dependency_error(preset):
         status = (preset or {}).get("dependency_status") if isinstance(preset, dict) else None
@@ -4416,7 +4452,7 @@ def register_ai_agent_routes(app, deps):
         image_assignments, image_assignment_error = _workflow_protected_media_assignments(preset, body)
         if image_assignment_error:
             return 400, image_assignment_error
-        user_inputs, workflow_adjustments = _workflow_user_inputs_from_generate_body(preset, body)
+        user_inputs, workflow_adjustments, effective_prompt = _workflow_user_inputs_from_generate_body(preset, body)
         workflow_adjustments = list(workflow_adjustments or []) + list(single_reference_adjustments or [])
         run_body = {
             "user_inputs": user_inputs,
@@ -4424,6 +4460,13 @@ def register_ai_agent_routes(app, deps):
             "run_count": body.get("batch_size") or body.get("run_count") or 1,
             "seed_after_generate": "fixed",
         }
+        # Keep the workflow-run snapshot and semantic review contract aligned
+        # with the exact positive prompt patched into the official workflow.
+        # Without this top-level value, the workflow executes the user_inputs
+        # prompt correctly but audit/review metadata falls back to the example
+        # prompt stored in the official manifest.
+        if effective_prompt:
+            run_body["prompt"] = effective_prompt
         if gguf_override:
             run_body["gguf_workflow"] = {
                 "profile_id": gguf_profile,
@@ -5863,11 +5906,27 @@ def register_ai_agent_routes(app, deps):
         base_key = f"hackme:{user_id}:{session_id or 'default'}"
         session_key = f"hackme:{user_id}:{binding}:{session_id or 'default'}" if binding else base_key
         public_settings = public_ai_agent_settings(settings, actor=actor)
-        route_timeout_seconds = max(5, min(610, int(public_settings.get("request_timeout_seconds") or 120) + 5))
+        configured_backend_timeout = max(
+            5,
+            min(600, int(public_settings.get("request_timeout_seconds") or 120)),
+        )
+        chat_settings = settings
+        requested_timeout_raw = data.get("request_timeout_seconds")
+        if requested_timeout_raw not in (None, ""):
+            try:
+                requested_timeout = int(float(requested_timeout_raw))
+            except (TypeError, ValueError):
+                requested_timeout = configured_backend_timeout
+            requested_timeout = max(5, min(configured_backend_timeout, requested_timeout))
+            chat_settings = dict(settings)
+            chat_settings["ai_agent_request_timeout_seconds"] = requested_timeout
+            route_timeout_seconds = min(610, requested_timeout + 2)
+        else:
+            route_timeout_seconds = min(610, configured_backend_timeout + 5)
         try:
             result, timed_out = _run_ai_agent_chat_with_timeout(
                 route_timeout_seconds,
-                settings=settings,
+                settings=chat_settings,
                 messages=data.get("messages"),
                 prompt=data.get("prompt") or "",
                 image_data_url=data.get("image_data_url") or "",

@@ -296,6 +296,11 @@ def _unique_storage_path(conn, owner_user_id, desired_path, display_name):
     raise ValueError("storage path conflict")
 
 
+def unique_storage_path(conn, owner_user_id, desired_path, display_name):
+    """Return a non-conflicting virtual path for automatic file placement."""
+    return _unique_storage_path(conn, owner_user_id, desired_path, display_name)
+
+
 def get_user_storage_summary(conn, user_id):
     ensure_storage_album_schema(conn)
     row = conn.execute("SELECT * FROM user_storage WHERE user_id=?", (int(user_id),)).fetchone()

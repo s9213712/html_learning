@@ -80,6 +80,8 @@ def test_dev_launcher_copies_repo_to_tmp_and_bootstraps_dev_friendly_runtime():
     release_gate = (ROOT / "scripts" / "qa" / "points_chain_release_gate.py").read_text(encoding="utf-8")
     assert '"--no-sync-defaults"' in release_gate
     assert 'export HACKME_DEV_GUNICORN_MAX_REQUESTS="$GUNICORN_MAX_REQUESTS"' in script
+    assert "HACKME_MEDIA_FFMPEG_THREADS" in script
+    assert "hls_ffmpeg_threads_per_worker" in script
     assert 'BOOTSTRAP_TIMEOUT_SECONDS="${HACKME_DEV_BOOTSTRAP_TIMEOUT_SECONDS:-180}"' in script
     assert 'HACKME_RUNTIME_OUTPUT_CAPTURE=0 timeout "${BOOTSTRAP_TIMEOUT_SECONDS}s" "$PYTHON_BIN" - <<\'PY\'' in script
     assert "print_startup_failure_context" in script

@@ -1628,6 +1628,12 @@ class WebClient:
                 headers=headers,
                 timeout=self.timeout,
             )
+            # Authenticated write responses rotate the CSRF cookie.  Keep the
+            # explicit header in sync so a long campaign does not continue
+            # sending the login-time token until the server prunes it.
+            rotated_csrf = self.session.cookies.get("csrf_token")
+            if rotated_csrf:
+                self.csrf = str(rotated_csrf)
             self._publish_request_progress(
                 f"request_completed:{method}:{response.status_code}"
             )
@@ -2381,6 +2387,23 @@ def descendants(rows: dict[int, dict[str, int]], root_pid: int) -> set[int]:
     return found
 
 
+def database_file_sizes(database_dir: Path) -> dict[str, int]:
+    """Snapshot transient SQLite files without losing the monitor to a race."""
+
+    if not database_dir.exists():
+        return {}
+    sizes: dict[str, int] = {}
+    for path in database_dir.glob("*.db*"):
+        try:
+            if path.is_file():
+                sizes[path.name] = path.stat().st_size
+        except FileNotFoundError:
+            # WAL/SHM sidecars may disappear between glob(), is_file(), and
+            # stat() when SQLite checkpoints or closes a connection.
+            continue
+    return sizes
+
+
 class ResourceMonitor(threading.Thread):
     def __init__(self, controllers: list[ServerController], out: Path, *, interval: float):
         super().__init__(daemon=True)
@@ -2429,11 +2452,7 @@ class ResourceMonitor(threading.Thread):
                         health_status = 0
                         health_error = f"{exc.__class__.__name__}: {exc}"
                     database_dir = controller.runtime_root / "database"
-                    db_sizes = {
-                        path.name: path.stat().st_size
-                        for path in database_dir.glob("*.db*")
-                        if path.is_file()
-                    } if database_dir.exists() else {}
+                    db_sizes = database_file_sizes(database_dir)
                     sample["servers"][controller.name] = {
                         "pid": pid,
                         "process_count": len(tree),

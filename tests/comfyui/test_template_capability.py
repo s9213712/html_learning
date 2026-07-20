@@ -12,6 +12,7 @@ from services.comfyui.template.capability import (
     iter_required_models,
     reset_object_info_cache,
     rewrite_workflow_model_inputs_to_local_options,
+    resolve_model_option,
 )
 
 
@@ -91,6 +92,20 @@ def test_capability_supported_when_local_has_everything():
     assert cap.missing_models == {}
     assert "euler" in cap.sampler_options["KSampler.sampler_name"]
     assert "euler" in cap.sampler_options["KSamplerAdvanced.sampler_name"]
+
+
+def test_resolve_model_option_maps_unique_checkpoint_basename_to_comfy_enum():
+    assert resolve_model_option(
+        "JANKUTrainedChenkinNoobai_v777.safetensors",
+        ["SDXL/JANKUTrainedChenkinNoobai_v777.safetensors"],
+    ) == "SDXL/JANKUTrainedChenkinNoobai_v777.safetensors"
+
+
+def test_resolve_model_option_rejects_ambiguous_checkpoint_basename():
+    assert resolve_model_option(
+        "shared.safetensors",
+        ["SDXL/shared.safetensors", "Illustrious/shared.safetensors"],
+    ) == ""
 
 
 def test_capability_unsupported_when_local_missing_class():

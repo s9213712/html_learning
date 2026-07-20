@@ -5,6 +5,7 @@ import argparse
 import base64
 import json
 import re
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,9 @@ from typing import Any
 from PIL import Image, ImageDraw, ImageFont
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 
 BASE_PROMPT = "by ogipote, anime style, 1girl"
@@ -718,6 +722,22 @@ def ensure_live_ai_agent_settings(page, *, model: str, api_base_url: str, comfyu
     }
     after = api_fetch(page, "PUT", "/api/admin/settings", payload)
     return {"before": before, "request": payload, "after": after}
+
+
+def restore_live_ai_agent_settings(page, settings_update: dict[str, Any]) -> dict[str, Any]:
+    """Restore only the settings mutated by ``ensure_live_ai_agent_settings``."""
+    before = settings_update.get("before") if isinstance(settings_update, dict) else {}
+    body = before.get("body") if isinstance(before, dict) else {}
+    settings = body.get("settings") if isinstance(body, dict) else {}
+    request = settings_update.get("request") if isinstance(settings_update, dict) else {}
+    payload = {
+        key: settings[key]
+        for key in request
+        if isinstance(settings, dict) and key in settings and key != "ai_agent_api_key"
+    }
+    if not payload:
+        return {"status": 0, "ok": False, "body": {"ok": False, "msg": "no restorable settings"}}
+    return api_fetch(page, "PUT", "/api/admin/settings", payload)
 
 
 def send_ai_agent_message(page, text: str, *, timeout_ms: int = 180_000) -> dict[str, Any]:
@@ -1528,6 +1548,7 @@ def main() -> int:
         report["source_generation"] = source_case_report
         if not source_preview.get("ok") or not source_image:
             report["cases"].append(source_case_report)
+            report["settings_restore"] = restore_live_ai_agent_settings(page, report["settings_update"])
             write_report(out_dir, {**report, "finished_at": time.strftime("%Y-%m-%d %H:%M:%S")})
             raise RuntimeError(f"txt2img source generation failed: {source_case_report.get('error')}")
         if args.stop_after_source:
@@ -1541,6 +1562,7 @@ def main() -> int:
             screenshot = out_dir / "ai_agent_source_generation.png"
             page.screenshot(path=str(screenshot), full_page=True)
             report["screenshot"] = str(screenshot)
+            report["settings_restore"] = restore_live_ai_agent_settings(page, report["settings_update"])
             write_report(out_dir, report)
             browser.close()
             print(json.dumps({"ok": report["ok"], "report": str(out_dir / "AI_AGENT_I2I_AUDIT_REPORT.md"), "out_dir": str(out_dir)}, ensure_ascii=False, indent=2))
@@ -1721,6 +1743,7 @@ def main() -> int:
         screenshot = out_dir / "ai_agent_i2i_audit_final.png"
         page.screenshot(path=str(screenshot), full_page=True)
         report["screenshot"] = str(screenshot)
+        report["settings_restore"] = restore_live_ai_agent_settings(page, report["settings_update"])
         browser.close()
 
     report["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")

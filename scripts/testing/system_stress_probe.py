@@ -14,7 +14,7 @@ import threading
 import time
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from statistics import median
 from typing import Any
@@ -46,7 +46,7 @@ WORKER_TELEMETRY_SCHEMA_VERSION = "hackme.system-stress-worker-telemetry.v1"
 
 
 def utc_now() -> str:
-    return datetime.utcnow().replace(microsecond=0).isoformat()
+    return datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0).isoformat()
 
 
 def percentile(sorted_values: list[float], pct: float) -> float:
@@ -70,6 +70,7 @@ class InflightWorkerTelemetry:
         self._histogram: Counter = Counter()
         self._sample_count = 0
         self._first_operation = threading.Event()
+        self._sample_observed = threading.Event()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -92,6 +93,7 @@ class InflightWorkerTelemetry:
                     active = self._active
                     self._histogram[active] += 1
                     self._sample_count += 1
+                self._sample_observed.set()
 
         self._thread = threading.Thread(
             target=sample_loop,
@@ -113,6 +115,11 @@ class InflightWorkerTelemetry:
                 raise RuntimeError("worker telemetry active count underflow")
             self._active -= 1
             self._completed += 1
+
+    def wait_until_sampled(self, timeout: float) -> bool:
+        """Wait until the sampler has recorded at least one active-window sample."""
+
+        return self._sample_observed.wait(timeout)
 
     @staticmethod
     def _histogram_percentile(histogram: Counter, sample_count: int, pct: float) -> int:
@@ -505,6 +512,9 @@ class Client:
                     timeout=self.timeout,
                     **kwargs,
                 )
+                rotated_csrf = self.session.cookies.get("csrf_token")
+                if rotated_csrf:
+                    self.csrf = str(rotated_csrf)
                 if retry_csrf and method in UNSAFE_METHODS and res.status_code in {400, 403}:
                     text = res.text[:300].lower()
                     if "csrf" in text:
@@ -518,6 +528,9 @@ class Client:
                             timeout=self.timeout,
                             **kwargs,
                         )
+                        rotated_csrf = self.session.cookies.get("csrf_token")
+                        if rotated_csrf:
+                            self.csrf = str(rotated_csrf)
                 return self.capture(name, res, started=started, expected=expected)
             except Exception as exc:
                 return {
@@ -604,6 +617,28 @@ def parse_pids(value: str) -> list[int]:
         except Exception:
             pass
     return pids
+
+
+def resolve_server_pids(value: str, runtime_root: str) -> tuple[list[int], str]:
+    explicit = parse_pids(value)
+    if explicit:
+        return explicit, "explicit"
+    root = Path(str(runtime_root or "")).resolve(strict=False) if runtime_root else None
+    if root is None:
+        return [], "none"
+    candidates = (
+        root / "server.pid",
+        root / "runtime" / "server.pid",
+        root / "hackme_web" / "runtime" / "server.pid",
+    )
+    for candidate in candidates:
+        try:
+            discovered = parse_pids(candidate.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError):
+            continue
+        if discovered:
+            return discovered, f"pidfile:{candidate}"
+    return [], "none"
 
 
 def setup_seed(client: Client, artifact_dir: Path) -> dict[str, Any]:
@@ -972,6 +1007,7 @@ def main() -> int:
     parser.add_argument("--accounts", default=os.environ.get("HACKME_STRESS_ACCOUNTS", ""))
     parser.add_argument("--session-mode", choices=["clone", "login"], default="clone")
     parser.add_argument("--operation-mode", choices=["random", "rotation"], default="random", help="rotation deterministically covers every operation for every active account before repeating")
+    parser.add_argument("--rotation-offset", type=int, default=0, help="Global task offset for rotation mode so repeated bounded rounds continue account/operation coverage")
     parser.add_argument("--require-all-accounts", action="store_true", help="Fail when any configured account cannot authenticate or receives no operation")
     parser.add_argument("--require-operation-coverage", action="store_true", help="Fail when any registered operation was not exercised")
     parser.add_argument("--require-operation-success", action="store_true", help="Fail when any required positive-path operation has no HTTP 2xx result")
@@ -1092,11 +1128,12 @@ def main() -> int:
     monitor = None
     resource_summary = {}
     if db_paths:
+        monitor_pids, monitor_pid_source = resolve_server_pids(args.server_pids, args.runtime_root)
         monitor = ResourceMonitor(
             runtime_root=Path(args.runtime_root),
             paths=db_paths,
             interval=float(args.resource_interval),
-            pids=parse_pids(args.server_pids),
+            pids=monitor_pids,
         )
         monitor.start()
 
@@ -1122,13 +1159,14 @@ def main() -> int:
     def task(task_id: int) -> None:
         rng = random.Random((task_id + 1) * 7919)
         if args.operation_mode == "rotation":
+            rotation_task_id = max(0, int(args.rotation_offset or 0)) + task_id
             op, desired_account = rotation_operation_account(
-                task_id,
+                rotation_task_id,
                 operation_names,
                 [username for username, _password in accounts],
             )
             account_clients = [item for item in clients if item.username == desired_account]
-            client = account_clients[(task_id // max(1, len(operation_names) * len(accounts))) % len(account_clients)] if account_clients else clients[task_id % len(clients)]
+            client = account_clients[(rotation_task_id // max(1, len(operation_names) * len(accounts))) % len(account_clients)] if account_clients else clients[task_id % len(clients)]
         else:
             client = clients[task_id % len(clients)]
             op = choose_operation(rng, weighted_ops)
@@ -1161,6 +1199,8 @@ def main() -> int:
         qos_thread.join(timeout=3)
         if monitor:
             resource_summary = monitor.stop()
+            resource_summary["configured_root_pids"] = monitor_pids
+            resource_summary["server_pid_source"] = monitor_pid_source
 
     elapsed_seconds = time.perf_counter() - started
     summary = stats.summary()
@@ -1265,6 +1305,7 @@ def main() -> int:
         "session_pool_created": len(clients),
         "session_mode": args.session_mode,
         "operation_mode": args.operation_mode,
+        "rotation_offset": max(0, int(args.rotation_offset or 0)),
         "configured_accounts": configured_account_names,
         "active_accounts": active_account_names,
         "account_login_results": account_login_results,

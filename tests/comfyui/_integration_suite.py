@@ -724,6 +724,9 @@ class MissingControlnetModelClient(FakeComfyUIClient):
 
 
 class SubfolderModelOptionClient(FakeComfyUIClient):
+    def get_models(self):
+        return ["SDXL/JANKUTrainedChenkinNoobai_v777.safetensors"]
+
     def get_loras(self):
         return ["QWEN/Qwen-Image-Lightning-4steps-V1.0.safetensors"]
 
@@ -732,6 +735,7 @@ class SubfolderModelOptionClient(FakeComfyUIClient):
 
     def get_capabilities(self):
         payload = super().get_capabilities()
+        payload["models"] = self.get_models()
         payload["loras"] = self.get_loras()
         payload["vaes"] = self.get_vaes()
         payload["upscale_models"] = ["ESRGAN/OmniSR_X4_DIV2K.safetensors"]
@@ -739,6 +743,16 @@ class SubfolderModelOptionClient(FakeComfyUIClient):
         payload["controlnet_types"]["canny"]["available"] = True
         payload["controlnet_types"]["canny"]["matching_models"] = [
             "SD35/sd3.5_large_controlnet_canny.safetensors"
+        ]
+        return payload
+
+
+class AmbiguousCheckpointBasenameClient(FakeComfyUIClient):
+    def get_capabilities(self):
+        payload = super().get_capabilities()
+        payload["models"] = [
+            "SDXL/shared.safetensors",
+            "Illustrious/shared.safetensors",
         ]
         return payload
 
@@ -1217,7 +1231,7 @@ def test_comfyui_generate_accepts_subfolder_lora_and_vae_options(tmp_path):
         "/api/comfyui/generate",
         json={
             "generation_mode": "txt2img",
-            "model": "dream.safetensors",
+            "model": "JANKUTrainedChenkinNoobai_v777.safetensors",
             "prompt": "subfolder model option test",
             "confirm_billing": True,
             "vae": "SDXL\\sdxl_vae.safetensors",
@@ -1229,8 +1243,34 @@ def test_comfyui_generate_accepts_subfolder_lora_and_vae_options(tmp_path):
 
     assert generated.status_code == 200
     _await_comfyui_result(client, generated)
+    assert FakeComfyUIClient.last_params["model"] == "SDXL/JANKUTrainedChenkinNoobai_v777.safetensors"
     assert FakeComfyUIClient.last_params["vae"] == "SDXL/sdxl_vae.safetensors"
     assert FakeComfyUIClient.last_params["loras"][0]["name"] == "QWEN/Qwen-Image-Lightning-4steps-V1.0.safetensors"
+
+
+def test_comfyui_generate_rejects_ambiguous_checkpoint_basename(tmp_path):
+    db_path = tmp_path / "comfyui.db"
+    storage_root = tmp_path / "storage"
+    storage_root.mkdir()
+    _init_db(db_path)
+    client = _build_app(
+        db_path,
+        storage_root,
+        comfyui_client=AmbiguousCheckpointBasenameClient(),
+    ).test_client()
+
+    generated = client.post(
+        "/api/comfyui/generate",
+        json={
+            "generation_mode": "txt2img",
+            "model": "shared.safetensors",
+            "prompt": "ambiguous checkpoint basename test",
+            "confirm_billing": True,
+        },
+    )
+
+    assert generated.status_code == 409
+    assert "basename 不唯一" in generated.get_json()["msg"]
 
 
 def test_comfyui_generate_accepts_subfolder_controlnet_model_option(tmp_path):
@@ -6190,6 +6230,23 @@ def test_comfyui_save_defaults_to_output_folder_and_album(tmp_path):
     conn.close()
     assert folder is not None
     assert album_file["storage_file_id"] == body["storage_file"]["id"]
+
+
+def test_comfyui_save_default_path_avoids_existing_output_collision(tmp_path):
+    db_path = tmp_path / "comfyui.db"
+    storage_root = tmp_path / "storage"
+    storage_root.mkdir()
+    _init_db(db_path)
+    client = _build_app(db_path, storage_root).test_client()
+    preview = _generate_preview(client)
+
+    first = client.post("/api/comfyui/save", json={"image_ref": preview["image_ref"]})
+    second = client.post("/api/comfyui/save", json={"image_ref": preview["image_ref"]})
+
+    assert first.status_code == 200, first.get_json()
+    assert second.status_code == 200, second.get_json()
+    assert first.get_json()["storage_file"]["virtual_path"] == "/output/hackme_web_00001_.png"
+    assert second.get_json()["storage_file"]["virtual_path"] == "/output/hackme_web_00001_ (2).png"
 
 
 def test_output_album_syncs_files_moved_into_output_folder(tmp_path):

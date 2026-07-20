@@ -27,6 +27,7 @@ def register_comfyui_image_routes(app, ctx):
     _active_generation_snapshot = ctx["active_generation_snapshot"]
     _actor_or_401 = ctx["actor_or_401"]
     _actor_value = ctx["actor_value"]
+    _assert_generation_job_owner = ctx["assert_generation_job_owner"]
     _assert_reasonable_image_size = ctx["assert_reasonable_image_size"]
     _client = ctx["client"]
     _client_for_url = ctx["client_for_url"]
@@ -39,12 +40,14 @@ def register_comfyui_image_routes(app, ctx):
     _generation_owner_id = ctx["generation_owner_id"]
     _image_ref_payload = ctx["image_ref_payload"]
     _interrupt_policy = ctx["interrupt_policy"]
+    _cancel_generation_job_backend = ctx["cancel_generation_job_backend"]
     _is_root = ctx["is_root"]
     _json_error_from_comfy = ctx["json_error_from_comfy"]
     _load_comfyui_image_ref_record = ctx["load_comfyui_image_ref_record"]
     _list_generation_history = ctx["list_generation_history"]
     _normalize_comfyui_backend_url = ctx["normalize_comfyui_backend_url"]
     _register_comfyui_image_refs = ctx["register_comfyui_image_refs"]
+    _update_generation_job = ctx["update_generation_job"]
     resolve_file_storage_path = ctx["resolve_file_storage_path"]
     _safe_text = ctx["safe_text"]
     _save_fetched_image = ctx["save_fetched_image"]
@@ -1414,6 +1417,104 @@ def register_comfyui_image_routes(app, ctx):
         except TypeError:
             data = None
         data = data if isinstance(data, dict) else {}
+        job_id = str(data.get("job_id") or "").strip()
+        if job_id:
+            job, owner_error = _assert_generation_job_owner(job_id, actor)
+            if owner_error:
+                return owner_error
+            status = str(job.get("status") or "").strip().lower()
+            if status in {"completed", "error", "cancelled"}:
+                return json_resp({
+                    "ok": True,
+                    "msg": "工作已是終止狀態，未再送出後端中斷。",
+                    "interrupt": {
+                        "job_id": job_id,
+                        "job_status": status,
+                        "backend_interrupted": False,
+                        "backend_action": "already_terminal",
+                    },
+                })
+            progress = job.get("progress") if isinstance(job.get("progress"), dict) else {}
+            prompt_id = str(progress.get("prompt_id") or "").strip()
+            backend_url = str(progress.get("backend_url") or progress.get("comfyui_url") or "").strip()
+            binding = _comfyui_binding(actor, backend_url=backend_url or None)
+            active_client = _client_for_url(binding["url"])
+            backend_result = {"backend_action": "deferred", "backend_interrupted": False}
+            backend_error = ""
+            if prompt_id:
+                try:
+                    backend_result = _cancel_generation_job_backend(
+                        active_client,
+                        prompt_id,
+                        timeout_seconds=COMFYUI_INTERRUPT_TIMEOUT_SECONDS,
+                    )
+                except ComfyUIError as exc:
+                    backend_error = str(exc)
+                except Exception as exc:
+                    backend_error = str(exc)
+                if backend_result.get("backend_action") == "refused_shared_running":
+                    audit(
+                        "COMFYUI_JOB_CANCEL_SKIPPED",
+                        get_client_ip(),
+                        user=actor["username"],
+                        success=True,
+                        ua=get_ua(),
+                        detail=f"job_id={job_id},prompt_id={prompt_id},reason=shared_running",
+                    )
+                    return json_resp({
+                        "ok": True,
+                        "msg": "未送出全域中斷，因後端同時有其他執行中工作；你的工作仍會繼續。",
+                        "interrupt": {
+                            "job_id": job_id,
+                            "job_status": status,
+                            "prompt_id": prompt_id,
+                            **backend_result,
+                        },
+                    })
+            cancelled_progress = {
+                **progress,
+                "phase": "cancelled",
+                "percent": 100,
+                "completed": False,
+                "cancel_requested": True,
+                "detail": "使用者已取消 ComfyUI 產圖工作",
+            }
+            cancelled_job = _update_generation_job(
+                job_id,
+                status="cancelled",
+                error="",
+                progress=cancelled_progress,
+            )
+            final_status = str((cancelled_job or {}).get("status") or "cancelled")
+            audit(
+                "COMFYUI_JOB_CANCEL",
+                get_client_ip(),
+                user=actor["username"],
+                success=True,
+                ua=get_ua(),
+                detail=(
+                    f"job_id={job_id},prompt_id={prompt_id or '-'},"
+                    f"action={backend_result.get('backend_action')},backend_error={backend_error[:120]}"
+                ),
+            )
+            message = "已取消自己的 ComfyUI 工作。"
+            if backend_result.get("backend_action") == "queue_delete":
+                message = "已從 ComfyUI 佇列精準移除自己的工作，不影響其他使用者。"
+            elif backend_result.get("backend_action") == "interrupt_verified_running":
+                message = "已確認目前執行中的 prompt 屬於你，並送出中斷。"
+            elif backend_error:
+                message = "已記錄取消；後端取消正在由工作執行緒收尾。"
+            return json_resp({
+                "ok": True,
+                "msg": message,
+                "interrupt": {
+                    "job_id": job_id,
+                    "job_status": final_status,
+                    "prompt_id": prompt_id,
+                    **backend_result,
+                    **({"backend_error": backend_error[:300]} if backend_error else {}),
+                },
+            })
         allowed, reason, summary = _interrupt_policy(actor)
         if not allowed:
             audit(

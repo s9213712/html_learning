@@ -2511,6 +2511,7 @@ def test_hls_prepare_worker_updates_job_center_until_ready(tmp_path, monkeypatch
     monkeypatch.setenv("HACKME_MEDIA_HLS_SERIALIZE_ALL", "1")
     monkeypatch.setenv("HACKME_MEDIA_HLS_LOCK_DIR", str(tmp_path / "hls-locks"))
     monkeypatch.setenv("HACKME_MEDIA_HLS_MAX_CONCURRENT", "1")
+    monkeypatch.setattr(hls_prepare_worker, "_utc_now_iso", lambda: "2026-07-20T05:31:59")
 
     rc = hls_prepare_worker.main([
         "--db-path",
@@ -2543,6 +2544,7 @@ def test_hls_prepare_worker_updates_job_center_until_ready(tmp_path, monkeypatch
         assert job["status"] == "succeeded"
         assert job["progress_percent"] == 100
         assert job["stage"] == "ready"
+        assert job["finished_at"] == "2026-07-20T05:31:59"
         assert not job["error_message"]
         assert not job["error_stage"]
         assert "Worker Movie" in job["title"]

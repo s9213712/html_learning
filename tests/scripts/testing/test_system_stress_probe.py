@@ -5,29 +5,35 @@ import threading
 import time
 from pathlib import Path
 
-from scripts.testing.points_chain_destructive_stress import chain_seed_path
+from scripts.testing.points_chain_destructive_stress import chain_seed_path, ensure_official_hot_wallet
 from scripts.testing.operational_soak_probe import (
+    ApiClient,
     FORMAL_RAMP_LEVELS,
     MIN_SIGNOFF_SECONDS,
+    SUPERVISED_LOAD_POLICIES,
     SentinelStats,
     aggregate_resource_evidence,
     aggregate_rounds,
     build_effective_load_sample,
+    campaign_load_policy,
     finish_command,
     main as operational_soak_main,
     measured_active_workers,
     normalized_32_throughput,
     request_command_stop,
+    round_rotation_offset,
     sanitized_command,
     start_command,
     stop_control_reason,
     validate_run_policy,
 )
 from scripts.testing.system_stress_probe import (
+    Client as StressClient,
     InflightWorkerTelemetry,
     OperationBudget,
     Stats,
     record_operation_result,
+    resolve_server_pids,
     resolve_session_pool_size,
     rotation_operation_account,
     run_operation,
@@ -49,7 +55,7 @@ def test_native_worker_telemetry_does_not_treat_idle_executor_capacity_as_active
     workers = [threading.Thread(target=operation) for _index in range(4)]
     for worker in workers:
         worker.start()
-    time.sleep(0.05)
+    assert telemetry.wait_until_sampled(1.0)
     release.set()
     for worker in workers:
         worker.join(timeout=1)
@@ -63,6 +69,13 @@ def test_native_worker_telemetry_does_not_treat_idle_executor_capacity_as_active
 
 
 ROOT = Path(__file__).resolve().parents[3]
+
+
+def test_standalone_soak_uses_bounded_non_ramping_policy():
+    policy = campaign_load_policy("standalone")
+
+    assert policy == SUPERVISED_LOAD_POLICIES["smoke"]
+    assert policy["ramp_required"] is False
 
 
 def test_expected_503_does_not_count_as_server_busy():
@@ -174,6 +187,19 @@ def test_rotation_assigns_every_operation_to_every_account_before_repeating():
         ("video", "bob"),
         ("trading", "bob"),
     ]
+
+
+def test_repeated_soak_rounds_continue_rotation_instead_of_restarting_account_one():
+    operations = ["drive", "video", "trading"]
+    accounts = ["alice", "bob", "carol"]
+
+    first_round = rotation_operation_account(round_rotation_offset(1, 3), operations, accounts)
+    second_round = rotation_operation_account(round_rotation_offset(2, 3), operations, accounts)
+    third_round = rotation_operation_account(round_rotation_offset(3, 3), operations, accounts)
+
+    assert first_round == ("drive", "alice")
+    assert second_round == ("drive", "bob")
+    assert third_round == ("drive", "carol")
 
 
 def test_system_stress_clone_mode_uses_each_accounts_own_authenticated_seed():
@@ -494,6 +520,7 @@ def test_operational_soak_uses_reentrant_auth_lock_and_full_rotation_contract():
 
     assert "threading.RLock()" in script
     assert '"--operation-mode", "rotation"' in script
+    assert '"--rotation-offset"' in script
     assert '"--require-all-accounts"' in script
     assert '"--require-operation-coverage"' in script
     assert "operations_without_success" in script
@@ -509,6 +536,75 @@ def test_operational_soak_uses_reentrant_auth_lock_and_full_rotation_contract():
     assert '"--accounts", account_spec' not in script
     assert '"--root-password", args.root_password' not in script
     assert 'parser.add_argument("--max-sentinel-p95-ms"' in script
+
+
+def test_operational_soak_client_tracks_csrf_cookie_rotated_by_each_write():
+    class Response:
+        status_code = 200
+        content = b"{}"
+        text = ""
+        headers: dict[str, str] = {}
+
+        def json(self) -> dict[str, object]:
+            return {"ok": True}
+
+    class Session:
+        def __init__(self):
+            self.cookies = {"csrf_token": "csrf-1"}
+            self.expected_csrf = "csrf-1"
+            self.write_count = 0
+
+        def request(self, method: str, _url: str, *, headers=None, **_kwargs: object) -> Response:
+            assert method == "POST"
+            assert (headers or {}).get("X-CSRF-Token") == self.expected_csrf
+            self.write_count += 1
+            self.expected_csrf = f"csrf-{self.write_count + 1}"
+            self.cookies["csrf_token"] = self.expected_csrf
+            return Response()
+
+    client = ApiClient("https://soak.invalid", "root", "secret")
+    client.session = Session()  # type: ignore[assignment]
+    client.csrf = "csrf-1"
+
+    for index in range(12):
+        result = client.request("POST", "/api/admin/users", json_body={"index": index})
+        assert result["ok"] is True
+
+    assert client.csrf == "csrf-13"
+    assert client.session.write_count == 12
+
+
+def test_system_stress_client_tracks_csrf_cookie_rotated_by_each_write():
+    class Response:
+        status_code = 200
+        content = b"{}"
+        text = "{}"
+        headers: dict[str, str] = {}
+
+    class Session:
+        def __init__(self):
+            self.cookies = {"csrf_token": "csrf-1"}
+            self.expected_csrf = "csrf-1"
+            self.write_count = 0
+
+        def request(self, method: str, _url: str, *, headers=None, **_kwargs: object) -> Response:
+            assert method == "POST"
+            assert (headers or {}).get("X-CSRF-Token") == self.expected_csrf
+            self.write_count += 1
+            self.expected_csrf = f"csrf-{self.write_count + 1}"
+            self.cookies["csrf_token"] = self.expected_csrf
+            return Response()
+
+    client = StressClient("https://stress.invalid", "member", "secret")
+    client.session = Session()  # type: ignore[assignment]
+    client.csrf = "csrf-1"
+
+    for index in range(12):
+        result = client.request("write", "POST", "/api/community/threads", json={"index": index})
+        assert result["ok"] is True
+
+    assert client.csrf == "csrf-13"
+    assert client.session.write_count == 12
 
 
 def test_operational_soak_aggregates_server_rss_and_database_evidence():
@@ -535,6 +631,17 @@ def test_operational_soak_aggregates_server_rss_and_database_evidence():
     assert evidence["monitored_pid_count_max"] == 3
     assert evidence["monitored_pids_seen"] == [10, 11, 12]
     assert evidence["db_peak"]["main"]["max_db_mb"] == 4.0
+
+
+def test_system_stress_resolves_explicit_or_runtime_pidfile(tmp_path):
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir()
+    (runtime_root / "server.pid").write_text("1234\n", encoding="utf-8")
+
+    assert resolve_server_pids("44, 55", str(runtime_root)) == ([44, 55], "explicit")
+    discovered, source = resolve_server_pids("", str(runtime_root))
+    assert discovered == [1234]
+    assert source == f"pidfile:{runtime_root / 'server.pid'}"
 
 
 def test_operational_soak_restricts_destructive_targets_and_artifacts_to_tmp(tmp_path):
@@ -803,6 +910,28 @@ def test_points_chain_stress_finds_chain_seed_under_runtime_secrets(tmp_path):
     expected.write_text("seed", encoding="utf-8")
 
     assert chain_seed_path(str(tmp_path)) == expected
+
+
+def test_points_chain_fixture_onboarding_retries_controlled_server_busy(monkeypatch):
+    class Client:
+        username = "stress-user"
+
+        def __init__(self):
+            self.calls = 0
+
+        def request(self, method, path, **_kwargs):
+            self.calls += 1
+            if path == "/api/points/wallet" or method == "GET":
+                return {"status": 200, "wallet": {}}
+            if self.calls < 4:
+                return {"status": 503, "error": "server_busy", "retry_after_seconds": 0.01}
+            return {"status": 200, "wallet_identity": {"address": "pc0stress"}}
+
+    monkeypatch.setattr("scripts.testing.points_chain_destructive_stress.time.sleep", lambda _seconds: None)
+    client = Client()
+
+    assert ensure_official_hot_wallet(client) == "pc0stress"
+    assert client.calls == 4
 
 
 def test_bad_login_operation_treats_auth_rejection_as_expected():
