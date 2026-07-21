@@ -17,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import median
-from typing import Any
+from typing import Any, Callable
 
 import requests
 
@@ -438,7 +438,9 @@ class Client:
         self.session = requests.Session()
         self.session.verify = False
         self.csrf = ""
-        self.lock = threading.Lock()
+        # The task runner acquires this slot before marking an operation
+        # in-flight; request() re-enters it for the actual HTTP exchange.
+        self.lock = threading.RLock()
 
     def refresh_csrf(self) -> bool:
         res = self.session.get(f"{self.base_url}/api/csrf-token", timeout=self.timeout)
@@ -988,9 +990,36 @@ def rotation_operation_account(task_id: int, operation_names: list[str], account
     if not operation_names or not account_names:
         raise ValueError("rotation requires operations and accounts")
     task_id = max(0, int(task_id))
-    operation = operation_names[task_id % len(operation_names)]
-    account = account_names[(task_id // len(operation_names)) % len(account_names)]
+    # Interleave accounts so the executor's first worker wave does not queue a
+    # whole operation matrix behind one account's session lock.
+    operation = operation_names[(task_id // len(account_names)) % len(operation_names)]
+    account = account_names[task_id % len(account_names)]
     return operation, account
+
+
+def rotation_client_index(task_id: int, account_count: int, client_count: int) -> int:
+    """Spread one account's consecutive rotation operations over its clones."""
+
+    task_id = max(0, int(task_id))
+    account_count = max(1, int(account_count))
+    client_count = max(1, int(client_count))
+    operation_index = task_id // account_count
+    return operation_index % client_count
+
+
+def run_in_client_slot(
+    client: Client,
+    telemetry: InflightWorkerTelemetry,
+    operation: Callable[[], dict[str, Any]],
+) -> dict[str, Any]:
+    """Count only work holding a real client slot, excluding lock waiters."""
+
+    with client.lock:
+        telemetry.begin_operation()
+        try:
+            return operation()
+        finally:
+            telemetry.end_operation()
 
 
 def main() -> int:
@@ -1170,23 +1199,29 @@ def main() -> int:
                 [username for username, _password in accounts],
             )
             account_clients = [item for item in clients if item.username == desired_account]
-            client = account_clients[(rotation_task_id // max(1, len(operation_names) * len(accounts))) % len(account_clients)] if account_clients else clients[task_id % len(clients)]
+            client = account_clients[
+                rotation_client_index(
+                    rotation_task_id,
+                    len(accounts),
+                    len(account_clients),
+                )
+            ] if account_clients else clients[task_id % len(clients)]
         else:
             client = clients[task_id % len(clients)]
             op = choose_operation(rng, weighted_ops)
         attempted_operations.add(op)
         start_event.wait()
-        worker_telemetry.begin_operation()
-        try:
-            result = run_operation(op, client, seed, budget, task_id)
-            record_operation_result(
-                stats,
-                requested_operation=op,
-                result=result,
-                account=client.username,
-            )
-        finally:
-            worker_telemetry.end_operation()
+        result = run_in_client_slot(
+            client,
+            worker_telemetry,
+            lambda: run_operation(op, client, seed, budget, task_id),
+        )
+        record_operation_result(
+            stats,
+            requested_operation=op,
+            result=result,
+            account=client.username,
+        )
 
     started_at = utc_now()
     started = time.perf_counter()

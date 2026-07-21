@@ -43,7 +43,9 @@ from scripts.testing.system_stress_probe import (
     record_operation_result,
     resolve_server_pids,
     resolve_session_pool_size,
+    rotation_client_index,
     rotation_operation_account,
+    run_in_client_slot,
     run_operation,
 )
 
@@ -396,10 +398,10 @@ def test_rotation_assigns_every_operation_to_every_account_before_repeating():
 
     assert assignments == [
         ("drive", "alice"),
-        ("video", "alice"),
-        ("trading", "alice"),
         ("drive", "bob"),
+        ("video", "alice"),
         ("video", "bob"),
+        ("trading", "alice"),
         ("trading", "bob"),
     ]
 
@@ -413,8 +415,54 @@ def test_repeated_soak_rounds_continue_rotation_instead_of_restarting_account_on
     third_round = rotation_operation_account(round_rotation_offset(3, 3), operations, accounts)
 
     assert first_round == ("drive", "alice")
-    assert second_round == ("drive", "bob")
-    assert third_round == ("drive", "carol")
+    assert second_round == ("video", "alice")
+    assert third_round == ("trading", "alice")
+
+
+def test_rotation_spreads_each_accounts_operations_across_clone_clients():
+    # 24 accounts and 128 clones gives the first executor wave 128 distinct
+    # client slots: eight accounts have six clones, sixteen have five.
+    clone_counts = [6] * 8 + [5] * 16
+    slots = set()
+    for task_id in range(128):
+        account_index = task_id % 24
+        clone_index = rotation_client_index(task_id, 24, clone_counts[account_index])
+        slots.add((account_index, clone_index))
+
+    assert len(slots) == 128
+
+
+def test_worker_telemetry_excludes_threads_waiting_for_same_client_slot():
+    class FakeClient:
+        lock = threading.RLock()
+
+    client = FakeClient()
+    telemetry = InflightWorkerTelemetry(4, sample_interval_seconds=0.005)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def operation():
+        entered.set()
+        release.wait(0.2)
+        return {"ok": True}
+
+    telemetry.start()
+    workers = [
+        threading.Thread(target=run_in_client_slot, args=(client, telemetry, operation))
+        for _index in range(4)
+    ]
+    for worker in workers:
+        worker.start()
+    assert entered.wait(1)
+    assert telemetry.wait_until_sampled(1)
+    release.set()
+    for worker in workers:
+        worker.join(timeout=1)
+    summary = telemetry.stop()
+
+    assert summary["active_workers_peak"] == 1
+    assert summary["operations_started"] == 4
+    assert summary["operations_completed"] == 4
 
 
 def test_system_stress_clone_mode_uses_each_accounts_own_authenticated_seed():
