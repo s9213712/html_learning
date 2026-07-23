@@ -60,6 +60,107 @@ class CampaignScenarioContract:
     resource_class: str = "ordinary"
 
 
+@dataclass(frozen=True)
+class AccountPersonaContract:
+    """One specialist lane layered on top of all-account baseline coverage."""
+
+    category: str
+    operations: tuple[str, ...]
+    invariant_focus: tuple[str, ...]
+
+
+# The synchronized core still sends every account through the complete safe
+# read/positive-path baseline.  These specialist lanes consume additional
+# rotation slots so a green aggregate cannot hide a broken domain behind work
+# performed by unrelated accounts.  The formal scenario matrix owns the deep
+# state-changing proofs (trades, chain transfers, HLS jobs, and ComfyUI output),
+# while these personas keep their control/read/error surfaces hot throughout
+# the entire campaign.
+ACCOUNT_PERSONA_CONTRACTS: dict[str, AccountPersonaContract] = {
+    "i2i_comfyui_research": AccountPersonaContract(
+        category="comfyui_i2i_queue_history_and_ai_agent",
+        operations=("hf_status", "hf_quote", "hf_generate", "ai_agent_status", "ai_agent_tools", "jobs"),
+        invariant_focus=("terminal_output_hash", "source_aspect_preserved", "queue_and_history_consistent"),
+    ),
+    "exchange_spot_lending_bots": AccountPersonaContract(
+        category="exchange_spot_lending_margin_and_bots",
+        operations=(
+            "trading_markets",
+            "trading_dashboard",
+            "trading_asset_overview",
+            "trading_bots",
+            "trading_grid_bots",
+            "trading_workflows",
+            "trading_grid_preview",
+        ),
+        invariant_focus=("decimal_recalculation", "reserve_nonnegative", "background_bot_exactly_once"),
+    ),
+    "web_security_adversary": AccountPersonaContract(
+        category="authorized_web_permission_and_input_attack",
+        operations=(
+            "bad_login",
+            "remote_direct_reject",
+            "bt_reject",
+            "community_bad_thread",
+            "chat_bad_message",
+            "me",
+        ),
+        invariant_focus=("expected_rejection", "no_privilege_escalation", "no_unhandled_5xx"),
+    ),
+    "pointschain_transfer_a": AccountPersonaContract(
+        category="pointschain_transfer_conversion_sender",
+        operations=("points_wallet", "points_ledger", "points_catalog", "jobs"),
+        invariant_focus=("debit_credit_conservation", "fee_recalculation", "nonce_idempotency"),
+    ),
+    "pointschain_transfer_b": AccountPersonaContract(
+        category="pointschain_transfer_conversion_receiver_and_governance",
+        operations=("points_wallet", "points_ledger", "points_governance", "jobs"),
+        invariant_focus=("receiver_balance", "finality_hash_chain", "replay_and_overspend_rejected"),
+    ),
+    "hls_media_streaming": AccountPersonaContract(
+        category="video_hls_share_and_playback",
+        operations=("video_list", "video_playback", "hls_master", "share_manage", "albums", "jobs"),
+        invariant_focus=("playlist_segment_integrity", "seek_and_restart_continuity", "share_revocation"),
+    ),
+    "drive_storage_recovery": AccountPersonaContract(
+        category="drive_upload_download_resume_and_share",
+        operations=("drive_list", "drive_upload", "drive_download", "resumable_start", "share_manage", "jobs"),
+        invariant_focus=("content_hash", "resume_offset", "quota_and_account_isolation"),
+    ),
+    "social_governance": AccountPersonaContract(
+        category="community_chat_friends_and_governance",
+        operations=(
+            "friends",
+            "notifications",
+            "community_boards",
+            "community_announcements",
+            "chat_rooms",
+            "points_governance",
+        ),
+        invariant_focus=("role_boundaries", "notification_exactly_once", "moderation_audit"),
+    ),
+    "async_restart_resilience": AccountPersonaContract(
+        category="jobs_sessions_and_restart_resilience",
+        operations=("version", "me", "profile", "jobs", "video_list", "hf_status", "ai_agent_status"),
+        invariant_focus=("session_rotation", "job_terminal_state", "restart_persistence"),
+    ),
+    "cross_domain_sentinel": AccountPersonaContract(
+        category="cross_domain_correctness_sentinel",
+        operations=(
+            "version",
+            "me",
+            "drive_list",
+            "video_list",
+            "trading_dashboard",
+            "points_wallet",
+            "hf_status",
+            "ai_agent_status",
+        ),
+        invariant_focus=("cross_domain_latency", "no_silent_failure", "account_state_consistency"),
+    ),
+}
+
+
 # This is the design authority for the formal campaign.  A scenario cannot be
 # removed, skipped, or reduced to an HTTP-status-only check without changing a
 # reviewed contract and its regression tests before the source freeze.

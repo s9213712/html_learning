@@ -1301,6 +1301,10 @@ def aggregate_rounds(round_payloads: list[dict[str, Any]], configured_accounts: 
     account_ops: Counter = Counter()
     operation_successes: Counter = Counter()
     account_successes: dict[str, Counter] = defaultdict(Counter)
+    persona_expected_successes: dict[str, Counter] = defaultdict(Counter)
+    persona_dispatches: dict[str, Counter] = defaultdict(Counter)
+    persona_contracts: dict[str, dict[str, Any]] = {}
+    persona_contract_conflicts: list[str] = []
     round_failures = []
     for index, payload in enumerate(round_payloads, start=1):
         summary = payload.get("summary") or {}
@@ -1316,6 +1320,28 @@ def aggregate_rounds(round_payloads: list[dict[str, Any]], configured_accounts: 
         for account, evidence in (summary.get("accounts") or {}).items():
             for operation, count in ((evidence or {}).get("successful_operations") or {}).items():
                 account_successes[str(account)][str(operation)] += int(count or 0)
+        for account, evidence in (payload.get("persona_coverage") or {}).items():
+            account = str(account)
+            evidence = evidence if isinstance(evidence, dict) else {}
+            contract = {
+                key: evidence.get(key)
+                for key in (
+                    "persona_id",
+                    "category",
+                    "operations",
+                    "invariant_focus",
+                    "required_expected_operations",
+                    "deferred_terminal_operations",
+                )
+            }
+            if account in persona_contracts and persona_contracts[account] != contract:
+                persona_contract_conflicts.append(account)
+            else:
+                persona_contracts[account] = contract
+            for operation, count in (evidence.get("expected_success_counts") or {}).items():
+                persona_expected_successes[account][str(operation)] += int(count or 0)
+            for operation, count in (evidence.get("dispatch_counts") or {}).items():
+                persona_dispatches[account][str(operation)] += int(count or 0)
         if payload.get("ok") is False:
             round_failures.append({"round": index, "degraded_reasons": payload.get("degraded_reasons") or [], "error": payload.get("error") or ""})
     account_success_gaps = {
@@ -1327,6 +1353,32 @@ def aggregate_rounds(round_payloads: list[dict[str, Any]], configured_accounts: 
         for account in configured_accounts
     }
     account_success_gaps = {account: gaps for account, gaps in account_success_gaps.items() if gaps}
+    persona_coverage = {}
+    for account in configured_accounts:
+        contract = persona_contracts.get(account)
+        if not contract:
+            continue
+        required = [str(value) for value in (contract.get("required_expected_operations") or [])]
+        gaps = [
+            operation
+            for operation in required
+            if int(persona_expected_successes.get(account, Counter()).get(operation, 0)) <= 0
+        ]
+        persona_coverage[account] = {
+            **contract,
+            "dispatch_counts": dict(sorted(persona_dispatches.get(account, Counter()).items())),
+            "expected_success_counts": {
+                operation: int(persona_expected_successes.get(account, Counter()).get(operation, 0))
+                for operation in required
+            },
+            "gaps": gaps,
+            "ok": not gaps and account not in persona_contract_conflicts,
+        }
+    persona_success_gaps = {
+        account: evidence["gaps"]
+        for account, evidence in persona_coverage.items()
+        if evidence.get("gaps")
+    }
     return {
         "rounds": len(round_payloads),
         "round_failures": round_failures,
@@ -1356,6 +1408,9 @@ def aggregate_rounds(round_payloads: list[dict[str, Any]], configured_accounts: 
             for account in configured_accounts
         },
         "account_success_gaps": account_success_gaps,
+        "persona_coverage": persona_coverage,
+        "persona_success_gaps": persona_success_gaps,
+        "persona_contract_conflicts": sorted(set(persona_contract_conflicts)),
     }
 
 
@@ -2160,6 +2215,7 @@ def main() -> int:
                 "--rotation-offset", str(round_rotation_offset(round_index, max(args.round_ops, args.account_count))),
                 "--require-all-accounts",
                 "--require-operation-coverage",
+                "--require-persona-success",
                 "--allow-server-busy",
                 "--max-server-busy-rate", str(max(0.0, min(1.0, args.max_server_busy_rate))),
                 "--max-ordinary-p95-ms", str(max(1.0, float(args.max_ordinary_p95_ms))),
@@ -2383,6 +2439,10 @@ def main() -> int:
         findings.append({"severity": "high", "title": "required positive-path operations never returned 2xx", "operations": aggregate["operations_without_success"]})
     if window_completed and aggregate["account_success_gaps"]:
         findings.append({"severity": "high", "title": "one or more accounts missed required positive-path success", "accounts": aggregate["account_success_gaps"]})
+    if window_completed and aggregate["persona_success_gaps"]:
+        findings.append({"severity": "high", "title": "one or more specialist account personas missed expected results", "accounts": aggregate["persona_success_gaps"]})
+    if aggregate["persona_contract_conflicts"]:
+        findings.append({"severity": "critical", "title": "account persona contract changed between synchronized rounds", "accounts": aggregate["persona_contract_conflicts"]})
     if sentinel["errors"]:
         findings.append({"severity": "high", "title": "root/manager sentinel observed failures", "count": len(sentinel["errors"])})
     if float(sentinel.get("server_busy_rate") or 0.0) > max(0.0, min(1.0, args.max_server_busy_rate)):

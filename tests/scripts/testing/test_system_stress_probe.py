@@ -40,6 +40,8 @@ from scripts.testing.system_stress_probe import (
     InflightWorkerTelemetry,
     OperationBudget,
     Stats,
+    account_persona_assignments,
+    persona_rotation_operation_account,
     record_operation_result,
     resolve_server_pids,
     resolve_session_pool_size,
@@ -385,6 +387,7 @@ def test_stats_preserves_true_per_account_operation_coverage():
     assert summary["accounts"]["opsim-a"]["operations"] == {"drive_list": 1}
     assert summary["accounts"]["opsim-a"]["successful_operations"] == {"drive_list": 1}
     assert summary["accounts"]["opsim-b"]["successful_operations"] == {"points_wallet": 1}
+    assert summary["accounts"]["opsim-a"]["expected_success_operations"] == {"drive_list": 1}
     assert summary["ops"]["points_wallet"]["successful_2xx"] == 1
     assert summary["accounts"]["opsim-b"]["total_ops"] == 2
     assert summary["accounts"]["opsim-b"]["failed_ops"] == 1
@@ -430,6 +433,58 @@ def test_rotation_spreads_each_accounts_operations_across_clone_clients():
         slots.add((account_index, clone_index))
 
     assert len(slots) == 128
+
+
+def test_persona_rotation_preserves_full_baseline_then_specializes() -> None:
+    operations = [
+        "hf_status",
+        "hf_quote",
+        "hf_generate",
+        "ai_agent_status",
+        "ai_agent_tools",
+        "jobs",
+        "trading_markets",
+        "trading_dashboard",
+        "trading_asset_overview",
+        "trading_bots",
+        "trading_grid_bots",
+        "trading_workflows",
+        "trading_grid_preview",
+        "bad_login",
+        "remote_direct_reject",
+        "bt_reject",
+        "community_bad_thread",
+        "chat_bad_message",
+        "me",
+    ]
+    accounts = ["i2i-user", "trading-user", "security-user"]
+    assignments = account_persona_assignments(accounts, operations)
+    baseline_span = len(operations) * len(accounts)
+
+    assert assignments["i2i-user"]["persona_id"] == "i2i_comfyui_research"
+    assert assignments["trading-user"]["persona_id"] == "exchange_spot_lending_bots"
+    assert assignments["security-user"]["persona_id"] == "web_security_adversary"
+    assert persona_rotation_operation_account(0, operations, accounts, assignments) == (
+        "hf_status",
+        "i2i-user",
+        "baseline",
+    )
+    assert persona_rotation_operation_account(
+        baseline_span,
+        operations,
+        accounts,
+        assignments,
+    ) == ("hf_status", "i2i-user", "i2i_comfyui_research")
+
+
+def test_expected_security_rejection_is_persona_success_but_not_2xx() -> None:
+    stats = Stats()
+
+    stats.record("bad_login", status=401, elapsed_ms=5, ok=True, account="security-user")
+    summary = stats.summary()["accounts"]["security-user"]
+
+    assert summary["expected_success_operations"] == {"bad_login": 1}
+    assert summary["successful_operations"] == {}
 
 
 def test_worker_telemetry_excludes_threads_waiting_for_same_client_slot():
@@ -676,6 +731,49 @@ def test_operational_soak_aggregates_all_accounts_and_operations():
     assert "drive_upload" in summary["operations_without_success"]
     assert set(summary["account_success_gaps"]) == {"alice", "bob", "carol"}
     assert len(summary["round_failures"]) == 1
+
+
+def test_operational_soak_aggregates_specialist_persona_evidence() -> None:
+    contract = {
+        "persona_id": "exchange_spot_lending_bots",
+        "category": "exchange_spot_lending_margin_and_bots",
+        "operations": ["trading_dashboard", "trading_bots"],
+        "invariant_focus": ["decimal_recalculation"],
+        "required_expected_operations": ["trading_dashboard", "trading_bots"],
+        "deferred_terminal_operations": [],
+    }
+    rounds = [
+        {
+            "ok": True,
+            "persona_coverage": {
+                "trader": {
+                    **contract,
+                    "dispatch_counts": {"trading_dashboard": 2},
+                    "expected_success_counts": {"trading_dashboard": 2, "trading_bots": 0},
+                }
+            },
+        },
+        {
+            "ok": True,
+            "persona_coverage": {
+                "trader": {
+                    **contract,
+                    "dispatch_counts": {"trading_bots": 1},
+                    "expected_success_counts": {"trading_dashboard": 0, "trading_bots": 1},
+                }
+            },
+        },
+    ]
+
+    summary = aggregate_rounds(rounds, ["trader"])
+
+    assert summary["persona_success_gaps"] == {}
+    assert summary["persona_contract_conflicts"] == []
+    assert summary["persona_coverage"]["trader"]["ok"] is True
+    assert summary["persona_coverage"]["trader"]["expected_success_counts"] == {
+        "trading_dashboard": 2,
+        "trading_bots": 1,
+    }
 
 
 def test_formal_operational_soak_requires_real_4_8_16_32_ramp() -> None:

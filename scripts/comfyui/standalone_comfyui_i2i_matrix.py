@@ -160,6 +160,12 @@ def apply_interactive_prompts(args):
     args.inpaint_method = _ask_choice("Inpaint method", args.inpaint_method, ("auto", "conditioning", "vae_encode"))
     args.mask_shape = _ask_choice("Mask shape", args.mask_shape, ("default", "window", "background_wall", "small_wall", "kimono_clothes"))
     args.outpaint = _ask_int("Outpaint default pixels", args.outpaint)
+    args.outpaint_source_feather = _ask_int("Outpaint source preservation feather pixels", args.outpaint_source_feather)
+    args.outpaint_preserve_source = _ask_choice(
+        "Preserve source interior after outpaint",
+        "yes" if args.outpaint_preserve_source else "no",
+        ("yes", "no"),
+    ) == "yes"
     args.blend_image_path = _ask_text("Blend image path", args.blend_image_path)
     args.style_image_path = _ask_text("Style/reference image path", args.style_image_path)
     args.out_dir = _ask_text("Output directory", args.out_dir)
@@ -340,6 +346,36 @@ def selected_inpaint_method(args, object_info: dict) -> str:
     if method == "auto":
         return "conditioning" if has_node(object_info, "InpaintModelConditioning") else "vae_encode"
     return method
+
+
+def selected_outpaint_method(args, object_info: dict) -> str:
+    """Prefer a noise-masked latent for outpaint instead of encoding gray padding."""
+
+    method = str(getattr(args, "inpaint_method", "auto") or "auto").strip().lower()
+    if method == "auto":
+        return "vae_encode" if has_node(object_info, "VAEEncodeForInpaint") else "conditioning"
+    return method
+
+
+def outpaint_padding(args) -> dict[str, int]:
+    default_expand = int(args.outpaint)
+    return {
+        "left": default_expand if args.outpaint_left is None else int(args.outpaint_left),
+        "top": default_expand if args.outpaint_top is None else int(args.outpaint_top),
+        "right": default_expand if args.outpaint_right is None else int(args.outpaint_right),
+        "bottom": default_expand if args.outpaint_bottom is None else int(args.outpaint_bottom),
+    }
+
+
+def scaled_dimensions(width: int, height: int, factor: float, *, multiple: int = 8) -> tuple[int, int]:
+    if int(width) <= 0 or int(height) <= 0:
+        raise ProbeError("source dimensions must be positive")
+    if float(factor) <= 1.0:
+        raise ProbeError("--upscale-factor must be greater than 1.0")
+    return tuple(
+        max(multiple, int(round((int(value) * float(factor)) / multiple)) * multiple)
+        for value in (width, height)
+    )
 
 
 def maybe_apply_differential_diffusion(args, object_info: dict, workflow: dict, model_ref: list) -> list:
@@ -623,15 +659,20 @@ def build_inpaint(
     return workflow
 
 
-def build_outpaint(args, object_info: dict, model_name: str, *, source_ref: dict, prompt: str, prefix: str) -> dict:
+def build_outpaint(
+    args,
+    object_info: dict,
+    model_name: str,
+    *,
+    source_ref: dict,
+    source_size: tuple[int, int],
+    prompt: str,
+    prefix: str,
+) -> dict:
     workflow = base_nodes(args, model_name)
     workflow["2"]["inputs"]["text"] = prompt
     workflow["4"] = {"class_type": "LoadImage", "inputs": {"image": file_input_name(source_ref), "upload": "image"}}
-    default_expand = int(args.outpaint)
-    left = default_expand if args.outpaint_left is None else int(args.outpaint_left)
-    top = default_expand if args.outpaint_top is None else int(args.outpaint_top)
-    right = default_expand if args.outpaint_right is None else int(args.outpaint_right)
-    bottom = default_expand if args.outpaint_bottom is None else int(args.outpaint_bottom)
+    padding = outpaint_padding(args)
     workflow["5"] = {
         "class_type": "ImagePadForOutpaint",
         "inputs": required_default_inputs(
@@ -639,15 +680,12 @@ def build_outpaint(args, object_info: dict, model_name: str, *, source_ref: dict
             "ImagePadForOutpaint",
             {
                 "image": ["4", 0],
-                "left": left,
-                "top": top,
-                "right": right,
-                "bottom": bottom,
+                **padding,
                 "feathering": int(args.outpaint_feathering),
             },
         ),
     }
-    method = selected_inpaint_method(args, object_info)
+    method = selected_outpaint_method(args, object_info)
     if method == "conditioning":
         if not has_node(object_info, "InpaintModelConditioning"):
             raise ProbeError("InpaintModelConditioning is not available on this ComfyUI instance")
@@ -701,13 +739,57 @@ def build_outpaint(args, object_info: dict, model_name: str, *, source_ref: dict
     decode_id = str(int(sampler_id) + 1)
     save_id = str(int(sampler_id) + 2)
     workflow[decode_id] = {"class_type": "VAEDecode", "inputs": {"samples": [sampler_id, 0], "vae": ["1", 2]}}
-    workflow[save_id] = {"class_type": "SaveImage", "inputs": {"images": [decode_id, 0], "filename_prefix": prefix}}
+    output_ref = [decode_id, 0]
+    if bool(args.outpaint_preserve_source):
+        mask_id = str(int(sampler_id) + 2)
+        feather_id = str(int(sampler_id) + 3)
+        composite_id = str(int(sampler_id) + 4)
+        save_id = str(int(sampler_id) + 5)
+        # Keep the original interior stable and use a soft transition into the
+        # generated outer area.  VAE decoding the entire padded latent otherwise
+        # frequently introduces a visible rectangular source boundary.
+        source_feather = max(1, min(int(args.outpaint_source_feather), min(source_size) // 3))
+        workflow[mask_id] = {
+            "class_type": "SolidMask",
+            "inputs": {"value": 1.0, "width": int(source_size[0]), "height": int(source_size[1])},
+        }
+        workflow[feather_id] = {
+            "class_type": "FeatherMask",
+            "inputs": {
+                "mask": [mask_id, 0],
+                "left": source_feather,
+                "top": source_feather,
+                "right": source_feather,
+                "bottom": source_feather,
+            },
+        }
+        workflow[composite_id] = {
+            "class_type": "ImageCompositeMasked",
+            "inputs": {
+                "destination": [decode_id, 0],
+                "source": ["4", 0],
+                "x": int(padding["left"]),
+                "y": int(padding["top"]),
+                "resize_source": False,
+                "mask": [feather_id, 0],
+            },
+        }
+        output_ref = [composite_id, 0]
+    workflow[save_id] = {"class_type": "SaveImage", "inputs": {"images": output_ref, "filename_prefix": prefix}}
     return workflow
 
 
-def build_upscale_redraw(args, object_info: dict, model_name: str, *, source_ref: dict, prompt: str, prefix: str) -> dict:
-    target_width = int(round(int(args.width) * float(args.upscale_factor)))
-    target_height = int(round(int(args.height) * float(args.upscale_factor)))
+def build_upscale_redraw(
+    args,
+    object_info: dict,
+    model_name: str,
+    *,
+    source_ref: dict,
+    source_size: tuple[int, int],
+    prompt: str,
+    prefix: str,
+) -> dict:
+    target_width, target_height = scaled_dimensions(*source_size, float(args.upscale_factor))
     workflow = base_nodes(args, model_name)
     workflow["2"]["inputs"]["text"] = prompt
     workflow["4"] = {"class_type": "LoadImage", "inputs": {"image": file_input_name(source_ref), "upload": "image"}}
@@ -747,31 +829,51 @@ def build_upscale_redraw(args, object_info: dict, model_name: str, *, source_ref
 
 
 def build_two_image_blend(args, object_info: dict, model_name: str, *, source_ref: dict, blend_ref: dict, prompt: str, prefix: str) -> dict:
+    """Semantically combine references without creating a ghosted pixel overlay."""
+
+    blend_factor = max(0.0, min(1.0, float(args.blend_factor)))
+    style_weight = 0.4 + (0.9 * blend_factor)
+    composition_weight = 0.4 + (0.9 * (1.0 - blend_factor))
     workflow = base_nodes(args, model_name)
     workflow["2"]["inputs"]["text"] = prompt
-    workflow["4"] = {"class_type": "LoadImage", "inputs": {"image": file_input_name(source_ref), "upload": "image"}}
-    workflow["5"] = {"class_type": "LoadImage", "inputs": {"image": file_input_name(blend_ref), "upload": "image"}}
-    workflow["6"] = {
-        "class_type": "ImageBlend",
+    workflow["4"] = {
+        "class_type": "IPAdapterUnifiedLoader",
         "inputs": required_default_inputs(
             object_info,
-            "ImageBlend",
+            "IPAdapterUnifiedLoader",
+            {"model": ["1", 0], "preset": args.ipadapter_preset},
+        ),
+    }
+    workflow["5"] = {"class_type": "LoadImage", "inputs": {"image": file_input_name(blend_ref), "upload": "image"}}
+    workflow["6"] = {"class_type": "LoadImage", "inputs": {"image": file_input_name(source_ref), "upload": "image"}}
+    workflow["7"] = {
+        "class_type": "IPAdapterStyleComposition",
+        "inputs": required_default_inputs(
+            object_info,
+            "IPAdapterStyleComposition",
             {
-                "image1": ["4", 0],
-                "image2": ["5", 0],
-                "blend_factor": float(args.blend_factor),
-                "blend_mode": args.blend_mode,
+                "model": ["4", 0],
+                "ipadapter": ["4", 1],
+                "image_style": ["5", 0],
+                "image_composition": ["6", 0],
+                "weight_style": style_weight,
+                "weight_composition": composition_weight,
+                "expand_style": False,
+                "combine_embeds": "average",
+                "start_at": 0.0,
+                "end_at": 1.0,
+                "embeds_scaling": "V only",
             },
         ),
     }
-    workflow["7"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["6", 0], "vae": ["1", 2]}}
-    workflow["8"] = {
+    workflow["8"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["6", 0], "vae": ["1", 2]}}
+    workflow["9"] = {
         "class_type": "KSampler",
         "inputs": {
-            "model": ["1", 0],
+            "model": ["7", 0],
             "positive": ["2", 0],
             "negative": ["3", 0],
-            "latent_image": ["7", 0],
+            "latent_image": ["8", 0],
             "seed": int(args.seed) + 409,
             "steps": int(args.steps),
             "cfg": float(args.cfg),
@@ -780,8 +882,8 @@ def build_two_image_blend(args, object_info: dict, model_name: str, *, source_re
             "denoise": float(args.blend_denoise),
         },
     }
-    workflow["9"] = {"class_type": "VAEDecode", "inputs": {"samples": ["8", 0], "vae": ["1", 2]}}
-    workflow["10"] = {"class_type": "SaveImage", "inputs": {"images": ["9", 0], "filename_prefix": prefix}}
+    workflow["10"] = {"class_type": "VAEDecode", "inputs": {"samples": ["9", 0], "vae": ["1", 2]}}
+    workflow["11"] = {"class_type": "SaveImage", "inputs": {"images": ["10", 0], "filename_prefix": prefix}}
     return workflow
 
 
@@ -1211,6 +1313,154 @@ def diff_metrics(source: Path, output: Path, *, mask: Path | None = None) -> dic
         return payload
 
 
+def expected_dimensions_check(output: Path, expected: tuple[int, int]) -> dict:
+    actual_stats = image_stats(output)
+    actual = (int(actual_stats["width"]), int(actual_stats["height"]))
+    expected = (int(expected[0]), int(expected[1]))
+    expected_ratio = expected[0] / max(1, expected[1])
+    actual_ratio = actual[0] / max(1, actual[1])
+    ratio_error = abs(actual_ratio - expected_ratio) / max(expected_ratio, 1e-9)
+    passed = actual == expected and ratio_error <= 0.01
+    return {
+        "id": "expected_dimensions_and_aspect",
+        "passed": passed,
+        "expected": list(expected),
+        "actual": list(actual),
+        "relative_aspect_error": round(ratio_error, 6),
+    }
+
+
+def outpaint_border_check(source: Path, output: Path, padding: dict[str, int]) -> dict:
+    """Reject the common false-green result where outpaint only adds gray canvas."""
+
+    from PIL import Image
+
+    with Image.open(source) as source_raw, Image.open(output) as output_raw:
+        source_size = source_raw.size
+        image = output_raw.convert("RGB")
+        left = max(0, int(padding.get("left", 0)))
+        top = max(0, int(padding.get("top", 0)))
+        right = max(0, int(padding.get("right", 0)))
+        bottom = max(0, int(padding.get("bottom", 0)))
+        expected_size = (source_size[0] + left + right, source_size[1] + top + bottom)
+        if image.size != expected_size:
+            return {
+                "id": "outpaint_generated_border",
+                "passed": False,
+                "reason": "output dimensions do not match source plus configured padding",
+                "source_size": list(source_size),
+                "expected_size": list(expected_size),
+                "actual_size": list(image.size),
+                "padding": {"left": left, "top": top, "right": right, "bottom": bottom},
+            }
+
+        # Only inspect the outer half of each newly padded band. Feathering near
+        # the original image is allowed, while untouched ImagePadForOutpaint
+        # canvas remains close to neutral 127/128 gray in these outer strips.
+        probe_boxes = []
+        if top:
+            probe_boxes.append((0, 0, image.width, max(1, top // 2)))
+        if bottom:
+            probe_boxes.append((0, image.height - max(1, bottom // 2), image.width, image.height))
+        middle_top = top
+        middle_bottom = image.height - bottom
+        if left and middle_bottom > middle_top:
+            probe_boxes.append((0, middle_top, max(1, left // 2), middle_bottom))
+        if right and middle_bottom > middle_top:
+            probe_boxes.append((image.width - max(1, right // 2), middle_top, image.width, middle_bottom))
+
+        total = 0
+        gray_placeholder = 0
+        for box in probe_boxes:
+            probe = image.crop(box)
+            pixels = probe.get_flattened_data() if hasattr(probe, "get_flattened_data") else probe.getdata()
+            for red, green, blue in pixels:
+                total += 1
+                channel_spread = max(red, green, blue) - min(red, green, blue)
+                channel_mean = (red + green + blue) / 3.0
+                if channel_spread <= 6 and abs(channel_mean - 127.5) <= 8:
+                    gray_placeholder += 1
+        gray_ratio = gray_placeholder / max(1, total)
+        seam_band = max(1, min(32, min(source_size) // 8))
+        seam_deltas = {}
+
+        def color_mean(box):
+            from PIL import ImageStat
+
+            return ImageStat.Stat(image.crop(box)).mean
+
+        def mean_delta(first, second):
+            return sum(abs(a - b) for a, b in zip(first, second)) / 3.0
+
+        if left:
+            seam_deltas["left"] = mean_delta(
+                color_mean((left - seam_band, top, left, image.height - bottom)),
+                color_mean((left, top, left + seam_band, image.height - bottom)),
+            )
+        if right:
+            boundary = image.width - right
+            seam_deltas["right"] = mean_delta(
+                color_mean((boundary - seam_band, top, boundary, image.height - bottom)),
+                color_mean((boundary, top, boundary + seam_band, image.height - bottom)),
+            )
+        if top:
+            seam_deltas["top"] = mean_delta(
+                color_mean((left, top - seam_band, image.width - right, top)),
+                color_mean((left, top, image.width - right, top + seam_band)),
+            )
+        if bottom:
+            boundary = image.height - bottom
+            seam_deltas["bottom"] = mean_delta(
+                color_mean((left, boundary - seam_band, image.width - right, boundary)),
+                color_mean((left, boundary, image.width - right, boundary + seam_band)),
+            )
+        seam_threshold = 20.0
+        max_seam_delta = max(seam_deltas.values(), default=0.0)
+        return {
+            "id": "outpaint_generated_border",
+            "passed": total > 0 and gray_ratio < 0.80 and max_seam_delta <= seam_threshold,
+            "source_size": list(source_size),
+            "expected_size": list(expected_size),
+            "actual_size": list(image.size),
+            "padding": {"left": left, "top": top, "right": right, "bottom": bottom},
+            "outer_probe_pixels": total,
+            "neutral_gray_placeholder_ratio": round(gray_ratio, 6),
+            "failure_threshold": 0.80,
+            "boundary_mean_rgb_delta": {name: round(value, 3) for name, value in seam_deltas.items()},
+            "max_boundary_mean_rgb_delta": round(max_seam_delta, 3),
+            "seam_failure_threshold": seam_threshold,
+        }
+
+
+def outpaint_center_preservation_check(source: Path, output: Path, padding: dict[str, int], feather: int) -> dict:
+    """Verify that outpaint has not redrawn the protected source interior."""
+
+    from PIL import Image, ImageChops, ImageStat
+
+    with Image.open(source) as source_raw, Image.open(output) as output_raw:
+        source_image = source_raw.convert("RGB")
+        output_image = output_raw.convert("RGB")
+        inset = max(1, min(int(feather), source_image.width // 3, source_image.height // 3))
+        source_crop = source_image.crop((inset, inset, source_image.width - inset, source_image.height - inset))
+        target_crop = output_image.crop((
+            int(padding["left"]) + inset,
+            int(padding["top"]) + inset,
+            int(padding["left"]) + source_image.width - inset,
+            int(padding["top"]) + source_image.height - inset,
+        ))
+        if target_crop.size != source_crop.size:
+            return {"id": "outpaint_source_interior_preserved", "passed": False, "reason": "protected output region has the wrong dimensions"}
+        diff = ImageChops.difference(source_crop, target_crop)
+        mean_delta = sum(ImageStat.Stat(diff).mean) / 3.0
+        return {
+            "id": "outpaint_source_interior_preserved",
+            "passed": mean_delta <= 1.0,
+            "inset": inset,
+            "mean_abs_rgb_delta": round(mean_delta, 4),
+            "failure_threshold": 1.0,
+        }
+
+
 def run_case(client: ComfyClient, args, *, case: dict, workflow: dict, source_path: Path | None, mask_path: Path | None) -> dict:
     started = time.perf_counter()
     out_png = Path(args.out_dir) / f"{case['id']}.png"
@@ -1219,6 +1469,15 @@ def run_case(client: ComfyClient, args, *, case: dict, workflow: dict, source_pa
         "label": case["label"],
         "status": "fail",
         "semantic_expectation": case.get("semantic_expectation", ""),
+        "semantic_verification": {
+            "status": "approved_by_operator" if args.approve_semantic_review else "manual_review_required",
+            "machine_verified": False,
+            "reason": (
+                "operator explicitly approved this semantic review"
+                if args.approve_semantic_review
+                else "workflow completion and numeric image invariants cannot prove prompt-level visual correctness"
+            ),
+        },
         "notes": case.get("notes", ""),
         "started_at": now_iso(),
     }
@@ -1236,13 +1495,33 @@ def run_case(client: ComfyClient, args, *, case: dict, workflow: dict, source_pa
         result["image_stats"] = image_stats(out_png)
         if source_path:
             result["diff_metrics"] = diff_metrics(source_path, out_png, mask=mask_path)
+        automated_checks = []
         if case.get("expect_larger_than_source") and source_path:
             source_stats = image_stats(source_path)
-            result["automated_size_check"] = {
+            automated_checks.append({
+                "id": "larger_than_source",
                 "passed": result["image_stats"]["width"] > source_stats["width"] or result["image_stats"]["height"] > source_stats["height"],
                 "source": {"width": source_stats["width"], "height": source_stats["height"]},
                 "output": {"width": result["image_stats"]["width"], "height": result["image_stats"]["height"]},
-            }
+            })
+        if case.get("expected_dimensions"):
+            automated_checks.append(expected_dimensions_check(out_png, tuple(case["expected_dimensions"])))
+        if case.get("outpaint_padding") and source_path:
+            automated_checks.append(outpaint_border_check(source_path, out_png, case["outpaint_padding"]))
+            if case.get("outpaint_preserve_source"):
+                automated_checks.append(outpaint_center_preservation_check(
+                    source_path,
+                    out_png,
+                    case["outpaint_padding"],
+                    int(case.get("outpaint_source_feather", 1)),
+                ))
+        result["automated_checks"] = automated_checks
+        failed_checks = [item for item in automated_checks if not item.get("passed")]
+        if failed_checks:
+            result["status"] = "fail"
+            result["validation_error"] = "machine image invariant failed: " + ", ".join(
+                str(item.get("id") or "unknown") for item in failed_checks
+            )
     except Exception as exc:
         result["status"] = "fail"
         result["error"] = sanitize_text(exc)
@@ -1280,7 +1559,12 @@ def run_matrix(args) -> dict:
                 "VAEEncode",
                 "VAEEncodeForInpaint",
                 "ImagePadForOutpaint",
+                "SolidMask",
+                "FeatherMask",
+                "ImageCompositeMasked",
                 "ImageScale",
+                "IPAdapterUnifiedLoader",
+                "IPAdapterStyleComposition",
                 "ControlNetLoader",
                 "ControlNetApplyAdvanced",
                 "UpscaleModelLoader",
@@ -1307,6 +1591,7 @@ def run_matrix(args) -> dict:
         "capabilities": summary,
         "cases": [],
         "skips": [],
+        "verification_scope": "workflow execution plus explicit machine image invariants; prompt-level semantics require visual review",
         "backend_generalization": {
             "diffusers": (
                 "Generic HF Diffusers can cover txt2img/img2img/inpaint when a repo exposes compatible Diffusers "
@@ -1322,19 +1607,23 @@ def run_matrix(args) -> dict:
         "unsupported_or_template_only": [
             "True separate-reference style imitation needs IPAdapter/reference/Redux-style nodes or a workflow template; shortcut img2img can only restyle the source image by prompt and denoise.",
             "True separate-reference feature imitation/faces/identity transfer needs reference/adapter nodes and is not a generic shortcut.",
-            "Prompt-guided blending of two images is not available in the current shortcut builder; it should be a workflow-template feature.",
+            "Prompt-guided multi-image blending requires IPAdapter/reference nodes or an imported workflow template; direct ImageBlend pixel overlays are rejected as semantically misleading.",
             "The project shortcut upscale path is pure model upscaling. This matrix tests redraw-upscale as a custom ComfyUI workflow via ImageScale + VAEEncode + KSampler.",
         ],
     }
     prompts = case_prompt_suite(args)
 
     source_path = out_dir / "source_t2i_reference.png"
+    imported_source = Path(str(args.source_image_path or "")).expanduser() if args.source_image_path else None
     source_case = {
         "id": "source_t2i_reference",
-        "label": "Reference txt2img source",
-        "semantic_expectation": "Generate a beach cat-girl source image with a visible editable object region.",
+        "label": "Imported existing source image" if imported_source else "Reference txt2img source",
+        "semantic_expectation": (
+            "Preserve the imported source bytes and dimensions before starting I2I operations."
+            if imported_source
+            else "Generate a beach cat-girl source image with a visible editable object region."
+        ),
     }
-    imported_source = Path(str(args.source_image_path or "")).expanduser() if args.source_image_path else None
     if imported_source:
         if not imported_source.is_file():
             raise ProbeError(f"--source-image-path does not exist: {imported_source}")
@@ -1378,6 +1667,9 @@ def run_matrix(args) -> dict:
         report["ok"] = False
         return report
 
+    source_image_stats = image_stats(source_path)
+    source_size = (int(source_image_stats["width"]), int(source_image_stats["height"]))
+    report["source_dimensions"] = {"width": source_size[0], "height": source_size[1]}
     source_ref = client.upload_image(source_path, overwrite=True)
     report["artifacts"]["uploaded_source_ref"] = source_ref
     blend_ref = None
@@ -1455,7 +1747,7 @@ def run_matrix(args) -> dict:
     mask_ref = None
     if inpaint_enabled:
         mask_path = out_dir / "inpaint_mask_alpha.png"
-        create_mask(mask_path, args.width, args.height, shape=args.mask_shape)
+        create_mask(mask_path, source_size[0], source_size[1], shape=args.mask_shape)
         report["artifacts"]["mask"] = str(mask_path)
         mask_ref = client.upload_image(mask_path, overwrite=True)
         report["artifacts"]["uploaded_mask_ref"] = mask_ref
@@ -1491,20 +1783,49 @@ def run_matrix(args) -> dict:
                 prefix="hackme_i2i_inpaint_replace",
             ),
         })
-    if case_enabled(args, "outpaint_expand_beach"):
+    outpaint_nodes = "ImagePadForOutpaint" in object_info and (
+        not args.outpaint_preserve_source
+        or all(name in object_info for name in ("SolidMask", "FeatherMask", "ImageCompositeMasked"))
+    )
+    if outpaint_nodes and case_enabled(args, "outpaint_expand_beach"):
+        padding = outpaint_padding(args)
         cases.append({
             "id": "outpaint_expand_beach",
             "label": "outpainting",
-            "semantic_expectation": "Extend the beach/ocean/sky beyond the original square without obvious borders.",
+            "semantic_expectation": "Extend the scene beyond the original image without neutral-gray padding or obvious borders.",
             "expect_larger_than_source": True,
+            "outpaint_padding": padding,
+            "outpaint_source_feather": int(args.outpaint_source_feather),
+            "outpaint_preserve_source": bool(args.outpaint_preserve_source),
+            "expected_dimensions": (
+                source_size[0] + padding["left"] + padding["right"],
+                source_size[1] + padding["top"] + padding["bottom"],
+            ),
             "workflow": build_outpaint(
                 args,
                 object_info,
                 model_name,
                 source_ref=source_ref,
+                source_size=source_size,
                 prompt=prompts["outpaint"],
                 prefix="hackme_i2i_outpaint",
             ),
+        })
+    elif case_enabled(args, "outpaint_expand_beach"):
+        missing = [
+            name
+            for name in (
+                ("ImagePadForOutpaint", "SolidMask", "FeatherMask", "ImageCompositeMasked")
+                if args.outpaint_preserve_source
+                else ("ImagePadForOutpaint",)
+            )
+            if name not in object_info
+        ]
+        if args.only_case:
+            raise ProbeError(f"outpaint requires seam-safe masking nodes: {', '.join(missing)}")
+        report["skips"].append({
+            "id": "outpaint_expand_beach",
+            "reason": f"Seam-safe source preservation nodes are missing: {', '.join(missing)}",
         })
     if controlnet and case_enabled(args, f"controlnet_copy_composition_{safe_name(controlnet['type'])}"):
         control_case = dict(controlnet)
@@ -1527,28 +1848,32 @@ def run_matrix(args) -> dict:
     elif not args.only_case:
         report["skips"].append({"id": "controlnet_copy_composition", "reason": "No compatible ControlNet loader/model/preprocessor combination was detected."})
     if "ImageScale" in object_info and case_enabled(args, "upscale_redraw_imagescale"):
+        upscale_size = scaled_dimensions(*source_size, float(args.upscale_factor))
         cases.append({
             "id": "upscale_redraw_imagescale",
             "label": "upscale redraw",
             "semantic_expectation": "Scale up the source and run a low-denoise redraw to add detail while preserving the scene.",
             "expect_larger_than_source": True,
+            "expected_dimensions": upscale_size,
             "workflow": build_upscale_redraw(
                 args,
                 object_info,
                 model_name,
                 source_ref=source_ref,
+                source_size=source_size,
                 prompt=prompts["upscale_redraw"],
                 prefix="hackme_i2i_upscale_redraw",
             ),
         })
     elif not args.only_case:
         report["skips"].append({"id": "upscale_redraw", "reason": "ImageScale is missing, so redraw-upscale cannot be built without an upscaler model/template."})
-    if "ImageBlend" in object_info and blend_ref and case_enabled(args, "two_image_blend_mix"):
+    semantic_blend_nodes = all(name in object_info for name in ("IPAdapterUnifiedLoader", "IPAdapterStyleComposition"))
+    if semantic_blend_nodes and blend_ref and case_enabled(args, "two_image_blend_mix"):
         cases.append({
             "id": "two_image_blend_mix",
-            "label": "two-image blend and redraw",
-            "semantic_expectation": "Blend the source image with a second reference and redraw a coherent single image.",
-            "notes": "This tests ImageBlend + low-denoise redraw. It is not a full IPAdapter/reference-image semantic blend.",
+            "label": "two-image semantic blend and redraw",
+            "semantic_expectation": "Use the second image as a semantic/style reference while preserving one coherent source composition.",
+            "notes": "Uses IPAdapter style/composition conditioning; direct pixel ImageBlend is intentionally forbidden because it produces ghosted double exposures.",
             "workflow": build_two_image_blend(
                 args,
                 object_info,
@@ -1562,7 +1887,7 @@ def run_matrix(args) -> dict:
     elif not args.only_case:
         report["skips"].append({
             "id": "two_image_blend",
-            "reason": "ImageBlend is missing or no --blend-image-path was provided. Prompt-guided multi-image semantic blend should be handled by an imported workflow template.",
+            "reason": "IPAdapter style/composition nodes are missing or no --blend-image-path was provided; direct pixel ImageBlend is not accepted as a semantic blend.",
         })
     if (
         all(name in object_info for name in ("IPAdapterUnifiedLoader", "IPAdapterStyleComposition"))
@@ -1628,7 +1953,14 @@ def run_matrix(args) -> dict:
         write_json(Path(args.out_json), report)
 
     failed = [case for case in report["cases"] if case.get("status") != "pass"]
-    report["ok"] = not failed
+    report["technical_ok"] = not failed
+    report["semantic_review_required_cases"] = [
+        case["id"]
+        for case in report["cases"]
+        if (case.get("semantic_verification") or {}).get("status") == "manual_review_required"
+    ]
+    report["semantic_ok"] = not report["semantic_review_required_cases"]
+    report["ok"] = report["technical_ok"] and report["semantic_ok"]
     report["finished_at"] = now_iso()
     return report
 
@@ -1659,6 +1991,9 @@ def parse_args(argv=None):
     parser.add_argument("--outpaint-right", type=int, default=None)
     parser.add_argument("--outpaint-bottom", type=int, default=None)
     parser.add_argument("--outpaint-feathering", type=int, default=48)
+    parser.add_argument("--outpaint-source-feather", type=int, default=64, help="Soft-mask pixels used to preserve the original source interior during outpaint.")
+    parser.add_argument("--outpaint-preserve-source", action=argparse.BooleanOptionalAction, default=True, help="Composite the original source interior back after sampling; disable for an inpaint checkpoint to allow a fully blended redraw.")
+    parser.add_argument("--approve-semantic-review", action="store_true", help="Record operator approval for the visual semantics of all generated cases; without this, a technical run is not overall green.")
     parser.add_argument("--outpaint-denoise", type=float, default=0.90)
     parser.add_argument("--inpaint-method", choices=("auto", "conditioning", "vae_encode"), default="auto")
     parser.add_argument("--inpaint-noise-mask", action=argparse.BooleanOptionalAction, default=True)
@@ -1722,6 +2057,9 @@ def main(argv=None) -> int:
             "out_dir": str(Path(args.out_dir).expanduser().resolve()),
             "passed": sum(1 for item in report.get("cases", []) if item.get("status") == "pass"),
             "failed": sum(1 for item in report.get("cases", []) if item.get("status") == "fail"),
+            "technical_ok": report.get("technical_ok"),
+            "semantic_ok": report.get("semantic_ok"),
+            "semantic_review_required": report.get("semantic_review_required_cases", []),
             "skipped": len(report.get("skips", [])),
             "error": report.get("error"),
         }, ensure_ascii=False, indent=2))

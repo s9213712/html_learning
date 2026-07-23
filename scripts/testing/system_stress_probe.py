@@ -27,6 +27,7 @@ if str(ROOT) not in sys.path:
 
 from scripts.testing.db_stress_probe import ResourceMonitor  # noqa: E402
 from scripts.testing.operation_coverage import (  # noqa: E402
+    ACCOUNT_PERSONA_CONTRACTS,
     ACCOUNT_SUCCESS_REQUIRED_OPERATIONS,
     GLOBAL_SUCCESS_REQUIRED_OPERATIONS,
 )
@@ -43,6 +44,8 @@ DEFENSIVE_LATENCY_OPS = {
     "qos_version",
 }
 WORKER_TELEMETRY_SCHEMA_VERSION = "hackme.system-stress-worker-telemetry.v1"
+PERSONA_COVERAGE_SCHEMA_VERSION = "hackme.system-stress-account-personas.v1"
+PERSONA_DEFERRED_TERMINAL_OPERATIONS = frozenset({"hf_generate", "hls_master"})
 
 
 def utc_now() -> str:
@@ -227,6 +230,7 @@ class Stats:
         self.bytes_received = 0
         self.account_ops: dict[str, Counter] = defaultdict(Counter)
         self.account_successes: dict[str, Counter] = defaultdict(Counter)
+        self.account_expected_successes: dict[str, Counter] = defaultdict(Counter)
         self.account_failures: Counter = Counter()
 
     def record(self, name: str, *, status: int = 0, elapsed_ms: float = 0.0, ok: bool = False, error: str = "", body_sample: str = "", bytes_received: int = 0, account: str = "", backpressure_rejected: bool = False) -> None:
@@ -251,6 +255,8 @@ class Stats:
             self.bytes_received += int(bytes_received or 0)
             if account:
                 self.account_ops[str(account)][name] += 1
+                if ok:
+                    self.account_expected_successes[str(account)][name] += 1
                 if 200 <= int(status or 0) < 300:
                     self.account_successes[str(account)][name] += 1
                 if error or not ok:
@@ -392,6 +398,9 @@ class Stats:
                 "total_ops": int(sum(ops.values())),
                 "failed_ops": int(self.account_failures.get(account, 0)),
                 "operations": dict(sorted(ops.items())),
+                "expected_success_operations": dict(
+                    sorted(self.account_expected_successes.get(account, Counter()).items())
+                ),
                 "successful_operations": dict(sorted(self.account_successes.get(account, Counter()).items())),
             }
             for account, ops in sorted(self.account_ops.items())
@@ -1007,6 +1016,58 @@ def rotation_client_index(task_id: int, account_count: int, client_count: int) -
     return operation_index % client_count
 
 
+def account_persona_assignments(
+    account_names: list[str],
+    operation_names: list[str],
+) -> dict[str, dict[str, Any]]:
+    """Assign deterministic specialist lanes and reject stale operation names."""
+
+    available = set(operation_names)
+    contracts = list(ACCOUNT_PERSONA_CONTRACTS.items())
+    if not account_names or not contracts:
+        return {}
+    assignments: dict[str, dict[str, Any]] = {}
+    for index, account in enumerate(account_names):
+        persona_id, contract = contracts[index % len(contracts)]
+        operations = tuple(operation for operation in contract.operations if operation in available)
+        missing = sorted(set(contract.operations) - available)
+        if missing:
+            raise ValueError(
+                f"persona {persona_id} references unregistered operations: {', '.join(missing)}"
+            )
+        assignments[str(account)] = {
+            "persona_id": persona_id,
+            "category": contract.category,
+            "operations": list(operations),
+            "invariant_focus": list(contract.invariant_focus),
+        }
+    return assignments
+
+
+def persona_rotation_operation_account(
+    task_id: int,
+    operation_names: list[str],
+    account_names: list[str],
+    assignments: dict[str, dict[str, Any]],
+) -> tuple[str, str, str]:
+    """Run a full all-account matrix, then spend extra slots on specialists."""
+
+    if not operation_names or not account_names:
+        raise ValueError("persona rotation requires operations and accounts")
+    baseline_span = len(operation_names) * len(account_names)
+    specialist_slots = [
+        (str(operation), str(account), str(evidence.get("persona_id") or ""))
+        for account, evidence in assignments.items()
+        for operation in (evidence.get("operations") or [])
+    ]
+    cycle_span = baseline_span + len(specialist_slots)
+    position = max(0, int(task_id)) % max(1, cycle_span)
+    if position < baseline_span or not specialist_slots:
+        operation, account = rotation_operation_account(position, operation_names, account_names)
+        return operation, account, "baseline"
+    return specialist_slots[position - baseline_span]
+
+
 def run_in_client_slot(
     client: Client,
     telemetry: InflightWorkerTelemetry,
@@ -1045,6 +1106,7 @@ def main() -> int:
     parser.add_argument("--require-operation-coverage", action="store_true", help="Fail when any registered operation was not exercised")
     parser.add_argument("--require-operation-success", action="store_true", help="Fail when any required positive-path operation has no HTTP 2xx result")
     parser.add_argument("--require-account-success", action="store_true", help="Fail when any configured account lacks a 2xx result for a required account-safe operation")
+    parser.add_argument("--require-persona-success", action="store_true", help="Fail when a specialist account lacks an expected result for one of its non-deferred persona operations")
     parser.add_argument("--allow-server-busy", action="store_true", help="Treat HTTP 503 server_busy as controlled degradation instead of a hard failure")
     parser.add_argument("--max-server-busy-rate", type=float, default=1.0, help="Maximum accepted 503 server_busy ratio when --allow-server-busy is enabled")
     parser.add_argument("--max-ordinary-p95-ms", type=float, default=1500.0)
@@ -1184,6 +1246,13 @@ def main() -> int:
     )
     weighted_ops = build_weighted_ops()
     operation_names = [name for name, _weight in weighted_ops]
+    configured_account_names = [username for username, _password in accounts]
+    persona_assignments = account_persona_assignments(
+        configured_account_names,
+        operation_names,
+    )
+    persona_dispatches: dict[str, Counter] = defaultdict(Counter)
+    persona_dispatch_lock = threading.Lock()
     total_ops = max(1, int(args.ops or args.logical_users))
     concurrency = max(1, int(args.concurrency))
     start_event = threading.Event()
@@ -1193,11 +1262,15 @@ def main() -> int:
         rng = random.Random((task_id + 1) * 7919)
         if args.operation_mode == "rotation":
             rotation_task_id = max(0, int(args.rotation_offset or 0)) + task_id
-            op, desired_account = rotation_operation_account(
+            op, desired_account, persona_lane = persona_rotation_operation_account(
                 rotation_task_id,
                 operation_names,
-                [username for username, _password in accounts],
+                configured_account_names,
+                persona_assignments,
             )
+            with persona_dispatch_lock:
+                persona_dispatches[desired_account][persona_lane] += 1
+                persona_dispatches[desired_account][op] += 1
             account_clients = [item for item in clients if item.username == desired_account]
             client = account_clients[
                 rotation_client_index(
@@ -1272,7 +1345,6 @@ def main() -> int:
     max_server_busy_rate = max(0.0, min(1.0, float(args.max_server_busy_rate)))
     if args.allow_server_busy and server_busy_rate > max_server_busy_rate:
         degraded_reasons.append("server_busy_rate_above_configured_limit")
-    configured_account_names = [username for username, _password in accounts]
     active_account_names = sorted({client.username for client in clients})
     account_operation_counts = {
         username: int((summary.get("accounts") or {}).get(username, {}).get("total_ops") or 0)
@@ -1310,6 +1382,42 @@ def main() -> int:
         for username, gaps in account_success_gaps.items()
         if gaps
     }
+    account_expected_success_counts = {
+        username: dict(
+            ((summary.get("accounts") or {}).get(username, {}).get("expected_success_operations") or {})
+        )
+        for username in configured_account_names
+    }
+    persona_coverage: dict[str, dict[str, Any]] = {}
+    for username in configured_account_names:
+        assignment = dict(persona_assignments.get(username) or {})
+        required_operations = sorted(
+            set(assignment.get("operations") or []) - PERSONA_DEFERRED_TERMINAL_OPERATIONS
+        )
+        gaps = [
+            operation
+            for operation in required_operations
+            if int(account_expected_success_counts.get(username, {}).get(operation) or 0) <= 0
+        ]
+        persona_coverage[username] = {
+            **assignment,
+            "required_expected_operations": required_operations,
+            "deferred_terminal_operations": sorted(
+                set(assignment.get("operations") or []) & PERSONA_DEFERRED_TERMINAL_OPERATIONS
+            ),
+            "dispatch_counts": dict(sorted(persona_dispatches.get(username, Counter()).items())),
+            "expected_success_counts": {
+                operation: int(account_expected_success_counts.get(username, {}).get(operation) or 0)
+                for operation in required_operations
+            },
+            "gaps": gaps,
+            "ok": not gaps,
+        }
+    persona_success_gaps = {
+        username: evidence["gaps"]
+        for username, evidence in persona_coverage.items()
+        if evidence.get("gaps")
+    }
     if args.require_all_accounts and (missing_accounts or accounts_without_operations):
         degraded_reasons.append("configured_account_coverage_incomplete")
     if args.require_operation_coverage and missing_operations:
@@ -1318,6 +1426,8 @@ def main() -> int:
         degraded_reasons.append("operation_positive_path_coverage_incomplete")
     if args.require_account_success and account_success_gaps:
         degraded_reasons.append("account_positive_path_coverage_incomplete")
+    if args.require_persona_success and persona_success_gaps:
+        degraded_reasons.append("account_persona_expected_result_coverage_incomplete")
     total_ops_per_second = round(summary_total_ops / elapsed_seconds, 2) if elapsed_seconds > 0 else 0.0
     accepted_ops_per_second = round(accepted_ops / elapsed_seconds, 2) if elapsed_seconds > 0 else 0.0
     server_busy_ops_per_second = round(server_busy_ops / elapsed_seconds, 2) if elapsed_seconds > 0 else 0.0
@@ -1357,10 +1467,15 @@ def main() -> int:
         "operations_without_success": operations_without_success,
         "account_success_counts": account_success_counts,
         "account_success_gaps": account_success_gaps,
+        "account_expected_success_counts": account_expected_success_counts,
+        "persona_coverage_schema_version": PERSONA_COVERAGE_SCHEMA_VERSION,
+        "persona_coverage": persona_coverage,
+        "persona_success_gaps": persona_success_gaps,
         "require_all_accounts": bool(args.require_all_accounts),
         "require_operation_coverage": bool(args.require_operation_coverage),
         "require_operation_success": bool(args.require_operation_success),
         "require_account_success": bool(args.require_account_success),
+        "require_persona_success": bool(args.require_persona_success),
         "allow_server_busy": bool(args.allow_server_busy),
         "max_server_busy_rate": max_server_busy_rate,
         "max_ordinary_p95_ms": max_ordinary_p95_ms,
