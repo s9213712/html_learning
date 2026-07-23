@@ -1,10 +1,57 @@
 from __future__ import annotations
 
 from scripts.testing.playwright_trading_background_correctness import (
+    api_with_backpressure_retry,
     points_service,
     resolve_probe_database_paths,
     stress_result_is_controlled_server_busy,
 )
+
+
+def test_trading_setup_retries_only_explicit_admission_control_backpressure(monkeypatch):
+    responses = iter([
+        {
+            "status": 503,
+            "ok": False,
+            "body": {"ok": False, "error": "server_busy", "retry_after_seconds": 2},
+        },
+        {"status": 200, "ok": True, "body": {"ok": True}},
+    ])
+    sleeps = []
+    monkeypatch.setattr(
+        "scripts.testing.playwright_trading_background_correctness.api",
+        lambda *_args, **_kwargs: next(responses),
+    )
+    monkeypatch.setattr(
+        "scripts.testing.playwright_trading_background_correctness.time.sleep",
+        sleeps.append,
+    )
+
+    result = api_with_backpressure_retry(object(), "POST", "/trading/orders", {"quantity": "1"})
+
+    assert result["status"] == 200
+    assert result["backpressure_attempts"] == 2
+    assert sleeps == [2.0]
+
+
+def test_trading_setup_does_not_retry_unexpected_failures(monkeypatch):
+    calls = 0
+
+    def unexpected_failure(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return {"status": 500, "ok": False, "body": {"error": "database_locked"}}
+
+    monkeypatch.setattr(
+        "scripts.testing.playwright_trading_background_correctness.api",
+        unexpected_failure,
+    )
+
+    result = api_with_backpressure_retry(object(), "POST", "/trading/orders", {"quantity": "1"})
+
+    assert result["status"] == 500
+    assert result["backpressure_attempts"] == 1
+    assert calls == 1
 
 
 def test_trading_probe_routes_identity_and_finance_databases_separately(tmp_path):

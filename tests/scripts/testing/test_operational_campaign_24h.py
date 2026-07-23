@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import hashlib
 import inspect
@@ -8,6 +9,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tarfile
 import time
 import uuid
 from pathlib import Path
@@ -181,6 +183,25 @@ def campaign_args(tmp_path: Path, *extra: str):
         "0",
         *extra,
     ])
+
+
+def test_portable_runtime_extraction_uses_tar_data_filter(tmp_path: Path) -> None:
+    archive = tmp_path / "portable.tar.gz"
+    with tarfile.open(archive, "w:gz") as handle:
+        safe = tarfile.TarInfo("database/app.db")
+        safe.size = 2
+        handle.addfile(safe, fileobj=io.BytesIO(b"ok"))
+        unsafe_link = tarfile.TarInfo("storage/outside-link")
+        unsafe_link.type = tarfile.SYMTYPE
+        unsafe_link.linkname = "/outside-the-restore-root"
+        handle.addfile(unsafe_link)
+    restore_root = tmp_path / "restore"
+    restore_root.mkdir()
+
+    with pytest.raises(tarfile.TarError):
+        Campaign._extract_verified_runtime_archive(archive, restore_root)
+
+    assert not (restore_root / "storage" / "outside-link").exists()
 
 
 def test_formal_duration_is_24_hours() -> None:
@@ -1799,6 +1820,22 @@ def test_ai_agent_formal_runner_keeps_credentials_out_of_argv_and_targets_recove
         }
 
     evidence_ids = set(CAMPAIGN_SCENARIO_CONTRACTS[scenario_id].required_evidence)
+    monkeypatch.setattr(
+        campaign,
+        "_provision_exact_scenario_users",
+        lambda *_args, **_kwargs: {"ok": True, "records": [{}, {}]},
+    )
+    monkeypatch.setattr(
+        campaign,
+        "_cleanup_exact_scenario_users",
+        lambda *_args, **_kwargs: {
+            "login_succeeded": True,
+            "records": [
+                {"delete_status": 200, "verify_status": 200, "residual_exact_count": 0},
+                {"delete_status": 200, "verify_status": 200, "residual_exact_count": 0},
+            ],
+        },
+    )
     monkeypatch.setattr(campaign, "run_step", fake_run_step)
     monkeypatch.setattr(campaign, "run_group", fake_run_group)
     monkeypatch.setattr(
@@ -1833,6 +1870,8 @@ def test_ai_agent_formal_runner_keeps_credentials_out_of_argv_and_targets_recove
     assert "--base-url" in command
     assert command[command.index("--base-url") + 1] == campaign.recovery.base_url
     assert captured["process_role"] == "ffmpeg"
+    assert result["recovery_campaign_account_replication"]["ok"] is True
+    assert result["recovery_campaign_account_cleanup"]["ok"] is True
     assert result["ok"] is True
     binding = campaign_module.FORMAL_SCENARIO_BINDINGS[scenario_id]
     assert binding.runner_id in campaign.native_scenario_runner_registry()

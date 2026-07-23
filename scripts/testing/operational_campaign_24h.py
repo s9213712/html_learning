@@ -3673,6 +3673,68 @@ class Campaign:
             "records": records,
         }
 
+    def _provision_exact_scenario_users(
+        self,
+        accounts: list[tuple[str, str]],
+        *,
+        target: Any,
+        nickname_prefix: str,
+    ) -> dict[str, Any]:
+        """Mirror named campaign accounts into an isolated scenario runtime.
+
+        Primary, recovery, and security runtimes deliberately use separate
+        databases.  A scenario targeting recovery must therefore establish its
+        own exact account fixtures instead of assuming primary provisioning is
+        replicated.  Passwords are accepted only in memory and never emitted
+        in the evidence payload.
+        """
+
+        root = WebClient(target.base_url, "root", self.credentials.root, timeout=90)
+        login = root.login()
+        records: list[dict[str, Any]] = []
+        if not login.get("ok"):
+            return {
+                "target": getattr(target, "name", "unknown"),
+                "root_login_succeeded": False,
+                "records": records,
+                "ok": False,
+            }
+        for index, (username, password) in enumerate(accounts, start=1):
+            created = self._create_user(
+                root,
+                username,
+                password,
+                nickname=f"{nickname_prefix} {index:02d}",
+            )
+            user_id = int(created.get("user_id") or 0)
+            quota = (
+                self._configure_campaign_storage_quota(root, user_id)
+                if created.get("ok") and user_id > 0
+                else {"ok": False, "error": "scenario_account_creation_failed"}
+            )
+            member = WebClient(target.base_url, username, password, timeout=90)
+            member_login = member.login() if quota.get("ok") else {"ok": False, "status": 0}
+            records.append({
+                "username": username,
+                "user_id": user_id,
+                "created_or_reused": int(created.get("create_status") or 0) in {200, 201, 409},
+                "creation_verified": created.get("ok") is True,
+                "storage_quota_configured": quota.get("ok") is True,
+                "member_login_succeeded": member_login.get("ok") is True,
+                "member_login_status": member_login.get("status"),
+            })
+        return {
+            "target": getattr(target, "name", "unknown"),
+            "root_login_succeeded": True,
+            "records": records,
+            "ok": bool(records) and all(
+                record["creation_verified"]
+                and record["storage_quota_configured"]
+                and record["member_login_succeeded"]
+                for record in records
+            ),
+        }
+
     def native_points_hft_invariants(self) -> dict[str, Any]:
         """Execute the exact reviewed PointsChain HFT scenario and bind its artifacts."""
 
@@ -4900,6 +4962,8 @@ class Campaign:
         out_dir = self.reports / "scenarios" / scenario_id
         probe_out = out_dir / "formal_ai_agent_positive_operations.json"
         restart_out = out_dir / "supervised_restart.json"
+        replica_out = out_dir / "recovery_campaign_account_replication.json"
+        replica_cleanup_out = out_dir / "recovery_campaign_account_cleanup.json"
         artifact_dir = out_dir / "artifacts"
         request_file = self.recovery.restart_request_file
         if len(self.accounts) < 2:
@@ -4910,6 +4974,35 @@ class Campaign:
                 "scenario_id": scenario_id,
             }
         user_one, user_two = self.accounts[:2]
+        recovery_replica = self._provision_exact_scenario_users(
+            [user_one, user_two],
+            target=self.recovery,
+            nickname_prefix="AI Agent Recovery Campaign",
+        )
+        atomic_write_json(replica_out, recovery_replica)
+        if recovery_replica.get("ok") is not True:
+            replica_cleanup = self._cleanup_exact_scenario_users(
+                [user_one[0], user_two[0]],
+                target=self.recovery,
+            )
+            atomic_write_json(replica_cleanup_out, replica_cleanup)
+            return {
+                "schema_version": NATIVE_RUNNER_RESULT_SCHEMA_VERSION,
+                "scenario_id": scenario_id,
+                "ok": False,
+                "classification": "FAIL_HARNESS",
+                "error": "recovery_campaign_account_replication_failed",
+                "artifact": str(replica_out),
+                "artifacts": [{
+                    "artifact_id": "native.source.ai_agent_positive_operations.recovery_account_replication",
+                    "path": str(replica_out),
+                    "artifact_type": "json",
+                }, {
+                    "artifact_id": "native.source.ai_agent_positive_operations.recovery_account_cleanup",
+                    "path": str(replica_cleanup_out),
+                    "artifact_type": "json",
+                }],
+            }
 
         def consume_restart_request() -> dict[str, Any]:
             before_pid = self.recovery.pid()
@@ -5095,9 +5188,42 @@ class Campaign:
                 ),
             ),
         ])
+        replica_cleanup = self._cleanup_exact_scenario_users(
+            [user_one[0], user_two[0]],
+            target=self.recovery,
+        )
+        replica_cleanup_ok = bool(
+            replica_cleanup.get("login_succeeded") is True
+            and len(replica_cleanup.get("records") or []) == 2
+            and all(
+                isinstance(record, Mapping)
+                and int(record.get("delete_status") or 0) in {0, 200}
+                and int(record.get("verify_status") or 0) == 200
+                and int(record.get("residual_exact_count") or 0) == 0
+                for record in (replica_cleanup.get("records") or [])
+            )
+        )
+        replica_cleanup["ok"] = replica_cleanup_ok
+        atomic_write_json(replica_cleanup_out, replica_cleanup)
+        result["recovery_campaign_account_replication"] = recovery_replica
+        result["recovery_campaign_account_cleanup"] = replica_cleanup
+        if not replica_cleanup_ok:
+            result["ok"] = False
         payload = load_json(probe_out)
         restart_payload = load_json(restart_out)
         artifacts = list(result.get("artifacts") or [])
+        artifacts.extend([
+            {
+                "artifact_id": "native.source.ai_agent_positive_operations.recovery_account_replication",
+                "path": str(replica_out),
+                "artifact_type": "json",
+            },
+            {
+                "artifact_id": "native.source.ai_agent_positive_operations.recovery_account_cleanup",
+                "path": str(replica_cleanup_out),
+                "artifact_type": "json",
+            },
+        ])
         fixture = payload.get("video") if isinstance(payload.get("video"), Mapping) else {}
         fixture = fixture.get("fixture") if isinstance(fixture.get("fixture"), Mapping) else {}
         fixture_path = Path(str(fixture.get("path") or "")).expanduser().resolve(strict=False)
@@ -6396,6 +6522,20 @@ class Campaign:
             return False
         return True
 
+    @staticmethod
+    def _extract_verified_runtime_archive(archive: Path, restore_root: Path) -> None:
+        """Extract a previously validated archive with tarfile's data filter.
+
+        The manifest validation above is the primary contract for the portable
+        backup, while the ``data`` filter is a second, extraction-time guard
+        against a changed archive or unsupported tar member type.  Supplying
+        the filter explicitly also keeps this path compatible with Python's
+        safer tarfile default.
+        """
+
+        with tarfile.open(archive, "r:gz") as handle:
+            handle.extractall(path=restore_root, filter="data")
+
     def _portable_full_runtime_cycle(
         self,
         *,
@@ -6511,8 +6651,7 @@ class Campaign:
                 return payload
 
             restore_root.mkdir(parents=True, exist_ok=False)
-            with tarfile.open(archive, "r:gz") as handle:
-                handle.extractall(restore_root)
+            self._extract_verified_runtime_archive(archive, restore_root)
             mismatches: list[str] = []
             missing: list[str] = []
             for row in files:
