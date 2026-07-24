@@ -1454,7 +1454,7 @@ def extra_security_headers(response):
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"
     elif STATIC_ASSET_CACHE_SECONDS > 0 and (
-        ((request.path == "/styles.css" or request.path.startswith("/js/")) and request.args.get("v"))
+        ((request.path in {"/styles.css", "/uiverse-galaxy.css"} or request.path.startswith("/js/")) and request.args.get("v"))
         or request.path.startswith("/assets/")
     ):
         response.headers["Cache-Control"] = f"public, max-age={STATIC_ASSET_CACHE_SECONDS}, immutable"

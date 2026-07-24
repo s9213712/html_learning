@@ -1,0 +1,283 @@
+/*
+ * Galaxy UI layer — local CSS only, no third-party runtime dependency.
+ *
+ * Sources (MIT):
+ * - uiverse-io/galaxy, Buttons/0x-Sarthak_hungry-penguin-30.html
+ *   by 0x-Sarthak: expanding pill-button interaction.
+ * - uiverse-io/galaxy, Cards/05akalan57_thin-sloth-31.html
+ *   by 05akalan57: diffused card highlight.
+ * - uiverse-io/galaxy, Forms/3bdel3ziz-T_helpless-wasp-32.html
+ *   by 3bdel3ziz-T: focused form hierarchy.
+ *
+ * The original examples are adapted to this application's existing semantic
+ * elements, design tokens, keyboard focus rules, and reduced-motion policy.
+ * Source: https://github.com/uiverse-io/galaxy (MIT).
+ */
+
+:root {
+  --galaxy-violet: #8d7dff;
+  --galaxy-cyan: #42d9c4;
+  --galaxy-amber: #f4b860;
+  --galaxy-ink: #0a0f1c;
+  --galaxy-surface: rgba(27, 34, 54, .82);
+  --galaxy-line: rgba(196, 210, 255, .15);
+  --galaxy-line-strong: rgba(172, 188, 255, .28);
+  --galaxy-glow: 0 18px 46px rgba(4, 8, 20, .28), inset 0 1px rgba(255, 255, 255, .05);
+}
+
+/* A restrained aurora backdrop gives the default theme depth while profile
+   settings that explicitly choose a background style retain precedence. */
+body:not([data-background-style]) {
+  background-color: var(--galaxy-ink);
+  background-image:
+    radial-gradient(60rem 36rem at -12% -18%, rgba(141, 125, 255, .22), transparent 62%),
+    radial-gradient(46rem 34rem at 112% 2%, rgba(66, 217, 196, .14), transparent 64%),
+    radial-gradient(34rem 28rem at 58% 108%, rgba(80, 123, 255, .10), transparent 67%);
+}
+
+/* Card highlight adapted from the Galaxy card example.  These selectors only
+   target surface containers, never stateful media/canvas elements. */
+.card,
+body.app-authenticated .admin-tools,
+body.app-authenticated .drive-card,
+body.app-authenticated .community-panel,
+body.app-authenticated .profile-home-card,
+body.app-authenticated .chat-room-dialog-modal,
+body.app-authenticated .modal-card {
+  border-color: var(--galaxy-line);
+  background:
+    radial-gradient(34rem 18rem at 0% 0%, color-mix(in srgb, var(--accent) 13%, transparent), transparent 58%),
+    linear-gradient(145deg, color-mix(in srgb, var(--surface) 92%, #17213e 8%), color-mix(in srgb, var(--surface) 96%, #070b15 4%));
+  box-shadow: var(--galaxy-glow);
+}
+
+.card {
+  border-radius: 18px;
+}
+
+body.app-authenticated .admin-tools,
+body.app-authenticated .drive-card,
+body.app-authenticated .community-panel,
+body.app-authenticated .profile-home-card {
+  border-radius: 16px;
+}
+
+.card:hover,
+body.app-authenticated .admin-tools:hover,
+body.app-authenticated .drive-card:hover,
+body.app-authenticated .community-panel:hover,
+body.app-authenticated .profile-home-card:hover {
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--galaxy-line));
+}
+
+/* Navigation receives a clearer active destination without changing its DOM
+   or the permission-gated module controls. */
+.app-sidebar {
+  border-right-color: var(--galaxy-line);
+  background:
+    radial-gradient(24rem 18rem at 0% 0%, color-mix(in srgb, var(--accent) 18%, transparent), transparent 63%),
+    linear-gradient(180deg, color-mix(in srgb, var(--sidebar-panel) 92%, #121a30 8%), var(--sidebar-panel));
+}
+
+.sidebar-brand-icon,
+.sidebar-icon {
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  background: linear-gradient(145deg, color-mix(in srgb, var(--accent) 32%, #202d54 68%), rgba(255, 255, 255, .06));
+  box-shadow: 0 8px 18px rgba(0, 0, 0, .18);
+}
+
+.sidebar-nav .tab {
+  position: relative;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  transition: color .16s ease, background-color .16s ease, border-color .16s ease, transform .16s ease;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .sidebar-nav .tab:not(.active):hover {
+    border-color: color-mix(in srgb, var(--accent) 24%, transparent);
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    color: var(--text);
+    transform: translateX(2px);
+  }
+}
+
+.sidebar-nav .tab.active,
+.tabs .tab.active {
+  border-color: color-mix(in srgb, var(--accent) 56%, white 10%);
+  background: linear-gradient(120deg, color-mix(in srgb, var(--accent) 88%, #625ed9 12%), color-mix(in srgb, var(--accent2) 58%, var(--accent) 42%));
+  box-shadow: 0 7px 18px color-mix(in srgb, var(--accent) 22%, transparent), inset 0 1px rgba(255, 255, 255, .18);
+}
+
+.tabs:not(.sidebar-nav) {
+  border: 1px solid rgba(255, 255, 255, .06);
+  background: color-mix(in srgb, var(--galaxy-ink) 52%, transparent);
+  box-shadow: inset 0 1px rgba(255, 255, 255, .035);
+}
+
+/* Button treatment adapted from the Galaxy expanding-pill example.  The
+   implementation uses the existing button classes, so loading, disabled,
+   icon-only, and permission states remain untouched. */
+.btn {
+  border: 1px solid color-mix(in srgb, var(--text) 12%, transparent);
+  background: linear-gradient(145deg, rgba(255, 255, 255, .085), rgba(255, 255, 255, .035));
+  box-shadow: inset 0 1px rgba(255, 255, 255, .06), 0 5px 14px rgba(0, 0, 0, .12);
+  transition: transform .16s ease, background .2s ease, border-color .2s ease, box-shadow .2s ease, opacity .16s ease;
+}
+
+.btn-primary {
+  border-color: color-mix(in srgb, var(--accent) 64%, white 13%);
+  background:
+    radial-gradient(circle at 88% 50%, rgba(255, 255, 255, .23) 0 7%, transparent 8%),
+    linear-gradient(120deg, color-mix(in srgb, var(--accent) 92%, #776cf6 8%), color-mix(in srgb, var(--accent2) 78%, #2d9fbd 22%));
+  box-shadow: 0 9px 22px color-mix(in srgb, var(--accent) 26%, transparent), inset 0 1px rgba(255, 255, 255, .24);
+}
+
+.btn-danger {
+  border-color: color-mix(in srgb, var(--danger) 68%, white 10%);
+  background: linear-gradient(120deg, color-mix(in srgb, var(--danger) 90%, #d5486d 10%), #f06b62);
+  box-shadow: 0 9px 20px color-mix(in srgb, var(--danger) 20%, transparent), inset 0 1px rgba(255, 255, 255, .16);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .btn:not(:disabled):not(.disabled):hover {
+    border-color: color-mix(in srgb, var(--accent) 42%, var(--galaxy-line));
+    background: linear-gradient(145deg, rgba(255, 255, 255, .13), rgba(255, 255, 255, .055));
+    box-shadow: 0 9px 20px rgba(0, 0, 0, .18), inset 0 1px rgba(255, 255, 255, .09);
+    transform: translateY(-1px);
+  }
+
+  .btn-primary:not(:disabled):not(.disabled):hover {
+    border-color: color-mix(in srgb, var(--accent2) 68%, white 15%);
+    background:
+      radial-gradient(ellipse at 88% 50%, rgba(255, 255, 255, .28) 0 46%, transparent 48%),
+      linear-gradient(120deg, color-mix(in srgb, var(--accent) 92%, #776cf6 8%), color-mix(in srgb, var(--accent2) 78%, #2d9fbd 22%));
+    box-shadow: 0 13px 28px color-mix(in srgb, var(--accent) 34%, transparent), inset 0 1px rgba(255, 255, 255, .28);
+  }
+}
+
+.btn:not(:disabled):not(.disabled):active {
+  transform: translateY(1px) scale(.985);
+  box-shadow: inset 0 2px 6px rgba(5, 8, 18, .24);
+}
+
+.btn:focus-visible,
+.tab:focus-visible,
+.sidebar-toggle:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent2) 88%, white 12%);
+  outline-offset: 2px;
+}
+
+/* Form hierarchy adapted from the Galaxy form example.  :focus-within keeps
+   labels readable without requiring placeholder-only fields. */
+.field {
+  transition: transform .16s ease;
+}
+
+.field:focus-within {
+  transform: translateY(-1px);
+}
+
+.field label {
+  color: color-mix(in srgb, var(--muted) 92%, white 8%);
+  font-weight: 650;
+  transition: color .18s ease, letter-spacing .18s ease;
+}
+
+.field:focus-within label {
+  color: color-mix(in srgb, var(--accent2) 72%, white 28%);
+  letter-spacing: .012em;
+}
+
+input,
+select,
+textarea,
+.readonly-field {
+  border-color: color-mix(in srgb, var(--galaxy-line-strong) 76%, transparent);
+  background: linear-gradient(145deg, rgba(6, 10, 19, .68), rgba(17, 25, 41, .62));
+  box-shadow: inset 0 1px rgba(255, 255, 255, .035);
+  transition: border-color .18s ease, box-shadow .18s ease, background .18s ease;
+}
+
+input:hover,
+select:hover,
+textarea:hover {
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--galaxy-line-strong));
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  border-color: color-mix(in srgb, var(--accent2) 72%, white 14%);
+  background: linear-gradient(145deg, rgba(7, 12, 23, .9), rgba(22, 34, 57, .78));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent), inset 0 1px rgba(255, 255, 255, .045);
+}
+
+/* Dense operational surfaces stay scannable: selected rows and status cards
+   have contrast, while table layout and overflow behavior are preserved. */
+body.app-authenticated .table-scroll-wrap,
+body.app-authenticated .admin-toolbar,
+body.app-authenticated .chat-toolbar,
+body.app-authenticated .drive-toolbar {
+  border-radius: 12px;
+}
+
+body.app-authenticated table tbody tr {
+  transition: background-color .16s ease, box-shadow .16s ease;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  body.app-authenticated table tbody tr:hover {
+    background: color-mix(in srgb, var(--accent) 7%, transparent);
+    box-shadow: inset 3px 0 color-mix(in srgb, var(--accent2) 78%, transparent);
+  }
+}
+
+.toast {
+  border-color: var(--galaxy-line-strong);
+  background:
+    radial-gradient(16rem 7rem at 100% 0%, color-mix(in srgb, var(--accent) 15%, transparent), transparent 64%),
+    color-mix(in srgb, var(--surface-raised, var(--surface)) 94%, #07101d 6%);
+  box-shadow: 0 18px 42px rgba(0, 0, 0, .34), inset 0 1px rgba(255, 255, 255, .06);
+}
+
+.global-language-switcher {
+  border: 1px solid var(--galaxy-line);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--surface) 78%, #0b1221 22%);
+  box-shadow: 0 7px 20px rgba(0, 0, 0, .18);
+}
+
+@media (max-width: 720px) {
+  .card {
+    border-radius: 15px;
+  }
+
+  body.app-authenticated .admin-tools,
+  body.app-authenticated .drive-card,
+  body.app-authenticated .community-panel,
+  body.app-authenticated .profile-home-card {
+    border-radius: 13px;
+  }
+
+  .field:focus-within {
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card,
+  .btn,
+  .tab,
+  .sidebar-nav .tab,
+  .field,
+  input,
+  select,
+  textarea,
+  body.app-authenticated table tbody tr {
+    transition: none !important;
+  }
+}
