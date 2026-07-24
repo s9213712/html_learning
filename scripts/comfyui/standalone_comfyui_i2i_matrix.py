@@ -158,9 +158,19 @@ def apply_interactive_prompts(args):
     args.controlnet_model = _ask_text("ControlNet model override", args.controlnet_model)
     args.control_strength = _ask_float("ControlNet strength", args.control_strength)
     args.inpaint_method = _ask_choice("Inpaint method", args.inpaint_method, ("auto", "conditioning", "vae_encode"))
+    args.outpaint_method = _ask_choice(
+        "Outpaint method",
+        args.outpaint_method,
+        ("auto", "full_redraw", "conditioning", "vae_encode"),
+    )
     args.mask_shape = _ask_choice("Mask shape", args.mask_shape, ("default", "window", "background_wall", "small_wall", "kimono_clothes"))
     args.outpaint = _ask_int("Outpaint default pixels", args.outpaint)
     args.outpaint_source_feather = _ask_int("Outpaint source preservation feather pixels", args.outpaint_source_feather)
+    args.outpaint_seam_prefill = _ask_choice(
+        "Outpaint seam prefill",
+        args.outpaint_seam_prefill,
+        ("auto", "on", "off"),
+    )
     args.outpaint_preserve_source = _ask_choice(
         "Preserve source interior after outpaint",
         "yes" if args.outpaint_preserve_source else "no",
@@ -349,12 +359,48 @@ def selected_inpaint_method(args, object_info: dict) -> str:
 
 
 def selected_outpaint_method(args, object_info: dict) -> str:
-    """Prefer a noise-masked latent for outpaint instead of encoding gray padding."""
+    """Choose a sampling path that can actually replace padded pixels.
 
-    method = str(getattr(args, "inpaint_method", "auto") or "auto").strip().lower()
-    if method == "auto":
-        return "vae_encode" if has_node(object_info, "VAEEncodeForInpaint") else "conditioning"
-    return method
+    Generic checkpoints frequently leave the neutral-gray ImagePadForOutpaint
+    canvas untouched when sampling is constrained to an inpaint noise mask.
+    For those checkpoints, redraw the padded image and composite the protected
+    source interior back with a feathered mask.  Explicit method choices keep
+    the masked paths available for dedicated inpainting checkpoints.
+    """
+
+    method = str(getattr(args, "outpaint_method", "auto") or "auto").strip().lower()
+    if method != "auto":
+        return method
+
+    # Preserve the legacy explicit --inpaint-method behaviour for callers that
+    # have not yet opted into --outpaint-method.
+    legacy_method = str(getattr(args, "inpaint_method", "auto") or "auto").strip().lower()
+    if legacy_method != "auto":
+        return legacy_method
+    return "full_redraw"
+
+
+def outpaint_seam_prefill_enabled(args, object_info: dict) -> bool:
+    """Use a pixel-space inpaint pass to remove gray padding before diffusion.
+
+    ComfyUI's built-in outpaint padding starts at neutral gray.  A generic
+    diffusion checkpoint can leave that gray visible, especially when the
+    source is composited back for identity preservation.  MAT supplies a
+    deterministic context fill first, giving the latent sampler image content
+    rather than a hard gray rectangle at the transition.
+    """
+
+    # MAT prefill is useful only on models where it has been visually
+    # validated.  Keeping it opt-in prevents an installed extension from
+    # silently changing the established outpaint result.
+    requested = str(getattr(args, "outpaint_seam_prefill", "off") or "off").strip().lower()
+    available = all(
+        has_node(object_info, name)
+        for name in ("INPAINT_LoadInpaintModel", "INPAINT_InpaintWithModel")
+    )
+    if requested == "on" and not available:
+        raise ProbeError("outpaint seam prefill requires INPAINT_LoadInpaintModel and INPAINT_InpaintWithModel")
+    return requested != "off" and available
 
 
 def outpaint_padding(args) -> dict[str, int]:
@@ -685,11 +731,41 @@ def build_outpaint(
             },
         ),
     }
+    padded_pixels_ref = ["5", 0]
+    mask_ref = ["5", 1]
+    next_id = 6
+    if outpaint_seam_prefill_enabled(args, object_info):
+        loader_id = str(next_id)
+        prefill_id = str(next_id + 1)
+        next_id += 2
+        workflow[loader_id] = {
+            "class_type": "INPAINT_LoadInpaintModel",
+            "inputs": required_default_inputs(
+                object_info,
+                "INPAINT_LoadInpaintModel",
+                {"model_name": str(args.outpaint_prefill_model)},
+            ),
+        }
+        workflow[prefill_id] = {
+            "class_type": "INPAINT_InpaintWithModel",
+            "inputs": required_default_inputs(
+                object_info,
+                "INPAINT_InpaintWithModel",
+                {
+                    "inpaint_model": [loader_id, 0],
+                    "image": padded_pixels_ref,
+                    "mask": mask_ref,
+                    "seed": int(args.seed) + 197,
+                },
+            ),
+        }
+        padded_pixels_ref = [prefill_id, 0]
     method = selected_outpaint_method(args, object_info)
     if method == "conditioning":
         if not has_node(object_info, "InpaintModelConditioning"):
             raise ProbeError("InpaintModelConditioning is not available on this ComfyUI instance")
-        workflow["6"] = {
+        conditioning_id = str(next_id)
+        workflow[conditioning_id] = {
             "class_type": "InpaintModelConditioning",
             "inputs": required_default_inputs(
                 object_info,
@@ -698,27 +774,34 @@ def build_outpaint(
                     "positive": ["2", 0],
                     "negative": ["3", 0],
                     "vae": ["1", 2],
-                    "pixels": ["5", 0],
-                    "mask": ["5", 1],
+                    "pixels": padded_pixels_ref,
+                    "mask": mask_ref,
                     "noise_mask": bool(args.inpaint_noise_mask),
                 },
             ),
         }
-        positive_ref = ["6", 0]
-        negative_ref = ["6", 1]
-        latent_ref = ["6", 2]
+        positive_ref = [conditioning_id, 0]
+        negative_ref = [conditioning_id, 1]
+        latent_ref = [conditioning_id, 2]
     else:
-        workflow["6"] = {
-            "class_type": "VAEEncodeForInpaint",
-            "inputs": required_default_inputs(
-                object_info,
-                "VAEEncodeForInpaint",
-                {"pixels": ["5", 0], "mask": ["5", 1], "vae": ["1", 2], "grow_mask_by": 6},
-            ),
-        }
+        encode_id = str(next_id)
+        if method == "full_redraw":
+            workflow[encode_id] = {
+                "class_type": "VAEEncode",
+                "inputs": {"pixels": padded_pixels_ref, "vae": ["1", 2]},
+            }
+        else:
+            workflow[encode_id] = {
+                "class_type": "VAEEncodeForInpaint",
+                "inputs": required_default_inputs(
+                    object_info,
+                    "VAEEncodeForInpaint",
+                    {"pixels": padded_pixels_ref, "mask": mask_ref, "vae": ["1", 2], "grow_mask_by": 6},
+                ),
+            }
         positive_ref = ["2", 0]
         negative_ref = ["3", 0]
-        latent_ref = ["6", 0]
+        latent_ref = [encode_id, 0]
     model_ref = maybe_apply_differential_diffusion(args, object_info, workflow, ["1", 0])
     sampler_id = str(max(int(item) for item in workflow) + 1)
     workflow[sampler_id] = {
@@ -1797,6 +1880,8 @@ def run_matrix(args) -> dict:
             "outpaint_padding": padding,
             "outpaint_source_feather": int(args.outpaint_source_feather),
             "outpaint_preserve_source": bool(args.outpaint_preserve_source),
+            "outpaint_method": selected_outpaint_method(args, object_info),
+            "outpaint_seam_prefill": outpaint_seam_prefill_enabled(args, object_info),
             "expected_dimensions": (
                 source_size[0] + padding["left"] + padding["right"],
                 source_size[1] + padding["top"] + padding["bottom"],
@@ -1990,12 +2075,15 @@ def parse_args(argv=None):
     parser.add_argument("--outpaint-top", type=int, default=None)
     parser.add_argument("--outpaint-right", type=int, default=None)
     parser.add_argument("--outpaint-bottom", type=int, default=None)
-    parser.add_argument("--outpaint-feathering", type=int, default=48)
-    parser.add_argument("--outpaint-source-feather", type=int, default=64, help="Soft-mask pixels used to preserve the original source interior during outpaint.")
+    parser.add_argument("--outpaint-feathering", type=int, default=64)
+    parser.add_argument("--outpaint-source-feather", type=int, default=128, help="Soft-mask pixels used to preserve the original source interior during outpaint.")
+    parser.add_argument("--outpaint-seam-prefill", choices=("auto", "on", "off"), default="off", help="Experimental: use the installed pixel-space inpaint model to replace gray outpaint padding before latent sampling. Disabled by default until visually validated for the selected model.")
+    parser.add_argument("--outpaint-prefill-model", default="MAT_Places512_G_fp16.safetensors", help="Installed pixel-space inpaint model used by --outpaint-seam-prefill.")
     parser.add_argument("--outpaint-preserve-source", action=argparse.BooleanOptionalAction, default=True, help="Composite the original source interior back after sampling; disable for an inpaint checkpoint to allow a fully blended redraw.")
     parser.add_argument("--approve-semantic-review", action="store_true", help="Record operator approval for the visual semantics of all generated cases; without this, a technical run is not overall green.")
-    parser.add_argument("--outpaint-denoise", type=float, default=0.90)
+    parser.add_argument("--outpaint-denoise", type=float, default=1.0, help="Denoise used for the extended canvas; full redraw uses 1.0 so neutral padding cannot survive.")
     parser.add_argument("--inpaint-method", choices=("auto", "conditioning", "vae_encode"), default="auto")
+    parser.add_argument("--outpaint-method", choices=("auto", "full_redraw", "conditioning", "vae_encode"), default="auto", help="Sampling path for outpaint. Auto uses full redraw plus feathered source restoration so generic checkpoints replace gray padding; choose a masked method for a dedicated inpaint checkpoint.")
     parser.add_argument("--inpaint-noise-mask", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--differential-diffusion", action="store_true")
     parser.add_argument("--differential-strength", type=float, default=1.0)

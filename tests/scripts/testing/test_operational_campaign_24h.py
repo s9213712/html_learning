@@ -2707,6 +2707,53 @@ def test_campaign_provisioning_configures_storage_for_each_account(
     assert all(row["storage_quota"]["ok"] for row in campaign.account_inventory)
 
 
+def test_scenario_account_replication_uses_target_runtime_and_never_reports_passwords(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    campaign = Campaign(campaign_args(tmp_path))
+    created_on: list[str] = []
+    configured_on: list[str] = []
+    member_logins: list[tuple[str, str]] = []
+
+    class FakeClient:
+        def __init__(self, base_url: str, username: str, _password: str, **_kwargs: object):
+            self.base_url = base_url
+            self.username = username
+
+        def login(self) -> dict[str, object]:
+            if self.username != "root":
+                member_logins.append((self.base_url, self.username))
+            return {"ok": True, "status": 200}
+
+    def fake_create(root: FakeClient, username: str, _password: str, **_kwargs: object) -> dict[str, object]:
+        created_on.append(root.base_url)
+        return {"ok": True, "create_status": 201, "user_id": len(created_on), "username": username}
+
+    def fake_quota(root: FakeClient, user_id: int) -> dict[str, object]:
+        configured_on.append(f"{root.base_url}:{user_id}")
+        return {"ok": True}
+
+    target = type("Target", (), {"base_url": "https://recovery.invalid", "name": "recovery"})()
+    monkeypatch.setattr(campaign_module, "WebClient", FakeClient)
+    monkeypatch.setattr(campaign, "_create_user", fake_create)
+    monkeypatch.setattr(campaign, "_configure_campaign_storage_quota", fake_quota)
+
+    result = campaign._provision_exact_scenario_users(
+        [("campaign-one", "NeverPersistThisPassword"), ("campaign-two", "NeitherThisOne")],
+        target=target,
+        nickname_prefix="Recovery Test",
+    )
+
+    assert result["ok"] is True
+    assert result["target"] == "recovery"
+    assert created_on == [target.base_url, target.base_url]
+    assert configured_on == [f"{target.base_url}:1", f"{target.base_url}:2"]
+    assert member_logins == [(target.base_url, "campaign-one"), (target.base_url, "campaign-two")]
+    assert "NeverPersistThisPassword" not in str(result)
+    assert "NeitherThisOne" not in str(result)
+
+
 def test_campaign_account_cleanup_deletes_and_verifies_exact_names(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

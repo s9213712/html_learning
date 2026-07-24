@@ -4,6 +4,7 @@ import subprocess
 import sys
 from types import SimpleNamespace
 
+import pytest
 from PIL import Image
 
 
@@ -40,6 +41,9 @@ def workflow_args(**overrides):
         "outpaint_bottom": None,
         "outpaint_feathering": 48,
         "outpaint_source_feather": 16,
+        "outpaint_method": "auto",
+        "outpaint_seam_prefill": "off",
+        "outpaint_prefill_model": "MAT_Places512_G_fp16.safetensors",
         "outpaint_preserve_source": True,
         "outpaint_denoise": 0.9,
         "inpaint_method": "auto",
@@ -137,7 +141,7 @@ def test_blend_uses_ipadapter_conditioning_not_pixel_overlay():
     assert workflow["7"]["inputs"]["image_composition"] == ["6", 0]
 
 
-def test_outpaint_auto_uses_noise_masked_vae_latent():
+def test_outpaint_auto_redraws_generic_checkpoint_padding_before_feathered_source_restore():
     module = load_matrix_module()
     workflow = module.build_outpaint(
         workflow_args(),
@@ -149,8 +153,56 @@ def test_outpaint_auto_uses_noise_masked_vae_latent():
         prefix="test",
     )
 
+    assert workflow["6"]["class_type"] == "VAEEncode"
+    assert workflow["6"]["inputs"]["pixels"] == ["5", 0]
+    assert "mask" not in workflow["6"]["inputs"]
+
+
+def test_outpaint_can_explicitly_use_noise_masked_vae_latent_for_inpaint_checkpoints():
+    module = load_matrix_module()
+    workflow = module.build_outpaint(
+        workflow_args(outpaint_method="vae_encode"),
+        {"VAEEncodeForInpaint": {}},
+        "inpaint.safetensors",
+        source_ref={"filename": "source.png"},
+        source_size=(512, 768),
+        prompt="extend scene",
+        prefix="test",
+    )
+
     assert workflow["6"]["class_type"] == "VAEEncodeForInpaint"
     assert workflow["6"]["inputs"]["mask"] == ["5", 1]
+
+
+def test_outpaint_prefill_is_opt_in_even_when_extension_nodes_are_installed():
+    module = load_matrix_module()
+    workflow = module.build_outpaint(
+        workflow_args(),
+        {
+            "VAEEncodeForInpaint": {},
+            "INPAINT_LoadInpaintModel": {},
+            "INPAINT_InpaintWithModel": {},
+        },
+        "model.safetensors",
+        source_ref={"filename": "source.png"},
+        source_size=(512, 768),
+        prompt="extend scene",
+        prefix="test",
+    )
+
+    assert workflow["6"]["class_type"] == "VAEEncode"
+    assert "INPAINT_LoadInpaintModel" not in {node["class_type"] for node in workflow.values()}
+
+
+def test_outpaint_prefill_cli_defaults_to_off():
+    module = load_matrix_module()
+    args = module.parse_args([])
+
+    assert args.outpaint_method == "auto"
+    assert args.outpaint_seam_prefill == "off"
+    assert args.outpaint_feathering == 64
+    assert args.outpaint_source_feather == 128
+    assert args.outpaint_denoise == 1.0
 
 
 def test_outpaint_can_skip_source_composite_for_inpaint_model_blending():
@@ -168,6 +220,45 @@ def test_outpaint_can_skip_source_composite_for_inpaint_model_blending():
     assert "ImageCompositeMasked" not in {node["class_type"] for node in workflow.values()}
     assert workflow["9"]["class_type"] == "SaveImage"
     assert workflow["9"]["inputs"]["images"] == ["8", 0]
+
+
+def test_outpaint_prefills_gray_padding_before_latent_sampling_when_available():
+    module = load_matrix_module()
+    workflow = module.build_outpaint(
+        workflow_args(outpaint_seam_prefill="auto", outpaint_prefill_model="mat.safetensors"),
+        {
+            "VAEEncodeForInpaint": {},
+            "INPAINT_LoadInpaintModel": {},
+            "INPAINT_InpaintWithModel": {},
+        },
+        "model.safetensors",
+        source_ref={"filename": "source.png"},
+        source_size=(512, 768),
+        prompt="extend scene",
+        prefix="test",
+    )
+
+    assert workflow["6"]["class_type"] == "INPAINT_LoadInpaintModel"
+    assert workflow["6"]["inputs"]["model_name"] == "mat.safetensors"
+    assert workflow["7"]["class_type"] == "INPAINT_InpaintWithModel"
+    assert workflow["8"]["class_type"] == "VAEEncode"
+    assert workflow["8"]["inputs"]["pixels"] == ["7", 0]
+    assert "mask" not in workflow["8"]["inputs"]
+
+
+def test_outpaint_required_prefill_fails_clearly_when_nodes_are_unavailable():
+    module = load_matrix_module()
+
+    with pytest.raises(module.ProbeError, match="outpaint seam prefill requires"):
+        module.build_outpaint(
+            workflow_args(outpaint_seam_prefill="on"),
+            {"VAEEncodeForInpaint": {}},
+            "model.safetensors",
+            source_ref={"filename": "source.png"},
+            source_size=(512, 768),
+            prompt="extend scene",
+            prefix="test",
+        )
 
 
 def test_outpaint_gray_canvas_is_a_machine_failure(tmp_path):
