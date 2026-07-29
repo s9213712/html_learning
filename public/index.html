@@ -4059,15 +4059,7 @@
                   <div class="field"><label>名稱</label><input type="text" id="trading-auto-bot-name" maxlength="80" placeholder="例如 BTC 多條件進場" /></div>
                   <div class="field"><label>市場</label><select id="trading-auto-bot-market"><option value="">讀取市場中...</option></select></div>
                   <div class="field"><label>可用上限點數</label><input type="number" id="trading-auto-bot-budget-points" min="0" max="1000000000000" step="1" value="100" /><div class="field-hint">買入動作最多使用此上限；0 代表不設上限。</div></div>
-                  <div class="field">
-                    <label>策略模式</label>
-                    <select id="trading-auto-strategy-mode">
-                      <option value="single">單條件觸發</option>
-                      <option value="and">多條件 AND</option>
-                      <option value="or">多條件 OR</option>
-                      <option value="risk">停利 / 停損</option>
-                    </select>
-                  </div>
+                  <div class="field"><label>策略邏輯</label><div class="field-hint">由下方 Workflow 的條件、AND / OR / NOT 與風控節點決定；Workflow JSON 是唯一執行設定。</div></div>
                   <div class="field"><label>每日最大觸發</label><input type="number" id="trading-auto-daily-runs" min="1" max="100" step="1" value="5" /></div>
                   <div class="field"><label>最多總觸發</label><input type="number" id="trading-auto-bot-max-runs" min="1" max="1000" step="1" value="5" /></div>
                   <div class="field"><label>預設冷卻秒數</label><input type="number" id="trading-auto-bot-cooldown" min="0" max="86400" step="1" value="300" /></div>

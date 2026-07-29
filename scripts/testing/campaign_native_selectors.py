@@ -798,6 +798,16 @@ def media_long_assertions(
         emulation = _mapping(row.get("emulation"))
         viewport_name = str(row.get("viewport") or "")
         expected_mobile = viewport_name == "mobile"
+        expected_console_errors = {
+            str(item)
+            for item in (row.get("expected_console_errors") or [])
+            if str(item)
+        }
+        unexpected_console_errors = [
+            str(item)
+            for item in (row.get("console_errors") or [])
+            if str(item) and str(item) not in expected_console_errors
+        ]
         return bool(
             row.get("schema_version") == MEDIA_BROWSER_LATENCY_SCHEMA_VERSION
             and row.get("ok") is True
@@ -840,7 +850,11 @@ def media_long_assertions(
             and int(layout.get("playerHeight") or 0) > 0
             and int(layout.get("scrollWidth") or 0) <= int(layout.get("viewportWidth") or 0) + 2
             and not list(row.get("fatal_errors") or [])
-            and not list(row.get("console_errors") or [])
+            # A password-protected share intentionally receives an initial
+            # 401 before the browser submits its share password.  The probe
+            # records that known browser message explicitly; any other
+            # console error remains a hard failure.
+            and not unexpected_console_errors
         )
 
     random_seek = bool(
@@ -901,7 +915,6 @@ def media_long_assertions(
         "master_variant_segment_measurement": master_variant_segments,
         "dual_audio_and_subtitles": dual_audio_subtitles,
         "desktop_mobile_random_seek": random_seek,
-        "desktop_mobile_first_frame_and_random_seek_latency": random_seek,
         "password_wrong_password_and_revoke": password_and_revoke,
         "primary_planned_restart": planned_restart,
         "post_restart_hls_share_continuity": continuity,

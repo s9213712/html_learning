@@ -233,7 +233,6 @@ const TRADING_PERSONAL_FORM_FIELDS = [
   { id: "trading-auto-bot-name", value: "" },
   { id: "trading-auto-bot-market", value: "" },
   { id: "trading-auto-bot-budget-points", value: "100" },
-  { id: "trading-auto-strategy-mode", value: "single" },
   { id: "trading-auto-daily-runs", value: "5" },
   { id: "trading-auto-bot-max-runs", value: "5" },
   { id: "trading-auto-bot-cooldown", value: "300" },

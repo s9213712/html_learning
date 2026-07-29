@@ -7,6 +7,7 @@ import secrets
 import shutil
 import sqlite3
 import tarfile
+import sys
 import urllib.parse
 from dataclasses import dataclass
 from datetime import datetime
@@ -1657,7 +1658,14 @@ def _safe_extract_tar(archive_path, target_dir):
             final = (target / member.name).resolve()
             if target not in final.parents and final != target:
                 raise ValueError(f"archive member escapes target: {member.name}")
-        tar.extractall(target)
+        # Python 3.14 changes the implicit extraction filter.  We already
+        # validate every member above; on Python 3.12+ also request the
+        # standard data-only filter explicitly so future interpreter upgrades
+        # cannot change restore behavior or re-enable special members.
+        if sys.version_info >= (3, 12):
+            tar.extractall(target, filter="data")
+        else:
+            tar.extractall(target)
 
 
 def _parse_daily_snapshot_time(value):

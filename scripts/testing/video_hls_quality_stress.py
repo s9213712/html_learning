@@ -57,6 +57,7 @@ TERMINAL_JOB_STATUSES = {"succeeded", "failed", "cancelled", "expired"}
 BROWSER_LATENCY_SCHEMA_VERSION = "hackme.browser-video-latency/v1"
 BROWSER_FIRST_FRAME_SLA_MS = 8_000.0
 BROWSER_SEEK_SLA_MS = 5_000.0
+UPLOAD_EDGE_RATE_LIMIT_RETRIES = 3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
@@ -253,6 +254,7 @@ def upload_video(
     visibility: str = "public",
     share_password: str = "",
     share_max_views: int = 0,
+    start_barrier: threading.Barrier | None = None,
 ) -> dict[str, Any]:
     auth = login(base_url, username, password)
     result: dict[str, Any] = {
@@ -263,6 +265,17 @@ def upload_video(
         "csrf": auth["csrf"],
         "login": auth["login"],
     }
+    # Authentication has a variable cost.  Synchronize only after every
+    # worker has completed it, otherwise the fastest account can submit its
+    # multipart request before the other accounts have even logged in and a
+    # nominally parallel test is not actually concurrent at the HTTP edge.
+    if start_barrier is not None:
+        try:
+            start_barrier.wait(timeout=max(60.0, float(timeout_seconds)))
+            result["upload_barrier_released_at_ms"] = utc_ms()
+        except threading.BrokenBarrierError:
+            result["error"] = "parallel_upload_start_barrier_failed"
+            return result
     if not auth["ok"]:
         result["error"] = "login_failed"
         return result
@@ -283,60 +296,82 @@ def upload_video(
     if visibility == "unlisted":
         fields["share_password"] = share_password
         fields["share_max_views"] = str(max(0, int(share_max_views)))
-    body = StreamingMultipartBody(
-        fields=fields,
-        file_field="video",
-        file_path=video_path,
-        content_type=mime_type,
-    )
+    attempts: list[dict[str, Any]] = []
     try:
-        response = auth["session"].post(
-            f"{base_url}/api/videos/upload",
-            data=body,
-            headers={
-                "Content-Type": body.content_type,
-                "Content-Length": str(len(body)),
-                "X-CSRF-Token": auth["token"],
-            },
-            timeout=timeout_seconds,
-        )
-        elapsed = time.perf_counter() - started
-        try:
-            payload: Any = response.json()
-        except Exception:
-            payload = response.text[:1000]
-        result.update({
-            "ok": response.status_code == 200 and isinstance(payload, dict) and bool(payload.get("ok")),
-            "status": response.status_code,
-            "elapsed_s": elapsed,
-            "upload_started_at_ms": upload_started_at_ms,
-            "upload_finished_at_ms": utc_ms(),
-            "payload": payload,
-        })
-        if isinstance(payload, dict):
-            video = payload.get("video") or {}
-            file_info = payload.get("file") or {}
-            stream_asset = payload.get("stream_asset") or {}
-            result.update({
-                "video_id": video.get("id"),
-                "file_id": file_info.get("file_id") or video.get("cloud_file_id"),
-                "stream_status": stream_asset.get("status"),
-                "stream_warning": payload.get("stream_warning") or "",
-                "share_url": video.get("share_url") or ((video.get("share_link") or {}).get("url")),
-                "share_password_required": bool(video.get("share_password_required")),
+        for attempt in range(1, UPLOAD_EDGE_RATE_LIMIT_RETRIES + 1):
+            body = StreamingMultipartBody(
+                fields=fields,
+                file_field="video",
+                file_path=video_path,
+                content_type=mime_type,
+            )
+            try:
+                response = auth["session"].post(
+                    f"{base_url}/api/videos/upload",
+                    data=body,
+                    headers={
+                        "Content-Type": body.content_type,
+                        "Content-Length": str(len(body)),
+                        "X-CSRF-Token": auth["token"],
+                    },
+                    timeout=timeout_seconds,
+                )
+            finally:
+                body.close()
+            try:
+                payload: Any = response.json()
+            except Exception:
+                payload = response.text[:1000]
+            attempts.append({
+                "attempt": attempt,
+                "status": response.status_code,
+                "elapsed_s": round(time.perf_counter() - started, 4),
             })
-        return result
+            if response.status_code == 429 and attempt < UPLOAD_EDGE_RATE_LIMIT_RETRIES:
+                retry_after = ""
+                if isinstance(payload, dict):
+                    retry_after = str(payload.get("retry_after_seconds") or "")
+                retry_after = retry_after or str(getattr(response, "headers", {}).get("Retry-After") or "")
+                try:
+                    delay_seconds = max(1.0, min(10.0, float(retry_after)))
+                except (TypeError, ValueError):
+                    delay_seconds = 2.0
+                attempts[-1]["retry_after_seconds"] = delay_seconds
+                time.sleep(delay_seconds)
+                continue
+            elapsed = time.perf_counter() - started
+            result.update({
+                "ok": response.status_code == 200 and isinstance(payload, dict) and bool(payload.get("ok")),
+                "status": response.status_code,
+                "elapsed_s": elapsed,
+                "upload_started_at_ms": upload_started_at_ms,
+                "upload_finished_at_ms": utc_ms(),
+                "attempts": attempts,
+                "payload": payload,
+            })
+            if isinstance(payload, dict):
+                video = payload.get("video") or {}
+                file_info = payload.get("file") or {}
+                stream_asset = payload.get("stream_asset") or {}
+                result.update({
+                    "video_id": video.get("id"),
+                    "file_id": file_info.get("file_id") or video.get("cloud_file_id"),
+                    "stream_status": stream_asset.get("status"),
+                    "stream_warning": payload.get("stream_warning") or "",
+                    "share_url": video.get("share_url") or ((video.get("share_link") or {}).get("url")),
+                    "share_password_required": bool(video.get("share_password_required")),
+                })
+            return result
     except Exception as exc:
         result.update({
             "elapsed_s": time.perf_counter() - started,
             "upload_started_at_ms": upload_started_at_ms,
             "upload_finished_at_ms": utc_ms(),
+            "attempts": attempts,
             "error": exc.__class__.__name__,
             "message": str(exc),
         })
         return result
-    finally:
-        body.close()
 
 
 def ps_snapshot(runtime_marker: str) -> list[dict[str, Any]]:
@@ -607,6 +642,7 @@ def run_upload_phase(args: argparse.Namespace) -> dict[str, Any]:
     monitor.start()
     started_ms = utc_ms()
     uploads: list[dict[str, Any]] = []
+    upload_start_barrier = threading.Barrier(len(accounts)) if len(accounts) > 1 else None
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(accounts)))
     futures = {
         executor.submit(
@@ -620,6 +656,7 @@ def run_upload_phase(args: argparse.Namespace) -> dict[str, Any]:
             visibility=args.visibility,
             share_password=args.share_password,
             share_max_views=args.share_max_views,
+            start_barrier=upload_start_barrier,
         ): username
         for username, password in accounts
     }
@@ -660,6 +697,10 @@ def run_upload_phase(args: argparse.Namespace) -> dict[str, Any]:
         "privacy_mode": args.privacy_mode,
         "visibility": args.visibility,
         "accounts": [username for username, _ in accounts],
+        "parallel_upload_start_barrier": {
+            "enabled": upload_start_barrier is not None,
+            "parties": len(accounts) if upload_start_barrier is not None else 0,
+        },
         "started_at_ms": started_ms,
         "finished_at_ms": utc_ms(),
         "uploads": uploads,
@@ -942,24 +983,58 @@ def measure_subtitle_tracks(
     return results
 
 
+def upload_owner_credentials(args: argparse.Namespace, upload_phase: dict[str, Any] | None) -> dict[int, tuple[str, str]]:
+    """Map each uploaded video to its owner so unlisted playback is measured as that owner."""
+    passwords = dict(parse_accounts(args.accounts, os.environ.get("HACKME_HLS_STRESS_ACCOUNTS_JSON", "")))
+    owners: dict[int, tuple[str, str]] = {}
+    for item in (upload_phase or {}).get("uploads") or []:
+        try:
+            video_id = int(item.get("video_id") or 0)
+        except (TypeError, ValueError):
+            continue
+        username = str(item.get("username") or "").strip()
+        password = passwords.get(username, "")
+        if video_id > 0 and username and password:
+            owners[video_id] = (username, password)
+    return owners
+
+
 def measure_hls_variants(args: argparse.Namespace, upload_phase: dict[str, Any] | None = None) -> dict[str, Any]:
-    auth = login(args.base_url, args.measure_username, args.measure_password)
-    if not auth["ok"]:
-        return {"phase": "measure", "ok": False, "error": "login_failed", "login": auth["login"]}
-    session = auth["session"]
-    token = auth["token"]
     state = filter_db_state_for_uploads(db_state(Path(args.db)), upload_phase)
     measurements: list[dict[str, Any]] = []
     phase_ok = True
+    owner_credentials = upload_owner_credentials(args, upload_phase)
+    auth_cache: dict[str, dict[str, Any]] = {}
     videos = state.get("videos") or []
     if not videos:
         phase_ok = False
     for video in videos:
         video_id = int(video["id"])
+        username, password = owner_credentials.get(
+            video_id,
+            (args.measure_username, args.measure_password),
+        )
+        auth = auth_cache.get(username)
+        if auth is None:
+            auth = login(args.base_url, username, password)
+            auth_cache[username] = auth
+        if not auth["ok"]:
+            measurements.append({
+                "video_id": video_id,
+                "title": video.get("title"),
+                "measure_username": username,
+                "error": "login_failed",
+                "login": auth["login"],
+            })
+            phase_ok = False
+            continue
+        session = auth["session"]
+        token = auth["token"]
         playback = timed_get(session, f"{args.base_url}/api/videos/{video_id}/playback", token, timeout=20)
         entry: dict[str, Any] = {
             "video_id": video_id,
             "title": video.get("title"),
+            "measure_username": username,
             "playback": playback,
             "variants": [],
             "subtitles": [],

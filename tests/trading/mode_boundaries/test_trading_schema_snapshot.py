@@ -345,9 +345,12 @@ def test_ensure_trading_schema_critical_columns_present(tmp_path):
             f"trading_margin_positions missing column {col!r}"
         )
 
-    # trading_bots — workflow + DCA support columns
+    # trading_bots — workflow + DCA support columns, including the DCA
+    # price band and the atomic UTC-day cap for Workflow bots.
     for col in (
         "bot_type", "interval_hours", "budget_points",
+        "price_upper_limit", "price_lower_limit",
+        "max_daily_runs", "daily_run_date", "daily_run_count",
         "workflow_json", "execution_state_json",
         "enabled_at", "last_scan_at", "share_parameters",
     ):

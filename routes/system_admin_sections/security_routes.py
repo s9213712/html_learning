@@ -569,6 +569,7 @@ def register_system_admin_security_routes(app, ctx):
     db_schema_summary = ctx["db_schema_summary"]
     db_integrity_summary = ctx["db_integrity_summary"]
     readiness_summary = ctx["readiness_summary"]
+    cached_readiness_summary = ctx["cached_readiness_summary"]
     anomaly_summary = ctx["anomaly_summary"]
     audit_integrity_summary = ctx["audit_integrity_summary"]
     security_center_payload = ctx["security_center_payload"]
@@ -875,7 +876,7 @@ def register_system_admin_security_routes(app, ctx):
         _, error = require_super_admin_actor()
         if error:
             return error
-        summary = readiness_summary(db=db_schema_summary())
+        summary = cached_readiness_summary()
         return json_resp({"ok": True, "readiness": summary})
 
     @app.route("/api/admin/health/anomaly", methods=["GET"])
@@ -892,7 +893,10 @@ def register_system_admin_security_routes(app, ctx):
         _, error = require_super_admin_actor()
         if error:
             return error
-        return json_resp({"ok": True, "audit_integrity": audit_integrity_summary()})
+        return json_resp({
+            "ok": True,
+            "audit_integrity": audit_integrity_summary(force_refresh=True),
+        })
 
     @app.route("/api/admin/health/db-integrity", methods=["GET"])
     @require_csrf_safe

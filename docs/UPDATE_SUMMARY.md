@@ -1,6 +1,35 @@
 # Update Summary
 
-Release ID: `05_2026.07.20-001`
+Release ID: `06_2026.07.29-001`
+
+## 06_2026.07.29-001
+
+- Reworked image editing validation around reviewable artifacts: HF/Diffusers
+  product i2i soak and cached standalone i2i probes now retain output images,
+  while the ComfyUI matrix covers i2i, inpaint, outpaint, upscale and blend.
+  Semantic SAM3 outpaint now validates canvas geometry and alpha before
+  delivering only the final server-side composite, preventing intermediate
+  background/foreground files or opaque source rectangles from being presented
+  as a successful edit.
+- Corrected HF/Diffusers img2img capability discovery for regular
+  `model_index.json` pipelines and added strict tests for Flux Fill outpaint
+  graph construction and semantic-composite failures.
+- Restored AI Agent reliability for Windows-hosted local Ollama from WSL with a
+  narrowly scoped, credential-free local fallback. Increased the bounded
+  browser/planner window so healthy schema-heavy tool planning is not aborted
+  before the normal chat budget, and covered it with backend and frontend tests.
+- Added server-owned bot protections: DCA upper/lower price bands produce
+  auditable skips without disabling protective exits; Workflow bot UTC daily
+  run limits are reserved atomically across manual and background scans and
+  released only when order placement fails.
+- Expanded operational evidence and stress scripts for mixed account traffic,
+  BT lifecycle, Cloud Drive streaming, HLS quality, storage, SQLite contention,
+  capacity selection, browser acceptance and 24-hour campaign contracts. The
+  documented BT multi-IP requirement remains fail-closed until exercised on a
+  genuinely multi-address private network.
+- Hardened responsive UI, upload/storage paths, backpressure, audit and
+  platform-health checks. Operator documentation now separates HF/Diffusers
+  from ComfyUI execution and requires visual review for image-edit output.
 
 ## 05_2026.07.20-001
 

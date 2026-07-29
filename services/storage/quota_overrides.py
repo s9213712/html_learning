@@ -32,12 +32,18 @@ def _row_to_dict(row):
     return data
 
 
-def get_storage_quota_override(conn, user_id):
-    ensure_storage_quota_override_schema(conn)
-    row = conn.execute(
-        "SELECT * FROM storage_quota_overrides WHERE user_id=?",
-        (int(user_id),),
-    ).fetchone()
+def get_storage_quota_override(conn, user_id, *, ensure_schema=True):
+    if ensure_schema:
+        ensure_storage_quota_override_schema(conn)
+    try:
+        row = conn.execute(
+            "SELECT * FROM storage_quota_overrides WHERE user_id=?",
+            (int(user_id),),
+        ).fetchone()
+    except Exception:
+        if ensure_schema:
+            raise
+        return None
     return _row_to_dict(row)
 
 

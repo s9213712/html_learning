@@ -3,6 +3,19 @@
 from services.comfyui.template.safety import next_safe_node_id
 
 
+# The regular checkpoint outpaint shortcut cannot reliably blend an opaque
+# studio/white backdrop into newly generated pixels.  Keep the model mapping
+# identical to the checked-in ``origin_flux_fill_outpaint_gguf_q3`` official
+# workflow, rather than creating a second, drifting implementation in the UI
+# code path.
+FLUX_FILL_OUTPAINT_GGUF_UNET = "flux1-fill-dev-Q3_K_S.gguf"
+FLUX_FILL_OUTPAINT_CLIP_L = "clip_l.safetensors"
+FLUX_FILL_OUTPAINT_T5 = "t5xxl_fp8_e4m3fn_scaled.safetensors"
+FLUX_FILL_OUTPAINT_VAE = "ae.safetensors"
+SAM3_OUTPAINT_SUBJECT_CHECKPOINT = "sam3.1_multiplex_fp16.safetensors"
+DEFAULT_OUTPAINT_SUBJECT_PROMPT = "main subject"
+
+
 def build_text_to_image_base(params):
     workflow = {
         "4": {
@@ -489,7 +502,310 @@ def build_inpaint_workflow(params, *, error_cls):
     return workflow
 
 
+def build_flux_fill_gguf_outpaint_workflow(params, *, error_cls):
+    """Build the product's source-preserving Flux Fill outpaint graph.
+
+    This mirrors the official GGUF template: the source image and generated
+    canvas meet through ``InpaintModelConditioning`` plus
+    ``DifferentialDiffusion``.  In particular, do not paste the opaque source
+    back over the decoded result with ``ImageCompositeMasked``: that operation
+    recreates the very rectangular seam that outpaint is meant to remove.
+    """
+    source_image = params.get("source_image_ref") if isinstance(params.get("source_image_ref"), dict) else None
+    if not source_image or not str(source_image.get("filename") or "").strip():
+        raise error_cls("向外延展缺少來源圖片")
+    if params.get("loras"):
+        raise error_cls("Flux Fill 外延不支援目前的 Checkpoint LoRA 快捷選擇，請改用相容的官方 workflow")
+    if params.get("controlnet"):
+        raise error_cls("Flux Fill 外延不支援目前的 Checkpoint ControlNet 快捷選擇，請改用相容的官方 workflow")
+
+    expand = params.get("outpaint") if isinstance(params.get("outpaint"), dict) else {}
+    unet_name = str(params.get("outpaint_flux_unet_name") or FLUX_FILL_OUTPAINT_GGUF_UNET).strip()
+    clip_l_name = str(params.get("outpaint_flux_clip_l") or FLUX_FILL_OUTPAINT_CLIP_L).strip()
+    t5_name = str(params.get("outpaint_flux_t5") or FLUX_FILL_OUTPAINT_T5).strip()
+    vae_name = str(params.get("outpaint_flux_vae") or FLUX_FILL_OUTPAINT_VAE).strip()
+    if not all((unet_name, clip_l_name, t5_name, vae_name)):
+        raise error_cls("Flux Fill 外延缺少必要的 UNet、CLIP 或 VAE")
+
+    return {
+        "17": {
+            "class_type": "LoadImage",
+            "inputs": {"image": source_image["filename"], "upload": "image"},
+        },
+        "23": {
+            "class_type": "CLIPTextEncode",
+            "inputs": {"text": params["prompt"], "clip": ["34", 0]},
+        },
+        "26": {
+            "class_type": "FluxGuidance",
+            "inputs": {"conditioning": ["23", 0], "guidance": 3.5},
+        },
+        "3": {
+            "class_type": "KSampler",
+            "inputs": {
+                "seed": int(params["seed"]),
+                "steps": int(params["steps"]),
+                "cfg": 1.0,
+                "sampler_name": "euler",
+                "scheduler": "normal",
+                "denoise": 1.0,
+                "model": ["39", 0],
+                "positive": ["38", 0],
+                "negative": ["38", 1],
+                "latent_image": ["38", 2],
+            },
+        },
+        "31": {
+            "class_type": "UnetLoaderGGUF",
+            "inputs": {"unet_name": unet_name},
+        },
+        "32": {
+            "class_type": "VAELoader",
+            "inputs": {"vae_name": vae_name},
+        },
+        "34": {
+            "class_type": "DualCLIPLoader",
+            "inputs": {
+                "clip_name1": clip_l_name,
+                "clip_name2": t5_name,
+                "type": "flux",
+                "device": "default",
+            },
+        },
+        "38": {
+            "class_type": "InpaintModelConditioning",
+            "inputs": {
+                "positive": ["26", 0],
+                "negative": ["46", 0],
+                "vae": ["32", 0],
+                "pixels": ["44", 0],
+                "mask": ["44", 1],
+                "noise_mask": False,
+            },
+        },
+        "39": {
+            "class_type": "DifferentialDiffusion",
+            "inputs": {"model": ["31", 0]},
+        },
+        "44": {
+            "class_type": "ImagePadForOutpaint",
+            "inputs": {
+                "image": ["17", 0],
+                "left": int(expand.get("left") or 0),
+                "top": int(expand.get("top") or 0),
+                "right": int(expand.get("right") or 0),
+                "bottom": int(expand.get("bottom") or 0),
+                "feathering": int(expand.get("feathering") or 24),
+            },
+        },
+        "46": {
+            "class_type": "ConditioningZeroOut",
+            "inputs": {"conditioning": ["23", 0]},
+        },
+        "8": {
+            "class_type": "VAEDecode",
+            "inputs": {"samples": ["3", 0], "vae": ["32", 0]},
+        },
+        "9": {
+            "class_type": "SaveImage",
+            "inputs": {
+                "filename_prefix": params.get("filename_prefix") or "hackme_web",
+                "images": ["8", 0],
+            },
+        },
+    }
+
+
+def build_flux_fill_sam3_subject_outpaint_workflow(params, *, error_cls):
+    """Build the two source artifacts for strict semantic outpaint.
+
+    A source image can contain an opaque studio/background rectangle.  Keeping
+    it in a ComfyUI ``ImageCompositeMasked`` node makes that rectangle (or its
+    colour bleed) part of the final image.  This workflow therefore produces
+    two *separate* artifacts instead:
+
+    * Flux Fill redraws a source-independent, aligned blank canvas.
+    * SAM3 emits the original source with a foreground-positive alpha channel.
+
+    ``services.comfyui.semantic_composite`` validates and joins those artifacts
+    after ComfyUI has completed.  Keeping the final alpha composite outside the
+    diffusion graph gives the product one clear fail-closed boundary and avoids
+    a model-generated seam around the original rectangular image.  Crucially,
+    the original source pixels do not enter Flux's inpaint conditioning: a
+    full-mask inpaint graph can otherwise still reconstruct/hallucinate the
+    original person behind the protected SAM3 foreground.
+    """
+    source_image = params.get("source_image_ref") if isinstance(params.get("source_image_ref"), dict) else None
+    if not source_image or not str(source_image.get("filename") or "").strip():
+        raise error_cls("向外延展缺少來源圖片")
+    if params.get("loras"):
+        raise error_cls("Flux Fill 外延不支援目前的 Checkpoint LoRA 快捷選擇，請改用相容的官方 workflow")
+    if params.get("controlnet"):
+        raise error_cls("Flux Fill 外延不支援目前的 Checkpoint ControlNet 快捷選擇，請改用相容的官方 workflow")
+    if int(params.get("batch_size") or 1) != 1:
+        raise error_cls("SAM3 語意外延一次僅支援一張；請以多次執行取得多個候選結果")
+
+    expand = params.get("outpaint") if isinstance(params.get("outpaint"), dict) else {}
+    subject_prompt = str(params.get("outpaint_subject_prompt") or DEFAULT_OUTPAINT_SUBJECT_PROMPT).strip()
+    if not subject_prompt:
+        raise error_cls("外延保留主體描述不可為空")
+    unet_name = str(params.get("outpaint_flux_unet_name") or FLUX_FILL_OUTPAINT_GGUF_UNET).strip()
+    clip_l_name = str(params.get("outpaint_flux_clip_l") or FLUX_FILL_OUTPAINT_CLIP_L).strip()
+    t5_name = str(params.get("outpaint_flux_t5") or FLUX_FILL_OUTPAINT_T5).strip()
+    vae_name = str(params.get("outpaint_flux_vae") or FLUX_FILL_OUTPAINT_VAE).strip()
+    sam3_checkpoint = str(params.get("outpaint_sam3_checkpoint") or SAM3_OUTPAINT_SUBJECT_CHECKPOINT).strip()
+    if not all((unet_name, clip_l_name, t5_name, vae_name, sam3_checkpoint)):
+        raise error_cls("Flux Fill 前景外延缺少必要的 UNet、CLIP、VAE 或 SAM3 模型")
+
+    canvas_width = int(params.get("outpaint_canvas_width") or 0)
+    canvas_height = int(params.get("outpaint_canvas_height") or 0)
+    if canvas_width < 64 or canvas_height < 64 or canvas_width > 16384 or canvas_height > 16384:
+        raise error_cls("SAM3 語意外延缺少已驗證的對齊畫布尺寸")
+    return {
+        "17": {
+            "class_type": "LoadImage",
+            "inputs": {"image": source_image["filename"], "upload": "image"},
+        },
+        "23": {
+            "class_type": "CLIPTextEncode",
+            "inputs": {"text": params["prompt"], "clip": ["34", 0]},
+        },
+        "26": {
+            "class_type": "FluxGuidance",
+            "inputs": {"conditioning": ["23", 0], "guidance": 3.5},
+        },
+        "3": {
+            "class_type": "KSampler",
+            "inputs": {
+                "seed": int(params["seed"]),
+                "steps": int(params["steps"]),
+                "cfg": 1.0,
+                "sampler_name": "euler",
+                "scheduler": "normal",
+                "denoise": 1.0,
+                "model": ["39", 0],
+                "positive": ["38", 0],
+                "negative": ["38", 1],
+                "latent_image": ["38", 2],
+            },
+        },
+        "31": {
+            "class_type": "UnetLoaderGGUF",
+            "inputs": {"unet_name": unet_name},
+        },
+        "32": {
+            "class_type": "VAELoader",
+            "inputs": {"vae_name": vae_name},
+        },
+        "34": {
+            "class_type": "DualCLIPLoader",
+            "inputs": {
+                "clip_name1": clip_l_name,
+                "clip_name2": t5_name,
+                "type": "flux",
+                "device": "default",
+            },
+        },
+        "38": {
+            "class_type": "InpaintModelConditioning",
+            "inputs": {
+                "positive": ["26", 0],
+                "negative": ["46", 0],
+                "vae": ["32", 0],
+                # Never feed the original source pixels to Flux.  Even a
+                # full inpaint mask can retain that latent's person semantics
+                # and create a second subject behind SAM3's protected one.
+                "pixels": ["118", 0],
+                "mask": ["120", 0],
+                "noise_mask": False,
+            },
+        },
+        "39": {
+            "class_type": "DifferentialDiffusion",
+            "inputs": {"model": ["31", 0]},
+        },
+        "118": {
+            "class_type": "EmptyImage",
+            "inputs": {
+                "width": canvas_width,
+                "height": canvas_height,
+                "batch_size": 1,
+                "color": 0,
+            },
+        },
+        "114": {
+            "class_type": "CLIPTextEncode",
+            "inputs": {"text": subject_prompt, "clip": ["116", 1]},
+        },
+        "115": {
+            "class_type": "SAM3_Detect",
+            "inputs": {
+                "model": ["116", 0],
+                "image": ["17", 0],
+                "conditioning": ["114", 0],
+                "threshold": float(params.get("outpaint_subject_threshold") or 0.25),
+                "refine_iterations": 2,
+                "individual_masks": False,
+            },
+        },
+        "116": {
+            "class_type": "CheckpointLoaderSimple",
+            "inputs": {"ckpt_name": sam3_checkpoint},
+        },
+        "117": {
+            "class_type": "InvertMask",
+            "inputs": {"mask": ["115", 0]},
+        },
+        # The canvas is an all-black `EmptyImage`; this full opaque mask tells
+        # Flux Fill to generate every pixel from the prompt, without seeing an
+        # original-image latent.  The source is used only by SAM3 below.
+        "120": {
+            "class_type": "SolidMask",
+            "inputs": {"value": 1.0, "width": canvas_width, "height": canvas_height},
+        },
+        "46": {
+            "class_type": "ConditioningZeroOut",
+            "inputs": {"conditioning": ["23", 0]},
+        },
+        "8": {
+            "class_type": "VAEDecode",
+            "inputs": {"samples": ["3", 0], "vae": ["32", 0]},
+        },
+        "121": {
+            "class_type": "JoinImageWithAlpha",
+            "inputs": {
+                "image": ["17", 0],
+                # SAM3's detected mask is background-positive for this model.
+                # Node 117 makes the alpha foreground-positive before the app
+                # layer performs its final composite.
+                "alpha": ["117", 0],
+            },
+        },
+        "9": {
+            "class_type": "SaveImage",
+            "inputs": {
+                "filename_prefix": params.get("filename_prefix") or "hackme_web",
+                "images": ["8", 0],
+            },
+            "_meta": {"title": "Semantic outpaint background"},
+        },
+        "124": {
+            "class_type": "SaveImage",
+            "inputs": {
+                "filename_prefix": f"{params.get('filename_prefix') or 'hackme_web'}_semantic_foreground",
+                "images": ["121", 0],
+            },
+            "_meta": {"title": "SAM3 semantic foreground"},
+        },
+    }
+
+
 def build_outpaint_workflow(params, *, error_cls):
+    family = str(params.get("outpaint_workflow_family") or "").strip().lower()
+    if family == "flux_fill_sam3_subject_gguf":
+        return build_flux_fill_sam3_subject_outpaint_workflow(params, error_cls=error_cls)
+    if family == "flux_fill_gguf":
+        return build_flux_fill_gguf_outpaint_workflow(params, error_cls=error_cls)
     workflow, final_model, _final_clip, vae_ref, next_node_id = build_text_to_image_base(params)
     source_image = params.get("source_image_ref") if isinstance(params.get("source_image_ref"), dict) else None
     if not source_image:

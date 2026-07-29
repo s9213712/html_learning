@@ -19,7 +19,7 @@ just reinforcing each other's mistakes.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from itertools import combinations
 import json
 import os
@@ -311,7 +311,7 @@ def default_training_report_dir() -> Path:
 
 
 def _timestamp() -> str:
-    return datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
 def _board_position_key(board: chess.Board) -> str:
@@ -1698,7 +1698,7 @@ def run_training_session(
             schedule.append((EXPERIMENT_PV_DIFFICULTY, EXPERIMENT_DL_DIFFICULTY))
 
     summary = {
-        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "generated_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
         "seed": seed,
         "teacher_depth": teacher_depth,
         "max_plies": max_plies,

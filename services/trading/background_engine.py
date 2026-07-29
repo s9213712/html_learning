@@ -12,7 +12,7 @@ import threading
 import socket
 import time
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from services.core.sqlite_hardening import is_sqlite_retryable_operational_error
 from services.server_mode.context import SmV2Context
@@ -90,7 +90,7 @@ def _with_sqlite_background_retry(operation, *, attempts=20, base_sleep=0.05):
 
 
 def _now_dt() -> datetime:
-    return datetime.utcnow().replace(microsecond=0)
+    return datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0)
 
 
 def _now_text() -> str:

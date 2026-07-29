@@ -268,6 +268,7 @@ def test_filemanager_and_albummanager_ui_are_wired():
     assert 'id="shared-file-login-link"' in share_preview_routes
     assert "前往登入" in share_preview_routes
     assert ".shared-file-progress" in share_preview_routes
+    assert "h1 {{ overflow-wrap: anywhere; word-break: break-word; }}" in share_preview_routes
     assert "function sharedFileSetLoginRequired(required)" in shared_file_js
     assert 'reason === "login_required"' in shared_file_js
     assert "return_to=" in shared_file_js

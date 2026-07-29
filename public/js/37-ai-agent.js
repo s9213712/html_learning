@@ -3338,14 +3338,16 @@ async function aiAgentPlanToolAction(userText, options = {}) {
       mode: "text",
       messages: [{ role: "user", content: planningPrompt }],
       image_data_url: "",
-      // The planner has a 45s browser deadline.  Ask the backend to stop a
-      // little earlier so an aborted planner request does not keep consuming
-      // a Gunicorn thread and AI Agent semaphore slot for the global 120s
-      // chat timeout.
-      request_timeout_seconds: 40,
+      // The structured planner carries the selected tool schemas and needs a
+      // materially longer window than a plain chat completion on cloud
+      // models.  Forty seconds was short enough to abort healthy planner
+      // requests in the browser, producing a spurious 502 before the normal
+      // 120s chat budget could be used.  Keep this bounded below that budget
+      // while allowing the provider to finish the planning response.
+      request_timeout_seconds: 80,
     }, {
       mode: "text",
-      timeoutMs: 45000,
+      timeoutMs: 85000,
     });
   } catch (err) {
     if (/逾時|timeout/i.test(String(err?.message || err))) {

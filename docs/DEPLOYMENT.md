@@ -59,7 +59,7 @@ python3 server.py
 | Runtime dirs | `HACKME_RUNTIME_DIR`, `HTML_LEARNING_DB_DIR`, `HTML_LEARNING_LOG_DIR`, `HTML_LEARNING_STORAGE_DIR`, `HTML_LEARNING_REPORTS_DIR` 等 | mutable runtime / DB / logs / storage 位置。 |
 | Bootstrap | `HTML_LEARNING_ROOT_PASSWORD`, `HTML_LEARNING_MANAGER_PASSWORD` | first boot 用；root 完成 bootstrap 後應 rotate/remove。 |
 | Gunicorn fallback bind | `HTML_LEARNING_HOST`, `HTML_LEARNING_PORT` | Flask fallback 與服務內部 bind 口徑；production Gunicorn 仍由 systemd service `ExecStart` 決定。 |
-| Backpressure | `HTML_LEARNING_BACKPRESSURE_THREAD_CAPACITY`, `HTML_LEARNING_BACKPRESSURE_NORMAL_LIMIT`, `HTML_LEARNING_BACKPRESSURE_HEAVY_LIMIT`, `HTML_LEARNING_BACKPRESSURE_ROOT_LIMIT`, `HTML_LEARNING_BACKPRESSURE_FAST_LANE_RESERVED`, `HTML_LEARNING_BACKPRESSURE_ROOT_PRIORITY_ENABLED` | app-level server busy / fast lane 初始值。 |
+| Backpressure | `HTML_LEARNING_BACKPRESSURE_THREAD_CAPACITY`, `HTML_LEARNING_BACKPRESSURE_NORMAL_LIMIT`, `HTML_LEARNING_BACKPRESSURE_HEAVY_LIMIT`, `HTML_LEARNING_BACKPRESSURE_ROOT_LIMIT`, `HTML_LEARNING_BACKPRESSURE_FAST_LANE_RESERVED`, `HTML_LEARNING_BACKPRESSURE_ROOT_PRIORITY_ENABLED` | app-level server busy / fast lane 初始值；raw thread capacity 會扣除 fast-lane token，1×160 要提供 128 路業務容量時建議設為 `130`。 |
 | Remote download capacity | `HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL`, `HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_PER_USER` | Direct link / BT / magnet 外部下載 worker 的全站與單用戶併發預設；老硬體建議 `1/1`。 |
 | BT backend | `HACKME_BT_BACKEND` | `auto`, `transmission`, or `aria2`；fresh DB 預設值，root 前台保存後以 root 設定為準。 |
 | Transmission RPC | `HACKME_TRANSMISSION_RPC_URL`, `HACKME_TRANSMISSION_RPC_USERNAME`, `HACKME_TRANSMISSION_RPC_PASSWORD` | BT/magnet 使用 Transmission RPC 時的連線設定；詳見 [13_REMOTE_DOWNLOAD_TRANSMISSION.md](13_REMOTE_DOWNLOAD_TRANSMISSION.md)。 |
@@ -143,9 +143,14 @@ backpressure 預設保留，因為它是防止程序被打爆的保護線；若�
 
 ```bash
 python3 scripts/testing/predeploy_capacity_probe.py \
-  --profiles 1x6,2x6,3x6,4x6 \
+  --profiles 1x6,1x16,1x32,1x64 \
   --target-p95-ms 1500
 ```
+
+SQLite deployments must keep `--workers 1`; increase `--threads` only after
+the capacity probe.  The high-end `1x160` profile intentionally admits at
+most 128 ordinary requests, reserving the remaining threads for health,
+authentication, and fast overload responses.
 
 `--account-counts` 預設為 `auto`；腳本會從 `--start-accounts` 開始按 `--growth-factor`
 往上探，體驗開始劣化後改用 `--fine-growth-factor` 細找伺服器穩定線。為避免使用者誤跑

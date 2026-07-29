@@ -180,6 +180,28 @@ def secure_read_json(path: Path, *, authority_root: Path) -> tuple[dict[str, Any
         raw = b"".join(chunks)
         if len(raw) != int(opened.st_size):
             raise ActivationArtifactError("activation artifact exact-size read failed")
+        # Metadata alone is not a sufficient mutation witness: a writer can
+        # rewrite the same inode without changing its size and some filesystems
+        # can coalesce timestamp updates.  Re-read through the already-opened,
+        # no-follow descriptor and require stable bytes before trusting JSON.
+        # This also avoids reopening the path during the verification window.
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        reread_chunks: list[bytes] = []
+        reread_remaining = int(opened.st_size)
+        while reread_remaining > 0:
+            chunk = os.read(descriptor, min(65536, reread_remaining))
+            if not chunk:
+                raise ActivationArtifactError(
+                    "activation artifact became shorter during secure read"
+                )
+            reread_chunks.append(chunk)
+            reread_remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise ActivationArtifactError(
+                "activation artifact became longer during secure read"
+            )
+        if b"".join(reread_chunks) != raw:
+            raise ActivationArtifactError("activation artifact changed during secure read")
         after = os.fstat(descriptor)
         current = artifact.lstat()
         current_parent = artifact.parent.lstat()

@@ -34,6 +34,9 @@ def workflow_args(**overrides):
         "blend_factor": 0.5,
         "blend_denoise": 0.4,
         "ipadapter_preset": "PLUS (high strength)",
+        "ipadapter_style_weight": 0.85,
+        "ipadapter_composition_weight": 0.85,
+        "ipadapter_denoise": 0.45,
         "outpaint": 128,
         "outpaint_left": None,
         "outpaint_top": None,
@@ -52,6 +55,24 @@ def workflow_args(**overrides):
     }
     values.update(overrides)
     return SimpleNamespace(**values)
+
+
+def sdxl_ipadapter_object_info():
+    return {
+        "IPAdapterModelLoader": {
+            "input": {"required": {"ipadapter_file": [[
+                "ip-adapter-plus_sdxl_vit-h.safetensors",
+                "ip-adapter_sdxl_vit-h.safetensors",
+            ]]}}
+        },
+        "CLIPVisionLoader": {
+            "input": {"required": {"clip_name": [[
+                "CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors",
+                "clip_vision_g.safetensors",
+            ]]}}
+        },
+        "IPAdapterStyleComposition": {"input": {"required": {}}},
+    }
 
 
 def test_standalone_comfyui_i2i_matrix_help_lists_core_modes():
@@ -83,6 +104,14 @@ def test_standalone_comfyui_i2i_matrix_help_lists_core_modes():
     assert "--approve-semantic-review" in result.stdout
     assert "--outpaint-preserve-source" in result.stdout
     assert "kimono_clothes" in result.stdout
+
+
+def test_standalone_outpaint_does_not_default_to_opaque_source_rectangle_composite():
+    module = load_matrix_module()
+
+    args = module.parse_args([])
+
+    assert args.outpaint_preserve_source is False
 
 
 def test_standalone_comfyui_i2i_matrix_documents_i2i_cases():
@@ -125,8 +154,8 @@ def test_blend_uses_ipadapter_conditioning_not_pixel_overlay():
     module = load_matrix_module()
     workflow = module.build_two_image_blend(
         workflow_args(),
-        {},
-        "model.safetensors",
+        sdxl_ipadapter_object_info(),
+        "SDXL\\sd_xl_base_1.0.safetensors",
         source_ref={"filename": "source.png"},
         blend_ref={"filename": "style.png"},
         prompt="semantic blend",
@@ -134,11 +163,75 @@ def test_blend_uses_ipadapter_conditioning_not_pixel_overlay():
     )
 
     classes = {node["class_type"] for node in workflow.values()}
-    assert "IPAdapterUnifiedLoader" in classes
+    assert "IPAdapterModelLoader" in classes
+    assert "CLIPVisionLoader" in classes
     assert "IPAdapterStyleComposition" in classes
     assert "ImageBlend" not in classes
-    assert workflow["7"]["inputs"]["image_style"] == ["5", 0]
-    assert workflow["7"]["inputs"]["image_composition"] == ["6", 0]
+    assert workflow["4"]["inputs"]["ipadapter_file"] == "ip-adapter-plus_sdxl_vit-h.safetensors"
+    assert workflow["5"]["inputs"]["clip_name"] == "CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors"
+    assert workflow["8"]["inputs"]["image_style"] == ["6", 0]
+    assert workflow["8"]["inputs"]["image_composition"] == ["7", 0]
+    assert workflow["8"]["inputs"]["clip_vision"] == ["5", 0]
+
+
+def test_blend_requires_sdxl_checkpoint_instead_of_submitting_a_known_incompatible_workflow():
+    module = load_matrix_module()
+
+    with pytest.raises(module.ProbeError, match="SDXL"):
+        module.build_two_image_blend(
+            workflow_args(),
+            sdxl_ipadapter_object_info(),
+            "NetaYume_v4_all_in_one.safetensors",
+            source_ref={"filename": "source.png"},
+            blend_ref={"filename": "style.png"},
+            prompt="semantic blend",
+            prefix="test",
+        )
+
+
+def test_ipadapter_style_reference_uses_the_same_explicit_sdxl_loader_chain():
+    module = load_matrix_module()
+    workflow = module.build_ipadapter_style_reference(
+        workflow_args(),
+        sdxl_ipadapter_object_info(),
+        "SDXL\\sd_xl_base_1.0.safetensors",
+        source_ref={"filename": "source.png"},
+        style_ref={"filename": "style.png"},
+        prompt="style reference",
+        prefix="test",
+    )
+
+    assert workflow["4"]["class_type"] == "IPAdapterModelLoader"
+    assert workflow["5"]["class_type"] == "CLIPVisionLoader"
+    assert workflow["8"]["class_type"] == "IPAdapterStyleComposition"
+    assert workflow["8"]["inputs"]["model"] == ["1", 0]
+    assert workflow["8"]["inputs"]["ipadapter"] == ["4", 0]
+    assert workflow["8"]["inputs"]["clip_vision"] == ["5", 0]
+
+
+def test_ipadapter_inpaint_reference_keeps_style_chain_and_mask_references_distinct():
+    module = load_matrix_module()
+    object_info = sdxl_ipadapter_object_info()
+    object_info["VAEEncodeForInpaint"] = {"input": {"required": {}}}
+    workflow = module.build_ipadapter_inpaint_reference(
+        workflow_args(inpaint_method="vae_encode"),
+        object_info,
+        "SDXL\\sd_xl_base_1.0.safetensors",
+        source_ref={"filename": "source.png"},
+        mask_ref={"filename": "mask.png"},
+        style_ref={"filename": "style.png"},
+        prompt="reference guided inpaint",
+        denoise=0.45,
+        prefix="test",
+    )
+
+    assert workflow["4"]["class_type"] == "IPAdapterModelLoader"
+    assert workflow["5"]["class_type"] == "CLIPVisionLoader"
+    assert workflow["9"]["class_type"] == "IPAdapterStyleComposition"
+    assert workflow["10"]["class_type"] == "VAEEncodeForInpaint"
+    assert workflow["10"]["inputs"]["pixels"] == ["7", 0]
+    assert workflow["10"]["inputs"]["mask"] == ["8", 0]
+    assert workflow["9"]["inputs"]["clip_vision"] == ["5", 0]
 
 
 def test_outpaint_auto_redraws_generic_checkpoint_padding_before_feathered_source_restore():
@@ -278,3 +371,23 @@ def test_outpaint_gray_canvas_is_a_machine_failure(tmp_path):
 
     assert module.outpaint_border_check(source, bad, padding)["passed"] is False
     assert module.outpaint_border_check(source, good, padding)["passed"] is True
+
+
+def test_outpaint_checks_accept_vae_aligned_trailing_edge_dimensions(tmp_path):
+    module = load_matrix_module()
+    source = tmp_path / "source.png"
+    output = tmp_path / "output.png"
+    Image.new("RGB", (529, 1315), (220, 40, 30)).save(source)
+    # Requested 785×1571 is decoded through an 8-pixel VAE latent grid as
+    # 784×1568.  The trailing right/bottom padding is therefore 127/125.
+    Image.new("RGB", (784, 1568), (220, 40, 30)).save(output)
+    padding = {"left": 128, "top": 128, "right": 128, "bottom": 128}
+
+    dimension = module.expected_dimensions_check(output, (785, 1571))
+    border = module.outpaint_border_check(source, output, padding)
+
+    assert dimension["passed"] is True
+    assert dimension["requested"] == [785, 1571]
+    assert dimension["expected"] == [784, 1568]
+    assert border["passed"] is True
+    assert border["effective_padding"] == {"left": 128, "top": 128, "right": 127, "bottom": 125}

@@ -373,8 +373,9 @@ def _disk_usage_for_storage_root(storage_root):
     }
 
 
-def get_user_cloud_drive_usage(conn, user, member_rule=None, storage_root=None):
-    ensure_upload_security_schema(conn)
+def get_user_cloud_drive_usage(conn, user, member_rule=None, storage_root=None, ensure_schema=True):
+    if ensure_schema:
+        ensure_upload_security_schema(conn)
     data = dict(user or {})
     user_id = int(data.get("id") or 0)
     capacity_probe_unlimited = str(os.environ.get("HACKME_CAPACITY_PROBE_UNLIMITED") or "").strip().lower() in {"1", "true", "yes", "on"}
@@ -398,7 +399,7 @@ def get_user_cloud_drive_usage(conn, user, member_rule=None, storage_root=None):
     media_derivative_usage = _media_derivative_usage_excluded_from_quota(conn, user_id)
     e2ee_stream_usage = _e2ee_stream_usage_excluded_from_quota(conn, user_id)
     service_cache_bytes_excluded = int(media_derivative_usage.get("bytes") or 0) + int(e2ee_stream_usage.get("bytes") or 0)
-    purchased_summary = purchased_storage_summary(conn, user_id) if user_id and not root_actor else {
+    purchased_summary = purchased_storage_summary(conn, user_id, ensure_schema=ensure_schema) if user_id and not root_actor else {
         "purchased_extra_bytes": 0,
         "active_purchase_count": 0,
         "active_purchases": [],
@@ -470,7 +471,10 @@ def get_user_cloud_drive_usage(conn, user, member_rule=None, storage_root=None):
         "by_risk_level": _count_grouped(conn, user_id, "risk_level"),
         "by_scan_status": _count_grouped(conn, user_id, "scan_status"),
     }
-    usage = apply_storage_quota_override(usage, get_storage_quota_override(conn, user_id))
+    usage = apply_storage_quota_override(
+        usage,
+        get_storage_quota_override(conn, user_id, ensure_schema=ensure_schema),
+    )
     if capacity_probe_unlimited:
         usage.update({
             "can_upload": True,

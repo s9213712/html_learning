@@ -86,6 +86,7 @@ from services.storage.storage_albums import (
     ensure_storage_album_schema,
     get_album,
     get_user_storage_summary,
+    get_user_storage_summary_snapshot,
     get_storage_file,
     list_albums,
     list_share_links,
@@ -116,6 +117,7 @@ from services.storage.storage_albums import (
     public_album_payload,
 )
 from services.users.friends import assert_can_target_user
+from services.users.member_levels import get_member_level_rule_readonly
 from services.storage.maintenance import run_storage_maintenance, storage_maintenance_status
 from services.storage.quota_overrides import (
     clear_storage_quota_override,
@@ -162,6 +164,7 @@ _ORIGINAL_DOWNLOAD_TORRENT_URL_WITH_ARIA2 = download_torrent_url_with_aria2
 def register_file_routes(app, deps):
     get_current_user_ctx = deps["get_current_user_ctx"]
     get_db = deps["get_db"]
+    get_readonly_db = deps.get("get_readonly_db", get_db)
     get_member_level_rule = deps["get_member_level_rule"]
     get_client_ip = deps.get("get_client_ip", lambda: "")
     get_ua = deps.get("get_ua", lambda: "")
@@ -3466,27 +3469,72 @@ def register_file_routes(app, deps):
                 synced.append(storage_file)
         return synced
 
+    def _has_orphan_cloud_files(conn, actor):
+        """Return whether this owner has a legacy cloud upload without a drive row.
+
+        New cloud uploads are registered in ``storage_files`` within their
+        upload transaction.  This small read-only probe retains the legacy
+        recovery behaviour without turning every drive refresh into a schema
+        migration or write transaction.
+        """
+        row = conn.execute(
+            """
+            SELECT 1
+            FROM uploaded_files f
+            WHERE f.owner_user_id=? AND f.deleted_at IS NULL
+              AND COALESCE(f.system_asset_type, '')<>'avatar'
+              AND NOT EXISTS (
+                  SELECT 1 FROM storage_files sf
+                  WHERE sf.file_id=f.id AND sf.deleted_at IS NULL
+              )
+            LIMIT 1
+            """,
+            (int(actor["id"]),),
+        ).fetchone()
+        return bool(row)
+
     @app.route("/api/storage/files", methods=["GET", "POST"])
     @require_csrf_safe
     def storage_files():
         actor, err = _actor_or_401()
         if err:
             return err
-        conn = get_db()
+        conn = get_readonly_db() if request.method == "GET" else get_db()
         try:
+            if request.method == "GET":
+                # Normal browser refreshes stay read-only.  Only an actual
+                # legacy orphan promotes this request to a short, serialized
+                # recovery write; new uploads create their drive row in the
+                # original upload transaction.
+                if _has_orphan_cloud_files(conn, actor):
+                    conn.close()
+                    conn = get_db()
+                    _sync_orphan_cloud_files_to_storage_browser(conn, actor)
+                    conn.commit()
+                    conn.close()
+                    conn = get_readonly_db()
+                include_trashed = request.args.get("include_trashed") in {"1", "true", "yes"}
+                files = list_storage_files(
+                    conn,
+                    actor=actor,
+                    include_trashed=include_trashed,
+                    limit=100,
+                    offset=0,
+                    ensure_schema=False,
+                )
+                rule = get_member_level_rule_readonly(conn, actor["effective_level"] or actor["member_level"])
+                usage = get_user_cloud_drive_usage(
+                    conn,
+                    actor,
+                    member_rule=rule,
+                    storage_root=storage_root,
+                    ensure_schema=False,
+                )
+                summary = get_user_storage_summary_snapshot(conn, actor["id"])
+                summary = _storage_summary_with_live_quota(summary, usage)
+                return json_resp({"ok": True, "files": files, "storage": summary})
             ensure_cloud_drive_attachment_schema(conn)
             ensure_storage_album_schema(conn)
-            if request.method == "GET":
-                ensure_output_album(conn, actor=actor)
-                _sync_orphan_cloud_files_to_storage_browser(conn, actor)
-                include_trashed = request.args.get("include_trashed") in {"1", "true", "yes"}
-                files = list_storage_files(conn, actor=actor, include_trashed=include_trashed, limit=100, offset=0)
-                rule = get_member_level_rule(conn, actor["effective_level"] or actor["member_level"])
-                usage = get_user_cloud_drive_usage(conn, actor, member_rule=rule, storage_root=storage_root)
-                summary = sync_user_storage_summary(conn, actor["id"], actor_user_id=actor["id"], source="list", reason="storage_files_list")
-                summary = _storage_summary_with_live_quota(summary, usage)
-                conn.commit()
-                return json_resp({"ok": True, "files": files, "storage": summary})
             if "file" not in request.files:
                 return json_resp({"ok": False, "msg": "缺少 file"}), 400
             restricted = _upload_restriction_response(conn, actor)
@@ -3619,13 +3667,14 @@ def register_file_routes(app, deps):
         actor, err = _actor_or_401()
         if err:
             return err
-        conn = get_db()
+        conn = get_readonly_db() if request.method == "GET" else get_db()
         try:
-            ensure_storage_album_schema(conn)
             if request.method == "GET":
-                ensure_output_album(conn, actor=actor)
-                conn.commit()
-                return json_resp({"ok": True, "folders": list_storage_folders(conn, actor=actor)})
+                return json_resp({
+                    "ok": True,
+                    "folders": list_storage_folders(conn, actor=actor, ensure_schema=False),
+                })
+            ensure_storage_album_schema(conn)
             try:
                 data = request.get_json(force=True)
             except Exception:
@@ -3769,15 +3818,19 @@ def register_file_routes(app, deps):
         actor, err = _actor_or_401()
         if err:
             return err
-        conn = get_db()
+        conn = get_readonly_db()
         try:
-            ensure_storage_album_schema(conn)
-            files = list_storage_trash(conn, actor=actor, limit=100, offset=0)
-            rule = get_member_level_rule(conn, actor["effective_level"] or actor["member_level"])
-            usage = get_user_cloud_drive_usage(conn, actor, member_rule=rule, storage_root=storage_root)
-            summary = sync_user_storage_summary(conn, actor["id"], actor_user_id=actor["id"], source="trash", reason="storage_trash_list")
+            files = list_storage_trash(conn, actor=actor, limit=100, offset=0, ensure_schema=False)
+            rule = get_member_level_rule_readonly(conn, actor["effective_level"] or actor["member_level"])
+            usage = get_user_cloud_drive_usage(
+                conn,
+                actor,
+                member_rule=rule,
+                storage_root=storage_root,
+                ensure_schema=False,
+            )
+            summary = get_user_storage_summary_snapshot(conn, actor["id"])
             summary = _storage_summary_with_live_quota(summary, usage)
-            conn.commit()
             return json_resp({"ok": True, "files": files, "storage": summary})
         finally:
             conn.close()
@@ -3884,12 +3937,12 @@ def register_file_routes(app, deps):
             return err
         conn = get_db()
         try:
-            ensure_storage_album_schema(conn)
             if request.method == "GET":
-                ensure_output_album(conn, actor=actor)
-                conn.commit()
-                albums = list_albums(conn, actor=actor, limit=100, offset=0)
+                # A browser listing must not create the output album or run
+                # schema DDL; either operation serializes unrelated traffic.
+                albums = list_albums(conn, actor=actor, limit=100, offset=0, ensure_schema=False)
                 return json_resp({"ok": True, "albums": albums})
+            ensure_storage_album_schema(conn)
             try:
                 data = request.get_json(force=True)
             except Exception:
@@ -3962,6 +4015,15 @@ def register_file_routes(app, deps):
             return json_resp({"ok": False, "msg": "請求 JSON 格式錯誤"}), 400
         conn = get_db()
         try:
+            # This operation reads the selected files before inserting the
+            # album and its memberships.  With SQLite's deferred transaction,
+            # another worker can acquire the writer lock between those reads
+            # and the first INSERT; the attempted read-to-write upgrade then
+            # fails immediately with ``database is locked`` despite a busy
+            # timeout.  Acquire the write reservation before any album work so
+            # concurrent requests wait safely and the all-or-nothing batch
+            # transaction remains intact.
+            conn.execute("BEGIN IMMEDIATE")
             album, msg = create_album_with_files(
                 conn,
                 actor=actor,
@@ -3993,14 +4055,12 @@ def register_file_routes(app, deps):
             return err
         conn = get_db()
         try:
-            ensure_storage_album_schema(conn)
             if request.method == "GET":
-                ensure_output_album(conn, actor=actor)
-                conn.commit()
-                album = get_album(conn, actor=actor, album_id=album_id, include_files=True)
+                album = get_album(conn, actor=actor, album_id=album_id, include_files=True, ensure_schema=False)
                 if not album:
                     return json_resp({"ok": False, "msg": "找不到相簿"}), 404
                 return json_resp({"ok": True, "album": album})
+            ensure_storage_album_schema(conn)
             if request.method == "DELETE":
                 result, msg = delete_album(conn, actor=actor, album_id=album_id)
                 if msg:
@@ -4129,6 +4189,7 @@ def register_file_routes(app, deps):
         conn = get_db()
         try:
             ensure_cloud_drive_attachment_schema(conn)
+            ensure_storage_album_schema(conn)
             rule = get_member_level_rule(conn, _actor_value(actor, "effective_level") or _actor_value(actor, "member_level"))
             try:
                 result, msg = store_cloud_upload(
@@ -4159,6 +4220,18 @@ def register_file_routes(app, deps):
             if msg:
                 conn.rollback()
                 return json_resp({"ok": False, "msg": msg}), 400
+            file_row = conn.execute("SELECT * FROM uploaded_files WHERE id=?", (result["file_id"],)).fetchone()
+            storage_file, storage_msg = create_storage_file_entry(
+                conn,
+                actor=actor,
+                file_row=file_row,
+                virtual_path=_unique_storage_path(conn, actor["id"], result.get("filename") or getattr(request.files["file"], "filename", "upload.bin")),
+                display_name=result.get("filename") or getattr(request.files["file"], "filename", "upload.bin"),
+                source="cloud_drive_upload",
+            )
+            if storage_msg:
+                conn.rollback()
+                return json_resp({"ok": False, "msg": storage_msg}), 400
             attach_result = None
             if context_type and context_id:
                 attach_result, msg = attach_existing_file(
@@ -4190,13 +4263,12 @@ def register_file_routes(app, deps):
                 job_type="cloud_drive.upload",
                 title_prefix="雲端硬碟上傳",
             )
-            file_row = conn.execute("SELECT * FROM uploaded_files WHERE id=?", (result["file_id"],)).fetchone()
             pending_copy_only_hls = _queue_cloud_drive_copy_only_hls_if_needed(conn, actor=actor, file_row=file_row)
             conn.commit()
             if pending_copy_only_hls:
                 _start_cloud_drive_copy_only_hls_worker(pending_copy_only_hls, actor=actor)
             audit("CLOUD_DRIVE_UPLOAD", get_client_ip(), user=actor["username"], success=True, ua=get_ua(), detail=f"file_id={result['file_id']}")
-            return json_resp({"ok": True, "file": result, "attachment": attach_result})
+            return json_resp({"ok": True, "file": result, "storage_file": storage_file, "attachment": attach_result})
         finally:
             conn.close()
 

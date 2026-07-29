@@ -15,6 +15,7 @@ from services.comfyui.workflow.final_model_safety import (
     final_model_safety_prompt_marker,
     verify_final_model_safety_backend_history_binding,
 )
+from services.comfyui.semantic_composite import finalize_generation_result_if_needed
 
 
 QUEUE_TIMEOUT_EXTENSION_SECONDS = 1800
@@ -1081,18 +1082,20 @@ def generate_image(
             accepts_fetch_outputs = True
         if accepts_fetch_outputs:
             kwargs["fetch_outputs"] = fetch_outputs
-        return generate_from_workflow_func(workflow, **kwargs)
-    if image_fetcher is None:
-        raise TypeError("generate_image() requires image_fetcher when generate_from_workflow_func is not provided")
-    return generate_from_workflow(
-        client,
-        workflow,
-        timeout_seconds=timeout_seconds,
-        expected_count=expected_count,
-        progress_callback=progress_callback,
-        extra_data=extra_data,
-        fetch_outputs=fetch_outputs,
-        error_cls=error_cls,
-        websocket_module=websocket_module,
-        image_fetcher=image_fetcher,
-    )
+        result = generate_from_workflow_func(workflow, **kwargs)
+    else:
+        if image_fetcher is None:
+            raise TypeError("generate_image() requires image_fetcher when generate_from_workflow_func is not provided")
+        result = generate_from_workflow(
+            client,
+            workflow,
+            timeout_seconds=timeout_seconds,
+            expected_count=expected_count,
+            progress_callback=progress_callback,
+            extra_data=extra_data,
+            fetch_outputs=fetch_outputs,
+            error_cls=error_cls,
+            websocket_module=websocket_module,
+            image_fetcher=image_fetcher,
+        )
+    return finalize_generation_result_if_needed(client, result, params, error_cls=error_cls)

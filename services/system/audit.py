@@ -346,8 +346,20 @@ def audit(action, ip, user="-", success=False, ua="-", detail="-"):
         )
 
 
-def _verify_audit_rows(rows, has_extended):
-    prev_hash = _STATE["chain_seed"]
+def _verify_audit_rows(rows, has_extended, *, initial_prev_hash=None):
+    """Verify consecutive audit rows from a known predecessor hash.
+
+    A full-chain check starts from the configured genesis seed.  A bounded
+    check must instead start from the stored hash immediately before its
+    first row; otherwise every legitimate range beginning after id=1 is
+    reported as a broken chain.
+    """
+
+    prev_hash = (
+        _STATE["chain_seed"]
+        if initial_prev_hash is None
+        else str(initial_prev_hash)
+    )
     for r in rows:
         base_entry = {
             "ts": r["ts"],
@@ -378,7 +390,13 @@ def _verify_audit_rows(rows, has_extended):
 
 
 def verify_audit_integrity(start_id=None, end_id=None):
-    """Verify a stable DB/latest-anchor observation without blocking writers."""
+    """Verify the complete chain, or a bounded consecutive chain range.
+
+    Full verification binds every row to the latest on-disk anchor and retries
+    around an anchor update.  A bounded range verifies its predecessor boundary
+    and the requested rows only; it deliberately does not claim that the full
+    chain or latest anchor has been verified.
+    """
 
     last_anchor_failure = (False, None, "audit snapshot did not stabilize")
     for attempt in range(_AUDIT_VERIFY_STABLE_ATTEMPTS):
@@ -390,11 +408,19 @@ def verify_audit_integrity(start_id=None, end_id=None):
             col_list = "id, ts, action, ip, user, success, ua, detail, chain_hash"
             if has_extended:
                 col_list = "id, ts, action, ip, user, success, ua, detail, prev_hash, entry_hash, chain_hash"
+            initial_prev_hash = None
             if start_id is None:
                 rows = conn.execute(
                     f"SELECT {col_list} FROM secure_audit ORDER BY id ASC"
                 ).fetchall()
             else:
+                predecessor = conn.execute(
+                    "SELECT id, chain_hash FROM secure_audit WHERE id<? "
+                    "ORDER BY id DESC LIMIT 1",
+                    (start_id,),
+                ).fetchone()
+                if predecessor is not None:
+                    initial_prev_hash = predecessor["chain_hash"]
                 rows = conn.execute(
                     f"SELECT {col_list} FROM secure_audit WHERE id>=? AND id<=? ORDER BY id ASC",
                     (start_id, end_id or start_id),
@@ -402,9 +428,25 @@ def verify_audit_integrity(start_id=None, end_id=None):
         finally:
             conn.close()
 
-        rows_ok, broken_at, row_details = _verify_audit_rows(rows, has_extended)
+        rows_ok, broken_at, row_details = _verify_audit_rows(
+            rows,
+            has_extended,
+            initial_prev_hash=initial_prev_hash,
+        )
         if not rows_ok:
             return False, broken_at, row_details
+
+        if start_id is not None:
+            if not rows:
+                return True, None, "range integrity OK (no entries)"
+            boundary = (
+                f"starts after audit id={int(rows[0]['id']) - 1}"
+                if initial_prev_hash is not None
+                else "starts from genesis seed"
+            )
+            return True, None, (
+                f"range integrity OK ({len(rows)} entries verified; {boundary})"
+            )
 
         anchor_after = _read_latest_audit_anchor()
         if anchor_before != anchor_after:

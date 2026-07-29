@@ -1,6 +1,6 @@
 import json
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import datetime, timezone
 import hashlib
 import io
 import os
@@ -4932,7 +4932,7 @@ def register_ai_agent_routes(app, deps):
         if warnings:
             safety_notes = (safety_notes + "\n" if safety_notes else "") + "\n".join(warnings)
         status = "needs_review" if warnings else "queued"
-        now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
         seed = json.dumps({
             "actor": _actor_value(actor, "username", ""),
             "objective": objective,

@@ -184,7 +184,7 @@ CAPACITY_TIER_PRESETS = {
         "description": "old desktop or low-power NAS; low-impact read-only probe",
     },
     "laptop": {
-        "profiles": "1x2,2x2",
+        "profiles": "1x2,1x4",
         "account_counts": "1,2",
         "load_profile": "basic",
         "max_rounds": 2,
@@ -195,7 +195,7 @@ CAPACITY_TIER_PRESETS = {
         "description": "ordinary laptop; small bounded member workflow probe",
     },
     "midrange": {
-        "profiles": "1x4,2x4,3x4",
+        "profiles": "1x4,1x16,1x32",
         "account_counts": "auto",
         "load_profile": "normal",
         "start_accounts": 4,
@@ -205,7 +205,7 @@ CAPACITY_TIER_PRESETS = {
         "description": "mid-range server; bounded normal capacity search",
     },
     "highend": {
-        "profiles": "1x6,2x6,3x6,4x6",
+        "profiles": "1x32,1x64,1x160",
         "account_counts": "auto",
         "load_profile": "normal",
         "start_accounts": 6,
@@ -397,13 +397,22 @@ def parse_profiles(raw: str) -> list[Profile]:
 
 def default_profiles() -> list[Profile]:
     cpu = max(1, int(os.cpu_count() or 1))
+    try:
+        mem_mb = int(os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") / (1024 * 1024))
+    except Exception:
+        mem_mb = 0
     candidates = [Profile(1, 6)]
-    if cpu >= 2:
-        candidates.append(Profile(2, 6))
-    if cpu >= 4:
-        candidates.append(Profile(3, 6))
-    if cpu >= 8:
-        candidates.append(Profile(4, 6))
+    # SQLite's writer lock is global to the database file.  Probe one
+    # Gunicorn process with increasingly deep gthread capacity so the selected
+    # profile cannot accidentally reintroduce cross-process write races.
+    if cpu >= 4 and (not mem_mb or mem_mb >= 4096):
+        candidates.append(Profile(1, 16))
+    if cpu >= 8 and (not mem_mb or mem_mb >= 8192):
+        candidates.append(Profile(1, 32))
+    if cpu >= 16 and (not mem_mb or mem_mb >= 16384):
+        candidates.append(Profile(1, 64))
+    if cpu >= 24 and (not mem_mb or mem_mb >= 32768):
+        candidates.append(Profile(1, 160))
     return candidates
 
 
@@ -995,7 +1004,13 @@ def start_isolated_server(args: argparse.Namespace, profile: Profile, run_root: 
     env["MANAGER_PASSWORD"] = args.manager_password
     env["TEST_PASSWORD"] = args.test_password
     if not args.keep_app_limits:
+        # The isolated capacity probe deliberately measures execution capacity,
+        # not the per-client burst guard.  Keep its documented "unlimited"
+        # mode coherent: the security event limiter was already disabled here,
+        # but the edge guard still rejected the account-seeding requests before
+        # the requested concurrency could be reached.
         env["HACKME_CAPACITY_PROBE_UNLIMITED"] = "1"
+        env["HACKME_EDGE_BURST_GUARD_ENABLED"] = "0"
     if args.disable_backpressure:
         env["HTML_LEARNING_BACKPRESSURE_ENABLED"] = "0"
     proc = subprocess.run(
@@ -2558,7 +2573,11 @@ def choose_recommendation(results: list[dict[str, Any]], args: argparse.Namespac
             "HACKME_DEV_GUNICORN_THREADS": str(profile["threads"]),
             "HACKME_DEV_GUNICORN_MAX_REQUESTS": str(max(0, int(args.gunicorn_max_requests))),
             "HACKME_DEV_GUNICORN_MAX_REQUESTS_JITTER": str(max(0, int(args.gunicorn_max_requests_jitter))),
-            "HTML_LEARNING_BACKPRESSURE_THREAD_CAPACITY": str(max(4, int(profile["threads"]))),
+            # Keep the high-end 1x160 profile's 32 spare gthread slots for
+            # health/auth/fast rejection.  The app's feature gate retains two
+            # fast-lane tokens internally, so its raw capacity is 130 when
+            # the verified business target is 128.
+            "HTML_LEARNING_BACKPRESSURE_THREAD_CAPACITY": str(min(130, max(4, int(profile["threads"])))),
             "HACKME_MEDIA_HLS_MAX_CONCURRENT": str(hls_capacity["hls_max_concurrent"]),
             "HACKME_MEDIA_HLS_SERIALIZE_ALL": str(hls_capacity["hls_serialize_all"]),
             "HACKME_MEDIA_FFMPEG_THREADS": str(hls_capacity["ffmpeg_threads"]),

@@ -155,7 +155,14 @@ def _raw_query_parameters(query: str) -> dict[str, list[bytes]]:
 class LocalTracker:
     """Minimal compact-peer tracker restricted to registered host-private endpoints."""
 
-    def __init__(self, trace: TraceRecorder, *, bind_ip: str, advertised_peer_ip: str) -> None:
+    def __init__(
+        self,
+        trace: TraceRecorder,
+        *,
+        bind_ip: str,
+        advertised_peer_ip: str,
+        listen_on_all_private_ips: bool = False,
+    ) -> None:
         self.trace = trace
         bind_address = ipaddress.ip_address(str(bind_ip))
         peer_address = ipaddress.ip_address(str(advertised_peer_ip))
@@ -165,6 +172,14 @@ class LocalTracker:
             raise ProbeFailure(f"tracker peer address must be a non-loopback host-private IPv4 address: {peer_address}")
         self.bind_ip = str(bind_address)
         self.advertised_peer_ip = str(peer_address)
+        # A single host can expose private endpoints through distinct local
+        # routing domains (for example an Ethernet address and a private /32
+        # assigned to ``lo``).  Listen on every local IPv4 destination only
+        # when the formal resume test needs to prove both endpoints.  Every
+        # announce remains constrained by a registered port and a one-time
+        # source-route proof below.
+        self.listen_on_all_private_ips = bool(listen_on_all_private_ips)
+        self.listener_bind_ip = "0.0.0.0" if self.listen_on_all_private_ips else self.bind_ip
         self._lock = threading.Lock()
         self._peers: dict[bytes, dict[bytes, dict[str, Any]]] = {}
         self._announces: list[dict[str, Any]] = []
@@ -183,7 +198,7 @@ class LocalTracker:
             def log_message(self, _format: str, *_args: Any) -> None:
                 return
 
-        self.server = ThreadingHTTPServer((self.bind_ip, 0), Handler)
+        self.server = ThreadingHTTPServer((self.listener_bind_ip, 0), Handler)
         self.server.daemon_threads = True
         self.thread = threading.Thread(target=self.server.serve_forever, name="bt-formal-tracker", daemon=True)
         self.started = False
@@ -196,6 +211,20 @@ class LocalTracker:
     def announce_url(self) -> str:
         return f"http://{self.bind_ip}:{self.port}/announce"
 
+    def announce_url_for_peer(self, peer_ip: str) -> str:
+        """Return the tracker URL reachable from one proven private endpoint."""
+
+        address = ipaddress.ip_address(str(peer_ip))
+        if (
+            not isinstance(address, ipaddress.IPv4Address)
+            or not address.is_private
+            or address.is_loopback
+        ):
+            raise ProbeFailure(f"invalid private tracker endpoint: {peer_ip}")
+        if not self.listen_on_all_private_ips and str(address) != self.bind_ip:
+            raise ProbeFailure("tracker is not listening on alternate private endpoints")
+        return f"http://{address}:{self.port}/announce"
+
     def start(self) -> None:
         if self.started:
             raise ProbeFailure("local tracker was started twice")
@@ -204,17 +233,33 @@ class LocalTracker:
         self.trace.emit(
             "tracker_started",
             bind_ip=self.bind_ip,
+            listener_bind_ip=self.listener_bind_ip,
             advertised_peer_ip=self.advertised_peer_ip,
             port=self.port,
             announce_url=self.announce_url,
         )
 
-    def prove_routed_source(self, peer_ip: str, *, timeout: float = 5.0) -> dict[str, Any]:
+    def prove_routed_source(
+        self,
+        peer_ip: str,
+        *,
+        tracker_ip: str | None = None,
+        timeout: float = 5.0,
+    ) -> dict[str, Any]:
         """Prove the routed/NAT source produced by a locally bound peer socket."""
 
         address = ipaddress.ip_address(str(peer_ip))
         if not isinstance(address, ipaddress.IPv4Address) or not address.is_private or address.is_loopback:
             raise ProbeFailure(f"invalid peer source-proof address: {peer_ip}")
+        tracker_address = ipaddress.ip_address(str(tracker_ip or self.bind_ip))
+        if (
+            not isinstance(tracker_address, ipaddress.IPv4Address)
+            or not tracker_address.is_private
+            or tracker_address.is_loopback
+        ):
+            raise ProbeFailure(f"invalid source-proof tracker endpoint: {tracker_ip}")
+        if not self.listen_on_all_private_ips and str(tracker_address) != self.bind_ip:
+            raise ProbeFailure("tracker is not listening on alternate private endpoints")
         token = secrets.token_urlsafe(32)
         token_sha256 = hashlib.sha256(token.encode("ascii")).hexdigest()
         pending = {
@@ -229,7 +274,7 @@ class LocalTracker:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client:
                 client.settimeout(float(timeout))
                 client.bind((str(address), 0))
-                client.connect((self.bind_ip, self.port))
+                client.connect((str(tracker_address), self.port))
                 request = (
                     f"GET /source-proof/{token} HTTP/1.1\r\n"
                     f"Host: {self.bind_ip}:{self.port}\r\n"
@@ -304,7 +349,42 @@ class LocalTracker:
         with self._lock:
             removed = self._peer_ip_by_port.pop(endpoint_port, None)
             self._source_proof_by_port.pop(endpoint_port, None)
-        self.trace.emit("tracker_peer_endpoint_unregistered", peer_ip=removed or "", port=endpoint_port)
+            purged = self._purge_peer_records_locked(endpoint_port)
+        self.trace.emit(
+            "tracker_peer_endpoint_unregistered",
+            peer_ip=removed or "",
+            port=endpoint_port,
+            purged_peer_records=purged,
+        )
+
+    def purge_peer_endpoint_records(self, port: int) -> int:
+        """Forget stale announces for a re-created local peer endpoint.
+
+        A stopped Transmission torrent need not emit a tracker ``stopped``
+        event before it is removed.  Retaining that old peer-id makes the
+        compact peer list advertise a listener that no longer exists.  This
+        only affects the in-memory formal tracker and does not change the
+        endpoint registration or its source-route proof.
+        """
+
+        endpoint_port = int(port)
+        with self._lock:
+            purged = self._purge_peer_records_locked(endpoint_port)
+        self.trace.emit("tracker_peer_records_purged", port=endpoint_port, purged_peer_records=purged)
+        return purged
+
+    def _purge_peer_records_locked(self, endpoint_port: int) -> int:
+        purged = 0
+        for swarm in self._peers.values():
+            stale_peer_ids = [
+                peer_id
+                for peer_id, peer in swarm.items()
+                if int(peer.get("port") or 0) == endpoint_port
+            ]
+            for peer_id in stale_peer_ids:
+                swarm.pop(peer_id, None)
+                purged += 1
+        return purged
 
     def stop(self) -> None:
         if not self.started:
@@ -561,8 +641,14 @@ def _host_private_ipv4() -> str:
 
 
 def _host_private_ipv4_candidates() -> list[str]:
-    primary = _host_private_ipv4()
-    candidates = [primary]
+    # A formal local-only network namespace intentionally has no default
+    # route.  Enumerate bound interfaces first; the historical route-based
+    # detector is only a preference hint when it is available.
+    try:
+        primary = _host_private_ipv4()
+    except ProbeFailure:
+        primary = ""
+    candidates = [primary] if primary else []
     ip_executable = shutil.which("ip")
     if ip_executable:
         try:
@@ -579,7 +665,8 @@ def _host_private_ipv4_candidates() -> list[str]:
         except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
             rows = []
         for row in rows if isinstance(rows, list) else []:
-            if str(row.get("ifname") or "") == "lo":
+            is_loopback_interface = str(row.get("ifname") or "") == "lo"
+            if is_loopback_interface:
                 continue
             for address_row in row.get("addr_info") or []:
                 value = str(address_row.get("local") or "")
@@ -625,6 +712,49 @@ def _tcp_endpoint_open(ip: str, port: int, *, timeout: float = 0.2) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.settimeout(timeout)
         return sock.connect_ex((str(ip), int(port))) == 0
+
+
+def _partial_download_evidence(roots: list[Path], expected_name: str) -> dict[str, Any]:
+    """Find the physical partial payload without assuming daemon-version layout."""
+
+    candidates: list[dict[str, Any]] = []
+    matches: list[Path] = []
+    seen: set[Path] = set()
+    for root in roots:
+        resolved = root.expanduser().resolve(strict=False)
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if not resolved.is_dir():
+            continue
+        try:
+            entries = sorted(resolved.rglob("*"))
+        except OSError:
+            continue
+        for entry in entries:
+            try:
+                if not entry.is_file():
+                    continue
+                size = int(entry.stat().st_size)
+            except OSError:
+                continue
+            row = {"path": str(entry), "name": entry.name, "size_bytes": size}
+            if len(candidates) < 40:
+                candidates.append(row)
+            # Transmission 3 writes an allocated ``.part`` sibling until the
+            # torrent completes; newer releases can expose the final name.
+            # Both are physical partial payloads in the configured download
+            # directory and must be handed back to the daemon for verification.
+            if entry.name in {expected_name, f"{expected_name}.part"} and size > 0:
+                matches.append(entry)
+    selected = sorted(matches, key=lambda path: path.stat().st_size, reverse=True)
+    return {
+        "expected_name": expected_name,
+        "roots": [str(root.expanduser().resolve(strict=False)) for root in roots],
+        "candidates": candidates,
+        "path": str(selected[0]) if selected else "",
+        "path_exists": bool(selected),
+    }
 
 
 @dataclass
@@ -697,7 +827,10 @@ class TransmissionDaemon:
             "--no-portmap",
             "--no-blocklist",
             "--no-global-seedratio",
-            "--log-level", "info",
+            # ``--log-level`` is not accepted by the supported Transmission
+            # 3.x daemon.  ``--log-info`` keeps the same diagnostics while
+            # remaining valid on both 3.x and newer releases.
+            "--log-info",
         ]
 
     def start(self, *, timeout: float = 20) -> int:
@@ -1028,6 +1161,7 @@ def _torrent_snapshot(item: dict[str, Any]) -> dict[str, Any]:
         "downloaded_bytes": int(item.get("downloadedEver") or 0),
         "left_bytes": int(item.get("leftUntilDone") or 0),
         "rate_download_bytes_per_sec": int(item.get("rateDownload") or 0),
+        "recheck_progress": float(item.get("recheckProgress") or 0),
         "error_code": int(item.get("error") or 0),
         "error_string": str(item.get("errorString") or ""),
         "peers_connected": int(item.get("peersConnected") or 0),
@@ -1050,6 +1184,7 @@ TORRENT_FIELDS = [
     "downloadedEver",
     "leftUntilDone",
     "rateDownload",
+    "recheckProgress",
     "error",
     "errorString",
     "peersConnected",
@@ -1368,14 +1503,24 @@ def derive_checks(raw: dict[str, Any]) -> dict[str, dict[str, Any]]:
         and piece_size == TORRENT_PIECE_SIZE_BYTES
         and verified_piece_floor > 0
         and 0 <= incomplete_piece_loss < piece_size
-        and _snapshot_completed_bytes(recovery_after) == verified_piece_floor
+        # Transmission 3 retains the exact pre-pause byte count in its
+        # ``files[].bytesCompleted`` field after a verify operation, while
+        # newer builds may round down the trailing incomplete piece.  Both
+        # representations are safe only if they preserve at least every full
+        # piece, never invent data, and discard less than one piece.
+        and verified_piece_floor <= _snapshot_completed_bytes(recovery_after) <= stable_completed
         and int(resume_recovery.get("preserved_completed_bytes") or -1) == stable_completed
-        and int(resume_recovery.get("verified_completed_bytes") or -1) == verified_piece_floor
+        and verified_piece_floor <= int(resume_recovery.get("verified_completed_bytes") or -1) <= stable_completed
+        and 0 <= int(
+            resume_recovery.get("discarded_incomplete_piece_bytes")
+            if resume_recovery.get("discarded_incomplete_piece_bytes") is not None
+            else -1
+        ) < piece_size
         and int(
             resume_recovery.get("discarded_incomplete_piece_bytes")
             if resume_recovery.get("discarded_incomplete_piece_bytes") is not None
             else -1
-        ) == incomplete_piece_loss
+        ) == stable_completed - _snapshot_completed_bytes(recovery_after)
         and resume_recovery.get("partial_path_exists") is True
         and seed_rotation_ok
         and after_resume_completed >= verified_piece_floor + piece_size
@@ -1522,7 +1667,10 @@ class FormalBTProbe:
         self.peer_bind_ips = _host_private_ipv4_candidates()
         self.peer_bind_ip = self.peer_bind_ips[0]
         if len(self.peer_bind_ips) < 2:
-            raise ProbeFailure("formal BT resume requires two distinct host-private IPv4 peer interfaces")
+            raise ProbeFailure(
+                "formal BT resume requires two distinct mutually reachable "
+                "non-loopback host-private IPv4 peer interfaces"
+            )
         required = {}
         for name in ("transmission-daemon", "transmission-create", "transmission-show", "ffmpeg", "ffprobe", "aria2c"):
             path = shutil.which(name)
@@ -1546,6 +1694,7 @@ class FormalBTProbe:
             self.trace,
             bind_ip=self.peer_bind_ip,
             advertised_peer_ip=self.peer_bind_ip,
+            listen_on_all_private_ips=len(self.peer_bind_ips) > 1,
         )
         self.tracker.start()
         payload = self.artifact_dir / f"bt-formal-{self.run_id}.ts"
@@ -1755,7 +1904,11 @@ class FormalBTProbe:
         if new_port <= 0:
             raise ProbeFailure("could not allocate alternate controlled seed peer port")
 
-        alternate_source_proof = self.tracker.prove_routed_source(alternate_ip)
+        alternate_tracker_url = self.tracker.announce_url_for_peer(alternate_ip)
+        alternate_source_proof = self.tracker.prove_routed_source(
+            alternate_ip,
+            tracker_ip=alternate_ip,
+        )
 
         stop_evidence = self.seed.stop()
         if stop_evidence.pid_remaining:
@@ -1783,6 +1936,10 @@ class FormalBTProbe:
             trace=self.trace,
         )
         seed_id = seed_state.get("id")
+        self.seed.rpc.call(
+            "torrent-set",
+            {"ids": [seed_id], "trackerAdd": [alternate_tracker_url]},
+        )
         self.seed.rpc.call("torrent-start", {"ids": [seed_id]})
         self.seed.rpc.call("torrent-reannounce", {"ids": [seed_id]})
         deadline = time.monotonic() + 15
@@ -1813,6 +1970,7 @@ class FormalBTProbe:
             "old_pid_exited": not _pid_exists(old_pid),
             "old_listener_closed": not _tcp_endpoint_open(old_ip, old_port),
             "new_listener_open": _tcp_endpoint_open(alternate_ip, new_port),
+            "alternate_tracker_url": alternate_tracker_url,
             "torrent_persisted": seed_state.get("hash_string") == info_hash,
             "tracker_updated": tracker_updated,
             "source_route_proof": alternate_source_proof,
@@ -1896,9 +2054,21 @@ class FormalBTProbe:
         verified_piece_floor = stable_completed - (stable_completed % TORRENT_PIECE_SIZE_BYTES)
         if verified_piece_floor <= 0:
             raise ProbeFailure("paused magnet has not completed one full torrent piece")
-        partial_path = download_dir / payload.name
-        if not partial_path.is_file():
-            raise ProbeFailure("paused magnet partial file is missing before recovery")
+        partial_evidence = _partial_download_evidence(
+            [download_dir, self.client.download_dir],
+            payload.name,
+        )
+        self.raw["magnet"]["pause_resume"]["resume_recovery"]["partial_file"] = partial_evidence
+        partial_path = Path(str(partial_evidence.get("path") or ""))
+        if partial_evidence.get("path_exists") is not True or not partial_path.is_file():
+            raise ProbeFailure(
+                "paused magnet partial file is missing before recovery: "
+                + json.dumps(partial_evidence, ensure_ascii=False)
+            )
+        # ``torrent-remove`` on a paused client does not reliably emit a
+        # tracker stopped event.  Drop only this client port's stale peer-id
+        # before re-adding so it cannot be returned as a false peer.
+        self.tracker.purge_peer_endpoint_records(self.client.peer_port)
         self.client.rpc.call("torrent-remove", {"ids": [torrent_id], "delete-local-data": False})
         old_torrent_absent = _wait_torrent_absent(
             self.client.rpc,
@@ -1915,7 +2085,7 @@ class FormalBTProbe:
             "torrent-add",
             {
                 "metainfo": base64.b64encode(metainfo_path.read_bytes()).decode("ascii"),
-                "download-dir": str(download_dir),
+                "download-dir": str(partial_path.parent),
                 "paused": True,
             },
             timeout=20,
@@ -1934,18 +2104,37 @@ class FormalBTProbe:
             },
         )
         self.client.rpc.call("torrent-verify", {"ids": [recovered_torrent_id]})
+        # A freshly re-added paused torrent initially reports ``stopped`` even
+        # though the asynchronous verification has only been queued.  Do not
+        # rotate the seed endpoint while the client is still verifying: it
+        # would miss the new peer and appear to be a failed resume.  Require a
+        # visible check_wait/checking state before accepting its terminal
+        # return to stopped.
+        verification_seen = False
+
+        def verified_partial(item: dict[str, Any]) -> bool:
+            nonlocal verification_seen
+            if int(item.get("status_code") or 0) in {1, 2} or float(
+                item.get("recheck_progress") or 0
+            ) > 0:
+                verification_seen = True
+                return False
+            return bool(
+                verification_seen
+                and item.get("status") == "stopped"
+                and item.get("hash_string") == info_hash
+                and float(item.get("metadata_percent_complete") or 0) >= 1
+                and verified_piece_floor <= _snapshot_completed_bytes(item) <= stable_completed
+            )
+
         recovered = _wait_for_snapshot(
             self.client.rpc,
             recovered_torrent_id,
             description="piece-verified partial magnet after resume recovery",
-            predicate=lambda item: (
-                item.get("status") == "stopped"
-                and item.get("hash_string") == info_hash
-                and float(item.get("metadata_percent_complete") or 0) >= 1
-                and _snapshot_completed_bytes(item) == verified_piece_floor
-            ),
-            timeout=60,
+            predicate=verified_partial,
+            timeout=max(60.0, min(float(self.args.timeout_seconds), 300.0)),
             trace=self.trace,
+            poll_seconds=0.1,
         )
         seed_ip_rotation = self._rotate_seed_peer_ip_for_resume(info_hash)
         self.client.rpc.call("torrent-start", {"ids": [recovered_torrent_id]})

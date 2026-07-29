@@ -15,6 +15,29 @@
 
 這份文件的目標不是取代它們，而是先回答「我要驗什麼、該先跑哪個、哪些其實是 wrapper、哪些是深層 runbook」。
 
+## 2026-07-29 現行回歸基線與判讀
+
+- 完整 Python suite 已以隔離 runtime 收集 `4703` 個 nodeid 並通過；後續改動仍應
+  依下方「全量 pytest」命令重跑，而不是把這筆結果當成永久 green。
+- AI Agent 的實際瀏覽器回歸必須確認 planner 與一般 chat 都取得 `200`、頁面沒有
+  console/page error，且設定面顯示已連線。雲端模型的 schema-heavy planner 預算
+  與 browser timeout 必須一起保持在總 chat timeout 以內，避免健康回應被前端過早
+  中止而誤報 `502`。
+- ComfyUI 的 i2i、outpaint、upscale、blend 與 HF/Diffusers 都必須保存可開啟的
+  圖片供人工視覺檢查；queue 成功、檔案存在或非空白檢查都不足以證明沒有框線、
+  主體漂移或不可用結果。具體步驟見
+  [comfyui/I2I_OUTPAINT_VALIDATION.md](comfyui/I2I_OUTPAINT_VALIDATION.md)。
+- 交易回歸至少要覆蓋現貨、借貸、DCA、Grid、Workflow 和 backtest。新增的 DCA
+  價格界限與 Workflow UTC 每日上限要同時用背景掃描與手動掃描觸發，確認 skipped
+  reason、原子計數與失敗補償都正確。
+- 本機 BT formal probe 已驗證 tracker-free、暫停/恢復與 daemon restart 的單機
+  生命週期。正式多 IP 簽核仍必須在具有兩個可互通私有位址的主機或測試網段執行；
+  單一介面不能冒充多 IP 成功。probe 維持 fail-closed：
+
+  ```bash
+  python3 scripts/testing/bt_formal_local_probe.py --out /tmp/bt_formal.json
+  ```
+
 ## 使用方法
 
 ### 最常用的測試層級

@@ -504,11 +504,17 @@ class DiffusersClient:
             return inferred
         raise ComfyUIError("GGUF 需要設定 base Diffusers repo，例如 stabilityai/stable-diffusion-xl-base-1.0")
 
-    def _resolve_diffusers_variant(self, model_repo, *, explicit_variant="", mode="txt2img"):
+    def _resolve_diffusers_variant(self, model_repo, *, explicit_variant="", explicit_variant_selected=False, mode="txt2img"):
         explicit_variant = str(explicit_variant or "").strip()
         normalized = normalize_diffusers_variant(explicit_variant, allow_blank=True)
         if normalized:
             return normalized
+        # ``__default__`` becomes an empty Diffusers variant. Keep the fact
+        # that the caller selected it so a multi-variant repo can use its
+        # documented default weights instead of treating that selection as
+        # absent.
+        if explicit_variant_selected:
+            return ""
         if not model_repo:
             return ""
         inspection = inspect_huggingface_diffusers_repo(model_repo, token=self.token, mode=mode)
@@ -2215,7 +2221,12 @@ class DiffusersClient:
         if gguf_file:
             variant = ""
         else:
-            variant = self._resolve_diffusers_variant(model_repo, explicit_variant=self._effective_model_variant(params), mode=mode)
+            variant = self._resolve_diffusers_variant(
+                model_repo,
+                explicit_variant=self._effective_model_variant(params),
+                explicit_variant_selected=bool(params.get("diffusers_model_variant_selected")),
+                mode=mode,
+            )
         gguf_base_repo = ""
         if gguf_file:
             gguf_base_repo = self._effective_gguf_base_repo(params, model_repo=model_repo)

@@ -27,6 +27,17 @@ def test_uiverse_galaxy_layer_preserves_accessibility_and_mobile_motion_policy()
     assert ".btn-primary" in galaxy_css
     assert ".field:focus-within" in galaxy_css
     assert ".btn:focus-visible" in galaxy_css
-    assert "@media (max-width: 720px)" in galaxy_css
+    assert "@media (max-width: 860px)" in galaxy_css
     assert "@media (prefers-reduced-motion: reduce)" in galaxy_css
     assert "body.app-authenticated .admin-tools" in galaxy_css
+
+
+def test_uiverse_galaxy_dark_selects_do_not_fall_back_to_a_white_native_menu():
+    galaxy_css = (ROOT / "public" / "uiverse-galaxy.css").read_text(encoding="utf-8")
+
+    assert 'body:not([data-theme-mode="light"]) select' in galaxy_css
+    assert "color-scheme: dark;" in galaxy_css
+    assert "background-color: #0d1628;" in galaxy_css
+    assert "select option," in galaxy_css
+    assert "select optgroup" in galaxy_css
+    assert "background-color: #101a2d;" in galaxy_css

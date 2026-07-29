@@ -795,6 +795,10 @@ def test_prepare_stream_asset_preserves_multi_audio_and_many_subtitles(tmp_path,
         output_path.write_text("WEBVTT\n\n00:00:01.000 --> 00:00:02.000\n字幕\n", encoding="utf-8")
         return type("Completed", (), {"stdout": "", "stderr": "", "returncode": 0})()
 
+    # Cloud-drive background workers enable forced stream-copy for the video
+    # portion.  It must still keep every source audio track as a selectable
+    # external HLS rendition.
+    monkeypatch.setenv("HACKME_MEDIA_HLS_FORCE_COPY", "1")
     monkeypatch.setattr(media_streaming, "_run_probe", probe_payload)
     monkeypatch.setattr(media_streaming, "_run_ffmpeg_hls", fake_hls)
     monkeypatch.setattr(media_streaming.subprocess, "run", fake_run)

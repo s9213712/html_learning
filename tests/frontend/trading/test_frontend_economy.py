@@ -1192,6 +1192,9 @@ def test_trading_exchange_is_separate_from_wallet_page():
     assert 'id="trading-dca-share-parameters"' in trading_section
     assert 'id="trading-grid-share-parameters"' in trading_section
     assert 'id="trading-auto-share-parameters"' in trading_section
+    assert 'id="trading-auto-strategy-mode"' not in trading_section
+    assert "Workflow JSON 是唯一執行設定" in trading_section
+    assert "strategy_mode:" not in trading_js
     assert 'id="trading-bot-scan-btn"' in trading_section
     assert 'id="trading-dca-backtest-run-btn"' in trading_section
     assert 'id="trading-grid-backtest-run-btn"' in trading_section

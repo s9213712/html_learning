@@ -5,6 +5,7 @@ import argparse
 import io
 import json
 import os
+import queue
 import random
 import ssl
 import subprocess
@@ -46,6 +47,21 @@ DEFENSIVE_LATENCY_OPS = {
 WORKER_TELEMETRY_SCHEMA_VERSION = "hackme.system-stress-worker-telemetry.v1"
 PERSONA_COVERAGE_SCHEMA_VERSION = "hackme.system-stress-account-personas.v1"
 PERSONA_DEFERRED_TERMINAL_OPERATIONS = frozenset({"hf_generate", "hls_master"})
+# Authenticated CSRF tokens are one-use/rotated credentials.  A single account
+# cannot safely submit independent mutations through hundreds of cloned cookie
+# jars at once; keep its mutation lane serialized while the read surface stays
+# fully concurrent.  Multi-account campaigns retain one lane per account.
+CSRF_MUTATION_OPERATIONS = frozenset({
+    "drive_upload",
+    "resumable_start",
+    "hf_quote",
+    "hf_generate",
+    "remote_direct_reject",
+    "bt_reject",
+    "trading_grid_preview",
+    "community_bad_thread",
+    "chat_bad_message",
+})
 
 
 def utc_now() -> str:
@@ -664,6 +680,11 @@ def setup_seed(client: Client, artifact_dir: Path) -> dict[str, Any]:
 
     def remember(name: str, result: dict[str, Any]) -> None:
         seed[name] = {k: result.get(k) for k in ("ok", "status", "elapsed_ms", "error")}
+        if not result.get("ok"):
+            seed["errors"].append(
+                f"{name} failed: status={int(result.get('status') or 0)} "
+                f"error={str(result.get('error') or '')[:180]}"
+            )
 
     result = client.request(
         "seed_drive_upload",
@@ -702,8 +723,16 @@ def setup_seed(client: Client, artifact_dir: Path) -> dict[str, Any]:
                 "POST",
                 "/api/videos/upload",
                 files={"video": ("seed.mp4", fh, "video/mp4")},
-                data={"title": "stress seed video", "visibility": "unlisted", "share_password": "StressVideo123!"},
-                expected={200, 400, 409, 500},
+                data={
+                    "title": "stress seed video",
+                    "visibility": "unlisted",
+                    "share_password": "StressVideo123!",
+                    # standard_plain defaults to direct-only by policy.  The
+                    # HLS lane must explicitly opt in so it verifies a real
+                    # queued/ready playlist instead of an unprepared asset.
+                    "streaming_modes": json.dumps(["prepared_hls", "realtime_proxy"]),
+                },
+                expected={200},
             )
         remember("video_upload", result)
         if result.get("status") == 200:
@@ -712,6 +741,26 @@ def setup_seed(client: Client, artifact_dir: Path) -> dict[str, Any]:
                 videos = body.get("videos") or []
                 if videos:
                     seed["video_id"] = videos[0].get("id")
+                    # A just-uploaded video may still be packaging.  Wait for
+                    # a terminal HLS master before the concurrent phase so a
+                    # 409 "processing" is not mistaken for a broken playlist.
+                    deadline = time.monotonic() + 45.0
+                    latest = {"status": 0, "error": "not checked"}
+                    while time.monotonic() < deadline:
+                        latest = client.request(
+                            "seed_hls_master",
+                            "GET",
+                            f"/api/videos/{seed['video_id']}/hls/master.m3u8",
+                            expected={200, 403, 404, 409},
+                        )
+                        if latest.get("status") != 409:
+                            break
+                        time.sleep(0.5)
+                    seed["hls_master"] = {
+                        key: latest.get(key)
+                        for key in ("ok", "status", "elapsed_ms", "error")
+                    }
+                    seed["hls_ready"] = int(latest.get("status") or 0) == 200
             except Exception as exc:
                 seed["errors"].append(f"video lookup failed: {exc}")
     else:
@@ -1083,6 +1132,41 @@ def run_in_client_slot(
             telemetry.end_operation()
 
 
+def build_client_slot_pools(clients: list[Client]) -> dict[str, queue.Queue[Client]]:
+    """Create exclusive reusable client lanes grouped by authenticated account."""
+
+    pools: dict[str, queue.Queue[Client]] = {}
+    for client in clients:
+        pools.setdefault(str(client.username), queue.Queue()).put(client)
+    return pools
+
+
+def run_in_available_client_slot(
+    client_slots: queue.Queue[Client],
+    telemetry: InflightWorkerTelemetry,
+    operation: Callable[[Client], dict[str, Any]],
+) -> tuple[str, dict[str, Any]]:
+    """Borrow one exclusive client without serializing unrelated workers.
+
+    Executor workers may finish tasks out of task-id order.  Binding a later
+    task directly to a still-busy client then turns a nominal 128-way run into
+    lock waiters that are correctly excluded from native telemetry, but no
+    longer constitute useful load.  A returned client becomes the next free
+    lane for the requested account instead.
+    """
+
+    client = client_slots.get()
+    try:
+        result = run_in_client_slot(
+            client,
+            telemetry,
+            lambda: operation(client),
+        )
+        return str(client.username), result
+    finally:
+        client_slots.put(client)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", required=True)
@@ -1209,6 +1293,12 @@ def main() -> int:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 2
 
+    client_slot_pools = build_client_slot_pools(clients)
+    # The original authenticated seed client owns the current rotated CSRF
+    # token.  Give each account one exclusive mutation lane; cloned clients
+    # remain available for all GET/HEAD traffic at configured concurrency.
+    csrf_mutation_slot_pools = build_client_slot_pools(list(account_seeds.values()))
+
     stats = Stats()
     # Rotation coverage is about dispatching every mandatory operation, not
     # silently losing evidence when an operation fails before its result is
@@ -1271,29 +1361,31 @@ def main() -> int:
             with persona_dispatch_lock:
                 persona_dispatches[desired_account][persona_lane] += 1
                 persona_dispatches[desired_account][op] += 1
-            account_clients = [item for item in clients if item.username == desired_account]
-            client = account_clients[
-                rotation_client_index(
-                    rotation_task_id,
-                    len(accounts),
-                    len(account_clients),
-                )
-            ] if account_clients else clients[task_id % len(clients)]
         else:
-            client = clients[task_id % len(clients)]
+            desired_account = str(clients[task_id % len(clients)].username)
             op = choose_operation(rng, weighted_ops)
+        client_slots = (
+            csrf_mutation_slot_pools.get(desired_account)
+            if op in CSRF_MUTATION_OPERATIONS
+            else client_slot_pools.get(desired_account)
+        )
+        if client_slots is None:
+            # Login failures are reported by account coverage below.  Keep the
+            # probe runnable long enough to emit that evidence rather than
+            # silently substituting a shared locked client.
+            client_slots = client_slot_pools[str(clients[task_id % len(clients)].username)]
         attempted_operations.add(op)
         start_event.wait()
-        result = run_in_client_slot(
-            client,
+        account, result = run_in_available_client_slot(
+            client_slots,
             worker_telemetry,
-            lambda: run_operation(op, client, seed, budget, task_id),
+            lambda client: run_operation(op, client, seed, budget, task_id),
         )
         record_operation_result(
             stats,
             requested_operation=op,
             result=result,
-            account=client.username,
+            account=account,
         )
 
     started_at = utc_now()
@@ -1358,10 +1450,16 @@ def main() -> int:
         name: int((summary.get("ops") or {}).get(name, {}).get("successful_2xx") or 0)
         for name in operation_names
     }
+    global_positive_operations = set(GLOBAL_SUCCESS_REQUIRED_OPERATIONS) - set(PERSONA_DEFERRED_TERMINAL_OPERATIONS)
     operations_without_success = sorted(
         name
-        for name in GLOBAL_SUCCESS_REQUIRED_OPERATIONS
+        for name in global_positive_operations
         if successful_operation_counts.get(name, 0) <= 0
+    )
+    deferred_terminal_operations_without_2xx = sorted(
+        name
+        for name in PERSONA_DEFERRED_TERMINAL_OPERATIONS
+        if int(successful_operation_counts.get(name, 0) or 0) <= 0
     )
     account_success_counts = {
         username: dict(
@@ -1465,6 +1563,7 @@ def main() -> int:
         "missing_operations": missing_operations,
         "successful_operation_counts": successful_operation_counts,
         "operations_without_success": operations_without_success,
+        "deferred_terminal_operations_without_2xx": deferred_terminal_operations_without_2xx,
         "account_success_counts": account_success_counts,
         "account_success_gaps": account_success_gaps,
         "account_expected_success_counts": account_expected_success_counts,

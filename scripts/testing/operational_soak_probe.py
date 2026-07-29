@@ -33,6 +33,7 @@ from scripts.testing.operation_coverage import (  # noqa: E402
     ACCOUNT_SUCCESS_REQUIRED_OPERATIONS,
     GLOBAL_SUCCESS_REQUIRED_OPERATIONS,
 )
+from scripts.testing.system_stress_probe import build_weighted_ops  # noqa: E402
 from scripts.testing.campaign_load import (  # noqa: E402
     EffectiveLoadWindow,
     summarize_target_load,
@@ -97,6 +98,9 @@ SENSITIVE_COMMAND_FLAGS = {
 }
 SUPERVISOR_COMPLETION_REASONS = frozenset({"required_continuous_active_duration_completed"})
 FORMAL_RAMP_LEVELS = tuple(SUPERVISED_LOAD_POLICIES["formal"]["ramp_levels"])
+FORMAL_TARGET_LOAD_LEVEL = int(
+    SUPERVISED_LOAD_POLICIES["formal"]["target_load_level"]
+)
 RAMP_MINIMUM_STAGE_SECONDS = {
     level: {
         int(stage): float(seconds)
@@ -123,6 +127,8 @@ SOAK_DEFERRED_SUCCESS_OPERATIONS = frozenset({"hf_generate", "hls_master"})
 SOAK_REQUIRED_SUCCESS_OPERATIONS = (
     GLOBAL_SUCCESS_REQUIRED_OPERATIONS - SOAK_DEFERRED_SUCCESS_OPERATIONS
 )
+MAINTENANCE_FENCE_SCHEMA_VERSION = "hackme.core-maintenance-fence/v1"
+MAINTENANCE_ACK_SCHEMA_VERSION = "hackme.core-maintenance-ack/v1"
 
 
 class CoreActivationStopped(RuntimeError):
@@ -187,6 +193,23 @@ def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
     os.replace(temporary, path)
+
+
+def read_maintenance_fence(path: Path | None) -> tuple[dict[str, Any] | None, str]:
+    """Read a campaign-owned restart fence without treating it as load data."""
+
+    if path is None or not path.exists():
+        return None, ""
+    payload = load_json(path)
+    if payload.get("schema_version") != MAINTENANCE_FENCE_SCHEMA_VERSION:
+        return None, "maintenance_fence_schema"
+    if not isinstance(payload.get("active"), bool):
+        return None, "maintenance_fence_active"
+    if not isinstance(payload.get("nonce"), str) or not payload["nonce"]:
+        return None, "maintenance_fence_nonce"
+    if not isinstance(payload.get("reason"), str) or not payload["reason"]:
+        return None, "maintenance_fence_reason"
+    return payload, ""
 
 
 def activation_contract(args: argparse.Namespace, runtime_root: Path) -> dict[str, Any]:
@@ -479,11 +502,12 @@ def normalized_32_throughput(
     operations_completed: int,
     window_seconds: float,
     scheduled_load_level: int,
+    target_load_level: int = 32,
 ) -> float:
     if window_seconds <= 0 or scheduled_load_level <= 0:
         return 0.0
     observed_per_minute = float(operations_completed) / float(window_seconds) * 60.0
-    return observed_per_minute * 32.0 / float(scheduled_load_level)
+    return observed_per_minute * float(target_load_level) / float(scheduled_load_level)
 
 
 def normalized_degradation_reason(reasons: list[str]) -> str:
@@ -509,6 +533,8 @@ def build_effective_load_sample(
     expected_operations: int,
     baseline_32_operations_per_minute: float,
     window_started_at: str,
+    target_load_level: int = 32,
+    minimum_active_workers_at_target: int = 28,
 ) -> dict[str, Any]:
     summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
     completed = int(summary.get("total_ops") or 0)
@@ -533,6 +559,8 @@ def build_effective_load_sample(
         attempts=attempts,
         baseline_32_operations_per_minute=float(baseline_32_operations_per_minute),
         degradation_reason=normalized_degradation_reason(operational_reasons),
+        target_load_level=int(target_load_level),
+        minimum_active_workers_at_target=int(minimum_active_workers_at_target),
     ).evidence()
     evidence["worker_measurement"] = {
         "method": "native_inflight_operation_counter_time_samples",
@@ -853,15 +881,30 @@ def sentinel_loop(
     root: ApiClient,
     manager: ApiClient,
     interval_seconds: float,
+    maintenance_pause: threading.Event | None = None,
+    idle: threading.Event | None = None,
 ) -> None:
     start.wait()
+    if idle is not None:
+        idle.set()
     while not stop.is_set():
+        if maintenance_pause is not None and maintenance_pause.is_set():
+            if idle is not None:
+                idle.set()
+            stop.wait(0.05)
+            continue
         cycle_started = time.monotonic()
-        for role, client, paths in (("root", root, ROOT_SENTINELS), ("manager", manager, MANAGER_SENTINELS)):
-            for path in paths:
-                if stop.is_set():
-                    return
-                stats.record(role, path, client.request("GET", path))
+        if idle is not None:
+            idle.clear()
+        try:
+            for role, client, paths in (("root", root, ROOT_SENTINELS), ("manager", manager, MANAGER_SENTINELS)):
+                for path in paths:
+                    if stop.is_set():
+                        return
+                    stats.record(role, path, client.request("GET", path))
+        finally:
+            if idle is not None:
+                idle.set()
         elapsed = time.monotonic() - cycle_started
         stop.wait(max(0.2, float(interval_seconds) - elapsed))
 
@@ -1420,6 +1463,19 @@ def round_rotation_offset(round_index: int, round_ops: int) -> int:
     return max(0, int(round_index) - 1) * max(1, int(round_ops))
 
 
+def complete_rotation_round_ops(requested_ops: int, account_count: int) -> int:
+    """Return enough work for one all-operation, all-account rotation.
+
+    ``system_stress_probe --require-operation-coverage`` is intentionally a
+    per-round assertion.  A smaller batch cannot satisfy it when the complete
+    operation/account matrix is larger, so silently using that smaller batch
+    would turn a healthy service into a guaranteed false failure.
+    """
+
+    complete_matrix = len(build_weighted_ops()) * max(1, int(account_count))
+    return max(1, int(requested_ops), int(account_count), complete_matrix)
+
+
 def aggregate_resource_evidence(round_payloads: list[dict[str, Any]], server_pids: str) -> dict[str, Any]:
     summaries = [
         payload.get("resource_monitor")
@@ -1432,6 +1488,15 @@ def aggregate_resource_evidence(round_payloads: list[dict[str, Any]], server_pid
         for summary in summaries
         for pid in (summary.get("monitored_pids_seen") or [])
     })
+    configured_server_pids = [
+        part for part in str(server_pids or "").replace(",", " ").split() if part
+    ]
+    # A primary restart replaces the master PID.  When no explicit override is
+    # supplied, every subprocess round discovers runtime/server.pid afresh;
+    # report that observed identity set instead of claiming RSS was untracked.
+    reported_server_pids = configured_server_pids or [
+        str(pid) for pid in monitored_pids_seen
+    ]
     first_sample = next((summary.get("first_sample") for summary in summaries if summary.get("first_sample")), {})
     last_sample = next((summary.get("last_sample") for summary in reversed(summaries) if summary.get("last_sample")), {})
     db_peak: dict[str, dict[str, Any]] = {}
@@ -1443,7 +1508,10 @@ def aggregate_resource_evidence(round_payloads: list[dict[str, Any]], server_pid
             if (evidence or {}).get("last"):
                 target["last"] = evidence["last"]
     return {
-        "server_pids": [part for part in str(server_pids or "").replace(",", " ").split() if part],
+        "server_pids": reported_server_pids,
+        "server_pid_source": (
+            "explicit" if configured_server_pids else "runtime_pidfile_per_round"
+        ),
         "rounds_with_resource_evidence": len(summaries),
         "sample_count": sum(int(summary.get("sample_count") or 0) for summary in summaries),
         "monitored_rss_first_mb": float((first_sample or {}).get("monitored_rss_mb") or 0),
@@ -1515,6 +1583,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-sentinel-p95-ms", type=float, default=3000.0)
     parser.add_argument("--browser-interval-seconds", type=int, default=4 * 60 * 60)
     parser.add_argument("--stop-file", default="", help="External campaign stop request below runtime-root")
+    parser.add_argument(
+        "--maintenance-fence-file",
+        default="",
+        help="Campaign-owned primary restart fence below runtime-root",
+    )
+    parser.add_argument(
+        "--maintenance-ack-file",
+        default="",
+        help="Quiescent/released acknowledgement for --maintenance-fence-file",
+    )
     parser.add_argument("--campaign-uuid", default="", help=argparse.SUPPRESS)
     parser.add_argument("--campaign-commit", default="", help=argparse.SUPPRESS)
     parser.add_argument("--runner-profile-digest", default="", help=argparse.SUPPRESS)
@@ -1587,6 +1665,24 @@ def main() -> int:
     stop_file = Path(args.stop_file).resolve(strict=False) if args.stop_file else None
     if stop_file is not None and stop_file != runtime_root and runtime_root not in stop_file.parents:
         raise SystemExit("--stop-file must remain under the selected /tmp runtime root")
+    maintenance_fence_file = (
+        Path(args.maintenance_fence_file).resolve(strict=False)
+        if args.maintenance_fence_file
+        else None
+    )
+    maintenance_ack_file = (
+        Path(args.maintenance_ack_file).resolve(strict=False)
+        if args.maintenance_ack_file
+        else None
+    )
+    for label, path in (
+        ("--maintenance-fence-file", maintenance_fence_file),
+        ("--maintenance-ack-file", maintenance_ack_file),
+    ):
+        if path is not None and path != runtime_root and runtime_root not in path.parents:
+            raise SystemExit(f"{label} must remain under the selected /tmp runtime root")
+    if (maintenance_fence_file is None) != (maintenance_ack_file is None):
+        raise SystemExit("maintenance fence and acknowledgement paths must be supplied together")
     checkpoint_path = report_dir / "operational_soak.checkpoint.json"
     source_harness_hashes = harness_hashes()
     try:
@@ -1682,10 +1778,21 @@ def main() -> int:
 
     stop_sentinel = threading.Event()
     start_sentinel = threading.Event()
+    maintenance_pause = threading.Event()
+    sentinel_idle = threading.Event()
     sentinel_stats = SentinelStats()
     sentinel_thread = threading.Thread(
         target=sentinel_loop,
-        args=(stop_sentinel, start_sentinel, sentinel_stats, root, manager, args.sentinel_interval_seconds),
+        args=(
+            stop_sentinel,
+            start_sentinel,
+            sentinel_stats,
+            root,
+            manager,
+            args.sentinel_interval_seconds,
+            maintenance_pause,
+            sentinel_idle,
+        ),
         daemon=True,
     )
     sentinel_thread.start()
@@ -1749,8 +1856,14 @@ def main() -> int:
     termination_reason = ""
     external_control_reason = ""
     loop_error: BaseException | None = None
+    maintenance_windows: list[dict[str, Any]] = []
+    maintenance_fence_errors: list[str] = []
     effective_load_required = args.campaign_level in {"rehearsal", "formal"}
     load_policy = campaign_load_policy(args.campaign_level)
+    target_load_level = int(load_policy["target_load_level"])
+    minimum_active_workers_at_target = int(
+        load_policy["minimum_active_workers_at_target"]
+    )
     ramp_minimum_stage_seconds = dict(
         RAMP_MINIMUM_STAGE_SECONDS.get(
             args.campaign_level,
@@ -1796,7 +1909,7 @@ def main() -> int:
                     for row in ramp_schedule
                     if int(row["level"]) == level
                 )
-                if level < 32
+                if level < target_load_level
                 else ramp_completion_deadline_seconds
             ),
             "scheduled_end_seconds": (
@@ -1805,7 +1918,7 @@ def main() -> int:
                     for row in ramp_schedule
                     if int(row["level"]) == level
                 )
-                if level < 32
+                if level < target_load_level
                 else float(args.duration_seconds)
             ),
             "completed_elapsed_seconds": None,
@@ -1826,6 +1939,7 @@ def main() -> int:
         target_summary = summarize_target_load(
             target_load_samples,
             minimum_coverage=MINIMUM_TARGET_LOAD_COVERAGE,
+            target_load_level=target_load_level,
         )
         sample_only_coverage = float(target_summary.get("target_load_coverage") or 0.0)
         target_seconds = float(target_summary.get("target_load_seconds") or 0.0)
@@ -1909,8 +2023,17 @@ def main() -> int:
                 "ok": ramp_ok,
             },
             "minimum_post_ramp_seconds": minimum_post_ramp_seconds,
-            "baseline_method": "median_ramp_throughput_normalized_to_concurrency_32",
+            "target_load_level": target_load_level,
+            "minimum_active_workers_at_target": minimum_active_workers_at_target,
+            "baseline_method": (
+                "median_ramp_throughput_normalized_to_concurrency_"
+                f"{target_load_level}"
+            ),
             "baseline_32_operations_per_minute": round(
+                baseline_32_operations_per_minute,
+                6,
+            ),
+            "baseline_target_operations_per_minute": round(
                 baseline_32_operations_per_minute,
                 6,
             ),
@@ -1936,12 +2059,12 @@ def main() -> int:
         completed = int(summary.get("total_ops") or 0)
         measured_workers = measured_active_workers(run, level, payload)
         seconds = max(0.0, float(payload.get("elapsed_seconds") or 0.0))
-        expected_operations = max(int(args.round_ops), int(args.account_count))
+        expected_operations = complete_rotation_round_ops(args.round_ops, args.account_count)
         worker_floor = int(math.ceil(level * 0.85))
         window_started_elapsed = max(0.0, window_started_monotonic - started)
         window_finished_elapsed = max(0.0, time.monotonic() - started)
         within_fixed_stage_window = bool(
-            level == 32
+            level == target_load_level
             or (
                 window_started_elapsed >= float(stage["scheduled_start_seconds"])
                 and window_finished_elapsed <= float(stage["scheduled_end_seconds"])
@@ -1959,6 +2082,7 @@ def main() -> int:
             operations_completed=completed,
             window_seconds=seconds,
             scheduled_load_level=level,
+            target_load_level=target_load_level,
         )
         stage["round_evidence"].append({
             "scheduled_load_level": level,
@@ -1995,10 +2119,10 @@ def main() -> int:
             if normalized > 0:
                 samples = stage["normalized_32_throughput_samples"]
                 samples.append(round(normalized, 6))
-                if level < 32:
+                if level < target_load_level:
                     baseline_candidates.append(normalized)
 
-        if level < 32:
+        if level < target_load_level:
             return
 
         sample = build_effective_load_sample(
@@ -2008,6 +2132,8 @@ def main() -> int:
             expected_operations=expected_operations,
             baseline_32_operations_per_minute=baseline_32_operations_per_minute,
             window_started_at=window_started_at,
+            target_load_level=target_load_level,
+            minimum_active_workers_at_target=minimum_active_workers_at_target,
         )
         sample_window_seconds = float(sample.get("window_seconds") or 0.0)
         operation_window_started = max(
@@ -2108,6 +2234,98 @@ def main() -> int:
                 "error_type": exc.__class__.__name__,
             }
 
+    def hold_for_primary_maintenance_fence() -> bool:
+        """Quiesce every core-owned requester for an acknowledged restart."""
+
+        nonlocal termination_reason
+        fence, error = read_maintenance_fence(maintenance_fence_file)
+        if error:
+            maintenance_fence_errors.append(error)
+            termination_reason = "maintenance_fence_invalid"
+            return False
+        if fence is None or fence.get("active") is not True:
+            return True
+
+        nonce = str(fence["nonce"])
+        reason = str(fence["reason"])
+        started_window = time.monotonic()
+        maintenance_pause.set()
+        # A root/manager sentinel cycle is also a real request stream.  Do not
+        # acknowledge a restart until it is between cycles.
+        if not sentinel_idle.wait(timeout=60.0):
+            maintenance_pause.clear()
+            maintenance_fence_errors.append("sentinel_not_quiescent")
+            termination_reason = "maintenance_fence_sentinel_timeout"
+            return False
+        # The independent PointsChain and browser probes may outlive a system
+        # round.  Let already-started probes finish before granting the fence;
+        # starting new probes remains suspended by this outer loop.
+        for name, state in (("points", points_state), ("browser", browser_state)):
+            process = state.get("process") if isinstance(state, dict) else None
+            while process is not None and process.poll() is None:
+                if external_stop_requested() or time.monotonic() >= deadline:
+                    maintenance_pause.clear()
+                    return False
+                time.sleep(0.05)
+            if state is not None and process is not None and process.poll() is None:
+                maintenance_fence_errors.append(f"{name}_probe_not_quiescent")
+                maintenance_pause.clear()
+                termination_reason = "maintenance_fence_background_probe_timeout"
+                return False
+        atomic_write_json(maintenance_ack_file, {
+            "schema_version": MAINTENANCE_ACK_SCHEMA_VERSION,
+            "state": "quiescent",
+            "nonce": nonce,
+            "reason": reason,
+            "acknowledged_at": utc_now(),
+            "acknowledged_monotonic_ns": time.monotonic_ns(),
+        })
+        while time.monotonic() < deadline and not external_stop_requested():
+            current, current_error = read_maintenance_fence(maintenance_fence_file)
+            if current_error:
+                maintenance_fence_errors.append(current_error)
+                termination_reason = "maintenance_fence_invalid"
+                maintenance_pause.clear()
+                return False
+            if current is None:
+                maintenance_fence_errors.append("maintenance_fence_disappeared")
+                termination_reason = "maintenance_fence_invalid"
+                maintenance_pause.clear()
+                return False
+            if str(current.get("nonce") or "") != nonce or str(current.get("reason") or "") != reason:
+                maintenance_fence_errors.append("maintenance_fence_identity_changed")
+                termination_reason = "maintenance_fence_invalid"
+                maintenance_pause.clear()
+                return False
+            if current.get("active") is not True:
+                elapsed_seconds = round(time.monotonic() - started_window, 3)
+                window = {
+                    "schema_version": MAINTENANCE_FENCE_SCHEMA_VERSION,
+                    "nonce": nonce,
+                    "reason": reason,
+                    "started_at": utc_now(),
+                    "elapsed_seconds": elapsed_seconds,
+                    "sentinel_quiescent": True,
+                    "background_probes_quiescent": True,
+                }
+                maintenance_windows.append(window)
+                atomic_write_json(maintenance_ack_file, {
+                    "schema_version": MAINTENANCE_ACK_SCHEMA_VERSION,
+                    "state": "released",
+                    "nonce": nonce,
+                    "reason": reason,
+                    "released_at": utc_now(),
+                    "elapsed_seconds": elapsed_seconds,
+                })
+                maintenance_pause.clear()
+                return True
+            time.sleep(0.05)
+        maintenance_pause.clear()
+        if not external_stop_requested() and not termination_reason:
+            termination_reason = "maintenance_fence_release_timeout"
+            maintenance_fence_errors.append(termination_reason)
+        return False
+
     def write_checkpoint(phase: str) -> None:
         elapsed = time.monotonic() - started
         atomic_write_json(checkpoint_path, {
@@ -2130,6 +2348,8 @@ def main() -> int:
             },
             "browser_runs_completed": len(browser_runs),
             "browser_running": browser_state is not None,
+            "maintenance_windows": maintenance_windows,
+            "maintenance_fence_errors": maintenance_fence_errors,
             "source_harness_hashes": source_harness_hashes,
             "harness_drift": detected_harness_drift,
             "termination_reason": termination_reason,
@@ -2167,6 +2387,9 @@ def main() -> int:
             if detected_harness_drift:
                 write_checkpoint("harness_drift_detected")
                 break
+            if not hold_for_primary_maintenance_fence():
+                write_checkpoint("primary_maintenance_fence")
+                break
             now = time.monotonic()
             if not advance_due_ramp_stages(now):
                 termination_reason = ramp_schedule_failure
@@ -2192,6 +2415,7 @@ def main() -> int:
                 next_browser_at = now + max(300, int(args.browser_interval_seconds))
 
             round_index += 1
+            effective_round_ops = complete_rotation_round_ops(args.round_ops, args.account_count)
             scheduled_load_level = (
                 FORMAL_RAMP_LEVELS[ramp_index]
                 if effective_load_required
@@ -2208,11 +2432,11 @@ def main() -> int:
                 "--out", str(round_path),
                 "--session-mode", "clone",
                 "--session-pool", str(max(args.account_count, int(args.session_pool))),
-                "--logical-users", str(max(args.round_ops, args.account_count)),
-                "--ops", str(max(args.round_ops, args.account_count)),
+                "--logical-users", str(effective_round_ops),
+                "--ops", str(effective_round_ops),
                 "--concurrency", str(scheduled_load_level),
                 "--operation-mode", "rotation",
-                "--rotation-offset", str(round_rotation_offset(round_index, max(args.round_ops, args.account_count))),
+                "--rotation-offset", str(round_rotation_offset(round_index, effective_round_ops)),
                 "--require-all-accounts",
                 "--require-operation-coverage",
                 "--require-persona-success",
@@ -2416,13 +2640,24 @@ def main() -> int:
         findings.append({"severity": "critical", "title": "system stress round timed out", "count": len(timed_out_rounds)})
     if detected_harness_drift:
         findings.append({"severity": "critical", "title": "test harness source changed during the run", "files": detected_harness_drift})
+    if maintenance_fence_errors:
+        findings.append({
+            "severity": "critical",
+            "classification": "FAIL_HARNESS",
+            "title": "planned primary maintenance fence was invalid or not acknowledged",
+            "errors": maintenance_fence_errors,
+        })
     if aggregate["round_failures"]:
         findings.append({"severity": "high", "title": "one or more synchronized system rounds failed", "count": len(aggregate["round_failures"])})
     if effective_load_required and not effective_load.get("ok"):
         findings.append({
             "severity": "critical",
             "classification": "FAIL_PRODUCT",
-            "title": "required 4-8-16-32 ramp or effective target-load coverage failed",
+            "title": (
+                "required "
+                + "-".join(str(level) for level in FORMAL_RAMP_LEVELS)
+                + " ramp or effective target-load coverage failed"
+            ),
             "ramp_completed_levels": (effective_load.get("ramp") or {}).get("completed_levels"),
             "baseline_32_operations_per_minute": effective_load.get("baseline_32_operations_per_minute"),
             "target_load_coverage": (effective_load.get("target_load_summary") or {}).get("target_load_coverage"),
@@ -2552,6 +2787,8 @@ def main() -> int:
         "sentinel": sentinel,
         "points_stress": {"run": points_run, "result": points_payload, "report": str(points_report)},
         "browser_runs": browser_runs,
+        "maintenance_windows": maintenance_windows,
+        "maintenance_fence_errors": maintenance_fence_errors,
         "final_checks": final_checks,
         "round_runs": round_runs,
         "partial_round_runs": [item for item in round_runs if item.get("partial")],
@@ -2578,6 +2815,8 @@ def main() -> int:
         "effective_load": effective_load,
         "sentinel": sentinel,
         "resource_evidence": resource_evidence,
+        "maintenance_windows": maintenance_windows,
+        "maintenance_fence_errors": maintenance_fence_errors,
         "source_harness_hashes": source_harness_hashes,
         "harness_drift": detected_harness_drift,
         "report": str(out_path),

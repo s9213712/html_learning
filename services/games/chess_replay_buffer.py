@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from services.server.runtime import default_runtime_root_path
@@ -41,7 +41,7 @@ def default_chess_replay_rejected_path() -> Path:
 
 
 def _now() -> str:
-    return datetime.utcnow().isoformat() + "Z"
+    return datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
 
 
 def _normalize_history(row) -> list[dict]:
@@ -356,7 +356,7 @@ def replay_buffer_summary(
     }
     if not target.exists() and not quarantine_target.exists() and not rejected_target.exists():
         return summary
-    cutoff = datetime.utcnow() - timedelta(days=max(0, int(recent_window_days or 0)))
+    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=max(0, int(recent_window_days or 0)))
     seen = 0
     trusted_seen = 0
     sources = (

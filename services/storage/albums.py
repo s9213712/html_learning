@@ -80,8 +80,9 @@ def _album_share_link_payload(row):
     }
 
 
-def _active_album_share_link(conn, album_id):
-    ensure_storage_album_schema(conn)
+def _active_album_share_link(conn, album_id, *, ensure_schema=True):
+    if ensure_schema:
+        ensure_storage_album_schema(conn)
     return conn.execute(
         """
         SELECT * FROM album_share_links
@@ -650,8 +651,9 @@ def smart_organize_albums(conn, *, actor, strategy="folder", visibility="private
     }, None
 
 
-def list_albums(conn, *, actor, include_deleted=False, limit=100, offset=0):
-    ensure_storage_album_schema(conn)
+def list_albums(conn, *, actor, include_deleted=False, limit=100, offset=0, ensure_schema=True):
+    if ensure_schema:
+        ensure_storage_album_schema(conn)
     where = "owner_user_id=?"
     params = [int(actor["id"])]
     if not include_deleted:
@@ -672,21 +674,22 @@ def list_albums(conn, *, actor, include_deleted=False, limit=100, offset=0):
     for row in rows:
         item = dict(row)
         if item.get("visibility") == "unlisted":
-            item["share_link"] = _album_share_link_payload(_active_album_share_link(conn, item["id"]))
+            item["share_link"] = _album_share_link_payload(_active_album_share_link(conn, item["id"], ensure_schema=False))
             if item["share_link"]:
                 item["share_url"] = item["share_link"]["url"]
         albums.append(item)
     return albums
 
 
-def get_album(conn, *, actor, album_id, include_files=False):
-    ensure_storage_album_schema(conn)
+def get_album(conn, *, actor, album_id, include_files=False, ensure_schema=True):
+    if ensure_schema:
+        ensure_storage_album_schema(conn)
     row = _album_row(conn, album_id)
     if not row or row["deleted_at"] or int(row["owner_user_id"]) != int(actor["id"]):
         return None
     data = dict(row)
     if data.get("visibility") == "unlisted":
-        data["share_link"] = _album_share_link_payload(_active_album_share_link(conn, data["id"]))
+        data["share_link"] = _album_share_link_payload(_active_album_share_link(conn, data["id"], ensure_schema=False))
         if data["share_link"]:
             data["share_url"] = data["share_link"]["url"]
     if include_files:

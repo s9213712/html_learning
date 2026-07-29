@@ -74,9 +74,15 @@ def safe_public_mime_type(filename=None, declared_mime=None):
     return _policy.safe_public_mime_type(filename, declared_mime)
 
 
-def get_user_cloud_drive_usage(conn, user, member_rule=None, storage_root=None):
+def get_user_cloud_drive_usage(conn, user, member_rule=None, storage_root=None, ensure_schema=True):
     # Keep purchased_extra_bytes and +storage_purchase semantics in the policy layer.
-    return _policy.get_user_cloud_drive_usage(conn, user, member_rule=member_rule, storage_root=storage_root)
+    return _policy.get_user_cloud_drive_usage(
+        conn,
+        user,
+        member_rule=member_rule,
+        storage_root=storage_root,
+        ensure_schema=ensure_schema,
+    )
 
 
 def scan_uploaded_file(conn, *, file_id, file_path, filename=None, declared_mime=None):

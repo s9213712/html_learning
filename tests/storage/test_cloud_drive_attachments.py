@@ -50,13 +50,30 @@ def _passthrough(fn):
     return fn
 
 
-def _build_app(db_path, storage_root, actor_box, points_service=None, server_file_fernet=None, settings=None):
+def _build_app(
+    db_path,
+    storage_root,
+    actor_box,
+    points_service=None,
+    server_file_fernet=None,
+    settings=None,
+    db_hook=None,
+):
     app = Flask(__name__)
     app.testing = True
 
     def get_db():
         conn = sqlite3.connect(db_path)
         conn.row_factory = sqlite3.Row
+        if callable(db_hook):
+            db_hook(conn)
+        return conn
+
+    def get_readonly_db():
+        conn = sqlite3.connect(f"{Path(db_path).resolve().as_uri()}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        if callable(db_hook):
+            db_hook(conn)
         return conn
 
     register_file_routes(app, {
@@ -65,6 +82,7 @@ def _build_app(db_path, storage_root, actor_box, points_service=None, server_fil
         "get_client_ip": lambda: "127.0.0.1",
         "get_current_user_ctx": lambda: actor_box["actor"],
         "get_db": get_db,
+        "get_readonly_db": get_readonly_db,
         "get_system_settings": lambda: settings or {"storage_trash_retention_days": 30},
         "get_member_level_rule": lambda conn, level: {
             "can_upload_attachment": True,
@@ -1736,6 +1754,92 @@ def test_storage_album_batch_share_is_atomic_and_complete(tmp_path):
     assert {item["storage_file_id"] for item in album["files"]} == set(storage_file_ids)
 
 
+def test_storage_album_batch_share_reserves_sqlite_writer_before_reads(tmp_path):
+    """A concurrent writer must wait before the batch operation reads files.
+
+    SQLite cannot safely upgrade a deferred transaction after another process
+    has acquired the write lock.  The route therefore has to begin with
+    ``BEGIN IMMEDIATE`` rather than relying on the first INSERT much later in
+    album construction.
+    """
+
+    db_path = tmp_path / "drive.db"
+    storage_root = tmp_path / "storage"
+    storage_root.mkdir()
+    _init_db(db_path)
+    actor_box = {"actor": _actor(1, "alice")}
+    statements = []
+    app = _build_app(
+        db_path,
+        storage_root,
+        actor_box,
+        db_hook=lambda conn: conn.set_trace_callback(statements.append),
+    )
+
+    with app.test_client() as client:
+        uploaded = client.post(
+            "/api/storage/files",
+            data={"file": (io.BytesIO(b"batch"), "batch.txt"), "virtual_path": "batch/batch.txt"},
+            content_type="multipart/form-data",
+        )
+    assert uploaded.status_code == 200
+    storage_file_id = uploaded.get_json()["storage_file"]["id"]
+    statements.clear()
+
+    with app.test_client() as client:
+        created = client.post(
+            "/api/storage/albums/batch-share",
+            json={"title": "Writer Reservation", "storage_file_ids": [storage_file_id]},
+        )
+
+    assert created.status_code == 200
+    assert statements[0].strip().upper() == "BEGIN IMMEDIATE"
+
+
+def test_storage_album_batch_share_waits_for_an_existing_writer(tmp_path):
+    db_path = tmp_path / "drive.db"
+    storage_root = tmp_path / "storage"
+    storage_root.mkdir()
+    _init_db(db_path)
+    actor_box = {"actor": _actor(1, "alice")}
+    app = _build_app(db_path, storage_root, actor_box)
+
+    with app.test_client() as client:
+        uploaded = client.post(
+            "/api/storage/files",
+            data={"file": (io.BytesIO(b"batch"), "batch.txt"), "virtual_path": "batch/batch.txt"},
+            content_type="multipart/form-data",
+        )
+    assert uploaded.status_code == 200
+    storage_file_id = uploaded.get_json()["storage_file"]["id"]
+
+    holder = sqlite3.connect(db_path, isolation_level=None)
+    holder.execute("BEGIN IMMEDIATE")
+    response_box = {}
+    completed = threading.Event()
+
+    def create_batch_share():
+        with app.test_client() as client:
+            response_box["response"] = client.post(
+                "/api/storage/albums/batch-share",
+                json={"title": "Waits for Writer", "storage_file_ids": [storage_file_id]},
+            )
+        completed.set()
+
+    worker = threading.Thread(target=create_batch_share)
+    worker.start()
+    try:
+        time.sleep(0.1)
+        assert not completed.is_set()
+    finally:
+        holder.execute("COMMIT")
+        holder.close()
+    worker.join(timeout=5)
+
+    assert completed.is_set()
+    assert response_box["response"].status_code == 200
+
+
 def test_storage_album_smart_organize_groups_media_by_folder_without_duplicates(tmp_path):
     db_path = tmp_path / "drive.db"
     storage_root = tmp_path / "storage"
@@ -2501,7 +2605,20 @@ def test_storage_files_auto_syncs_orphan_cloud_uploads(tmp_path):
         content_type="multipart/form-data",
     )
     assert uploaded.status_code == 200
-    file_id = uploaded.get_json()["file"]["file_id"]
+    uploaded_payload = uploaded.get_json()
+    file_id = uploaded_payload["file"]["file_id"]
+    # New uploads are registered atomically with the upload itself, so normal
+    # list polling remains read-only.
+    assert uploaded_payload["storage_file"]["file_id"] == file_id
+
+    # Simulate an old/partially migrated upload row.  The browser must still
+    # recover it once rather than leaving the file inaccessible forever.
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("DELETE FROM storage_files WHERE file_id=?", (file_id,))
+        conn.commit()
+    finally:
+        conn.close()
 
     storage_files = client.get("/api/storage/files")
     assert storage_files.status_code == 200

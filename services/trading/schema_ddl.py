@@ -497,6 +497,11 @@ TRADING_BOTS_DDL = """
             cooldown_seconds INTEGER NOT NULL DEFAULT 300,
             interval_hours INTEGER NOT NULL DEFAULT 24,
             budget_points INTEGER NOT NULL DEFAULT 0,
+            price_upper_limit REAL,
+            price_lower_limit REAL,
+            max_daily_runs INTEGER NOT NULL DEFAULT 0,
+            daily_run_date TEXT,
+            daily_run_count INTEGER NOT NULL DEFAULT 0,
             stop_loss_percent REAL,
             take_profit_percent REAL,
             share_parameters INTEGER NOT NULL DEFAULT 0,
@@ -515,7 +520,10 @@ TRADING_BOTS_DDL = """
             CHECK (run_count >= 0),
             CHECK (cooldown_seconds >= 0),
             CHECK (interval_hours >= 1),
-            CHECK (budget_points >= 0)
+            CHECK (budget_points >= 0),
+            CHECK (max_daily_runs >= 0 AND max_daily_runs <= 100),
+            CHECK (daily_run_count >= 0),
+            CHECK (price_lower_limit IS NULL OR price_upper_limit IS NULL OR price_lower_limit <= price_upper_limit)
         )
         """
 

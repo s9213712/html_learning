@@ -557,11 +557,33 @@ def run_probe(args):
     # fixtures, not installed model dependencies.
     source_image_name = "hackme_official_probe_source.png"
     mask_image_name = "hackme_official_probe_mask.png"
+    source_artifact = {"kind": "synthetic", "size": [int(args.image_size), int(args.image_size)]}
     if not args.preflight_only:
         probe_nonce = f"{int(time.time() * 1000)}_{id(args):x}"
+        if args.source_image_path:
+            source_path = Path(args.source_image_path).expanduser().resolve()
+            if not source_path.is_file():
+                raise ValueError(f"source image does not exist: {source_path}")
+            try:
+                from PIL import Image
+
+                with Image.open(source_path) as image:
+                    source_size = list(image.size)
+                    image.verify()
+            except Exception as exc:
+                raise ValueError(f"source image cannot be decoded: {source_path}: {exc}") from exc
+            suffix = source_path.suffix.lower()
+            if suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
+                raise ValueError("source image must be PNG, JPEG, or WebP")
+            source_bytes = source_path.read_bytes()
+            source_filename = f"hackme_official_probe_source_{probe_nonce}{suffix}"
+            source_artifact = {"kind": "file", "path": str(source_path), "size": source_size}
+        else:
+            source_bytes = _png_rgba(args.image_size, args.image_size, (80, 140, 230, 255))
+            source_filename = f"hackme_official_probe_source_{probe_nonce}.png"
         source_ref = client.upload_image_bytes(
-            _png_rgba(args.image_size, args.image_size, (80, 140, 230, 255)),
-            f"hackme_official_probe_source_{probe_nonce}.png",
+            source_bytes,
+            source_filename,
             overwrite=False,
             subfolder="hackme_official_probe",
         )
@@ -674,6 +696,19 @@ def run_probe(args):
                 "video_count": len(media.get("videos") or []),
                 "audio_count": len(media.get("audio") or []),
             }
+            if args.artifact_dir:
+                output_bytes = bytes(output.get("data") or b"")
+                if not output_bytes:
+                    for item in output.get("images") or []:
+                        if isinstance(item, dict) and item.get("data"):
+                            output_bytes = bytes(item["data"])
+                            break
+                if output_bytes:
+                    artifact_dir = Path(args.artifact_dir).expanduser().resolve()
+                    artifact_dir.mkdir(parents=True, exist_ok=True)
+                    artifact_path = artifact_dir / f"{bundle_id}.png"
+                    artifact_path.write_bytes(output_bytes)
+                    output_summary["artifact_path"] = str(artifact_path)
             quality_issues = [] if args.no_fetch_outputs else _output_quality_issues(output)
             if quality_issues:
                 output_summary["quality_issues"] = quality_issues[:5]
@@ -695,13 +730,15 @@ def run_probe(args):
             if not args.continue_on_fail:
                 break
 
-    return _probe_report(
+    report = _probe_report(
         args,
         bundle_ids=bundle_ids,
         custom_params=custom_params,
         parameter_mode=parameter_mode,
         results=results,
     )
+    report["source_input"] = source_artifact
+    return report
 
 
 def parse_args():
@@ -713,6 +750,7 @@ def parse_args():
     parser.add_argument("--width", type=int, default=None, help="Smoke/custom override for node inputs named width.")
     parser.add_argument("--height", type=int, default=None, help="Smoke/custom override for node inputs named height.")
     parser.add_argument("--image-size", type=int, default=128)
+    parser.add_argument("--source-image-path", default="", help="Use this actual source image instead of the synthetic probe square.")
     parser.add_argument("--prompt", default=None, help="Smoke/custom override for prompt text inputs.")
     parser.add_argument("--negative-prompt", default=None, help="Smoke/custom override for negative prompt text inputs.")
     parser.add_argument("--checkpoint-model", default="", help="Smoke/custom override for CheckpointLoaderSimple ckpt_name.")
@@ -747,6 +785,7 @@ def parse_args():
     parser.add_argument("--no-fetch-outputs", action="store_true", help="Validate execution and output references without downloading generated media bytes.")
     parser.add_argument("--acceptance-only", action="store_true", help="Queue each prompt to validate ComfyUI accepts it, then interrupt instead of waiting for generated outputs.")
     parser.add_argument("--json-out", default="")
+    parser.add_argument("--artifact-dir", default="", help="Directory for fetched output images used in visual review.")
     return parser.parse_args()
 
 

@@ -21,6 +21,7 @@ import tempfile
 import time
 import traceback
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -1213,7 +1214,7 @@ def check_auth_registration_journey(rec: Recorder, browser, base_url: str, root_
         if not reg_msg and isinstance(register_body, dict):
             reg_msg = str(register_body.get("msg") or "").strip()
         pending_login = fetch_json(page, "POST", "/api/login", {"username": username, "password": password})
-        users = fetch_json(root_page, "GET", "/api/admin/users?include_deleted=1")
+        users = fetch_json_get_retry(root_page, journey_user_lookup_path(username))
         user_rows = users.get("body", {}).get("users") or []
         target = next((item for item in user_rows if item.get("username") == username), None)
         if not target:
@@ -1434,8 +1435,17 @@ def check_account_context_isolation_journey(
         ctx.close()
 
 
+def journey_user_lookup_path(username: str) -> str:
+    """Return a deterministic lookup that is not limited by the users list page."""
+    return (
+        "/api/admin/users?include_deleted=1&page_size=100&q="
+        f"{urllib.parse.quote(username, safe='')}"
+    )
+
+
 def ensure_journey_user(page, username: str) -> dict[str, Any]:
-    users = fetch_json(page, "GET", "/api/admin/users?include_deleted=1")
+    lookup_path = journey_user_lookup_path(username)
+    users = fetch_json_get_retry(page, lookup_path)
     for item in users.get("body", {}).get("users") or []:
         if item.get("username") == username:
             return {"id": int(item["id"]), "username": username}
@@ -1455,7 +1465,7 @@ def ensure_journey_user(page, username: str) -> dict[str, Any]:
     )
     if created["status"] not in {200, 409}:
         raise RuntimeError(f"create journey user failed: {created}")
-    users = fetch_json(page, "GET", "/api/admin/users?include_deleted=1")
+    users = fetch_json_get_retry(page, lookup_path)
     for item in users.get("body", {}).get("users") or []:
         if item.get("username") == username:
             return {"id": int(item["id"]), "username": username}

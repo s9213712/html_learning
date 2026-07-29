@@ -15,6 +15,8 @@ def _build_app(
     db_delete_session=None,
     db_get_user_from_token=None,
     rate_limiter=None,
+    cached_setting_reader=None,
+    system_settings_reader=None,
 ):
     app = Flask(__name__)
     app.testing = True
@@ -46,11 +48,11 @@ def _build_app(
         "encrypt_field": lambda value: value,
         "ensure_user_official_room_membership": lambda *args, **kwargs: None,
         "get_client_ip": lambda: (ip_box or {"ip": "127.0.0.1"})["ip"],
-        "get_cached_system_setting": lambda key, default=None: settings.get(key, default),
+        "get_cached_system_setting": cached_setting_reader or (lambda key, default=None: settings.get(key, default)),
         "get_current_user_ctx": lambda: None,
         "get_db": get_db,
         "get_feature_settings": lambda: {},
-        "get_system_settings": lambda: settings,
+        "get_system_settings": system_settings_reader or (lambda: settings),
         "get_ua": lambda: "test-agent",
         "hash_password": lambda value: value,
         "is_feature_enabled": lambda key: key == "feature_account_security_enabled",
@@ -135,6 +137,30 @@ def test_public_version_endpoints_expose_release_id(tmp_path):
     assert version.get_json()["release_id"] == "test-release"
     assert version.get_json()["server_time"]["timezone"] == "Asia/Taipei"
     assert "server_time_unix_ms" in version.get_json()["server_time"]
+
+
+def test_public_version_endpoint_reuses_status_snapshot_under_polling(tmp_path):
+    calls = []
+    settings = {"server_timezone": "Asia/Taipei", "maintenance_mode": True}
+
+    def system_settings_reader():
+        calls.append("settings")
+        return settings
+
+    app = _build_app(
+        tmp_path / "version-cache.db",
+        settings,
+        system_settings_reader=system_settings_reader,
+    )
+
+    client = app.test_client()
+    first = client.get("/api/version")
+    second = client.get("/api/version")
+
+    assert first.status_code == second.status_code == 200
+    assert first.get_json()["maintenance_mode"] is True
+    assert second.get_json()["server_time"]["timezone"] == "Asia/Taipei"
+    assert calls == ["settings"]
 
 
 def _seed_db(db_path):

@@ -171,6 +171,103 @@ def test_dev_launcher_dry_run_resolves_cloud_drive_storage_options(tmp_path):
     assert "trusted_hosts:       disabled (dev only)" in result.stdout
 
 
+def test_dev_launcher_explicit_threads_do_not_inherit_stale_backpressure_default(tmp_path):
+    defaults = tmp_path / "capacity-defaults.env"
+    defaults.write_text(
+        "HACKME_DEV_GUNICORN_WORKERS=4\n"
+        "HACKME_DEV_GUNICORN_THREADS=6\n"
+        "HTML_LEARNING_BACKPRESSURE_THREAD_CAPACITY=6\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [
+            str(ROOT / "test_for_develop.sh"),
+            "--cli",
+            "--dry-run",
+            "--server-runner",
+            "gunicorn",
+            "--no-capacity-probe",
+            "--capacity-defaults-file",
+            str(defaults),
+            "--gunicorn-workers",
+            "4",
+            "--gunicorn-threads",
+            "32",
+        ],
+        cwd=ROOT,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "gunicorn:            workers=4 threads=32" in result.stdout
+    assert "backpressure:        32" in result.stdout
+
+
+def test_dev_launcher_uses_one_sqlite_writer_and_reserves_high_end_threads(tmp_path):
+    result = subprocess.run(
+        [
+            str(ROOT / "test_for_develop.sh"),
+            "--cli",
+            "--dry-run",
+            "--server-runner",
+            "gunicorn",
+            "--no-capacity-probe",
+            "--capacity-defaults-file",
+            str(tmp_path / "missing-capacity-defaults.env"),
+            "--gunicorn-workers",
+            "1",
+            "--gunicorn-threads",
+            "160",
+        ],
+        cwd=ROOT,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "gunicorn:            workers=1 threads=160" in result.stdout
+    assert "backpressure:        130" in result.stdout
+
+
+def test_dev_launcher_uses_a_keepalive_window_that_covers_high_concurrency_session_reuse(tmp_path):
+    result = subprocess.run(
+        [
+            str(ROOT / "test_for_develop.sh"),
+            "--cli",
+            "--dry-run",
+            "--server-runner",
+            "gunicorn",
+            "--no-capacity-probe",
+            "--capacity-defaults-file",
+            str(tmp_path / "missing-capacity-defaults.env"),
+            "--gunicorn-workers",
+            "4",
+            "--gunicorn-threads",
+            "32",
+        ],
+        cwd=ROOT,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "keep_alive=30" in result.stdout
+
+
+def test_systemd_example_uses_the_same_high_concurrency_keepalive_window():
+    service = (ROOT / "deploy" / "systemd" / "hackme-web.service.example").read_text(encoding="utf-8")
+
+    assert "--keep-alive 30" in service
+    assert "--keep-alive 2" not in service
+    assert "--workers 1" in service
+    assert "--threads 32" in service
+
+
 def test_dev_launcher_dry_run_resolves_cloudflare_tunnel_options(tmp_path):
     helper = tmp_path / "tunnel_helper.py"
     helper.write_text("# helper placeholder\n", encoding="utf-8")

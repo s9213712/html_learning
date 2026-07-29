@@ -5,6 +5,7 @@ import json
 from io import BytesIO
 from pathlib import Path
 
+from scripts.testing.campaign_scenario_binding import FORMAL_SCENARIO_BINDINGS
 from scripts.testing.campaign_native_selectors import (
     EXPECTED_COMFY_CGROUP_LIMITS,
     EXPECTED_COMFY_SAFETY_FIELDS,
@@ -2275,8 +2276,22 @@ def test_media_long_selector_fail_closed_on_frame_seek_layout_or_browser_errors(
         selected = media_long_assertions(stress, restart)
 
         assert selected["scenario_assertions"]["desktop_mobile_random_seek"] is False
-        assert selected["scenario_assertions"]["desktop_mobile_first_frame_and_random_seek_latency"] is False
         assert selected["terminal_assertions"]["all_domain_assertions_true"] is False
+
+
+def test_media_long_selector_allows_the_expected_password_gate_console_message() -> None:
+    stress, restart = media_long_fixture()
+    expected_message = "console.error:Failed to load resource: the server responded with a status of 401 (UNAUTHORIZED)"
+    for row in stress["phases"][3]["shares"][0]["browser"]:
+        row["console_errors"] = [expected_message]
+        row["expected_console_errors"] = [expected_message]
+
+    selected = media_long_assertions(stress, restart)
+
+    assert selected["scenario_assertions"]["desktop_mobile_random_seek"] is True
+    assert set(selected["scenario_assertions"]) == set(
+        FORMAL_SCENARIO_BINDINGS["media_long_hls_share"].evidence_adapter_ids
+    )
 
 
 def test_media_long_selector_preserves_3900_parallel_hls_revoke_restart_contracts() -> None:

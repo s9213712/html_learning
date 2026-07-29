@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from services.games.chess_dl import bundled_chess_dl_model_path, default_chess_dl_model_path, experiment_dl_model_template
@@ -18,7 +18,7 @@ from services.server.runtime import default_runtime_root_path
 
 
 def _now() -> str:
-    return datetime.utcnow().isoformat() + "Z"
+    return datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
 
 
 def default_chess_candidate_dir() -> Path:
@@ -138,7 +138,7 @@ def production_engine_inventory() -> list[dict]:
             "path": str(path),
             "exists": path.exists(),
             "size_bytes": path.stat().st_size if path.exists() else 0,
-            "mtime": datetime.utcfromtimestamp(path.stat().st_mtime).isoformat() + "Z" if path.exists() else "",
+            "mtime": datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).replace(tzinfo=None).isoformat() + "Z" if path.exists() else "",
         }
         if engine == "experiment 5:nnue":
             base = experiment_nnue_model_template()

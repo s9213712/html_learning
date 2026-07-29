@@ -1,6 +1,14 @@
+from datetime import datetime, timezone
 import time
 
 from scripts.testing import db_stress_probe
+
+
+def test_db_stress_probe_timestamps_are_timezone_aware_utc():
+    observed = datetime.fromisoformat(db_stress_probe.now_iso())
+
+    assert observed.tzinfo is not None
+    assert observed.utcoffset() == timezone.utc.utcoffset(observed)
 
 
 def test_db_stress_probe_keeps_secure_audit_chain_pristine(tmp_path):

@@ -11,6 +11,7 @@ from services.security.access_controls import (
 )
 from services.server.backpressure import install_backpressure
 from services.server import backpressure as backpressure_module
+from routes.system_admin import _AuditIntegritySummaryCache
 from services.server.request_guards import (
     enforce_browser_only_mode,
     get_request_maintenance_bypass_token,
@@ -421,7 +422,27 @@ def test_backpressure_qos_classification_matches_route_planes():
     assert backpressure_module.classify_request_qos("/api/chat/rooms", "POST") == "api_write"
 
 
+def test_audit_integrity_summary_cache_coalesces_bursts_and_returns_isolated_values():
+    cache = _AuditIntegritySummaryCache(ttl_seconds=10)
+    calls = []
+
+    def compute():
+        calls.append("verify")
+        return {"ok": True, "nested": {"checks": 1}}
+
+    first = cache.get_or_compute(compute)
+    first["nested"]["checks"] = 999
+    second = cache.get_or_compute(compute)
+    refreshed = cache.get_or_compute(compute, force_refresh=True)
+
+    assert calls == ["verify", "verify"]
+    assert second == {"ok": True, "nested": {"checks": 1}}
+    assert refreshed == {"ok": True, "nested": {"checks": 1}}
+
+
 def test_backpressure_keeps_lightweight_background_polls_in_fast_lane():
+    assert backpressure_module.is_backpressure_fast_lane_path("/api/comfyui/status")
+    assert backpressure_module.is_backpressure_fast_lane_path("/api/ai-agent/status")
     assert backpressure_module.is_backpressure_fast_lane_path("/api/comfyui/resources")
     assert backpressure_module.is_backpressure_fast_lane_path("/api/notifications/unread-count")
     assert backpressure_module.is_backpressure_fast_lane_path("/api/games/multiplayer/invites/pending")
@@ -452,11 +473,71 @@ def test_backpressure_auto_uses_gunicorn_threads_from_argv(monkeypatch):
     })
 
     assert state["limits"]["thread_capacity"] == 12
-    assert state["limits"]["normal"] == 8
+    assert state["limits"]["normal"] == 10
     assert state["limits"]["heavy"] == 6
     assert state["limits"]["root"] == 3
-    assert state["limits"]["feature"] == 8
-    assert state["limits"]["fast_lane_reserved"] == 4
+    assert state["limits"]["feature"] == 10
+    assert state["limits"]["fast_lane_reserved"] == 2
+
+
+def test_backpressure_auto_uses_configured_high_capacity_gthread_worker(monkeypatch):
+    monkeypatch.delenv("HTML_LEARNING_BACKPRESSURE_THREAD_CAPACITY", raising=False)
+    monkeypatch.delenv("HACKME_DEV_GUNICORN_THREADS", raising=False)
+    monkeypatch.delenv("GUNICORN_THREADS", raising=False)
+    monkeypatch.setattr(backpressure_module, "_total_memory_mb", lambda: 8192)
+    monkeypatch.setattr(
+        backpressure_module.sys,
+        "argv",
+        ["python", "-m", "gunicorn", "server:app", "--worker-class", "gthread", "--threads", "32"],
+    )
+
+    state = backpressure_module._build_backpressure_state({
+        "server_backpressure_enabled": True,
+        "server_backpressure_mode": "auto",
+        "server_backpressure_thread_capacity": 0,
+        "server_backpressure_normal_limit": 0,
+        "server_backpressure_heavy_limit": 0,
+        "server_backpressure_root_limit": 0,
+        "server_backpressure_fast_lane_reserved": 0,
+        "server_backpressure_root_priority_enabled": True,
+    })
+
+    limits = state["limits"]
+    assert limits["thread_capacity"] == 32
+    assert limits["fast_lane_reserved"] == 2
+    assert limits["feature"] == 30
+    assert limits["normal"] == 30
+    assert limits["heavy"] == 16
+    assert limits["root"] == 4
+
+
+def test_backpressure_128_business_target_accounts_for_fast_lane_tokens(monkeypatch):
+    monkeypatch.setenv("HTML_LEARNING_BACKPRESSURE_THREAD_CAPACITY", "130")
+    monkeypatch.delenv("HACKME_DEV_GUNICORN_THREADS", raising=False)
+    monkeypatch.delenv("GUNICORN_THREADS", raising=False)
+    monkeypatch.setattr(backpressure_module, "_total_memory_mb", lambda: 8192)
+    monkeypatch.setattr(
+        backpressure_module.sys,
+        "argv",
+        ["python", "-m", "gunicorn", "server:app", "--worker-class", "gthread", "--threads", "160"],
+    )
+
+    state = backpressure_module._build_backpressure_state({
+        "server_backpressure_enabled": True,
+        "server_backpressure_mode": "auto",
+        "server_backpressure_thread_capacity": 0,
+        "server_backpressure_normal_limit": 0,
+        "server_backpressure_heavy_limit": 0,
+        "server_backpressure_root_limit": 0,
+        "server_backpressure_fast_lane_reserved": 0,
+        "server_backpressure_root_priority_enabled": True,
+    })
+
+    limits = state["limits"]
+    assert limits["thread_capacity"] == 130
+    assert limits["fast_lane_reserved"] == 2
+    assert limits["feature"] == 128
+    assert limits["normal"] == 128
 
 
 def test_explicit_backpressure_environment_switch_overrides_persisted_default(monkeypatch):
