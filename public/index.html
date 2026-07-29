@@ -4959,16 +4959,16 @@
           <span id="launch-check-summary" style="font-size:.78rem;color:var(--muted);"></span>
         </div>
         <div class="drive-card-sub" style="margin-bottom:.65rem;">
-          切換到 <strong>production</strong> 之前必須兩塊都通過：<strong>(A) 切換前 blocker / 現況提示</strong>（鏈 / 完整性 / readiness / anomaly）+ <strong>(B) 13 份最新通過報告</strong>。<br>
-          <strong>注意：</strong>production profile 的 HTTPS / audit chain / Integrity Guard / browser-only 等安全設定會在 mode switch 成功時自動套用，<strong>不是</strong>你必須先手動打開的上線前檢查項目。<br>
-          ❌ 紅 = 不通過或缺少；⚠ 黃 = 接近 / 警告；✓ 綠 = 通過。各卡片附捷徑與失敗對策。<br>
+          這是<strong>選用的 production readiness 建議檢查</strong>：<strong>(A) 運行現況</strong>（鏈 / 完整性 / readiness / anomaly）與 <strong>(B) 最新 reports</strong> 都會保留供判讀；未通過<strong>不會阻止</strong> root 明確輸入 <code>GO_LIVE</code> 的切換。<br>
+          <strong>注意：</strong>production profile 的 HTTPS / audit chain / Integrity Guard / browser-only 等安全設定會在 mode switch 成功時自動套用；Integrity Guard 高風險、切換失敗與 log-chain 斷裂仍會走既有安全處置。<br>
+          ❌ 紅 = 建議優先處理；⚠ 黃 = 接近 / 警告；✓ 綠 = 通過。各卡片附捷徑與對策。<br>
           詳細產生 / 上傳流程：<code>docs/server_mode_v2/03_production_gate_playbook.md</code>。
         </div>
 
-        <div class="health-section-title" style="margin-top:.4rem;">A. 切換前 blocker / 現況提示（鏈 / 完整性 / readiness / anomaly）</div>
+        <div class="health-section-title" style="margin-top:.4rem;">A. 運行現況與建議（鏈 / 完整性 / readiness / anomaly）</div>
         <div id="launch-check-conditions" class="health-summary-grid" style="margin-bottom:.65rem;"></div>
 
-        <div class="health-section-title">B. 13 份必過 Production Gate Reports</div>
+        <div class="health-section-title">B. Production Readiness Reports（選用）</div>
         <div id="launch-check-list" class="security-log-grid"></div>
         <div id="launch-check-msg" class="msg" style="margin-top:.6rem;"></div>
         <details class="drive-collapsible-panel settings-collapse" id="launch-check-release-panel" style="margin-top:.75rem;">
@@ -4980,7 +4980,7 @@
           </summary>
           <div class="drive-collapsible-body">
             <div id="launch-check-release-summary" class="health-summary-grid" style="margin-bottom:.55rem;"></div>
-            <pre id="launch-check-release-details" class="security-log-box security-log-pre" style="max-height:320px;overflow:auto;">按「產生 Release Bundle」後會整理 production gate 狀態與 QA artifact index。</pre>
+            <pre id="launch-check-release-details" class="security-log-box security-log-pre" style="max-height:320px;overflow:auto;">按「產生 Release Bundle」後會整理 production readiness 狀態與 QA artifact index。</pre>
           </div>
         </details>
         <details class="drive-collapsible-panel settings-collapse" id="launch-check-upload-panel" style="margin-top:.75rem;">
@@ -5002,7 +5002,7 @@
               </div>
               <div class="field">
                 <label>快速說明</label>
-                <div class="drive-card-sub" id="launch-check-upload-hint" style="margin-top:.25rem;">上傳的 JSON 必須包含 raw_report、sha256 report_hash 與可驗證 signature；伺服器會重算 hash 與驗簽，未通過不會計入 production gate。</div>
+                <div class="drive-card-sub" id="launch-check-upload-hint" style="margin-top:.25rem;">上傳的 JSON 必須包含 raw_report、sha256 report_hash 與可驗證 signature；伺服器會重算 hash 與驗簽，未通過只會顯示為未驗證建議，不會作為切換授權。</div>
               </div>
             </div>
             <label style="display:block;margin-top:.55rem;">Report JSON</label>

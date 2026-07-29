@@ -1,6 +1,22 @@
 # Update Summary
 
-Release ID: `06_2026.07.29-001`
+Release ID: `06_2026.07.30-001`
+
+## 06_2026.07.30-001
+
+- Changed production readiness reports and the root/AI-Agent preflight from a
+  mode-switch authorization gate into optional, traceable advisories. An
+  explicit root `GO_LIVE` still requires normal authorization, CSRF,
+  checkpointing, Integrity Guard, and mode-switch log-chain safety handling.
+- Simplified the launch-preflight result into separate `advisories` and real
+  `blockers`, so missing reports no longer suppress an explicitly confirmed
+  switch while failed switch/readback operations remain visible failures.
+- Updated the Security Center, operator playbooks, and historical validation
+  notes to describe the current advisory policy rather than the retired
+  mandatory-report gate.
+- Removed 169 unreferenced historical QA reports plus two unreferenced stale
+  implementation plans, refreshed stale module/test paths in the active QA
+  runbooks, and escaped launch-check API values before rendering them as HTML.
 
 ## 06_2026.07.29-001
 

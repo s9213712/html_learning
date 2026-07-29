@@ -449,7 +449,7 @@ AI_AGENT_TOOL_BLUEPRINT = {
     },
     "write_launch_preflight_execute": {
         "label": "執行上線前檢查",
-        "description": "root 專用白名單工具：執行 requirements、log chain、AI audit scan，整理阻塞原因與後續指令；預設只 dry-run，明確 GO_LIVE 時才切換 production。",
+        "description": "root 專用白名單工具：執行選用的 requirements、log chain、AI audit scan，整理建議與後續指令；預設只 dry-run，明確 GO_LIVE 時才切換 production。",
         "min_role": "super_admin",
         "data_scope": "write_tool:launch_check",
     },

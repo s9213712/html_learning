@@ -42,6 +42,6 @@
 
 - `docs/AGENTS` 是 agent 工作規則與 QA 任務書的正式入口。
 - `docs/AGENTS/research` 是仍會影響未來動工的研究規格；不是 runtime evidence 或一次性 QA 報告。
-- 歷史 QA 報告已移到 [../archive/agent_qa_reports/](../archive/agent_qa_reports/)；新報告仍寫在 `docs/AGENTS/reports/`。
+- `docs/AGENTS/reports/` 只保留現行文件仍引用的精簡 QA 證據；未引用的歷史報告應留在 Git history 或 [../archive/agent_qa_reports/](../archive/agent_qa_reports/)，不要重新累積在工作樹。
 - 新報告應以精簡 Markdown/JSON 摘要與必要的小型回歸 fixture 為主；完整生圖 assets、影片、HLS、DB、log 與長跑 raw artifacts 必須留在 `/tmp` 或外部 artifact storage。既有大型 i2i evidence bundles 是 legacy migration debt，不是 canonical 文件，也不得納入 pre-push/runtime 全量掃描。
 - 不要再新增第二套平行目錄，例如 `docs/codex/...` 或 repo 根層 `reports/...` 的新副本。

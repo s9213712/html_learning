@@ -280,8 +280,8 @@ artifact 與失敗判讀見
 
 ### Production Gate 報告對照表
 
-`services/snapshots/schema.py::PRODUCTION_REQUIRED_REPORT_TYPES` 是 production gate 的 source of truth。
-截至 2026-06-23，required report set 為 14 份。
+`services/snapshots/schema.py::PRODUCTION_REQUIRED_REPORT_TYPES` 是 production readiness report inventory 的 source of truth。
+截至 2026-06-23，report set 為 14 份；它是選用的風險證據，不是 production mode switch 的授權 gate。
 欄位說明：
 
 - `使用腳本 / 驗證面`：產生或驗證該報告的主要入口。
@@ -298,9 +298,9 @@ artifact 與失敗判讀見
 - `runtime/reports/security/production_gate/*.json` 的 filesystem auto-detect 只輔助顯示最新候選報告。
 - 這些檔案預設是 `unverified`，只有驗簽成功且 target 與當前 runtime 一致時才會被視為 `verified`。
 - unsigned、invalid JSON、`report_type` mismatch、replay 舊 commit 等檔案只能在後台顯示 warning，
-  不可讓 production gate 亮綠。
-- production gate 的 live 驗收至少要再補一條：
-  **完整 required report set verified 但 old/fake `target_commit` 的 reports 不得解鎖 production。**
+  不可讓 readiness 顯示為已驗證通過。
+- production readiness 的 live 驗收至少要再補一條：
+  **完整 report set verified 但 old/fake `target_commit` 的 reports 必須維持 advisory，且不能被誤標為 current verified。**
   這條不可只靠 `tests/snapshots/test_snapshots.py`；必須對隔離 `/tmp` server 實際呼叫：
   - `GET /api/root/server-mode/requirements`
   - `POST /api/root/production/enter`

@@ -3,7 +3,7 @@
  *
  * This file is the single canonical implementation for:
  * - server mode status and switching
- * - production gate / launch-check report UI
+ * - optional production readiness / launch-check report UI
  * - internal-test and tester-token management
  *
  * It is loaded after 50-admin.js so it can use shared admin helpers, state,
@@ -97,14 +97,15 @@ function renderServerModeRequirements(requirements) {
   const missing = Array.isArray(requirements.missing) ? requirements.missing : [];
   const failed = Array.isArray(requirements.failed) ? requirements.failed : [];
   const required = Array.isArray(requirements.required) ? requirements.required : [];
+  const safeList = (items) => items.map((item) => sanitize(String(item ?? ""))).join(", ");
   host.innerHTML = `
-    <div><strong>Production gate</strong>：${requirements.ok ? "已通過" : "未通過"}</div>
-    <div>必要報告：${required.join(", ") || "-"}</div>
-    <div>缺少：${missing.join(", ") || "無"}；失敗：${failed.join(", ") || "無"}</div>
+    <div><strong>Production 建議檢查</strong>：${requirements.ok ? "已通過" : "有建議處理事項"}</div>
+    <div>建議報告：${safeList(required) || "-"}</div>
+    <div>缺少：${safeList(missing) || "無"}；失敗：${safeList(failed) || "無"}</div>
   `;
 }
 
-// ── 上線前檢查分頁（13 份 production gate report）────────────────────────────
+// ── 上線前建議檢查分頁（production readiness reports）────────────────────────
 //
 // Each entry: label / purpose / generator / defaultOutput / tip / shortcut
 // shortcut.kind:
@@ -217,10 +218,10 @@ const LAUNCH_CHECK_REPORT_META = {
   },
 };
 
-// 其他上線前條件（真正 blocker + 現況提示）— production gate
-// 不把「已經先切成 production」或「已手動套 production 設定」當成前置條件。
-// production profile 會在 mode switch 成功時自動套用；A 區只保留切換前真的
-// 需要先確認的 blocker，外加少量資訊卡。每個 condition 函式拿到
+// 其他上線前條件（建議處理事項 + 現況提示）。
+// 不把「已經先切成 production」或「已手動套 production 設定」當成前置條件或切換 gate。
+// production profile 會在 mode switch 成功時自動套用；A 區保留建議優先
+// 確認的項目與少量資訊卡。每個 condition 函式拿到
 // (sc, requirements) 回傳 {label, value, color, hint?, shortcut?}.
 function launchCheckConditionList(sc, requirements) {
   const audit = sc.audit_integrity || {};
@@ -243,7 +244,7 @@ function launchCheckConditionList(sc, requirements) {
     shortcut: { kind: "ui", target: "settings", anchor: "server-mode-section", label: "前往伺服器設定 → 模式切換" },
   });
 
-  // Production profile 會在成功切 mode 時自動套用，不應列為前置 blocker。
+  // Production profile 會在成功切 mode 時自動套用，不應列為切換前置條件。
   const productionAutoSummary = [
     productionSettings.server_ssl_enabled ? "HTTPS" : null,
     productionSettings.audit_chain_enabled ? "audit chain" : null,
@@ -269,7 +270,7 @@ function launchCheckConditionList(sc, requirements) {
     value: auditEnabled ? (auditOk ? "完整" : "異常") : "目前未啟用",
     color: auditEnabled ? (auditOk ? "#4caf50" : "#ff4f6d") : "#82b1ff",
     hint: auditEnabled
-      ? (auditOk ? "雜湊鏈無斷點" : "雜湊鏈不完整：先處理 mode_switch_logs / audit 問題再上線")
+      ? (auditOk ? "雜湊鏈無斷點" : "雜湊鏈不完整：建議優先處理 mode_switch_logs / audit 問題")
       : "目前模式未啟用 audit chain；切 production 時會自動開，但若要先演練請在隔離環境做 production gate rehearsal",
     shortcut: { kind: "ui", target: "health", anchor: "server-health-audit", label: "前往健康度 → 審計與檢查" },
   });
@@ -279,7 +280,7 @@ function launchCheckConditionList(sc, requirements) {
     label: "Readiness 檢查",
     value: readiness.status || "-",
     color: healthStatusColor(readiness.status),
-    hint: readiness.status === "ok" ? "Readiness ok" : `Readiness=${readiness.status || "-"}：先解決失敗項`,
+    hint: readiness.status === "ok" ? "Readiness ok" : `Readiness=${readiness.status || "-"}：建議處理失敗項`,
     shortcut: { kind: "ui", target: "health", anchor: "server-health-summary", label: "前往健康度 → Readiness" },
   });
 
@@ -289,7 +290,7 @@ function launchCheckConditionList(sc, requirements) {
     label: "異常訊號",
     value: signalCount === 0 ? "無" : `${signalCount} 筆`,
     color: signalCount === 0 ? "#4caf50" : (anomaly.status === "critical" ? "#ff4f6d" : "#ffb74d"),
-    hint: signalCount === 0 ? "目前無異常訊號" : `先處理 anomaly signals（${signalCount} 筆）再上線`,
+    hint: signalCount === 0 ? "目前無異常訊號" : `建議優先處理 anomaly signals（${signalCount} 筆）`,
     shortcut: { kind: "ui", target: "health", anchor: "server-health-summary", label: "前往健康度 → Anomaly" },
   });
 
@@ -299,10 +300,10 @@ function launchCheckConditionList(sc, requirements) {
   const failed = (requirements.failed || []).length;
   const pass = Math.max(0, total - missing - failed);
   out.push({
-    label: "13 份 production reports",
+    label: "Production 建議 reports",
     value: `${pass} / ${total}`,
     color: missing === 0 && failed === 0 ? "#4caf50" : "#ff4f6d",
-    hint: (missing === 0 && failed === 0) ? "全部通過" : `缺 ${missing} 份、不通過 ${failed} 份；詳見下方 B 區`,
+    hint: (missing === 0 && failed === 0) ? "全部通過" : `缺 ${missing} 份、不通過 ${failed} 份；不會阻止明確 GO_LIVE，詳見下方 B 區`,
   });
 
   return out;
@@ -346,7 +347,7 @@ function openLaunchCheckUpload(reportType = "") {
     const meta = LAUNCH_CHECK_REPORT_META[reportType];
     hint.textContent = meta
       ? `用途：${meta.purpose}｜建議產生方式：${meta.generator}｜注意：必須提供 raw_report + sha256 report_hash + 可驗證 signature，伺服器會重算 hash 並驗簽。`
-      : "上傳的 JSON 必須包含 raw_report、sha256 report_hash 與可驗證 signature；未通過驗簽不會計入 production gate。";
+      : "上傳的 JSON 必須包含 raw_report、sha256 report_hash 與可驗證 signature；未通過驗簽只會顯示為未驗證建議。";
   }
   if (input && !input.value.trim()) input.value = reportType ? `{\n  "report_type": "${reportType}",\n  "target_commit": "",\n  "target_branch": "",\n  "server_mode": "preprod",\n  "test_result": "pass",\n  "pass": true,\n  "critical_findings_count": 0,\n  "high_findings_count": 0,\n  "unresolved_findings": [],\n  "tester": "root",\n  "report_hash": "sha256:",\n  "signature": "hmac_sha256:",\n  "key_version": "",\n  "raw_report": {\n    "summary": "fill with the actual signed report body"\n  }\n}` : "";
   if (file) file.value = "";
@@ -404,8 +405,7 @@ function launchCheckShortcutHandler(shortcut) {
 }
 
 function launchCheckConditionMarkup(condition, idx) {
-  const escape = (text) => String(text == null ? "" : text)
-    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const escape = (text) => sanitize(String(text == null ? "" : text));
   const defaultOpen = condition.color === "#ff4f6d" || condition.color === "#ffb74d";
   const shortcutBtn = condition.shortcut
     ? `<button class="btn btn-sm" type="button" data-launch-shortcut="cond-${idx}" style="margin-top:.35rem;font-size:.7rem;padding:.18rem .5rem;">${escape(condition.shortcut.label || "前往")}</button>`
@@ -570,8 +570,7 @@ function launchCheckCardMarkup(reportType, reportRow, missing, failed, idx) {
   } else if (reportRow) {
     stateNote = `最近通過：${reportRow.created_at || "-"}（commit ${String(reportRow.target_commit || "").slice(0, 8) || "-"}）`;
   }
-  const escape = (text) => String(text == null ? "" : text)
-    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const escape = (text) => sanitize(String(text == null ? "" : text));
   const shortcut = meta.shortcut;
   const defaultOpen = !!missing || !!failed;
   const shortcutBtn = shortcut
@@ -725,15 +724,14 @@ async function loadLaunchCheck() {
       const allReportsPassed = reqJson.ok === true && missing.size === 0 && failed.size === 0;
       const allConditionsPassed = conditionsRedCount === 0;
       const allGreen = allReportsPassed && allConditionsPassed;
-      const parts = [];
       if (allGreen) {
-        overall.textContent = `✓ 條件全綠 + 13 份報告全通過，可進 production`;
+        overall.textContent = `✓ 條件全綠 + ${required.length} 份報告全通過`;
       } else {
         const fragments = [];
         if (!allConditionsPassed) fragments.push(`A 區紅燈 ${conditionsRedCount}`);
         if (conditionsYellowCount) fragments.push(`A 區黃燈 ${conditionsYellowCount}`);
         if (!allReportsPassed) fragments.push(`B 區 ${passingReports}/${required.length}`);
-        overall.textContent = `❌ ${fragments.join(" · ")} — 還不能進 production`;
+        overall.textContent = `❌ ${fragments.join(" · ")} — 建議優先處理，但不阻止明確 GO_LIVE`;
       }
       overall.style.color = allGreen ? "#4caf50" : "#ff4f6d";
     }
@@ -746,7 +744,7 @@ async function loadLaunchCheck() {
       summary.textContent = parts.join("、");
     }
     if (!required.length) {
-      list.innerHTML = `<div class="drive-empty">沒有定義 production gate report — 請檢查 services/snapshots/schema.py:PRODUCTION_REQUIRED_REPORT_TYPES</div>`;
+      list.innerHTML = `<div class="drive-empty">沒有定義 production readiness report — 請檢查 services/snapshots/schema.py:PRODUCTION_REQUIRED_REPORT_TYPES</div>`;
       return;
     }
     list.innerHTML = required
@@ -768,7 +766,7 @@ async function loadLaunchCheck() {
       overall.textContent = "讀取失敗";
       overall.style.color = "#ff4f6d";
     }
-    list.innerHTML = `<div class="drive-empty">上線前檢查讀取失敗：${err && err.message ? err.message : "未知錯誤"}</div>`;
+    list.innerHTML = `<div class="drive-empty">上線前檢查讀取失敗：${sanitize(String(err && err.message ? err.message : "未知錯誤"))}</div>`;
     launchCheckMsg(err && err.message ? err.message : "未知錯誤", false);
   }
 }

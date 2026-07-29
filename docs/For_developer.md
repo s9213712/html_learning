@@ -20,7 +20,7 @@ Related technical references:
 
 ## Release and Schema
 
-- Release ID: `06_2026.07.29-001`
+- Release ID: `06_2026.07.30-001`
 - Schema version: `30`
 - Release ID source: `services/platform/release_info.py`
 - Runtime version endpoint: `GET /api/version`
@@ -1162,7 +1162,7 @@ Route modules:
 
 Service modules:
 
-- `services/access_controls.py`
+- `services/security/access_controls.py`
 - `services/users/auth.py`
 - `services/audit.py`
 - `services/platform/bootstrap.py`

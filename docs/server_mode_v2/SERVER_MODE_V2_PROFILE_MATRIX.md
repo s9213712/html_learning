@@ -20,7 +20,7 @@ validation.
 | `test` | none | **Isolated QA bench** — developers / QA agents run curl / 自動化 / fuzz / 例外輸入 / 壓測. | Must be deployed in an isolated runtime; **never on a public-facing site**; **must not point at production wallet / production ledger**. Different role from `internal_test`. |
 | `internal_test` | none | Controlled feature preview for **invited human testers**. | Tighter than `test`; access requires tester token; tester actions go to `test_shadow_*` tables. |
 | `dev_ready` | `preprod` | Development-ready / pre-release mode. | `preprod` is accepted only as a legacy alias and is stored/displayed as `dev_ready`. |
-| `production` | none | Public online operation. | Requires strict report gate and all mandatory security controls. |
+| `production` | none | Public online operation. | Requires explicit `GO_LIVE` and mandatory runtime security controls; readiness reports are advisory. |
 | `maintenance` | previous `maintenance_mode` setting | Operational maintenance, updates, DB migration, repair. | Formal server mode; setting remains an implementation detail. |
 | `incident_lockdown` | none | Security incident containment. | Auto-entered on restore failure, chain mismatch, high-risk integrity findings, and failed mode switch. |
 
@@ -128,7 +128,7 @@ The activity → mode mapping below uses these rules to keep `test` and `interna
 | Independent logging | `mode_switch_logs` is written directly to DB and does not depend on audit chain. No delete API is exposed. |
 | Checkpoint gate | Mode switch is rejected if checkpoint creation fails. |
 | Restore validation | Restore must verify DB, test content removal, PointsChain hash, Cloud Drive metadata hash, config/security hash, and integrity manifest hash. |
-| Production gate | Production entry requires all mandatory reports passing with zero critical/high unresolved findings. |
+| Production readiness | Report status is advisory; production entry still requires explicit `GO_LIVE` and all mandatory runtime safety controls. |
 | Incident safety | Restore validation failure, PointsChain mismatch, high-risk integrity finding, mode switch failure, or production critical file change enters `incident_lockdown`. |
 
 ## Mode Behavior Matrix
@@ -171,9 +171,9 @@ The activity → mode mapping below uses these rules to keep `test` and `interna
 | `maintenance` | `ENTER_MAINTENANCE` |
 | `incident_lockdown` | `ENTER_INCIDENT_LOCKDOWN` |
 
-## Production Gate Reports
+## Production Readiness Reports
 
-Production entry requires one latest passing report for each of the **13 report types** defined in `services/snapshots/schema.py:35-49 PRODUCTION_REQUIRED_REPORT_TYPES`.
+The optional readiness view evaluates the latest report for each type defined in `services/snapshots/schema.py::PRODUCTION_REQUIRED_REPORT_TYPES`.
 
 | # | Report type | Required content |
 | --- | --- | --- |
@@ -191,14 +191,14 @@ Production entry requires one latest passing report for each of the **13 report 
 | 12 | `points_chain_consistency` | PointsChain verification report. |
 | 13 | `cloud_drive_quota_permission` | Cloud Drive quota and permission report. |
 
-All 13 must be **latest passing** with **zero critical findings**, **zero high findings**, and **zero unresolved findings** to enter production. A single missing or stale or failing report blocks entry.
+Reports are most useful when **latest passing** with **zero critical findings**, **zero high findings**, and **zero unresolved findings**. A missing, stale, or failing report remains visible as an advisory and does not block an explicit `GO_LIVE` entry.
 
 Each report must include `report_id`, `report_type`, `generated_at`,
 `target_commit`, `target_branch`, `server_mode`, `test_result`, `pass`,
 `critical_findings_count`, `high_findings_count`, `unresolved_findings`,
 `tester`, and `signature` or `hash`.
 
-> **Spec history note**: An earlier draft listed only the bottom 7 (`stress` through `cloud_drive_quota_permission`). The implementation has always required the full 13 since the Server Mode v2 phase 2 cut. The spec is now aligned with implementation.
+> **Spec history note**: An earlier draft listed only the bottom 7 (`stress` through `cloud_drive_quota_permission`). The report inventory has expanded since the Server Mode v2 phase 2 cut; it is now advisory rather than a mode-switch authorization gate.
 
 ## Shadow Data Boundaries
 
@@ -221,7 +221,7 @@ interchangeable:
 | Token | Where it is used | Purpose | Authority |
 | --- | --- | --- | --- |
 | `internal_test` login token | `POST /api/login` payload field `internal_test_token` | Lets a root-approved tester log in while the server is in `internal_test` mode. | Login gate only. It does not grant API scopes by itself. |
-| Server Mode v2 tester token | `X-Tester-Token` or `Authorization: Bearer ...` | Lets a tester call scoped `/api/tester/*` automation/shadow APIs in `test` or `internal_test`. | Route/method/mode scoped, rate-limited, expiring, revocable, HMAC-signed. It cannot access root/admin/server-mode/snapshot/integrity/audit APIs. |
+| Server Mode v2 tester token | `X-Tester-Token` or an `Authorization` header using the Bearer scheme | Lets a tester call scoped `/api/tester/*` automation/shadow APIs in `test` or `internal_test`. | Route/method/mode scoped, rate-limited, expiring, revocable, HMAC-signed. It cannot access root/admin/server-mode/snapshot/integrity/audit APIs. |
 
 The login token is a door key. The tester token is a scoped test API key. A
 user may need one or both depending on whether the task is simply entering
@@ -231,7 +231,7 @@ user may need one or both depending on whether the task is simply entering
 
 | API | Purpose |
 | --- | --- |
-| `GET /api/root/server-mode` | Read current mode, profiles, production gate status, and incident summary. |
+| `GET /api/root/server-mode` | Read current mode, profiles, production readiness status, and incident summary. |
 | `POST /api/root/server-mode/checkpoint` | Create a checkpoint before a planned mode operation. |
 | `POST /api/root/server-mode/restore-check` | Validate current state against a stored checkpoint. |
 | `POST /api/root/server-mode/switch` | Switch mode after confirmation phrase and checkpoint gate. |
@@ -263,8 +263,8 @@ user may need one or both depending on whether the task is simply entering
 - 對 `test_for_develop.sh` 啟動路徑而言，這表示 `HTML_LEARNING_GIT_REPO_DIR`
   必須指向真實 git repo，而不是沒有 `.git` 的 `/tmp` copy；否則 live target commit
   會變空值，舊 commit 驗證將失真。
-- 正式 QA / pre-push / production-gate 驗收必須至少包含一個 live regression：
-  **完整 required report set verified 但 old/fake `target_commit` 的 reports 不得解鎖 production。**
+- 正式 QA / pre-push / production-readiness 驗收應至少包含一個 live regression：
+  **完整 report set verified 但 old/fake `target_commit` 的 reports 必須顯示為 advisory，不能被誤標為 current verified。**
 
 ## Tester APIs
 
@@ -370,7 +370,7 @@ qa_checks:
   - superweak_exit_discards_all_changes
 ```
 
-對應 pytest：見 `tests/test_snapshots.py` + `tests/test_auth_csrf_safe.py` + 後續 trading 整合測試（[`SERVER_MODE_V2_TRADING_AND_POINTSCHAIN.md`](SERVER_MODE_V2_TRADING_AND_POINTSCHAIN.md)）。
+對應 pytest：見 `tests/snapshots/test_snapshots.py` + `tests/security/auth/test_auth_csrf_safe.py` + 後續 trading 整合測試（[`SERVER_MODE_V2_TRADING_AND_POINTSCHAIN.md`](SERVER_MODE_V2_TRADING_AND_POINTSCHAIN.md)）。
 
 ## Implementation-Grade YAML Reference
 

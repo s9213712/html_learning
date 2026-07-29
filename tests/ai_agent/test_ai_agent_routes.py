@@ -1277,7 +1277,7 @@ def test_ai_agent_write_tool_internal_dispatch_preserves_browser_user_agent(tmp_
     assert payload["result"]["user_agent"] == "Mozilla/5.0 BrowserOnlyRegression"
 
 
-def test_ai_agent_launch_preflight_executes_checks_audit_and_switch(monkeypatch, tmp_path):
+def test_ai_agent_launch_preflight_switches_despite_optional_check_advisory(monkeypatch, tmp_path):
     db_path = tmp_path / "ai_agent_routes.db"
     _build_db(db_path)
     app = _build_app(
@@ -1293,7 +1293,7 @@ def test_ai_agent_launch_preflight_executes_checks_audit_and_switch(monkeypatch,
     @app.route("/api/root/server-mode/requirements", methods=["GET"])
     def fake_requirements():
         calls.append("requirements")
-        return _json_resp({"ok": True, "missing": [], "failed": [], "reports": {}})
+        return _json_resp({"ok": False, "missing": ["pytest"], "failed": [], "reports": {}})
 
     @app.route("/api/root/server-mode/logs/verify", methods=["GET"])
     def fake_logs_verify():
@@ -1337,7 +1337,8 @@ def test_ai_agent_launch_preflight_executes_checks_audit_and_switch(monkeypatch,
     assert payload["result"]["completed"] is True
     assert payload["result"]["final_mode"] == "production"
     assert payload["result"]["blockers"] == []
-    assert payload["result"]["preflight_passed"] is True
+    assert payload["result"]["preflight_passed"] is False
+    assert "缺少 production gate 報告：pytest" in payload["result"]["advisories"]
     assert payload["result"]["dry_run"] is False
     assert payload["result"]["operator_boundary"]["production_switch_requires_explicit_go_live"] is True
     assert calls == ["requirements", "logs_verify", "audit_scan", "switch", "server_mode"]
@@ -1401,7 +1402,7 @@ def test_ai_agent_launch_preflight_defaults_to_dry_run_without_switch(monkeypatc
     requirements_step = next(item for item in result["steps"] if item["name"] == "requirements_gate")
     assert requirements_step["result"]["report_status"]["large_evidence"] == {"pass": True}
     assert "reports" not in requirements_step["result"]
-    assert result["msg"] == "上線前檢查通過；本次為 dry-run，未切換 production"
+    assert result["msg"] == "上線前檢查完成；本次為 dry-run，未切換 production"
     assert result["next_actions"][0]["kind"] == "explicit_go_live_confirmation"
     assert result["next_actions"][0]["required_arguments"]["confirm"] == "GO_LIVE"
     assert any(item["kind"] == "twenty_four_hour_operational_campaign" for item in result["operator_runbook"])
@@ -1457,7 +1458,8 @@ def test_ai_agent_launch_preflight_treats_failed_http_status_as_blocker(monkeypa
 
     assert response.status_code == 200
     assert result["preflight_passed"] is False
-    assert "requirements gate 呼叫失敗：HTTP 503" in result["blockers"]
+    assert result["blockers"] == []
+    assert "requirements gate 呼叫失敗：HTTP 503" in result["advisories"]
     assert result["completed"] is False
 
 
@@ -1497,7 +1499,7 @@ def test_ai_agent_launch_preflight_reports_failed_final_mode_readback(monkeypatc
     })
     result = response.get_json()["result"]
 
-    assert result["preflight_passed"] is False
+    assert result["preflight_passed"] is True
     assert "最終 server mode 回讀失敗：HTTP 503" in result["blockers"]
     assert result["steps"][-1]["name"] == "final_mode_status"
     assert result["steps"][-1]["ok"] is False
@@ -1543,7 +1545,11 @@ def test_ai_agent_launch_preflight_maps_missing_reports_to_operator_commands(mon
         "arguments": {"target_mode": "production"},
     })
     result = response.get_json()["result"]
-    commands = {item.get("report_type"): item.get("command") for item in result["next_actions"]}
+    commands = {
+        item.get("report_type"): item.get("command")
+        for item in result["next_actions"]
+        if item.get("report_type")
+    }
 
     assert response.status_code == 200
     assert result["preflight_passed"] is False
@@ -1556,7 +1562,11 @@ def test_ai_agent_launch_preflight_maps_missing_reports_to_operator_commands(mon
         ),
         "pytest": "python3 scripts/on_live_reports/pytest.py",
     }
-    assert all(item["agent_can_execute"] is False for item in result["next_actions"])
+    assert all(
+        item["agent_can_execute"] is False
+        for item in result["next_actions"]
+        if item.get("report_type")
+    )
 
 
 def test_ai_agent_launch_switch_requires_explicit_go_live_confirmation(tmp_path):

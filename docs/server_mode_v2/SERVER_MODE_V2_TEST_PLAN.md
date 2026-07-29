@@ -136,20 +136,20 @@ After each phase, report:
 
 The current implementation is covered by these focused tests:
 
-- `tests/test_snapshots.py`
+- `tests/snapshots/test_snapshots.py`
   - checkpoint-gated mode switch
   - failed checkpoint to `incident_lockdown`
   - production report gate APIs
   - tester token APIs
   - tester shadow role/wallet isolation
   - superweak dirty-state discard
-- `tests/test_account_lockout.py`
+- `tests/account/auth/test_account_lockout.py`
   - production same-IP and same-account conflict policies remain disabled by
     default
   - scoped tester token login for `internal_test`
-- `tests/test_upload_security.py`
+- `tests/storage/test_upload_security.py`
   - superweak Cloud Drive quota is forced to 10MB, including root
-- `tests/test_integrity_guard.py`
+- `tests/security/integrity/test_integrity_guard.py`
   - production entry with high-risk integrity finding enters
     `incident_lockdown`
 - frontend static tests
