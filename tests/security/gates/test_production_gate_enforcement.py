@@ -181,20 +181,21 @@ def test_gate_blocks_with_wrong_confirm_phrase(tmp_path):
 # ── #2 Empty DB ───────────────────────────────────────────────────────
 
 
-def test_gate_blocks_when_no_reports(tmp_path):
+def test_switch_allows_no_reports_and_returns_advisory(tmp_path):
     mode, _, _ = _build_runtime(tmp_path)
     actor = {"id": 1, "username": "root"}
     res = mode.switch_mode(target_mode="production", actor=actor, confirm="GO_LIVE")
-    assert res["ok"] is False
-    assert "production gate" in res["msg"]
-    requirements = res.get("requirements") or {}
+    assert res["ok"] is True
+    assert res.get("mode", {}).get("current_mode") == "production"
+    requirements = res.get("production_requirements") or {}
     assert set(requirements.get("missing", [])) == set(PRODUCTION_REQUIRED_REPORT_TYPES)
+    assert res.get("advisories")
 
 
 # ── #3 one missing report ────────────────────────────────────────────
 
 
-def test_gate_blocks_when_one_report_missing(tmp_path):
+def test_switch_allows_one_missing_report_and_keeps_report_status(tmp_path):
     mode, _, db_path = _build_runtime(tmp_path)
     # Insert every required report except the first one.
     skipped = PRODUCTION_REQUIRED_REPORT_TYPES[0]
@@ -202,8 +203,8 @@ def test_gate_blocks_when_one_report_missing(tmp_path):
         _insert_report(db_path, rt)
     actor = {"id": 1, "username": "root"}
     res = mode.switch_mode(target_mode="production", actor=actor, confirm="GO_LIVE")
-    assert res["ok"] is False
-    requirements = res.get("requirements") or {}
+    assert res["ok"] is True
+    requirements = res.get("production_requirements") or {}
     # The one we skipped must show up as missing — and only that one.
     assert requirements.get("missing") == [skipped]
     assert not requirements.get("failed")
@@ -212,7 +213,7 @@ def test_gate_blocks_when_one_report_missing(tmp_path):
 # ── #4 critical_findings_count > 0 ─────────────────────────────────────
 
 
-def test_gate_blocks_when_one_report_has_critical_finding(tmp_path):
+def test_switch_allows_critical_report_but_keeps_advisory(tmp_path):
     mode, _, db_path = _build_runtime(tmp_path)
     # All passing except one with critical=2.
     bad_one = PRODUCTION_REQUIRED_REPORT_TYPES[3]
@@ -223,15 +224,15 @@ def test_gate_blocks_when_one_report_has_critical_finding(tmp_path):
             _insert_report(db_path, rt)
     actor = {"id": 1, "username": "root"}
     res = mode.switch_mode(target_mode="production", actor=actor, confirm="GO_LIVE")
-    assert res["ok"] is False
-    requirements = res.get("requirements") or {}
+    assert res["ok"] is True
+    requirements = res.get("production_requirements") or {}
     assert bad_one in requirements.get("failed", []), requirements
 
 
 # ── #5 high_findings_count > 0 ─────────────────────────────────────────
 
 
-def test_gate_blocks_when_one_report_has_high_finding(tmp_path):
+def test_switch_allows_high_report_but_keeps_advisory(tmp_path):
     mode, _, db_path = _build_runtime(tmp_path)
     bad_one = PRODUCTION_REQUIRED_REPORT_TYPES[5]
     for rt in PRODUCTION_REQUIRED_REPORT_TYPES:
@@ -241,15 +242,15 @@ def test_gate_blocks_when_one_report_has_high_finding(tmp_path):
             _insert_report(db_path, rt)
     actor = {"id": 1, "username": "root"}
     res = mode.switch_mode(target_mode="production", actor=actor, confirm="GO_LIVE")
-    assert res["ok"] is False
-    requirements = res.get("requirements") or {}
+    assert res["ok"] is True
+    requirements = res.get("production_requirements") or {}
     assert bad_one in requirements.get("failed", []), requirements
 
 
 # ── #6 empty report_hash ──────────────────────────────────────────────
 
 
-def test_gate_blocks_when_one_report_has_empty_hash(tmp_path):
+def test_switch_allows_unsigned_report_but_keeps_advisory(tmp_path):
     mode, _, db_path = _build_runtime(tmp_path)
     bad_one = PRODUCTION_REQUIRED_REPORT_TYPES[7]
     for rt in PRODUCTION_REQUIRED_REPORT_TYPES:
@@ -259,15 +260,15 @@ def test_gate_blocks_when_one_report_has_empty_hash(tmp_path):
             _insert_report(db_path, rt)
     actor = {"id": 1, "username": "root"}
     res = mode.switch_mode(target_mode="production", actor=actor, confirm="GO_LIVE")
-    assert res["ok"] is False
-    requirements = res.get("requirements") or {}
+    assert res["ok"] is True
+    requirements = res.get("production_requirements") or {}
     assert bad_one in requirements.get("failed", []), requirements
 
 
 # ── #7 pass=False ─────────────────────────────────────────────────────
 
 
-def test_gate_blocks_when_one_report_has_pass_false(tmp_path):
+def test_switch_allows_failed_report_but_keeps_advisory(tmp_path):
     mode, _, db_path = _build_runtime(tmp_path)
     bad_one = PRODUCTION_REQUIRED_REPORT_TYPES[10]
     for rt in PRODUCTION_REQUIRED_REPORT_TYPES:
@@ -277,8 +278,8 @@ def test_gate_blocks_when_one_report_has_pass_false(tmp_path):
             _insert_report(db_path, rt)
     actor = {"id": 1, "username": "root"}
     res = mode.switch_mode(target_mode="production", actor=actor, confirm="GO_LIVE")
-    assert res["ok"] is False
-    requirements = res.get("requirements") or {}
+    assert res["ok"] is True
+    requirements = res.get("production_requirements") or {}
     assert bad_one in requirements.get("failed", []), requirements
 
 

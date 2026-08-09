@@ -7,6 +7,7 @@ import pytest
 from scripts.testing.playwright_deep_site_check import (
     env_int,
     is_recoverable_network_cascade,
+    journey_user_lookup_path,
     require_external_server_credentials,
 )
 from scripts.testing.playwright_platform_health_check import ignored_browser_error
@@ -59,6 +60,12 @@ def test_deep_playwright_env_int_keeps_invalid_values_optional(monkeypatch):
     assert env_int("PLAYWRIGHT_TEST_INTEGER") == 31
     monkeypatch.setenv("PLAYWRIGHT_TEST_INTEGER", "invalid")
     assert env_int("PLAYWRIGHT_TEST_INTEGER") is None
+
+
+def test_deep_playwright_journey_user_lookup_filters_beyond_default_page():
+    assert journey_user_lookup_path("qa user/+1") == (
+        "/api/admin/users?include_deleted=1&page_size=100&q=qa%20user%2F%2B1"
+    )
 
 
 def test_playwright_acceptance_runner_uses_isolated_runtime_and_expected_checks():

@@ -35,6 +35,34 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+
+def campaign_ai_agent_provider_env(
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Map the product provider contract to the formal-run contract.
+
+    Production deployment uses ``HACKME_AI_AGENT_*`` while the formal probe
+    deliberately requires its own ``HACKME_CAMPAIGN_*`` names.  Forward only
+    the non-secret URL/model fields, and preserve explicitly scoped campaign
+    values when an operator supplies them.  Missing values remain missing so
+    the formal probe continues to fail closed rather than selecting a model.
+    """
+
+    source = environ if environ is not None else os.environ
+    values = {
+        "HACKME_CAMPAIGN_AI_AGENT_API_BASE_URL": str(
+            source.get("HACKME_CAMPAIGN_AI_AGENT_API_BASE_URL")
+            or source.get("HACKME_AI_AGENT_API_BASE_URL")
+            or ""
+        ).strip(),
+        "HACKME_CAMPAIGN_AI_AGENT_MODEL": str(
+            source.get("HACKME_CAMPAIGN_AI_AGENT_MODEL")
+            or source.get("HACKME_AI_AGENT_MODEL")
+            or ""
+        ).strip(),
+    }
+    return {key: value for key, value in values.items() if value}
+
 from scripts.testing.campaign_readiness import LayeredReadinessProbe, ReadinessConfig
 from scripts.testing.campaign_activation import (
     CORE_ACK_SCHEMA_VERSION,
@@ -1147,18 +1175,24 @@ def validate_effective_load_evidence(
     if not isinstance(ramp, Mapping):
         errors.append("ramp")
         ramp = {}
-    if ramp.get("required_levels") != [4, 8, 16, 32]:
+    policy = SUPERVISED_LOAD_POLICIES[campaign_level]
+    target_load_level = int(policy["target_load_level"])
+    minimum_active_workers_at_target = int(
+        policy["minimum_active_workers_at_target"]
+    )
+    required_levels = [int(level) for level in policy["ramp_levels"]]
+    if ramp.get("required_levels") != required_levels:
         errors.append("ramp_required_levels")
-    if ramp.get("completed_levels") != [4, 8, 16, 32]:
+    if ramp.get("completed_levels") != required_levels:
         errors.append("ramp_completed_levels")
     if ramp.get("ok") is not True:
         errors.append("ramp_ok")
-    policy = SUPERVISED_LOAD_POLICIES[campaign_level]
     if ramp.get("minimum_stage_seconds") != policy["minimum_ramp_stage_seconds"]:
         errors.append("ramp_minimum_stage_seconds")
     scheduled_start = 0.0
     expected_schedule: list[dict[str, float | int]] = []
-    for scheduled_level in (4, 8, 16):
+    ramp_stage_levels = required_levels[:-1]
+    for scheduled_level in ramp_stage_levels:
         window_seconds = float(policy["minimum_ramp_stage_seconds"][str(scheduled_level)])
         expected_schedule.append({
             "level": scheduled_level,
@@ -1198,7 +1232,7 @@ def validate_effective_load_evidence(
     if not isinstance(stages, Mapping):
         errors.append("ramp_stages")
         stages = {}
-    for level in (4, 8, 16):
+    for level in ramp_stage_levels:
         stage = stages.get(str(level)) if isinstance(stages, Mapping) else None
         if not isinstance(stage, Mapping):
             errors.append(f"ramp_stage:{level}")
@@ -1208,7 +1242,7 @@ def validate_effective_load_evidence(
         required_stage_seconds = float(policy["minimum_ramp_stage_seconds"][str(level)])
         if float(stage.get("minimum_stage_seconds") or 0.0) != required_stage_seconds:
             errors.append(f"ramp_stage_contract:{level}")
-        schedule_row = expected_schedule[(4, 8, 16).index(level)]
+        schedule_row = expected_schedule[ramp_stage_levels.index(level)]
         if (
             float(stage.get("scheduled_start_seconds") or 0.0)
             != float(schedule_row["start_seconds"])
@@ -1275,12 +1309,23 @@ def validate_effective_load_evidence(
                     native_valid_rounds += 1
         if native_valid_rounds != int(stage.get("valid_terminal_rounds") or 0):
             errors.append(f"ramp_stage_native_rounds:{level}")
-    baseline = evidence.get("baseline_32_operations_per_minute")
+    baseline = evidence.get("baseline_target_operations_per_minute")
+    if baseline is None:
+        # Preserve validation of evidence created by the previous 32-way
+        # contract while the formal target has become policy-driven.
+        baseline = evidence.get("baseline_32_operations_per_minute")
     if isinstance(baseline, bool) or not isinstance(baseline, (int, float)) or float(baseline) <= 0:
-        errors.append("baseline_32_operations_per_minute")
+        errors.append("baseline_target_operations_per_minute")
         baseline_value = 0.0
     else:
         baseline_value = float(baseline)
+    if evidence.get("target_load_level") not in (None, target_load_level):
+        errors.append("target_load_level_contract")
+    if evidence.get("minimum_active_workers_at_target") not in (
+        None,
+        minimum_active_workers_at_target,
+    ):
+        errors.append("minimum_active_workers_at_target_contract")
     if baseline_candidates and not math.isclose(
         baseline_value,
         float(median(baseline_candidates)),
@@ -1350,7 +1395,7 @@ def validate_effective_load_evidence(
         native = measurement.get("native") if isinstance(measurement, Mapping) else None
         native_valid, native_p10 = _validated_native_worker_count(
             native,
-            configured_workers=32,
+            configured_workers=target_load_level,
         )
         measurement_valid = bool(
             isinstance(measurement, Mapping)
@@ -1361,8 +1406,8 @@ def validate_effective_load_evidence(
             and measurement.get("configured_concurrency_not_used_as_measurement") is True
         )
         at_target = bool(
-            int(sample.get("scheduled_load_level") or 0) == 32
-            and active_workers >= int(policy["minimum_active_workers_at_32"])
+            int(sample.get("scheduled_load_level") or 0) == target_load_level
+            and active_workers >= minimum_active_workers_at_target
             and baseline_value > 0
             and throughput >= baseline_value * float(policy["minimum_baseline_throughput_ratio"])
             and effective_ratio >= float(policy["minimum_effective_operation_ratio"])
@@ -2561,6 +2606,7 @@ class ScenarioSpec:
     fraction: float
     runner: Callable[[], dict[str, Any]]
     mandatory: bool = True
+    depends_on: tuple[str, ...] = ()
 
 
 class Campaign:
@@ -2760,6 +2806,13 @@ class Campaign:
         self.core_root = self.root / "core_soak"
         self.core_report = self.core_root / "operational_soak.json"
         self.core_stop_file = self.core_root / "campaign_load.stop.json"
+        # Primary-server restart scenarios run beside the continuous soak.  A
+        # durable two-phase fence lets the soak finish its current round and
+        # acknowledge that it has quiesced before a *planned* primary outage.
+        # Without it, expected connection refusals during a recovery drill are
+        # indistinguishable from a product regression in the aggregate report.
+        self.core_maintenance_fence_file = self.core_root / "primary_maintenance_fence.json"
+        self.core_maintenance_ack_file = self.core_root / "primary_maintenance_ack.json"
         self.core_activation_dir = self.core_root / "activation"
         self.core_ready_file = self.core_activation_dir / "core_soak.ready.json"
         self.core_activation_file = self.core_activation_dir / "core_soak.activation.json"
@@ -3329,6 +3382,13 @@ class Campaign:
     def request_hard_stop(self, *, reason: str, classification: str, evidence: Mapping[str, Any]) -> dict[str, Any]:
         if self.state_machine is None:
             self.stop_event.set()
+            # A scenario may be blocked inside a long-running subprocess when
+            # the load generator or a required active condition fails.  Merely
+            # waking its owning thread leaves the runner waiting for the full
+            # scenario join timeout (eight hours by default) and can strand a
+            # failed campaign indefinitely.  Hard-stop semantics require the
+            # owned process groups to be terminated before final collection.
+            self.stop_managed_steps()
             return {"state": "STOPPING_LOAD", "reason": reason}
         try:
             state = self.state_machine.hard_stop(
@@ -3347,6 +3407,10 @@ class Campaign:
             "requested_at": utc_now(),
         })
         self.stop_event.set()
+        # Stop external scenario tools before joining their worker threads.
+        # This keeps an early core failure bounded by the tool termination
+        # grace period rather than the long normal-completion join window.
+        self.stop_managed_steps()
         return state
 
     def mark_failed(self, *, reason: str, classification: str = "FAIL_HARNESS") -> None:
@@ -3671,6 +3735,68 @@ class Campaign:
             "login_succeeded": True,
             "requested_usernames": exact_names,
             "records": records,
+        }
+
+    def _provision_exact_scenario_users(
+        self,
+        accounts: list[tuple[str, str]],
+        *,
+        target: Any,
+        nickname_prefix: str,
+    ) -> dict[str, Any]:
+        """Mirror named campaign accounts into an isolated scenario runtime.
+
+        Primary, recovery, and security runtimes deliberately use separate
+        databases.  A scenario targeting recovery must therefore establish its
+        own exact account fixtures instead of assuming primary provisioning is
+        replicated.  Passwords are accepted only in memory and never emitted
+        in the evidence payload.
+        """
+
+        root = WebClient(target.base_url, "root", self.credentials.root, timeout=90)
+        login = root.login()
+        records: list[dict[str, Any]] = []
+        if not login.get("ok"):
+            return {
+                "target": getattr(target, "name", "unknown"),
+                "root_login_succeeded": False,
+                "records": records,
+                "ok": False,
+            }
+        for index, (username, password) in enumerate(accounts, start=1):
+            created = self._create_user(
+                root,
+                username,
+                password,
+                nickname=f"{nickname_prefix} {index:02d}",
+            )
+            user_id = int(created.get("user_id") or 0)
+            quota = (
+                self._configure_campaign_storage_quota(root, user_id)
+                if created.get("ok") and user_id > 0
+                else {"ok": False, "error": "scenario_account_creation_failed"}
+            )
+            member = WebClient(target.base_url, username, password, timeout=90)
+            member_login = member.login() if quota.get("ok") else {"ok": False, "status": 0}
+            records.append({
+                "username": username,
+                "user_id": user_id,
+                "created_or_reused": int(created.get("create_status") or 0) in {200, 201, 409},
+                "creation_verified": created.get("ok") is True,
+                "storage_quota_configured": quota.get("ok") is True,
+                "member_login_succeeded": member_login.get("ok") is True,
+                "member_login_status": member_login.get("status"),
+            })
+        return {
+            "target": getattr(target, "name", "unknown"),
+            "root_login_succeeded": True,
+            "records": records,
+            "ok": bool(records) and all(
+                record["creation_verified"]
+                and record["storage_quota_configured"]
+                and record["member_login_succeeded"]
+                for record in records
+            ),
         }
 
     def native_points_hft_invariants(self) -> dict[str, Any]:
@@ -4102,7 +4228,11 @@ class Campaign:
                 share_session=share_session,
             )
             old_pid = self.primary.pid()
-            restart = self.primary.restart(reason="formal_long_media_continuity")
+            coordinated_restart = self.restart_primary_with_core_maintenance(
+                reason="formal_long_media_continuity",
+            )
+            result["core_maintenance"] = coordinated_restart.get("maintenance") or {}
+            restart = coordinated_restart.get("restart") or {}
             start_event = restart.get("started") if isinstance(restart.get("started"), Mapping) else {}
             stop_event = restart.get("stopped") if isinstance(restart.get("stopped"), Mapping) else {}
             result["restart"] = {
@@ -4117,7 +4247,7 @@ class Campaign:
                 },
                 "elapsed_seconds": restart.get("elapsed_seconds"),
             }
-            if restart.get("ok"):
+            if coordinated_restart.get("ok") is True:
                 result["after_restart"] = self._shared_hls_observation(
                     anonymous,
                     base_url=self.primary.base_url,
@@ -4900,6 +5030,8 @@ class Campaign:
         out_dir = self.reports / "scenarios" / scenario_id
         probe_out = out_dir / "formal_ai_agent_positive_operations.json"
         restart_out = out_dir / "supervised_restart.json"
+        replica_out = out_dir / "recovery_campaign_account_replication.json"
+        replica_cleanup_out = out_dir / "recovery_campaign_account_cleanup.json"
         artifact_dir = out_dir / "artifacts"
         request_file = self.recovery.restart_request_file
         if len(self.accounts) < 2:
@@ -4910,6 +5042,35 @@ class Campaign:
                 "scenario_id": scenario_id,
             }
         user_one, user_two = self.accounts[:2]
+        recovery_replica = self._provision_exact_scenario_users(
+            [user_one, user_two],
+            target=self.recovery,
+            nickname_prefix="AI Agent Recovery Campaign",
+        )
+        atomic_write_json(replica_out, recovery_replica)
+        if recovery_replica.get("ok") is not True:
+            replica_cleanup = self._cleanup_exact_scenario_users(
+                [user_one[0], user_two[0]],
+                target=self.recovery,
+            )
+            atomic_write_json(replica_cleanup_out, replica_cleanup)
+            return {
+                "schema_version": NATIVE_RUNNER_RESULT_SCHEMA_VERSION,
+                "scenario_id": scenario_id,
+                "ok": False,
+                "classification": "FAIL_HARNESS",
+                "error": "recovery_campaign_account_replication_failed",
+                "artifact": str(replica_out),
+                "artifacts": [{
+                    "artifact_id": "native.source.ai_agent_positive_operations.recovery_account_replication",
+                    "path": str(replica_out),
+                    "artifact_type": "json",
+                }, {
+                    "artifact_id": "native.source.ai_agent_positive_operations.recovery_account_cleanup",
+                    "path": str(replica_cleanup_out),
+                    "artifact_type": "json",
+                }],
+            }
 
         def consume_restart_request() -> dict[str, Any]:
             before_pid = self.recovery.pid()
@@ -5070,6 +5231,7 @@ class Campaign:
                     "HACKME_PROBE_MANAGER_PASSWORD": self.credentials.manager,
                     "HACKME_PROBE_USER_ONE_PASSWORD": user_one[1],
                     "HACKME_PROBE_USER_TWO_PASSWORD": user_two[1],
+                    **campaign_ai_agent_provider_env(),
                 },
                 payload_ok=lambda payload: bool(
                     payload.get("schema_version") == "hackme.formal-ai-agent-positive-operations-probe/v1"
@@ -5095,9 +5257,42 @@ class Campaign:
                 ),
             ),
         ])
+        replica_cleanup = self._cleanup_exact_scenario_users(
+            [user_one[0], user_two[0]],
+            target=self.recovery,
+        )
+        replica_cleanup_ok = bool(
+            replica_cleanup.get("login_succeeded") is True
+            and len(replica_cleanup.get("records") or []) == 2
+            and all(
+                isinstance(record, Mapping)
+                and int(record.get("delete_status") or 0) in {0, 200}
+                and int(record.get("verify_status") or 0) == 200
+                and int(record.get("residual_exact_count") or 0) == 0
+                for record in (replica_cleanup.get("records") or [])
+            )
+        )
+        replica_cleanup["ok"] = replica_cleanup_ok
+        atomic_write_json(replica_cleanup_out, replica_cleanup)
+        result["recovery_campaign_account_replication"] = recovery_replica
+        result["recovery_campaign_account_cleanup"] = replica_cleanup
+        if not replica_cleanup_ok:
+            result["ok"] = False
         payload = load_json(probe_out)
         restart_payload = load_json(restart_out)
         artifacts = list(result.get("artifacts") or [])
+        artifacts.extend([
+            {
+                "artifact_id": "native.source.ai_agent_positive_operations.recovery_account_replication",
+                "path": str(replica_out),
+                "artifact_type": "json",
+            },
+            {
+                "artifact_id": "native.source.ai_agent_positive_operations.recovery_account_cleanup",
+                "path": str(replica_cleanup_out),
+                "artifact_type": "json",
+            },
+        ])
         fixture = payload.get("video") if isinstance(payload.get("video"), Mapping) else {}
         fixture = fixture.get("fixture") if isinstance(fixture.get("fixture"), Mapping) else {}
         fixture_path = Path(str(fixture.get("path") or "")).expanduser().resolve(strict=False)
@@ -5516,7 +5711,10 @@ class Campaign:
         def restart_persistence() -> dict[str, Any]:
             custom = load_json(custom_out)
             old_pid = self.primary.pid()
-            restarted = self.primary.restart(reason="formal_trading_workflow_persistence")
+            coordinated_restart = self.restart_primary_with_core_maintenance(
+                reason="formal_trading_workflow_persistence",
+            )
+            restarted = coordinated_restart.get("restart") or {}
             stopped = restarted.get("stopped") if isinstance(restarted.get("stopped"), Mapping) else {}
             started = restarted.get("started") if isinstance(restarted.get("started"), Mapping) else {}
             readiness = started.get("ready") if isinstance(started.get("ready"), Mapping) else {}
@@ -5534,6 +5732,7 @@ class Campaign:
             template_hash = self._sha256(template_file) if template_file.is_file() and not template_file.is_symlink() else ""
             order_uuid = str((custom.get("scan_trigger") or {}).get("order_uuid") or "") if isinstance(custom.get("scan_trigger"), Mapping) else ""
             return {
+                "core_maintenance": coordinated_restart.get("maintenance") or {},
                 "old_pid": old_pid,
                 "new_pid": int(started.get("pid") or 0),
                 "old_master_remaining": stopped.get("master_process_remaining"),
@@ -6396,6 +6595,20 @@ class Campaign:
             return False
         return True
 
+    @staticmethod
+    def _extract_verified_runtime_archive(archive: Path, restore_root: Path) -> None:
+        """Extract a previously validated archive with tarfile's data filter.
+
+        The manifest validation above is the primary contract for the portable
+        backup, while the ``data`` filter is a second, extraction-time guard
+        against a changed archive or unsupported tar member type.  Supplying
+        the filter explicitly also keeps this path compatible with Python's
+        safer tarfile default.
+        """
+
+        with tarfile.open(archive, "r:gz") as handle:
+            handle.extractall(path=restore_root, filter="data")
+
     def _portable_full_runtime_cycle(
         self,
         *,
@@ -6511,8 +6724,7 @@ class Campaign:
                 return payload
 
             restore_root.mkdir(parents=True, exist_ok=False)
-            with tarfile.open(archive, "r:gz") as handle:
-                handle.extractall(restore_root)
+            self._extract_verified_runtime_archive(archive, restore_root)
             mismatches: list[str] = []
             missing: list[str] = []
             for row in files:
@@ -8030,6 +8242,10 @@ class Campaign:
             raise ActivationArtifactError("core soak runtime root symlink rejected")
         self.core_root.mkdir(parents=True, exist_ok=True)
         os.chmod(self.core_root, 0o700)
+        assert_fresh_artifact_paths([
+            self.core_maintenance_fence_file,
+            self.core_maintenance_ack_file,
+        ])
         activation_required = bool(
             self.supervised and self.campaign_level in {"rehearsal", "soak", "formal"}
         )
@@ -8108,7 +8324,8 @@ class Campaign:
             "--max-ordinary-p95-ms", str(float(self.args.max_ordinary_p95_ms)),
             "--max-ordinary-p99-ms", str(float(self.args.max_ordinary_p99_ms)),
             "--max-sentinel-p95-ms", str(float(self.args.max_sentinel_p95_ms)),
-            "--server-pids", str(self.primary.pid()),
+            "--maintenance-fence-file", str(self.core_maintenance_fence_file),
+            "--maintenance-ack-file", str(self.core_maintenance_ack_file),
         ]
         if self.supervised:
             self.core_command.extend(["--stop-file", str(self.core_stop_file)])
@@ -8132,7 +8349,6 @@ class Campaign:
             "HACKME_SOAK_MANAGER_PASSWORD": self.credentials.manager,
             "HACKME_SOAK_TEST_PASSWORD": self.credentials.test,
             "HACKME_SOAK_ACCOUNT_PASSWORD": self.credentials.member,
-            "HACKME_SERVER_PIDS": str(self.primary.pid()),
         })
         if activation_required:
             env["HACKME_CORE_ACTIVATION_NONCE"] = self.core_activation_nonce
@@ -8172,6 +8388,145 @@ class Campaign:
             "report": str(self.core_report),
             "command": sanitized_command(self.core_command),
         }
+
+    def _enter_primary_maintenance_fence(
+        self,
+        *,
+        reason: str,
+        timeout_seconds: float = 300.0,
+    ) -> dict[str, Any]:
+        """Wait for the continuous soak to quiesce before a planned restart."""
+
+        process = self.core_process
+        if process is None or process.poll() is not None:
+            return {
+                "required": False,
+                "ok": False,
+                "error": "core_soak_not_running",
+            }
+        nonce = secrets.token_hex(24)
+        started = time.monotonic()
+        request = {
+            "schema_version": "hackme.core-maintenance-fence/v1",
+            "active": True,
+            "nonce": nonce,
+            "reason": str(reason),
+            "requested_at": utc_now(),
+            "requested_monotonic_ns": time.monotonic_ns(),
+        }
+        atomic_write_json(self.core_maintenance_fence_file, request)
+        deadline = started + max(1.0, float(timeout_seconds))
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                return {
+                    "required": True,
+                    "ok": False,
+                    "nonce": nonce,
+                    "error": "core_soak_exited_before_maintenance_ack",
+                }
+            ack = load_json(self.core_maintenance_ack_file)
+            if (
+                ack.get("schema_version") == "hackme.core-maintenance-ack/v1"
+                and ack.get("nonce") == nonce
+                and ack.get("state") == "quiescent"
+                and ack.get("reason") == str(reason)
+            ):
+                return {
+                    "required": True,
+                    "ok": True,
+                    "nonce": nonce,
+                    "reason": str(reason),
+                    "elapsed_seconds": round(time.monotonic() - started, 3),
+                    "ack": ack,
+                }
+            time.sleep(0.05)
+        return {
+            "required": True,
+            "ok": False,
+            "nonce": nonce,
+            "reason": str(reason),
+            "elapsed_seconds": round(time.monotonic() - started, 3),
+            "error": "core_soak_maintenance_ack_timeout",
+        }
+
+    def _leave_primary_maintenance_fence(
+        self,
+        entered: Mapping[str, Any],
+        *,
+        timeout_seconds: float = 60.0,
+    ) -> dict[str, Any]:
+        """Release a prior fence and require the soak to record the window."""
+
+        nonce = str(entered.get("nonce") or "")
+        reason = str(entered.get("reason") or "")
+        if not nonce or not reason:
+            return {
+                "required": bool(entered.get("required")),
+                "ok": False,
+                "error": "maintenance_fence_identity_missing",
+            }
+        started = time.monotonic()
+        atomic_write_json(self.core_maintenance_fence_file, {
+            "schema_version": "hackme.core-maintenance-fence/v1",
+            "active": False,
+            "nonce": nonce,
+            "reason": reason,
+            "released_at": utc_now(),
+            "released_monotonic_ns": time.monotonic_ns(),
+        })
+        deadline = started + max(1.0, float(timeout_seconds))
+        while time.monotonic() < deadline:
+            ack = load_json(self.core_maintenance_ack_file)
+            if (
+                ack.get("schema_version") == "hackme.core-maintenance-ack/v1"
+                and ack.get("nonce") == nonce
+                and ack.get("state") == "released"
+                and ack.get("reason") == reason
+            ):
+                return {
+                    "required": True,
+                    "ok": True,
+                    "nonce": nonce,
+                    "reason": reason,
+                    "elapsed_seconds": round(time.monotonic() - started, 3),
+                    "ack": ack,
+                }
+            process = self.core_process
+            if process is None or process.poll() is not None:
+                return {
+                    "required": True,
+                    "ok": False,
+                    "nonce": nonce,
+                    "reason": reason,
+                    "error": "core_soak_exited_before_maintenance_release",
+                }
+            time.sleep(0.05)
+        return {
+            "required": True,
+            "ok": False,
+            "nonce": nonce,
+            "reason": reason,
+            "elapsed_seconds": round(time.monotonic() - started, 3),
+            "error": "core_soak_maintenance_release_timeout",
+        }
+
+    def restart_primary_with_core_maintenance(self, *, reason: str) -> dict[str, Any]:
+        """Restart primary only inside a recorded, quiescent soak window."""
+
+        entered = self._enter_primary_maintenance_fence(reason=reason)
+        result: dict[str, Any] = {"maintenance": {"entered": entered}}
+        if entered.get("ok") is not True:
+            result.update({"ok": False, "error": "primary_restart_maintenance_not_quiescent"})
+            return result
+        try:
+            restart = self.primary.restart(reason=reason)
+            result["restart"] = restart
+            result["ok"] = bool(restart.get("ok"))
+        finally:
+            released = self._leave_primary_maintenance_fence(entered)
+            result["maintenance"]["released"] = released
+            result["ok"] = bool(result.get("ok") and released.get("ok"))
+        return result
 
     def _core_observation(self) -> tuple[Any, ...]:
         process = self.core_process
@@ -8481,6 +8836,27 @@ class Campaign:
             "backup_restore_restart": "recovery",
             "media_proxy_cross_browser": "isolated",
         }
+        # A primary-service restart intentionally causes a short outage.  Do
+        # not run an unrelated primary scenario through that boundary: it
+        # would convert an expected maintenance window into a false product or
+        # harness failure.  The core soak is independently fenced and remains
+        # active throughout; only the finite scenario runners are sequenced.
+        dependencies = {
+            "cloud_drive_share_stream": ("media_long_hls_share",),
+            "bt_download_stream_restart": ("media_long_hls_share",),
+            "comfyui_real_workflows": ("media_long_hls_share",),
+            "trading_background_custom_workflow": (
+                "media_long_hls_share",
+                "cloud_drive_share_stream",
+                "bt_download_stream_restart",
+                "comfyui_real_workflows",
+            ),
+            "pointschain_hft_invariants": ("trading_background_custom_workflow",),
+            "wallet_incident_governance": ("trading_background_custom_workflow",),
+            "server_emergency_incident": ("trading_background_custom_workflow",),
+            "community_governance_operations": ("trading_background_custom_workflow",),
+            "final_ui_mobile_prelaunch": ("trading_background_custom_workflow",),
+        }
         return [
             ScenarioSpec(
                 scenario_id,
@@ -8488,12 +8864,33 @@ class Campaign:
                 targets.get(scenario_id, "primary"),
                 contract.scheduled_fraction,
                 lambda scenario_id=scenario_id: self.run_formal_native_scenario(scenario_id),
+                depends_on=dependencies.get(scenario_id, ()),
             )
             for scenario_id, contract in CAMPAIGN_SCENARIO_CONTRACTS.items()
         ]
 
+    def wait_for_scenario_dependencies(self, spec: ScenarioSpec) -> list[str]:
+        """Wait for prerequisite scenarios and fail closed if one failed."""
+
+        errors: list[str] = []
+        for scenario_id in spec.depends_on:
+            while not self.stop_event.is_set():
+                with self.lock:
+                    result = self.scenario_results.get(scenario_id)
+                if result is not None:
+                    if result.get("ok") is not True:
+                        errors.append(f"scenario_dependency_failed:{scenario_id}")
+                    break
+                self.stop_event.wait(0.1)
+            if self.stop_event.is_set():
+                break
+            if errors:
+                break
+        return errors
+
     def scenario_worker(self, spec: ScenarioSpec) -> None:
         self.active_event.wait()
+        dependency_errors = self.wait_for_scenario_dependencies(spec)
         delay = max(0.0, float(self.args.duration_seconds) * max(0.0, min(1.0, spec.fraction)))
         while not self.stop_event.is_set() and self.elapsed() < delay:
             self.stop_event.wait(min(5.0, max(0.1, delay - self.elapsed())))
@@ -8503,10 +8900,18 @@ class Campaign:
             drift_before = self.check_drift()
             started_at = utc_now()
             started_elapsed = self.elapsed()
-            try:
-                result = spec.runner() if not drift_before else {"ok": False, "error": "source_drift_before_scenario"}
-            except Exception as exc:
-                result = {"ok": False, "error": f"{exc.__class__.__name__}: {exc}"}
+            if dependency_errors:
+                result = {
+                    "ok": False,
+                    "classification": "FAIL_HARNESS",
+                    "error": "scenario_dependencies_not_satisfied",
+                    "dependency_errors": dependency_errors,
+                }
+            else:
+                try:
+                    result = spec.runner() if not drift_before else {"ok": False, "error": "source_drift_before_scenario"}
+                except Exception as exc:
+                    result = {"ok": False, "error": f"{exc.__class__.__name__}: {exc}"}
             if result.get("ok") is True:
                 try:
                     binding = FORMAL_SCENARIO_BINDINGS[spec.scenario_id]
@@ -8613,6 +9018,7 @@ class Campaign:
                 "target": spec.target,
                 "mandatory": spec.mandatory,
                 "scheduled_fraction": spec.fraction,
+                "depends_on": list(spec.depends_on),
                 "started_at": started_at,
                 "started_active_seconds": round(started_elapsed, 3),
                 "finished_active_seconds": round(self.elapsed(), 3),

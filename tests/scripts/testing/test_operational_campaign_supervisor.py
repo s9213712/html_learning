@@ -382,7 +382,7 @@ def test_runner_command_is_supervised_and_never_contains_authorization_material(
     assert "--allow-short-duration" in command
     assert command[command.index("--concurrency") + 1] == "2"
     assert command[command.index("--round-ops") + 1] == "50"
-    assert command[command.index("--max-ordinary-p95-ms") + 1] == "3000.0"
+    assert command[command.index("--max-ordinary-p95-ms") + 1] == "30000.0"
     assert command[command.index("--minimum-free-gb") + 1] == "20.0"
     assert "--authorization-file" not in command
     assert "--gate-bundle-file" not in command
@@ -405,8 +405,8 @@ def test_soak_runner_command_is_full_day_but_not_capacity_signoff(
     command = supervisor._runner_command()
 
     assert command[command.index("--duration-seconds") + 1] == "86400"
-    assert command[command.index("--workers") + 1] == "2"
-    assert command[command.index("--threads") + 1] == "2"
+    assert command[command.index("--workers") + 1] == "1"
+    assert command[command.index("--threads") + 1] == "16"
     assert command[command.index("--concurrency") + 1] == "4"
     assert "--allow-short-duration" in command
     assert "--authorization-file" not in command

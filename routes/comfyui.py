@@ -14,7 +14,7 @@ import subprocess
 import tempfile
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse, urlunparse
@@ -70,6 +70,7 @@ from services.comfyui.gguf_profiles import (
 )
 from services.comfyui.huggingface import normalize_diffusers_variant, normalize_huggingface_repo_file
 from services.comfyui.workflow.compat import apply_workflow_compatibility_fixes
+from services.comfyui.workflow import builder as workflow_builder
 from services.comfyui.workflows import (
     WorkflowValidationError,
     extract_workflow_summary,
@@ -1621,6 +1622,64 @@ def register_comfyui_routes(app, deps):
                 conn.commit()
             finally:
                 conn.close()
+        _hydrate_semantic_outpaint_canvas_geometry(active_client, params)
+        return params
+
+    def _hydrate_semantic_outpaint_canvas_geometry(active_client, params):
+        """Set trusted aligned blank-canvas dimensions for SAM3 outpaint.
+
+        Flux Fill must not receive the source image's VAE latent: even under a
+        full mask it can redraw a second person behind the app-composited SAM3
+        foreground.  EmptyImage needs concrete dimensions, so obtain them from
+        the now-materialized input image rather than accepting caller supplied
+        dimensions.
+        """
+        if not isinstance(params, dict):
+            return params
+        if str(params.get("outpaint_workflow_family") or "").strip().lower() != "flux_fill_sam3_subject_gguf":
+            return params
+        source_ref = params.get("source_image_ref") if isinstance(params.get("source_image_ref"), dict) else None
+        if not source_ref:
+            raise ComfyUIError("SAM3 語意外延缺少來源圖片，無法建立空白畫布")
+        try:
+            fetched = active_client.fetch_image(source_ref)
+            _assert_reasonable_image_size(fetched)
+            raw_data = getattr(fetched, "data", b"") or b""
+            from PIL import Image
+
+            with Image.open(BytesIO(bytes(raw_data))) as source_image:
+                source_width, source_height = source_image.size
+        except ComfyUIError:
+            raise
+        except Exception as exc:
+            raise ComfyUIError(f"SAM3 語意外延無法讀取來源尺寸：{exc}") from exc
+        if source_width < 64 or source_height < 64 or source_width > 16384 or source_height > 16384:
+            raise ComfyUIError("SAM3 語意外延來源尺寸不在支援範圍")
+        expand = params.get("outpaint") if isinstance(params.get("outpaint"), dict) else {}
+        left = max(0, int(expand.get("left") or 0))
+        top = max(0, int(expand.get("top") or 0))
+        right = max(0, int(expand.get("right") or 0))
+        bottom = max(0, int(expand.get("bottom") or 0))
+
+        def _aligned_canvas_size(source_size, before, after):
+            requested = source_size + before + after
+            # Comfy's latent path is aligned to eight pixels.  Floor the outer
+            # border when possible (matching ImagePadForOutpaint), but never
+            # crop any pixel covered by the later SAM3 foreground composite.
+            aligned = (requested // 8) * 8
+            minimum_subject_extent = source_size + before
+            if aligned < minimum_subject_extent:
+                aligned = ((minimum_subject_extent + 7) // 8) * 8
+            return aligned
+
+        canvas_width = _aligned_canvas_size(source_width, left, right)
+        canvas_height = _aligned_canvas_size(source_height, top, bottom)
+        if canvas_width < 64 or canvas_height < 64 or canvas_width > 16384 or canvas_height > 16384:
+            raise ComfyUIError("SAM3 語意外延對齊後的畫布尺寸不在支援範圍")
+        params["outpaint_source_width"] = source_width
+        params["outpaint_source_height"] = source_height
+        params["outpaint_canvas_width"] = canvas_width
+        params["outpaint_canvas_height"] = canvas_height
         return params
 
     def _validate_generation_capabilities(active_client, params):
@@ -1691,6 +1750,7 @@ def register_comfyui_routes(app, deps):
                 valid_variants = {str(item.get("variant") or "") for item in variant_options}
                 valid_gguf_files = {str(item.get("gguf_file") or "") for item in variant_options if item.get("kind") == "gguf"}
                 selected_variant = normalize_diffusers_variant(params.get("diffusers_model_variant"), allow_blank=True)
+                variant_explicitly_selected = bool(params.get("diffusers_model_variant_selected"))
                 if selected_variant is None:
                     return {**(capabilities or {}), "diffusers_inspection": inspection}, "Diffusers 模型精度版本名稱不合法。"
                 if not selected_gguf_file and not selected_variant and len(variant_options) == 1 and variant_options[0].get("kind") == "gguf":
@@ -1710,7 +1770,7 @@ def register_comfyui_routes(app, deps):
                     params["diffusers_gguf_profile"] = str(profile.get("id") or "")
                     params["diffusers_gguf_variant"] = str(profile_variant.get("id") or "")
                     params["diffusers_gguf_base_repo"] = str(profile.get("base_repo") or params.get("diffusers_gguf_base_repo") or "").strip()
-                if len(variant_options) > 1 and not selected_variant and not selected_gguf_file:
+                if len(variant_options) > 1 and not selected_variant and not selected_gguf_file and not variant_explicitly_selected:
                     return (
                         {**(capabilities or {}), "diffusers_inspection": inspection},
                         "這個 Hugging Face repo 有多個精度版本，請先在生圖頁面選擇要下載/載入的版本，避免重複下載。",
@@ -1738,7 +1798,92 @@ def register_comfyui_routes(app, deps):
             return capabilities, None
         if mode_definition.get("workflow_only"):
             return capabilities, "這個模式需要透過支援的大模型 workflow 模板執行，請先匯入或選擇對應 workflow。"
-        if mode != "upscale":
+        flux_fill_outpaint = (
+            mode == "outpaint"
+            and str((params or {}).get("outpaint_workflow_family") or "").strip().lower()
+            in {"flux_fill_gguf", "flux_fill_sam3_subject_gguf"}
+        )
+        flux_fill_sam3_subject_outpaint = (
+            mode == "outpaint"
+            and str((params or {}).get("outpaint_workflow_family") or "").strip().lower()
+            == "flux_fill_sam3_subject_gguf"
+        )
+        if flux_fill_outpaint:
+            if params.get("loras"):
+                return capabilities, "Flux Fill 外延不支援目前的 Checkpoint LoRA 快捷選擇，請改用相容的官方 workflow。"
+            if params.get("controlnet"):
+                return capabilities, "Flux Fill 外延不支援目前的 Checkpoint ControlNet 快捷選擇，請改用相容的官方 workflow。"
+            if flux_fill_sam3_subject_outpaint and int(params.get("batch_size") or 1) != 1:
+                return capabilities, "SAM3 語意外延一次僅支援一張；請以多次執行取得多個候選結果。"
+            required_flux_nodes = {
+                "LoadImage", "CLIPTextEncode", "FluxGuidance", "KSampler", "UnetLoaderGGUF", "VAELoader",
+                "DualCLIPLoader", "InpaintModelConditioning", "DifferentialDiffusion", "EmptyImage", "SolidMask",
+                "ConditioningZeroOut", "VAEDecode", "SaveImage",
+            }
+            if flux_fill_sam3_subject_outpaint:
+                required_flux_nodes.update({"CheckpointLoaderSimple", "SAM3_Detect", "InvertMask", "JoinImageWithAlpha"})
+            missing_flux_nodes = sorted(node for node in required_flux_nodes if node not in available_nodes)
+            if missing_flux_nodes:
+                return capabilities, "Flux Fill 外延缺少必要 workflow node：" + ", ".join(missing_flux_nodes)
+
+            def _resolve_flux_model(label, requested, options):
+                resolved = resolve_model_option(requested, options or [])
+                if not resolved:
+                    return "", f"Flux Fill 外延缺少必要{label}：{requested}"
+                return resolved, ""
+
+            unet_name, flux_msg = _resolve_flux_model(
+                " GGUF UNet",
+                workflow_builder.FLUX_FILL_OUTPAINT_GGUF_UNET,
+                (capabilities or {}).get("diffusion_models") or [],
+            )
+            if flux_msg:
+                return capabilities, flux_msg
+            clip_l_name, flux_msg = _resolve_flux_model(
+                " CLIP-L",
+                workflow_builder.FLUX_FILL_OUTPAINT_CLIP_L,
+                (capabilities or {}).get("clip_models") or [],
+            )
+            if flux_msg:
+                return capabilities, flux_msg
+            t5_name, flux_msg = _resolve_flux_model(
+                " T5",
+                workflow_builder.FLUX_FILL_OUTPAINT_T5,
+                (capabilities or {}).get("clip_models") or [],
+            )
+            if flux_msg:
+                return capabilities, flux_msg
+            vae_name, flux_msg = _resolve_flux_model(
+                " VAE",
+                workflow_builder.FLUX_FILL_OUTPAINT_VAE,
+                (capabilities or {}).get("vaes") or [],
+            )
+            if flux_msg:
+                return capabilities, flux_msg
+            sam3_checkpoint = ""
+            if flux_fill_sam3_subject_outpaint:
+                sam3_checkpoint, flux_msg = _resolve_flux_model(
+                    " SAM3 checkpoint",
+                    workflow_builder.SAM3_OUTPAINT_SUBJECT_CHECKPOINT,
+                    (capabilities or {}).get("models") or [],
+                )
+                if flux_msg:
+                    return capabilities, flux_msg
+            params.update({
+                "model": unet_name,
+                "vae": vae_name,
+                "cfg": 1.0,
+                "sampler_name": "euler",
+                "scheduler": "normal",
+                "denoise_strength": 1.0,
+                "official_workflow_id": "origin_flux_fill_outpaint_gguf_q3",
+                "outpaint_flux_unet_name": unet_name,
+                "outpaint_flux_clip_l": clip_l_name,
+                "outpaint_flux_t5": t5_name,
+                "outpaint_flux_vae": vae_name,
+                "outpaint_sam3_checkpoint": sam3_checkpoint,
+            })
+        if mode != "upscale" and not flux_fill_outpaint:
             checkpoint_options = list((capabilities or {}).get("models") or [])
             if not checkpoint_options and hasattr(active_client, "get_models"):
                 try:
@@ -1760,7 +1905,16 @@ def register_comfyui_routes(app, deps):
         elif mode == "inpaint":
             required_nodes.update({"LoadImage", "LoadImageMask", "VAEEncodeForInpaint"})
         elif mode == "outpaint":
-            required_nodes.update({"LoadImage", "ImagePadForOutpaint", "VAEEncodeForInpaint"})
+            if flux_fill_outpaint:
+                required_nodes = {
+                    "LoadImage", "CLIPTextEncode", "FluxGuidance", "KSampler", "UnetLoaderGGUF", "VAELoader",
+                    "DualCLIPLoader", "InpaintModelConditioning", "DifferentialDiffusion", "EmptyImage", "SolidMask",
+                    "ConditioningZeroOut", "VAEDecode", "SaveImage",
+                }
+                if flux_fill_sam3_subject_outpaint:
+                    required_nodes.update({"CheckpointLoaderSimple", "SAM3_Detect", "InvertMask", "JoinImageWithAlpha"})
+            else:
+                required_nodes.update({"LoadImage", "ImagePadForOutpaint", "VAEEncodeForInpaint"})
         elif mode == "upscale":
             required_nodes = {"LoadImage", "UpscaleModelLoader", "ImageUpscaleWithModel", "SaveImage"}
             upscale_models = list((capabilities or {}).get("upscale_models") or [])
@@ -2218,7 +2372,7 @@ def register_comfyui_routes(app, deps):
                             payload["stage"] = str(progress_data.get("phase") or default_stage)[:80]
                             payload["progress_percent"] = int(float(progress_data.get("percent") or 100))
                             payload["stage_detail"] = str(progress_data.get("detail") or "")[:1000]
-                            payload["finished_at"] = __import__("datetime").datetime.utcnow().replace(microsecond=0).isoformat()
+                            payload["finished_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
                         if updated.get("error"):
                             payload["error_message"] = str(updated.get("error") or "")[:1000]
                             payload["error_stage"] = "comfyui"
@@ -2357,7 +2511,7 @@ def register_comfyui_routes(app, deps):
                         "stage_detail": detail,
                     }
                     if next_status in {"succeeded", "failed", "cancelled", "expired"}:
-                        update_payload["finished_at"] = __import__("datetime").datetime.utcnow().replace(microsecond=0).isoformat()
+                        update_payload["finished_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
                     if next_status == "failed":
                         update_payload["error_message"] = str(progress_data.get("error_message") or detail or "ComfyUI 產圖失敗")[:1000]
                         update_payload["error_stage"] = "comfyui"
@@ -4747,6 +4901,10 @@ def register_comfyui_routes(app, deps):
             "reference_image_ref": _normalize_image_ref_field(data.get("reference_image_ref") or data.get("reference_image_ref_json") or data.get("pose_reference_image_ref")),
             "upscale_model": str(data.get("upscale_model") or "").strip(),
             "outpaint": _normalize_outpaint_payload(data),
+            "outpaint_workflow_family": "flux_fill_sam3_subject_gguf" if mode == "outpaint" else "",
+            "outpaint_subject_prompt": _normalize_comfyui_prompt_text(
+                data.get("outpaint_subject_prompt") or data.get("subject_prompt") or "main subject"
+            )[:300],
         }
         params.update(_normalize_agent_review_params(data))
         skip_asset_validation = _coerce_bool(data.get("skip_asset_validation"))

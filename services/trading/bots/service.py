@@ -62,6 +62,12 @@ def _normalize_optional_risk_percent(value, *, name):
     return number if number > 0 else None
 
 
+def _normalize_optional_price_limit(value, *, name):
+    if value in (None, ""):
+        return None
+    return _to_price_float(value, name=name, minimum=0.00000001, maximum=10**12)
+
+
 def bot_max_runs_from_storage(value):
     number = int(value or 0)
     return -1 if number >= UNLIMITED_BOT_MAX_RUNS else number
@@ -232,6 +238,35 @@ def validate_bot_payload(service, conn, payload):
     interval_hours = _to_int(payload.get("interval_hours", 24), name="interval_hours", minimum=1, maximum=8760)
     if bot_type == "dca":
         cooldown_seconds = max(cooldown_seconds, interval_hours * 3600)
+        price_upper_limit = _normalize_optional_price_limit(
+            payload.get("price_upper_limit"), name="price_upper_limit"
+        )
+        price_lower_limit = _normalize_optional_price_limit(
+            payload.get("price_lower_limit"), name="price_lower_limit"
+        )
+        if (
+            price_lower_limit is not None
+            and price_upper_limit is not None
+            and price_lower_limit > price_upper_limit
+        ):
+            raise ValueError("price_lower_limit must not exceed price_upper_limit")
+        max_daily_runs = 0
+    else:
+        # A Workflow already carries its executable logic in workflow_json.
+        # Do not retain a second, ambiguous top-level strategy mode.  The
+        # daily cap is only exposed for Workflow bots and has a finite UI
+        # range; missing values remain unlimited for existing API clients.
+        price_upper_limit = None
+        price_lower_limit = None
+        max_daily_runs = _to_int(
+            payload.get("max_daily_runs", 0),
+            name="max_daily_runs",
+            # Existing API callers did not send this field.  Preserve their
+            # unlimited behaviour, while an explicit setting must satisfy
+            # the UI contract of 1..100 rather than silently becoming 0.
+            minimum=1 if "max_daily_runs" in payload else 0,
+            maximum=100,
+        )
     workflow = None
     if bot_type == "conditional":
         workflow = service._validate_workflow(payload.get("workflow_json") or payload.get("workflow"))
@@ -268,6 +303,9 @@ def validate_bot_payload(service, conn, payload):
         "cooldown_seconds": cooldown_seconds,
         "interval_hours": interval_hours,
         "budget_points": budget_points,
+        "price_upper_limit": price_upper_limit,
+        "price_lower_limit": price_lower_limit,
+        "max_daily_runs": max_daily_runs,
         "stop_loss_percent": stop_loss_percent,
         "take_profit_percent": take_profit_percent,
         "share_parameters": bool(payload.get("share_parameters", False)),
@@ -534,6 +572,93 @@ def bot_risk_target_order(bot, *, context):
     return None
 
 
+def dca_price_limit_reason(bot, observed_price):
+    """Return the user-facing DCA price-band skip reason, if any.
+
+    The limits are deliberately checked *after* DCA stop-loss/take-profit
+    handling in ``run_trading_bot_rows``.  A risk target must still be able
+    to close an existing position even when the normal periodic buy is
+    paused outside the configured band.
+    """
+    price = float(observed_price or 0)
+    if price <= 0:
+        return None
+    upper = bot["price_upper_limit"] if "price_upper_limit" in bot.keys() else None
+    lower = bot["price_lower_limit"] if "price_lower_limit" in bot.keys() else None
+    if upper not in (None, "") and price > float(upper):
+        return "price_above_limit"
+    if lower not in (None, "") and price < float(lower):
+        return "price_below_limit"
+    return None
+
+
+def claim_daily_trigger_slot(service, bot):
+    """Atomically reserve one UTC-day Workflow trigger slot.
+
+    The scheduler may be entered by an automatic job and a user-triggered
+    scan at nearly the same time.  A read-then-write count would let both
+    paths pass the cap, so the reservation is one conditional UPDATE inside
+    an IMMEDIATE transaction.  ``max_daily_runs=0`` is the backwards-
+    compatible unlimited value used by existing bots.
+    """
+    max_daily_runs = int(bot["max_daily_runs"] or 0) if "max_daily_runs" in bot.keys() else 0
+    if max_daily_runs <= 0:
+        return True
+    today = _utc_now().date().isoformat()
+    conn = service.get_db()
+    try:
+        service.ensure_schema(conn)
+        conn.commit()
+        conn.execute("BEGIN IMMEDIATE")
+        updated = conn.execute(
+            """
+            UPDATE trading_bots
+            SET daily_run_date=?,
+                daily_run_count=CASE WHEN daily_run_date=? THEN daily_run_count+1 ELSE 1 END,
+                updated_at=?
+            WHERE id=?
+              AND enabled=1
+              AND (daily_run_date IS NULL OR daily_run_date<>? OR daily_run_count<?)
+            """,
+            (today, today, _now_text(), int(bot["id"]), today, max_daily_runs),
+        )
+        conn.commit()
+        return updated.rowcount == 1
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def release_daily_trigger_slot(service, bot):
+    """Release a reservation only when order placement itself failed."""
+    max_daily_runs = int(bot["max_daily_runs"] or 0) if "max_daily_runs" in bot.keys() else 0
+    if max_daily_runs <= 0:
+        return
+    today = _utc_now().date().isoformat()
+    conn = service.get_db()
+    try:
+        service.ensure_schema(conn)
+        conn.commit()
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            """
+            UPDATE trading_bots
+            SET daily_run_count=CASE WHEN daily_run_count>0 THEN daily_run_count-1 ELSE 0 END,
+                updated_at=?
+            WHERE id=? AND daily_run_date=?
+            """,
+            (_now_text(), int(bot["id"]), today),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def list_trading_bots(service, *, actor):
     user_id = service._actor_id(actor)
     if not user_id:
@@ -587,6 +712,7 @@ def save_trading_bot(service, *, actor, payload, bot_uuid=None):
                 SET bot_type=?, name=?, market_symbol=?, side=?, order_type=?, quantity_text=?,
                     limit_price_points=?, trigger_type=?, trigger_price_points=?,
                     enabled=?, max_runs=?, cooldown_seconds=?, interval_hours=?, budget_points=?,
+                    price_upper_limit=?, price_lower_limit=?, max_daily_runs=?,
                     stop_loss_percent=?, take_profit_percent=?, share_parameters=?, workflow_json=?, execution_state_json='{}', last_error='',
                     enabled_at=?, updated_at=?
                 WHERE id=?
@@ -595,7 +721,7 @@ def save_trading_bot(service, *, actor, payload, bot_uuid=None):
                     data["bot_type"], data["name"], data["market_symbol"], data["side"], data["order_type"], data["quantity_text"],
                     data["limit_price_points"], data["trigger_type"], data["trigger_price_points"],
                     1 if data["enabled"] else 0, data["max_runs"], data["cooldown_seconds"],
-                    data["interval_hours"], data["budget_points"], data["stop_loss_percent"], data["take_profit_percent"], 1 if data["share_parameters"] else 0, _json_dumps(data["workflow"]) if data["workflow"] else None,
+                    data["interval_hours"], data["budget_points"], data["price_upper_limit"], data["price_lower_limit"], data["max_daily_runs"], data["stop_loss_percent"], data["take_profit_percent"], 1 if data["share_parameters"] else 0, _json_dumps(data["workflow"]) if data["workflow"] else None,
                     now if data["enabled"] and not bool(existing["enabled"]) else (existing["enabled_at"] if data["enabled"] else None),
                     now,
                     existing["id"],
@@ -609,14 +735,14 @@ def save_trading_bot(service, *, actor, payload, bot_uuid=None):
                 INSERT INTO trading_bots (
                     bot_uuid, user_id, bot_type, name, market_symbol, side, order_type, quantity_text,
                     limit_price_points, trigger_type, trigger_price_points, enabled,
-                    max_runs, run_count, cooldown_seconds, interval_hours, budget_points, stop_loss_percent, take_profit_percent, share_parameters, workflow_json, execution_state_json, enabled_at, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    max_runs, run_count, cooldown_seconds, interval_hours, budget_points, price_upper_limit, price_lower_limit, max_daily_runs, stop_loss_percent, take_profit_percent, share_parameters, workflow_json, execution_state_json, enabled_at, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(uuid.uuid4()), user_id, data["bot_type"], data["name"], data["market_symbol"], data["side"], data["order_type"],
                     data["quantity_text"], data["limit_price_points"], data["trigger_type"], data["trigger_price_points"],
                     1 if data["enabled"] else 0, data["max_runs"], data["cooldown_seconds"],
-                    data["interval_hours"], data["budget_points"], data["stop_loss_percent"], data["take_profit_percent"], 1 if data["share_parameters"] else 0, _json_dumps(data["workflow"]) if data["workflow"] else None, "{}",
+                    data["interval_hours"], data["budget_points"], data["price_upper_limit"], data["price_lower_limit"], data["max_daily_runs"], data["stop_loss_percent"], data["take_profit_percent"], 1 if data["share_parameters"] else 0, _json_dumps(data["workflow"]) if data["workflow"] else None, "{}",
                     now if data["enabled"] else None,
                     now,
                     now,
@@ -911,6 +1037,7 @@ def run_trading_bot_rows(service, rows):
     for row in rows:
         scanned += 1
         price_conn = None
+        daily_slot_reserved = False
         now_dt = _utc_now()
         workflow_state = _workflow_state(row["execution_state_json"] if "execution_state_json" in row.keys() else None)
         decision = None
@@ -996,6 +1123,14 @@ def run_trading_bot_rows(service, rows):
                     continue
             elif str(row["bot_type"] or "conditional") == "dca":
                 order_payload = bot_risk_target_order(row, context=context)
+                if order_payload is None:
+                    limit_reason = dca_price_limit_reason(row, observed_price)
+                    if limit_reason:
+                        price_conn.close()
+                        price_conn = None
+                        record_bot_run(service, row, status="skipped", observed_price=observed_price, error=limit_reason)
+                        skipped.append({"bot_uuid": row["bot_uuid"], "reason": limit_reason, "observed_price_points": observed_price})
+                        continue
             price_conn.close()
             price_conn = None
             if not workflow and order_payload is None and not bot_trigger_hit(row, observed_price, observed_low=observed_low, observed_high=observed_high):
@@ -1018,6 +1153,14 @@ def run_trading_bot_rows(service, rows):
                 order_type = row["order_type"]
                 side = row["side"]
                 limit_price_points = row["limit_price_points"]
+            if str(row["bot_type"] or "conditional") == "conditional":
+                if not claim_daily_trigger_slot(service, row):
+                    record_bot_run(service, row, status="skipped", observed_price=observed_price, error="daily_max_runs_reached")
+                    skipped.append({"bot_uuid": row["bot_uuid"], "reason": "daily_max_runs_reached", "observed_price_points": observed_price})
+                    continue
+                # Only capped bots need a compensating release when order
+                # placement fails.  A successful order consumes the slot.
+                daily_slot_reserved = int(row["max_daily_runs"] or 0) > 0 if "max_daily_runs" in row.keys() else False
             result = service.place_order(
                 actor=_bot_actor(row),
                 market_symbol=row["market_symbol"],
@@ -1026,6 +1169,9 @@ def run_trading_bot_rows(service, rows):
                 quantity=quantity_text,
                 limit_price_points=limit_price_points,
             )
+            # The trigger has now reached the exchange order path; retain the
+            # UTC-day reservation even if later audit recording fails.
+            daily_slot_reserved = False
             order_uuid = (result.get("order") or {}).get("order_uuid")
             if workflow and decision:
                 action = decision.get("action") or {}
@@ -1043,6 +1189,11 @@ def run_trading_bot_rows(service, rows):
             if price_conn is not None:
                 try:
                     price_conn.close()
+                except Exception:
+                    pass
+            if daily_slot_reserved:
+                try:
+                    release_daily_trigger_slot(service, row)
                 except Exception:
                     pass
             record_bot_run(service, row, status="failed", observed_price=observed_price, error=str(exc))

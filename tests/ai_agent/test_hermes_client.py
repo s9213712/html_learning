@@ -328,6 +328,97 @@ def test_json_request_retries_transient_ai_backend_502(monkeypatch):
     assert len(calls) == 2
 
 
+def test_json_request_uses_restricted_windows_ollama_bridge_after_wsl_loopback_failure(monkeypatch):
+    commands = []
+
+    def offline_urlopen(_req, timeout=5):
+        raise urllib_error.URLError("WSL loopback refused")
+
+    def fake_run(command, **kwargs):
+        if command[0] == "wslpath":
+            return hermes_client.subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=b"\\\\wsl.localhost\\Ubuntu-22.04\\tmp\\payload.json\n",
+                stderr=b"",
+            )
+        commands.append((command, kwargs))
+        return hermes_client.subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps({"object": "list", "data": [{"id": "qwen3.5:cloud"}]}).encode("utf-8"),
+            stderr=b"",
+        )
+
+    monkeypatch.setattr(hermes_client.urllib_request, "urlopen", offline_urlopen)
+    monkeypatch.setattr(hermes_client.os.path, "isfile", lambda path: path == hermes_client.WINDOWS_OLLAMA_CURL_PATH)
+    monkeypatch.setattr(hermes_client.subprocess, "run", fake_run)
+
+    result = hermes_client._json_request(
+        {"ai_agent_api_base_url": "http://127.0.0.1:11434/v1"},
+        "GET",
+        "/models",
+        timeout=8,
+    )
+
+    assert result["data"][0]["id"] == "qwen3.5:cloud"
+    assert len(commands) == 1
+    command, kwargs = commands[0]
+    assert command[:3] == [hermes_client.WINDOWS_OLLAMA_CURL_PATH, "--noproxy", "*"]
+    assert "http://127.0.0.1:11434/v1/models" in command
+    assert "input" not in kwargs
+
+
+def test_windows_ollama_bridge_rejects_nonlocal_or_credentialed_targets(monkeypatch):
+    monkeypatch.setattr(hermes_client.os.path, "isfile", lambda _path: True)
+
+    assert hermes_client._is_windows_ollama_proxy_target(
+        "http://127.0.0.1:11434/v1/models", {"Content-Type": "application/json"}
+    ) is True
+    assert hermes_client._is_windows_ollama_proxy_target(
+        "http://agent.example.test:11434/v1/models", {"Content-Type": "application/json"}
+    ) is False
+    assert hermes_client._is_windows_ollama_proxy_target(
+        "http://127.0.0.1:8642/v1/models", {"Content-Type": "application/json"}
+    ) is False
+    assert hermes_client._is_windows_ollama_proxy_target(
+        "http://127.0.0.1:11434/v1/models", {"Authorization": "Bearer secret"}
+    ) is False
+
+
+def test_windows_ollama_bridge_url_maps_only_the_fixed_wsl_bridge_to_windows(monkeypatch):
+    commands = []
+
+    def offline_urlopen(_req, timeout=5):
+        raise urllib_error.URLError("WSL bridge unavailable")
+
+    def fake_run(command, **kwargs):
+        commands.append((command, kwargs))
+        return hermes_client.subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps({"object": "list", "data": [{"id": "qwen3.5:cloud"}]}).encode("utf-8"),
+            stderr=b"",
+        )
+
+    monkeypatch.setattr(hermes_client.urllib_request, "urlopen", offline_urlopen)
+    monkeypatch.setattr(hermes_client.os.path, "isfile", lambda path: path == hermes_client.WINDOWS_OLLAMA_CURL_PATH)
+    monkeypatch.setattr(hermes_client.subprocess, "run", fake_run)
+
+    result = hermes_client._json_request(
+        {"ai_agent_api_base_url": "http://127.0.0.1:11435/v1"},
+        "GET",
+        "/models",
+        timeout=8,
+    )
+
+    assert result["data"][0]["id"] == "qwen3.5:cloud"
+    assert len(commands) == 1
+    command, kwargs = commands[0]
+    assert "http://127.0.0.1:11434/v1/models" in command
+    assert "input" not in kwargs
+
+
 def test_ai_agent_health_checks_base_path_when_present(monkeypatch):
     class FakeResponse:
         def __init__(self, payload):

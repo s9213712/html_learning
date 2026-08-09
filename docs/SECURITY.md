@@ -59,5 +59,5 @@
 - 限制 `X-Frame-Options`, `nosniff`, `nosniff`, `X-Permitted-Cross-Domain-Policies`
 
 ## 已知限制與待做
-- 管理帳號行為仍未完整模組化，後端程式集中於 `server.py`。
-- 建議再進一步加入「自動化 pre-push 架構掃描」與「程式拆分」流程。
+- 管理與 runtime 路由已拆到 `routes/system_admin_sections/` 等模組，`server.py` 主要負責 app 組裝與相依注入；新增管理功能仍應放進對應 route/service 模組，避免重新集中。
+- pre-push 已包含結構、文件、靜態安全與測試檢查；仍應定期檢視動態載入邊界與新外部整合的最小權限設定。

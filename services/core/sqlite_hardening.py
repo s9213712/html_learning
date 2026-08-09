@@ -7,11 +7,18 @@ import time
 from pathlib import Path
 from urllib.parse import quote, urlencode
 
+try:  # POSIX is the production runtime; keep a safe local-lock fallback elsewhere.
+    import fcntl
+except ImportError:  # pragma: no cover - exercised only on non-POSIX hosts.
+    fcntl = None
+
 
 _WRITE_LOCKS: dict[str, threading.RLock] = {}
 _WRITE_LOCKS_GUARD = threading.Lock()
 _WAL_READY_DB_PATHS: set[str] = set()
 _WAL_READY_GUARD = threading.Lock()
+_PROCESS_WRITE_LOCK_STATES: dict[str, dict[str, object]] = {}
+_PROCESS_WRITE_LOCKS_GUARD = threading.Lock()
 
 
 def _env_int(name: str, default: int, *, minimum: int | None = None, maximum: int | None = None) -> int:
@@ -27,7 +34,9 @@ def _env_int(name: str, default: int, *, minimum: int | None = None, maximum: in
 
 
 def sqlite_busy_timeout_ms() -> int:
-    return _env_int("HACKME_SQLITE_BUSY_TIMEOUT_MS", 3000, minimum=1000, maximum=120000)
+    # Keep this aligned with the web connection timeout (15 seconds). A
+    # shorter SQLite wait turns a recoverable writer queue into 503s.
+    return _env_int("HACKME_SQLITE_BUSY_TIMEOUT_MS", 15000, minimum=1000, maximum=120000)
 
 
 def sqlite_retry_attempts() -> int:
@@ -122,6 +131,84 @@ def _write_lock_for(database: object) -> threading.RLock:
         return lock
 
 
+def _process_write_lock_path(database: object) -> Path | None:
+    """Return a sibling lock file for a file-backed SQLite database."""
+    raw = str(database or "")
+    if not raw or raw == ":memory:" or raw.startswith("file:"):
+        return None
+    try:
+        path = Path(raw).expanduser().resolve()
+    except Exception:
+        return None
+    return path.with_name(f".{path.name}.hackme-write.lock")
+
+
+def _acquire_process_write_lock(database: object) -> bool:
+    """Serialize SQLite writers across sibling web-worker processes."""
+    lock_path = _process_write_lock_path(database)
+    if lock_path is None or fcntl is None:
+        return False
+    key = _db_lock_key(database)
+    owner = threading.get_ident()
+    with _PROCESS_WRITE_LOCKS_GUARD:
+        state = _PROCESS_WRITE_LOCK_STATES.get(key)
+        if state and state.get("owner") == owner:
+            state["depth"] = int(state.get("depth") or 0) + 1
+            return True
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        handle = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    except OSError as exc:
+        raise sqlite3.OperationalError(f"database is locked: cannot open writer lock ({exc})") from exc
+    deadline = time.monotonic() + (sqlite_busy_timeout_ms() / 1000.0)
+    sleep_seconds = min(0.05, sqlite_retry_base_sleep_seconds())
+    try:
+        while True:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise sqlite3.OperationalError("database is locked: writer queue timeout")
+                time.sleep(sleep_seconds)
+        with _PROCESS_WRITE_LOCKS_GUARD:
+            _PROCESS_WRITE_LOCK_STATES[key] = {"owner": owner, "depth": 1, "handle": handle}
+        return True
+    except Exception:
+        try:
+            os.close(handle)
+        except OSError:
+            pass
+        raise
+
+
+def _release_process_write_lock(database: object) -> None:
+    lock_path = _process_write_lock_path(database)
+    if lock_path is None or fcntl is None:
+        return
+    key = _db_lock_key(database)
+    owner = threading.get_ident()
+    handle = None
+    with _PROCESS_WRITE_LOCKS_GUARD:
+        state = _PROCESS_WRITE_LOCK_STATES.get(key)
+        if not state or state.get("owner") != owner:
+            return
+        remaining = int(state.get("depth") or 0) - 1
+        if remaining > 0:
+            state["depth"] = remaining
+            return
+        handle = state.get("handle")
+        _PROCESS_WRITE_LOCK_STATES.pop(key, None)
+    if isinstance(handle, int):
+        try:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+        finally:
+            try:
+                os.close(handle)
+            except OSError:
+                pass
+
+
 def _can_use_wal(database: object, *, uri: bool = False) -> bool:
     raw = str(database or "")
     if not raw or raw == ":memory:":
@@ -158,18 +245,30 @@ class HardenedSQLiteConnection(sqlite3.Connection):
         super().__init__(*args, **kwargs)
         self._hackme_write_lock = _write_lock_for(database)
         self._hackme_write_lock_held = False
+        self._hackme_process_write_lock_held = False
+        self._hackme_database = database
         self._hackme_retry_attempts = sqlite_retry_attempts()
         self._hackme_retry_sleep = sqlite_retry_base_sleep_seconds()
 
     def _acquire_write_lock_for(self, sql: str) -> None:
         if _sql_may_write(sql) and not self._hackme_write_lock_held:
             self._hackme_write_lock.acquire()
-            self._hackme_write_lock_held = True
+            try:
+                self._hackme_process_write_lock_held = _acquire_process_write_lock(self._hackme_database)
+                self._hackme_write_lock_held = True
+            except Exception:
+                self._hackme_write_lock.release()
+                raise
 
     def _release_write_lock(self) -> None:
         if self._hackme_write_lock_held:
-            self._hackme_write_lock_held = False
-            self._hackme_write_lock.release()
+            try:
+                if self._hackme_process_write_lock_held:
+                    _release_process_write_lock(self._hackme_database)
+            finally:
+                self._hackme_process_write_lock_held = False
+                self._hackme_write_lock_held = False
+                self._hackme_write_lock.release()
 
     def _with_locked_retry(self, operation):
         attempts = max(1, int(getattr(self, "_hackme_retry_attempts", 1) or 1))

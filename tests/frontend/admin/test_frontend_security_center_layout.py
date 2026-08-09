@@ -280,7 +280,7 @@ def test_server_update_ui_is_health_card_preview_only():
     assert "serverUpdateApply" not in bootstrap_js
 
 
-def test_launch_check_treats_production_profile_settings_as_auto_applied_not_manual_blockers():
+def test_launch_check_treats_production_profile_settings_as_auto_applied_and_optional():
     index_html = (ROOT / "public" / "index.html").read_text(encoding="utf-8")
     admin_js = (
         (ROOT / "public" / "js" / "50-admin.js").read_text(encoding="utf-8")
@@ -291,7 +291,7 @@ def test_launch_check_treats_production_profile_settings_as_auto_applied_not_man
     launch_body = admin_js.split("function launchCheckConditionList(sc, requirements) {", 1)[1].split("function jumpToAnchor", 1)[0]
 
     assert "production profile 的 HTTPS / audit chain / Integrity Guard / browser-only 等安全設定會在 mode switch 成功時自動套用" in index_html
-    assert "不是</strong>你必須先手動打開的上線前檢查項目" in index_html
+    assert "未通過<strong>不會阻止</strong> root 明確輸入 <code>GO_LIVE</code> 的切換" in index_html
     assert 'id="launch-check-upload-panel"' in index_html
     assert 'id="launch-check-upload-file"' in index_html
     assert 'id="launch-check-upload-json"' in index_html
@@ -317,6 +317,10 @@ def test_launch_check_treats_production_profile_settings_as_auto_applied_not_man
     assert "python3 scripts/security/pentest/functional_permission_pentest.py" in admin_js
     assert "上線前檢查可在非 production 執行；真正切換由 GO_LIVE 完成" in launch_body
     assert "這些安全設定會在切換到 production 時自動套用，不是上線前檢查的手動前置條件" in launch_body
+    assert "不會阻止明確 GO_LIVE" in launch_body
+    assert "const safeList = (items) => items.map((item) => sanitize(String(item ?? \"\"))).join(\", \");" in admin_js
+    assert '上線前檢查讀取失敗：${sanitize(String(err && err.message ? err.message : "未知錯誤"))}' in admin_js
+    assert 'const escape = (text) => sanitize(String(text == null ? "" : text));' in admin_js
     assert "production 必須開 Integrity Guard" not in launch_body
     assert "請先切到 dev_ready 再開上線檢查" not in launch_body
 

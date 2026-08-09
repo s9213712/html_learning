@@ -1,5 +1,6 @@
 import json
 import os
+import queue
 import sys
 import threading
 import time
@@ -14,12 +15,14 @@ from scripts.testing.operational_soak_probe import (
     ApiClient,
     FORMAL_RAMP_LEVELS,
     MIN_SIGNOFF_SECONDS,
+    MAINTENANCE_FENCE_SCHEMA_VERSION,
     SUPERVISED_LOAD_POLICIES,
     SentinelStats,
     aggregate_resource_evidence,
     aggregate_rounds,
     build_effective_load_sample,
     campaign_load_policy,
+    complete_rotation_round_ops,
     configure_soak_storage_quota,
     finish_command,
     main as operational_soak_main,
@@ -28,6 +31,7 @@ from scripts.testing.operational_soak_probe import (
     login_with_setup_backoff,
     provision_accounts,
     request_command_stop,
+    read_maintenance_fence,
     round_rotation_offset,
     sanitized_command,
     start_command,
@@ -40,14 +44,42 @@ from scripts.testing.system_stress_probe import (
     InflightWorkerTelemetry,
     OperationBudget,
     Stats,
+    account_persona_assignments,
+    build_client_slot_pools,
+    build_weighted_ops,
+    persona_rotation_operation_account,
     record_operation_result,
     resolve_server_pids,
     resolve_session_pool_size,
     rotation_client_index,
     rotation_operation_account,
+    run_in_available_client_slot,
     run_in_client_slot,
     run_operation,
 )
+
+
+def test_maintenance_fence_requires_complete_campaign_identity(tmp_path: Path) -> None:
+    fence_path = tmp_path / "primary_maintenance_fence.json"
+    fence_path.write_text(json.dumps({
+        "schema_version": MAINTENANCE_FENCE_SCHEMA_VERSION,
+        "active": True,
+        "nonce": "nonce-1",
+        "reason": "planned_restart",
+    }), encoding="utf-8")
+
+    payload, error = read_maintenance_fence(fence_path)
+
+    assert error == ""
+    assert payload is not None
+    assert payload["active"] is True
+    fence_path.write_text(json.dumps({
+        "schema_version": MAINTENANCE_FENCE_SCHEMA_VERSION,
+        "active": True,
+        "nonce": "",
+        "reason": "planned_restart",
+    }), encoding="utf-8")
+    assert read_maintenance_fence(fence_path) == (None, "maintenance_fence_nonce")
 
 
 def test_setup_login_retries_controlled_rate_limit(monkeypatch):
@@ -385,6 +417,7 @@ def test_stats_preserves_true_per_account_operation_coverage():
     assert summary["accounts"]["opsim-a"]["operations"] == {"drive_list": 1}
     assert summary["accounts"]["opsim-a"]["successful_operations"] == {"drive_list": 1}
     assert summary["accounts"]["opsim-b"]["successful_operations"] == {"points_wallet": 1}
+    assert summary["accounts"]["opsim-a"]["expected_success_operations"] == {"drive_list": 1}
     assert summary["ops"]["points_wallet"]["successful_2xx"] == 1
     assert summary["accounts"]["opsim-b"]["total_ops"] == 2
     assert summary["accounts"]["opsim-b"]["failed_ops"] == 1
@@ -419,6 +452,13 @@ def test_repeated_soak_rounds_continue_rotation_instead_of_restarting_account_on
     assert third_round == ("trading", "alice")
 
 
+def test_complete_rotation_round_ops_covers_every_operation_for_every_account():
+    operation_count = len(build_weighted_ops())
+
+    assert complete_rotation_round_ops(250, 10) == operation_count * 10
+    assert complete_rotation_round_ops(operation_count * 10 + 1, 10) == operation_count * 10 + 1
+
+
 def test_rotation_spreads_each_accounts_operations_across_clone_clients():
     # 24 accounts and 128 clones gives the first executor wave 128 distinct
     # client slots: eight accounts have six clones, sixteen have five.
@@ -430,6 +470,58 @@ def test_rotation_spreads_each_accounts_operations_across_clone_clients():
         slots.add((account_index, clone_index))
 
     assert len(slots) == 128
+
+
+def test_persona_rotation_preserves_full_baseline_then_specializes() -> None:
+    operations = [
+        "hf_status",
+        "hf_quote",
+        "hf_generate",
+        "ai_agent_status",
+        "ai_agent_tools",
+        "jobs",
+        "trading_markets",
+        "trading_dashboard",
+        "trading_asset_overview",
+        "trading_bots",
+        "trading_grid_bots",
+        "trading_workflows",
+        "trading_grid_preview",
+        "bad_login",
+        "remote_direct_reject",
+        "bt_reject",
+        "community_bad_thread",
+        "chat_bad_message",
+        "me",
+    ]
+    accounts = ["i2i-user", "trading-user", "security-user"]
+    assignments = account_persona_assignments(accounts, operations)
+    baseline_span = len(operations) * len(accounts)
+
+    assert assignments["i2i-user"]["persona_id"] == "i2i_comfyui_research"
+    assert assignments["trading-user"]["persona_id"] == "exchange_spot_lending_bots"
+    assert assignments["security-user"]["persona_id"] == "web_security_adversary"
+    assert persona_rotation_operation_account(0, operations, accounts, assignments) == (
+        "hf_status",
+        "i2i-user",
+        "baseline",
+    )
+    assert persona_rotation_operation_account(
+        baseline_span,
+        operations,
+        accounts,
+        assignments,
+    ) == ("hf_status", "i2i-user", "i2i_comfyui_research")
+
+
+def test_expected_security_rejection_is_persona_success_but_not_2xx() -> None:
+    stats = Stats()
+
+    stats.record("bad_login", status=401, elapsed_ms=5, ok=True, account="security-user")
+    summary = stats.summary()["accounts"]["security-user"]
+
+    assert summary["expected_success_operations"] == {"bad_login": 1}
+    assert summary["successful_operations"] == {}
 
 
 def test_worker_telemetry_excludes_threads_waiting_for_same_client_slot():
@@ -461,6 +553,52 @@ def test_worker_telemetry_excludes_threads_waiting_for_same_client_slot():
     summary = telemetry.stop()
 
     assert summary["active_workers_peak"] == 1
+    assert summary["operations_started"] == 4
+    assert summary["operations_completed"] == 4
+
+
+def test_available_client_lanes_keep_distinct_workers_in_the_operation_section():
+    class FakeClient:
+        def __init__(self, username: str):
+            self.username = username
+            self.lock = threading.RLock()
+
+    clients = [FakeClient("test") for _index in range(4)]
+    slots = build_client_slot_pools(clients)
+    telemetry = InflightWorkerTelemetry(4, sample_interval_seconds=0.005)
+    entered = 0
+    entered_lock = threading.Lock()
+    all_entered = threading.Event()
+    release = threading.Event()
+
+    def operation(_client):
+        nonlocal entered
+        with entered_lock:
+            entered += 1
+            if entered == 4:
+                all_entered.set()
+        release.wait(0.2)
+        return {"ok": True}
+
+    telemetry.start()
+    workers = [
+        threading.Thread(
+            target=run_in_available_client_slot,
+            args=(slots["test"], telemetry, operation),
+        )
+        for _index in range(4)
+    ]
+    for worker in workers:
+        worker.start()
+    assert all_entered.wait(1)
+    assert telemetry.wait_until_sampled(1)
+    release.set()
+    for worker in workers:
+        worker.join(timeout=1)
+    summary = telemetry.stop()
+
+    assert summary["active_workers_peak"] == 4
+    assert summary["sustained_active_workers"] == 4
     assert summary["operations_started"] == 4
     assert summary["operations_completed"] == 4
 
@@ -678,13 +816,57 @@ def test_operational_soak_aggregates_all_accounts_and_operations():
     assert len(summary["round_failures"]) == 1
 
 
-def test_formal_operational_soak_requires_real_4_8_16_32_ramp() -> None:
-    assert FORMAL_RAMP_LEVELS == (4, 8, 16, 32)
+def test_operational_soak_aggregates_specialist_persona_evidence() -> None:
+    contract = {
+        "persona_id": "exchange_spot_lending_bots",
+        "category": "exchange_spot_lending_margin_and_bots",
+        "operations": ["trading_dashboard", "trading_bots"],
+        "invariant_focus": ["decimal_recalculation"],
+        "required_expected_operations": ["trading_dashboard", "trading_bots"],
+        "deferred_terminal_operations": [],
+    }
+    rounds = [
+        {
+            "ok": True,
+            "persona_coverage": {
+                "trader": {
+                    **contract,
+                    "dispatch_counts": {"trading_dashboard": 2},
+                    "expected_success_counts": {"trading_dashboard": 2, "trading_bots": 0},
+                }
+            },
+        },
+        {
+            "ok": True,
+            "persona_coverage": {
+                "trader": {
+                    **contract,
+                    "dispatch_counts": {"trading_bots": 1},
+                    "expected_success_counts": {"trading_dashboard": 0, "trading_bots": 1},
+                }
+            },
+        },
+    ]
+
+    summary = aggregate_rounds(rounds, ["trader"])
+
+    assert summary["persona_success_gaps"] == {}
+    assert summary["persona_contract_conflicts"] == []
+    assert summary["persona_coverage"]["trader"]["ok"] is True
+    assert summary["persona_coverage"]["trader"]["expected_success_counts"] == {
+        "trading_dashboard": 2,
+        "trading_bots": 1,
+    }
+
+
+def test_formal_operational_soak_requires_real_4_to_128_ramp() -> None:
+    assert FORMAL_RAMP_LEVELS == (4, 8, 16, 32, 64, 128)
     assert normalized_32_throughput(
         operations_completed=400,
         window_seconds=60,
         scheduled_load_level=8,
-    ) == 1600.0
+        target_load_level=128,
+    ) == 6400.0
 
 
 def test_idle_configured_workers_do_not_count_as_effective_target_load() -> None:
@@ -902,12 +1084,17 @@ def test_operational_soak_aggregates_server_rss_and_database_evidence():
     evidence = aggregate_resource_evidence(rounds, "10, 11")
 
     assert evidence["server_pids"] == ["10", "11"]
+    assert evidence["server_pid_source"] == "explicit"
     assert evidence["monitored_rss_first_mb"] == 100.0
     assert evidence["monitored_rss_last_mb"] == 120.0
     assert evidence["monitored_rss_max_mb"] == 125.5
     assert evidence["monitored_pid_count_max"] == 3
     assert evidence["monitored_pids_seen"] == [10, 11, 12]
     assert evidence["db_peak"]["main"]["max_db_mb"] == 4.0
+
+    restarted = aggregate_resource_evidence(rounds, "")
+    assert restarted["server_pids"] == ["10", "11", "12"]
+    assert restarted["server_pid_source"] == "runtime_pidfile_per_round"
 
 
 def test_system_stress_resolves_explicit_or_runtime_pidfile(tmp_path):

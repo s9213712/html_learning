@@ -171,6 +171,46 @@ def test_huggingface_diffusers_metadata_does_not_imply_img2img_only_from_txt2img
     ) == ["txt2img"]
 
 
+def test_huggingface_diffusers_metadata_recognizes_standard_sdxl_img2img_pipeline():
+    assert detect_diffusers_supported_modes(
+        repo_id="dhead/wai-nsfw-illustrious-sdxl-v140-sdxl",
+        pipeline_tag="text-to-image",
+        library_name="diffusers",
+        tags=["diffusers", "text-to-image", "diffusers:StableDiffusionXLPipeline"],
+        config={"diffusers": {"_class_name": "StableDiffusionXLPipeline"}},
+        siblings=[{"rfilename": "model_index.json"}],
+    ) == ["txt2img", "img2img"]
+
+
+def test_diffusers_explicit_default_variant_is_valid_for_multi_variant_repo(monkeypatch, tmp_path):
+    client = DiffusersClient(model_repo="owner/model", storage_root=tmp_path)
+    inspection = {
+        "ok": True,
+        "variant_options": [
+            {"kind": "diffusers", "variant": ""},
+            {"kind": "diffusers", "variant": "fp16"},
+        ],
+    }
+    monkeypatch.setattr(
+        "services.comfyui.diffusers_client.inspect_huggingface_diffusers_repo",
+        lambda *args, **kwargs: inspection,
+    )
+
+    assert client._resolve_diffusers_variant(
+        "owner/model",
+        explicit_variant="",
+        explicit_variant_selected=True,
+        mode="img2img",
+    ) == ""
+    with pytest.raises(ComfyUIError, match="多個精度版本"):
+        client._resolve_diffusers_variant(
+            "owner/model",
+            explicit_variant="",
+            explicit_variant_selected=False,
+            mode="img2img",
+        )
+
+
 def test_huggingface_diffusers_metadata_accepts_modular_model_index():
     assert detect_diffusers_supported_modes(
         repo_id="owner/modular-diffusers-model",

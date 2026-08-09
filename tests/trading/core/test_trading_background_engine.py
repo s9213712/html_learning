@@ -1,7 +1,7 @@
 import sqlite3
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from services.points_chain import PointsLedgerService, ensure_points_economy_schema
 from services.job_center import list_jobs
@@ -157,7 +157,7 @@ def test_background_interest_accrual_runs_without_logged_in_actor(tmp_path):
         quantity="0.1",
         collateral_points=200,
     )
-    opened_at = (datetime.utcnow().replace(microsecond=0) - timedelta(hours=2, minutes=1)).isoformat()
+    opened_at = (datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0) - timedelta(hours=2, minutes=1)).isoformat()
     conn = trading.get_db()
     try:
         conn.execute(
@@ -200,8 +200,8 @@ def test_background_interest_accrual_runs_without_logged_in_actor(tmp_path):
 def test_background_lease_prevents_second_owner_from_running_same_job(tmp_path):
     _points, trading = _services(tmp_path)
     trading.ensure_background_schema()
-    future = (datetime.utcnow().replace(microsecond=0) + timedelta(minutes=5)).isoformat()
-    now = datetime.utcnow().replace(microsecond=0).isoformat()
+    future = (datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0) + timedelta(minutes=5)).isoformat()
+    now = datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0).isoformat()
     conn = trading.get_db()
     try:
         conn.execute(

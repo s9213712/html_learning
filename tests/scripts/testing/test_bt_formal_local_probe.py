@@ -2,16 +2,162 @@ from __future__ import annotations
 
 import hashlib
 import urllib.parse
+from pathlib import Path
 
 from scripts.testing.bt_formal_local_probe import (
     MANDATORY_CHECK_IDS,
     PROBE_NAME,
     SCHEMA_VERSION,
     _bencode,
+    _partial_download_evidence,
     _raw_query_parameters,
     derive_checks,
+    LocalTracker,
+    TraceRecorder,
+    TransmissionDaemon,
     validate_machine_report,
 )
+
+
+def test_tracker_can_issue_distinct_private_endpoint_urls_when_multi_listener_enabled(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    class FakeServer:
+        def __init__(self, address, _handler) -> None:
+            self.server_address = (address[0], 48123)
+            self.daemon_threads = False
+
+        def server_close(self) -> None:
+            return None
+
+        def serve_forever(self) -> None:
+            return None
+
+        def shutdown(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "scripts.testing.bt_formal_local_probe.ThreadingHTTPServer",
+        FakeServer,
+    )
+    tracker = LocalTracker(
+        TraceRecorder(tmp_path / "trace.jsonl"),
+        bind_ip="192.168.18.19",
+        advertised_peer_ip="192.168.18.19",
+        listen_on_all_private_ips=True,
+    )
+    try:
+        assert tracker.listener_bind_ip == "0.0.0.0"
+        assert tracker.announce_url_for_peer("10.255.255.254") == (
+            f"http://10.255.255.254:{tracker.port}/announce"
+        )
+    finally:
+        tracker.server.server_close()
+
+
+def test_tracker_purges_only_stale_peer_records_for_the_requested_port(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    class FakeServer:
+        def __init__(self, address, _handler) -> None:
+            self.server_address = (address[0], 48124)
+            self.daemon_threads = False
+
+        def server_close(self) -> None:
+            return None
+
+        def serve_forever(self) -> None:
+            return None
+
+        def shutdown(self) -> None:
+            return None
+
+    monkeypatch.setattr("scripts.testing.bt_formal_local_probe.ThreadingHTTPServer", FakeServer)
+    tracker = LocalTracker(
+        TraceRecorder(tmp_path / "trace.jsonl"),
+        bind_ip="192.168.18.19",
+        advertised_peer_ip="192.168.18.19",
+    )
+    try:
+        tracker._peers = {
+            b"first": {
+                b"stale": {"ip": "192.168.18.19", "port": 51001},
+                b"current": {"ip": "192.168.18.19", "port": 51002},
+            },
+            b"second": {b"also_stale": {"ip": "192.168.18.19", "port": 51001}},
+        }
+
+        assert tracker.purge_peer_endpoint_records(51001) == 2
+        assert tracker._peers == {
+            b"first": {b"current": {"ip": "192.168.18.19", "port": 51002}},
+            b"second": {},
+        }
+    finally:
+        tracker.server.server_close()
+
+
+def test_transmission_command_uses_cross_version_info_logging(tmp_path: Path) -> None:
+    daemon = TransmissionDaemon(
+        role="seed",
+        executable="transmission-daemon",
+        runtime_dir=tmp_path / "config",
+        download_dir=tmp_path / "downloads",
+        log_path=tmp_path / "daemon.log",
+        rpc_port=49001,
+        peer_port=49002,
+        peer_bind_ip="192.168.18.19",
+        trace=TraceRecorder(tmp_path / "trace.jsonl"),
+    )
+
+    command = daemon.command()
+
+    assert "--log-info" in command
+    assert "--log-level" not in command
+
+
+def test_partial_download_evidence_uses_real_daemon_file_location(tmp_path: Path) -> None:
+    requested_root = tmp_path / "requested"
+    daemon_root = tmp_path / "daemon-default"
+    daemon_root.mkdir(parents=True)
+    payload = daemon_root / "fixture.ts"
+    payload.write_bytes(b"partial")
+
+    evidence = _partial_download_evidence([requested_root, daemon_root], "fixture.ts")
+
+    assert evidence["path_exists"] is True
+    assert evidence["path"] == str(payload)
+    assert evidence["candidates"] == [{
+        "path": str(payload), "name": "fixture.ts", "size_bytes": len(b"partial"),
+    }]
+
+
+def test_partial_download_evidence_accepts_transmission_part_suffix(tmp_path: Path) -> None:
+    root = tmp_path / "downloads"
+    root.mkdir()
+    payload = root / "fixture.ts.part"
+    payload.write_bytes(b"partial")
+
+    evidence = _partial_download_evidence([root], "fixture.ts")
+
+    assert evidence["path_exists"] is True
+    assert evidence["path"] == str(payload)
+
+
+def test_derive_checks_accepts_transmission_three_verified_partial_progress() -> None:
+    raw = raw_success_fixture()
+    recovery = raw["magnet"]["pause_resume"]["resume_recovery"]
+    # Transmission 3 preserves a trailing partial byte count after verify;
+    # the probe must accept it only when it remains within the one-piece
+    # safety bound and later tests one full additional piece of progress.
+    recovery["after_verify"]["files"][0]["bytes_completed"] = 300_000
+    recovery["verified_completed_bytes"] = 300_000
+    recovery["discarded_incomplete_piece_bytes"] = 0
+
+    checks = derive_checks(raw)
+
+    assert checks["pause_resume_progress"]["ok"] is True
 
 
 def raw_success_fixture() -> dict:

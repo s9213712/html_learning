@@ -1,9 +1,11 @@
-# Production Gate Playbook — Required Reports
+# Production Readiness Playbook — Optional Reports
 
-> **目的**：要把 server 切到 `production`，必須先有完整 required report set 的「最新通過」report 上傳並通過驗證。
+> **目的**：把 server 切到 `production` 前，可選擇產生並驗證完整的 readiness report set，讓操作者有可追溯的風險證據。
 > 本檔給操作者一張 step-by-step 對照表：每份 report 是什麼、怎麼產、怎麼上傳、怎麼驗 status、失敗怎麼辦。
 >
-> **依據**：[`SERVER_MODE_V2_PROFILE_MATRIX.md §Production Gate Reports`](SERVER_MODE_V2_PROFILE_MATRIX.md#production-gate-reports) + `services/snapshots/schema.py::PRODUCTION_REQUIRED_REPORT_TYPES`。截至 2026-06-23，required set 為 14 份。
+> **切換規則**：report 結果只作建議，不阻止 root 明確輸入 `GO_LIVE` 的 mode switch；權限、CSRF、確認字串、Integrity Guard、checkpoint 與 mode-switch log-chain 的安全處置仍照常強制。
+>
+> **依據**：[`SERVER_MODE_V2_PROFILE_MATRIX.md §Production Readiness Reports`](SERVER_MODE_V2_PROFILE_MATRIX.md#production-readiness-reports) + `services/snapshots/schema.py::PRODUCTION_REQUIRED_REPORT_TYPES`。截至 2026-06-23，report set 為 14 份。
 
 ---
 
@@ -29,9 +31,9 @@
 | `key_version` | 對應簽章用的 key version |
 
 **Replay 防護**：同 `(report_type, report_hash, target_commit)` 三元組已存在 → reject，避免複用過期 artifact。
-**可信驗證**：缺少 `raw_report`、`report_hash` 與 `raw_report` 不一致、`signature` 驗證失敗、`key_version` 不符，任何一項都不會被 production gate 接受。
-**Filesystem auto-detect 不是信任來源**：`runtime/reports/security/production_gate/*.json` 只作為後台頁面與 API 的輔助顯示來源。這些檔案預設 `trust_level=unverified`；只有 `_verify_production_report_signature()` 驗證成功，且 `target_commit` / `target_branch` / `server_mode` 與當前 runtime 完全一致時，才會升級成 `verified` 並真正滿足 production gate。
-**舊檔 / 偽造檔警告**：unsigned、invalid JSON、`report_type` mismatch、replay 舊 commit、target 不一致等 filesystem 報告都只應顯示 warning，不能覆蓋資料庫裡已驗證的 report，也不能放行 production。
+**可信驗證**：缺少 `raw_report`、`report_hash` 與 `raw_report` 不一致、`signature` 驗證失敗、`key_version` 不符的 report 不會被標為可信。
+**Filesystem auto-detect 不是信任來源**：`runtime/reports/security/production_gate/*.json` 只作為後台頁面與 API 的輔助顯示來源。這些檔案預設 `trust_level=unverified`；只有 `_verify_production_report_signature()` 驗證成功，且 `target_commit` / `target_branch` / `server_mode` 與當前 runtime 完全一致時，才會升級成 `verified`。
+**舊檔 / 偽造檔警告**：unsigned、invalid JSON、`report_type` mismatch、replay 舊 commit、target 不一致等 filesystem 報告都只應顯示 warning，不能覆蓋資料庫裡已驗證的 report；它們也不會成為切換授權。
 
 **Commit 對齊**：required report set 的 `target_commit` 必須**全部相同**才算「對同一個 commit 都通過」。任一份 commit hash 不一致 → 視為過期，重跑該份。
 
@@ -40,8 +42,8 @@
 
 1. 製造完整 required report set `verified` 但 `target_commit=old/fake` 的 reports。
 2. 驗 `GET /api/root/server-mode/requirements` 仍然 `ok=false`。
-3. 驗 `POST /api/root/production/enter` 被擋下，且 warning / reason 明確顯示
-   `target_commit_mismatch`。
+3. 驗 `POST /api/root/production/enter` 在明確 `GO_LIVE` 下仍可切換，但回應保留
+   `production_requirements.ok=false` 與 advisory，明確顯示 `target_commit_mismatch`。
 4. 再製造完整 required report set `verified + current target_commit` 的 reports，確認
    `requirements ok=true` 且 `production enter` 成功。
 
@@ -164,7 +166,7 @@ curl -sk -b jar "$BASE_URL/api/root/production-report/status" | jq
 }
 ```
 
-### 3.4 Required set 全綠後才能 enter production
+### 3.4 選用：報告全綠後再 enter production
 
 ```bash
 csrf=$(curl -sk -c jar -b jar "$BASE_URL/api/csrf-token" | jq -re '.csrf_token')
@@ -269,4 +271,4 @@ python3 scripts/on_live_reports/ai_agent_boundary.py
 
 ---
 
-*Playbook end. 對應 spec：[`SERVER_MODE_V2_PROFILE_MATRIX.md §Production Gate Reports`](SERVER_MODE_V2_PROFILE_MATRIX.md#production-gate-reports). 配套腳本：本資料夾 `01_internal_test_login_token.sh` + `02_tester_token_shadow_api.sh`。*
+*Playbook end. 對應 spec：[`SERVER_MODE_V2_PROFILE_MATRIX.md §Production Readiness Reports`](SERVER_MODE_V2_PROFILE_MATRIX.md#production-readiness-reports). 配套腳本：本資料夾 `01_internal_test_login_token.sh` + `02_tester_token_shadow_api.sh`。*

@@ -1,8 +1,10 @@
 import sqlite3
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from decimal import Decimal, ROUND_DOWN
 from pathlib import Path
+from threading import Barrier
 
 import pytest
 
@@ -2328,6 +2330,216 @@ def test_dca_trading_bot_converts_budget_to_market_order(tmp_path):
     )
     assert total_spend <= 100
     assert dashboard["bots"][0]["run_count"] == 1
+
+
+def test_dca_price_band_persists_and_pauses_periodic_buys_outside_limits(tmp_path):
+    _, trading = _services(tmp_path)
+    created = trading.save_trading_bot(
+        actor=_actor(),
+        payload={
+            "bot_type": "dca",
+            "name": "Band limited ETH DCA",
+            "market_symbol": "ETH/POINTS",
+            "budget_points": 100,
+            "interval_hours": 1,
+            "price_lower_limit": "4900.25",
+            "price_upper_limit": "5100.75",
+            "max_runs": 2,
+            "enabled": True,
+        },
+    )["bot"]
+
+    assert created["price_lower_limit"] == pytest.approx(4900.25)
+    assert created["price_upper_limit"] == pytest.approx(5100.75)
+
+    trading.test_prices["ETH/POINTS"] = 5200
+    above = trading.run_trading_bots(actor=_actor(), limit=10)
+    assert above["triggered"] == []
+    assert above["skipped"][0]["reason"] == "price_above_limit"
+
+    trading.test_prices["ETH/POINTS"] = 4800
+    below = trading.run_trading_bots(actor=_actor(), limit=10)
+    assert below["triggered"] == []
+    assert below["skipped"][0]["reason"] == "price_below_limit"
+
+    trading.test_prices["ETH/POINTS"] = 5000
+    in_band = trading.run_trading_bots(actor=_actor(), limit=10)
+    assert len(in_band["triggered"]) == 1
+    listed = next(bot for bot in trading.list_trading_bots(actor=_actor())["bots"] if bot["bot_uuid"] == created["bot_uuid"])
+    assert listed["price_lower_limit"] == pytest.approx(4900.25)
+    assert listed["price_upper_limit"] == pytest.approx(5100.75)
+    assert listed["run_count"] == 1
+
+    with pytest.raises(ValueError, match="price_lower_limit must not exceed price_upper_limit"):
+        trading.save_trading_bot(
+            actor=_actor(),
+            payload={
+                "bot_type": "dca",
+                "name": "Invalid DCA price band",
+                "market_symbol": "ETH/POINTS",
+                "budget_points": 100,
+                "price_lower_limit": 5101,
+                "price_upper_limit": 5100,
+                "max_runs": 1,
+                "enabled": False,
+            },
+        )
+
+
+def test_dca_risk_target_runs_before_price_band_pause(tmp_path):
+    points, trading = _services(tmp_path)
+    points.record_transaction(user_id=1, currency_type="points", direction="credit", amount=20_000, action_type="admin_adjust_credit")
+    trading.place_order(actor=_actor(), market_symbol="ETH/POINTS", side="buy", order_type="market", quantity="1")
+    trading.test_prices["ETH/POINTS"] = 4700
+    trading.save_trading_bot(
+        actor=_actor(),
+        payload={
+            "bot_type": "dca",
+            "name": "DCA risk before lower band",
+            "market_symbol": "ETH/POINTS",
+            "budget_points": 100,
+            "interval_hours": 24,
+            "price_lower_limit": 4800,
+            "stop_loss_percent": 5,
+            "max_runs": 1,
+            "enabled": True,
+        },
+    )
+
+    result = trading.run_trading_bots(actor=_actor(), limit=10)
+
+    assert len(result["triggered"]) == 1
+    dashboard = trading.user_dashboard(user_id=1)
+    assert dashboard["positions"][0]["quantity_units"] == 0
+    assert any(order["side"] == "sell" for order in dashboard["orders"])
+
+
+def test_workflow_daily_cap_is_persisted_and_resets_on_next_utc_day(tmp_path):
+    _, trading = _services(tmp_path)
+    workflow = {
+        "version": 1,
+        "strategy_kind": "workflow",
+        "branches": [{
+            "id": "daily-cap-branch",
+            "name": "daily cap sequence",
+            "priority": 10,
+            "logic": "AND",
+            "cooldown_seconds": 0,
+            "max_runs": 3,
+            "conditions": [{"type": "always"}],
+            "actions": [
+                {"type": "buy_amount", "amount_points": 20, "step": 1, "order_type": "market"},
+                {"type": "buy_amount", "amount_points": 20, "step": 2, "order_type": "market"},
+                {"type": "buy_amount", "amount_points": 20, "step": 3, "order_type": "market"},
+            ],
+        }],
+    }
+    created = trading.save_trading_bot(
+        actor=_actor(),
+        payload={
+            "bot_type": "conditional",
+            "name": "UTC daily capped workflow",
+            "market_symbol": "ETH/POINTS",
+            "side": "buy",
+            "order_type": "market",
+            "quantity": "0.00000001",
+            "trigger_type": "always",
+            "workflow_json": workflow,
+            "max_runs": 3,
+            "max_daily_runs": 1,
+            "cooldown_seconds": 0,
+            "enabled": True,
+        },
+    )["bot"]
+
+    first = trading.run_trading_bots(actor=_actor(), limit=10)
+    assert len(first["triggered"]) == 1
+    second = trading.run_trading_bots(actor=_actor(), limit=10)
+    assert second["triggered"] == []
+    assert second["skipped"][0]["reason"] == "daily_max_runs_reached"
+
+    conn = trading.get_db()
+    try:
+        row = conn.execute(
+            "SELECT max_daily_runs, daily_run_date, daily_run_count, run_count FROM trading_bots WHERE bot_uuid=?",
+            (created["bot_uuid"],),
+        ).fetchone()
+        assert row["max_daily_runs"] == 1
+        assert row["daily_run_count"] == 1
+        assert row["run_count"] == 1
+        conn.execute(
+            "UPDATE trading_bots SET daily_run_date='2000-01-01', daily_run_count=1 WHERE bot_uuid=?",
+            (created["bot_uuid"],),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    next_day = trading.run_trading_bots(actor=_actor(), limit=10)
+    assert len(next_day["triggered"]) == 1
+    listed = next(bot for bot in trading.list_trading_bots(actor=_actor())["bots"] if bot["bot_uuid"] == created["bot_uuid"])
+    assert listed["max_daily_runs"] == 1
+    assert listed["daily_run_count"] == 1
+    assert listed["run_count"] == 2
+
+
+def test_workflow_daily_cap_claim_is_atomic_for_concurrent_scans(tmp_path):
+    _, trading = _services(tmp_path)
+    workflow = {
+        "version": 1,
+        "strategy_kind": "workflow",
+        "branches": [{
+            "id": "concurrent-daily-cap",
+            "name": "concurrent daily cap",
+            "priority": 10,
+            "logic": "AND",
+            "cooldown_seconds": 0,
+            "max_runs": 2,
+            "conditions": [{"type": "always"}],
+            "actions": [
+                {"type": "buy_amount", "amount_points": 20, "step": 1, "order_type": "market"},
+                {"type": "buy_amount", "amount_points": 20, "step": 2, "order_type": "market"},
+            ],
+        }],
+    }
+    created = trading.save_trading_bot(
+        actor=_actor(),
+        payload={
+            "bot_type": "conditional",
+            "name": "concurrent UTC daily capped workflow",
+            "market_symbol": "ETH/POINTS",
+            "side": "buy",
+            "order_type": "market",
+            "quantity": "0.00000001",
+            "trigger_type": "always",
+            "workflow_json": workflow,
+            "max_runs": 2,
+            "max_daily_runs": 1,
+            "cooldown_seconds": 0,
+            "enabled": True,
+        },
+    )["bot"]
+
+    barrier = Barrier(2)
+
+    def concurrent_scan():
+        barrier.wait(timeout=5)
+        return trading.run_trading_bot_once(actor=_actor(), bot_uuid=created["bot_uuid"])
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = [future.result(timeout=10) for future in (executor.submit(concurrent_scan), executor.submit(concurrent_scan))]
+
+    assert sum(len(result["triggered"]) for result in results) == 1
+    assert sum(len(result["failed"]) for result in results) == 0
+    assert sum(
+        1
+        for result in results
+        for skipped in result["skipped"]
+        if skipped["reason"] == "daily_max_runs_reached"
+    ) == 1
+    listed = next(bot for bot in trading.list_trading_bots(actor=_actor())["bots"] if bot["bot_uuid"] == created["bot_uuid"])
+    assert listed["daily_run_count"] == 1
+    assert listed["run_count"] == 1
 
 
 def test_run_single_dca_bot_once_executes_created_bot_immediately(tmp_path):

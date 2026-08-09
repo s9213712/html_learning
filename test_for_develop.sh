@@ -52,15 +52,33 @@ TRADING_BACKGROUND_DEV_READY="${HACKME_DEV_TRADING_BACKGROUND_DEV_READY:-0}"
 SERVER_RUNNER="${HACKME_DEV_SERVER_RUNNER:-gunicorn}"
 GUNICORN_WORKERS="${HACKME_DEV_GUNICORN_WORKERS:-auto}"
 GUNICORN_THREADS="${HACKME_DEV_GUNICORN_THREADS:-auto}"
+GUNICORN_THREADS_EXPLICIT=0
+case "${GUNICORN_THREADS,,}" in
+  ""|auto|dynamic) ;;
+  *) GUNICORN_THREADS_EXPLICIT=1 ;;
+esac
 GUNICORN_TIMEOUT="${HACKME_DEV_GUNICORN_TIMEOUT:-20}"
 GUNICORN_TIMEOUT_SET=0
 [[ -n "${HACKME_DEV_GUNICORN_TIMEOUT+x}" ]] && GUNICORN_TIMEOUT_SET=1
 COMFYUI_DEV_GUNICORN_TIMEOUT_FLOOR="${HACKME_DEV_COMFYUI_GUNICORN_TIMEOUT_FLOOR:-900}"
 GUNICORN_GRACEFUL_TIMEOUT="${HACKME_DEV_GUNICORN_GRACEFUL_TIMEOUT:-10}"
-GUNICORN_KEEP_ALIVE="${HACKME_DEV_GUNICORN_KEEP_ALIVE:-2}"
+# Two seconds closes an otherwise healthy persistent TLS connection between
+# ordinary UI polls.  That is observable as RemoteDisconnected by clients
+# which select the socket just as Gunicorn expires it.  Keep a modest idle
+# window by default while retaining --gunicorn-keep-alive for constrained
+# deployments.
+# A large session pool can legitimately revisit a persistent connection after
+# ten seconds while a high-concurrency round is still draining.  Keep it long
+# enough to avoid stale-socket BrokenPipe/reset failures without holding idle
+# connections indefinitely.
+GUNICORN_KEEP_ALIVE="${HACKME_DEV_GUNICORN_KEEP_ALIVE:-30}"
 GUNICORN_BACKLOG="${HACKME_DEV_GUNICORN_BACKLOG:-64}"
 GUNICORN_MAX_REQUESTS="${HACKME_DEV_GUNICORN_MAX_REQUESTS:-10000}"
 GUNICORN_MAX_REQUESTS_JITTER="${HACKME_DEV_GUNICORN_MAX_REQUESTS_JITTER:-1000}"
+GUNICORN_MAX_REQUESTS_SET=0
+GUNICORN_MAX_REQUESTS_JITTER_SET=0
+[[ -n "${HACKME_DEV_GUNICORN_MAX_REQUESTS+x}" ]] && GUNICORN_MAX_REQUESTS_SET=1
+[[ -n "${HACKME_DEV_GUNICORN_MAX_REQUESTS_JITTER+x}" ]] && GUNICORN_MAX_REQUESTS_JITTER_SET=1
 CAPACITY_PROBE_MODE="${HACKME_DEV_CAPACITY_PROBE:-auto}"
 CAPACITY_PROBE_TIER="${HACKME_DEV_CAPACITY_PROBE_TIER:-auto}"
 CAPACITY_PROBE_RAN=0
@@ -538,19 +556,24 @@ load_local_capacity_defaults() {
         fi
         ;;
       HACKME_DEV_GUNICORN_MAX_REQUESTS)
-        if [[ "$mode" == "force" || -z "${HACKME_DEV_GUNICORN_MAX_REQUESTS+x}" ]]; then
+        if [[ "$mode" == "force" || "$GUNICORN_MAX_REQUESTS_SET" != "1" ]]; then
           GUNICORN_MAX_REQUESTS="$value"
           export HACKME_DEV_GUNICORN_MAX_REQUESTS="$value"
         fi
         ;;
       HACKME_DEV_GUNICORN_MAX_REQUESTS_JITTER)
-        if [[ "$mode" == "force" || -z "${HACKME_DEV_GUNICORN_MAX_REQUESTS_JITTER+x}" ]]; then
+        if [[ "$mode" == "force" || "$GUNICORN_MAX_REQUESTS_JITTER_SET" != "1" ]]; then
           GUNICORN_MAX_REQUESTS_JITTER="$value"
           export HACKME_DEV_GUNICORN_MAX_REQUESTS_JITTER="$value"
         fi
         ;;
       HTML_LEARNING_BACKPRESSURE_THREAD_CAPACITY)
-        if [[ "$mode" == "force" || -z "${HTML_LEARNING_BACKPRESSURE_THREAD_CAPACITY+x}" || "$(printf '%s' "${HTML_LEARNING_BACKPRESSURE_THREAD_CAPACITY:-}" | tr '[:upper:]' '[:lower:]')" == "auto" ]]; then
+        # A capacity-defaults file describes the Gunicorn profile that produced
+        # it.  Do not retain its lower backpressure capacity after an operator
+        # explicitly selects a different thread count on this invocation.  An
+        # explicitly exported backpressure value remains an intentional
+        # override and is still preserved by this condition.
+        if [[ "$mode" == "force" || ( "$GUNICORN_THREADS_EXPLICIT" != "1" && ( -z "${HTML_LEARNING_BACKPRESSURE_THREAD_CAPACITY+x}" || "$(printf '%s' "${HTML_LEARNING_BACKPRESSURE_THREAD_CAPACITY:-}" | tr '[:upper:]' '[:lower:]')" == "auto" ) ) ]]; then
           export HTML_LEARNING_BACKPRESSURE_THREAD_CAPACITY="$value"
         fi
         ;;
@@ -1416,13 +1439,12 @@ except Exception:
     mem_mb = 0
 
 def auto_workers():
-    if cpu <= 2 or (mem_mb and mem_mb < 2048):
-        return 1
-    if cpu >= 16 and (not mem_mb or mem_mb >= 16384):
-        return 5
-    if cpu >= 8 and (not mem_mb or mem_mb >= 8192):
-        return 4
-    return 2
+    # This application uses SQLite for account, PointsChain, governance, and
+    # storage writes.  Multiple Gunicorn processes each have their own Python
+    # locks, so they amplify cross-process SQLite write races rather than
+    # increasing safe write throughput.  Scale the one process with gthreads;
+    # external workers such as ffmpeg remain independently bounded.
+    return 1
 
 def auto_threads():
     if mem_mb and mem_mb < 2048:
@@ -1430,17 +1452,22 @@ def auto_threads():
     if cpu <= 2 or (mem_mb and mem_mb < 4096):
         return 6
     if cpu <= 4:
-        return 6
-    # This app has substantial SQLite, PointsChain, and governance write
-    # serialization. Prefer more worker processes with fewer threads over a
-    # single process with a large thread pile; it uses more cores for CPU-bound
-    # Python work without multiplying per-process DB writer pressure.
-    return 6
+        return 16
+    if cpu <= 8 or (mem_mb and mem_mb < 8192):
+        return 32
+    if cpu <= 16 or (mem_mb and mem_mb < 16384):
+        return 64
+    # Leave 32 gthread slots outside the 128-request business admission gate
+    # on high-end hosts.  Those slots keep auth, health, and rejection paths
+    # responsive even while the regular workload is fully admitted.
+    return 160
 
 workers = auto_workers() if raw_workers in {"", "auto", "dynamic"} else int(raw_workers)
 threads = auto_threads() if raw_threads in {"", "auto", "dynamic"} else int(raw_threads)
+# Keep an explicit operator override available for controlled compatibility
+# testing; automatic selection is always the SQLite-safe single process.
 workers = max(1, min(6, workers))
-threads = max(2, min(16, threads))
+threads = max(2, min(160, threads))
 print(f"{workers} {threads}")
 PY
 )"
@@ -1681,7 +1708,15 @@ print_resolved_config() {
   say "  max_content_mb:      ${MAX_CONTENT_MB:-<app default>}"
   say "  server_runner:       $SERVER_RUNNER"
   if [[ "$SERVER_RUNNER" == "gunicorn" ]]; then
-    say "  gunicorn:            workers=$GUNICORN_WORKERS threads=$GUNICORN_THREADS timeout=$GUNICORN_TIMEOUT backlog=$GUNICORN_BACKLOG max_requests=$GUNICORN_MAX_REQUESTS jitter=$GUNICORN_MAX_REQUESTS_JITTER"
+    local resolved_backpressure_capacity="${HTML_LEARNING_BACKPRESSURE_THREAD_CAPACITY:-auto}"
+    if [[ -z "${HTML_LEARNING_BACKPRESSURE_THREAD_CAPACITY+x}" ]]; then
+      resolved_backpressure_capacity="$GUNICORN_THREADS"
+      if [[ "$resolved_backpressure_capacity" -gt 130 ]]; then
+        resolved_backpressure_capacity=130
+      fi
+    fi
+    say "  gunicorn:            workers=$GUNICORN_WORKERS threads=$GUNICORN_THREADS timeout=$GUNICORN_TIMEOUT keep_alive=$GUNICORN_KEEP_ALIVE backlog=$GUNICORN_BACKLOG max_requests=$GUNICORN_MAX_REQUESTS jitter=$GUNICORN_MAX_REQUESTS_JITTER"
+    say "  backpressure:        $resolved_backpressure_capacity"
     say "  hls_slots:           max_concurrent=${HACKME_MEDIA_HLS_MAX_CONCURRENT:-<worker default 1>} ffmpeg_threads=${HACKME_MEDIA_FFMPEG_THREADS:-<worker default 1>} serialize_all=${HACKME_MEDIA_HLS_SERIALIZE_ALL:-<worker default>} probe=$HLS_SLOT_PROBE_MODE"
     say "  remote_download:     global=${HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_GLOBAL:-<root/env default 1>} per_user=${HACKME_REMOTE_DOWNLOAD_MAX_CONCURRENT_PER_USER:-<root/env default 1>}"
     say "  bt_backend:          ${BT_DOWNLOAD_BACKEND:-${HACKME_BT_BACKEND:-auto}} transmission_rpc=${TRANSMISSION_RPC_URL:-${HACKME_TRANSMISSION_RPC_URL:-http://127.0.0.1:9091/transmission/rpc}}"
@@ -5064,6 +5099,9 @@ while [[ $# -gt 0 ]]; do
       ;;
     --gunicorn-threads)
       GUNICORN_THREADS="${2:?missing gunicorn thread count}"
+      if ! is_auto_capacity_value "$GUNICORN_THREADS"; then
+        GUNICORN_THREADS_EXPLICIT=1
+      fi
       shift 2
       ;;
     --gunicorn-timeout)
@@ -5085,10 +5123,12 @@ while [[ $# -gt 0 ]]; do
       ;;
     --gunicorn-max-requests)
       GUNICORN_MAX_REQUESTS="${2:?missing gunicorn max requests}"
+      GUNICORN_MAX_REQUESTS_SET=1
       shift 2
       ;;
     --gunicorn-max-requests-jitter)
       GUNICORN_MAX_REQUESTS_JITTER="${2:?missing gunicorn max requests jitter}"
+      GUNICORN_MAX_REQUESTS_JITTER_SET=1
       shift 2
       ;;
     --capacity-probe|--retest-capacity|--refresh-capacity)
@@ -5551,7 +5591,16 @@ if [[ "$SERVER_RUNNER" == "flask" ]]; then
 fi
 export HTML_LEARNING_BACKPRESSURE_ENABLED="${HTML_LEARNING_BACKPRESSURE_ENABLED:-1}"
 if [[ "$SERVER_RUNNER" == "gunicorn" ]]; then
-  export HTML_LEARNING_BACKPRESSURE_THREAD_CAPACITY="${HTML_LEARNING_BACKPRESSURE_THREAD_CAPACITY:-$GUNICORN_THREADS}"
+  # Do not admit every high-end gthread slot to ordinary work.  The spare
+  # threads preserve fast-lane health/auth service under a 128-way workload.
+  # The feature gate reserves two of its own tokens.  Therefore its raw
+  # capacity must be 130 to admit 128 business requests while a 1x160
+  # profile still leaves 32 WSGI threads available.
+  DEFAULT_BACKPRESSURE_CAPACITY="$GUNICORN_THREADS"
+  if [[ "$DEFAULT_BACKPRESSURE_CAPACITY" -gt 130 ]]; then
+    DEFAULT_BACKPRESSURE_CAPACITY=130
+  fi
+  export HTML_LEARNING_BACKPRESSURE_THREAD_CAPACITY="${HTML_LEARNING_BACKPRESSURE_THREAD_CAPACITY:-$DEFAULT_BACKPRESSURE_CAPACITY}"
 else
   export HTML_LEARNING_BACKPRESSURE_THREAD_CAPACITY="${HTML_LEARNING_BACKPRESSURE_THREAD_CAPACITY:-auto}"
 fi

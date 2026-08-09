@@ -20,7 +20,7 @@ import sqlite3
 import sys
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -65,7 +65,7 @@ class Recorder:
 
 
 def utc_now() -> str:
-    return datetime.utcnow().replace(microsecond=0).isoformat()
+    return datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0).isoformat()
 
 
 def taiwan_id_number(index: int) -> str:
@@ -257,6 +257,43 @@ def api(page, method: str, path: str, body: dict[str, Any] | None = None) -> dic
         """,
         {"method": method.upper(), "path": path, "body": body},
     )
+
+
+def api_with_backpressure_retry(
+    page,
+    method: str,
+    path: str,
+    body: dict[str, Any] | None = None,
+    *,
+    max_attempts: int = 4,
+) -> dict[str, Any]:
+    """Retry only an explicitly rejected request, never an ambiguous failure.
+
+    The service's ``server_busy`` response is emitted by the admission gate
+    before the business handler.  It is therefore safe to retry it after the
+    server-advertised delay.  Other HTTP failures, transport errors, and
+    malformed responses are returned unchanged so the correctness probe still
+    exposes them.
+    """
+
+    attempts = max(1, int(max_attempts))
+    result: dict[str, Any] = {}
+    for attempt in range(1, attempts + 1):
+        result = api(page, method, path, body)
+        payload = result.get("body") if isinstance(result.get("body"), dict) else {}
+        controlled_busy = (
+            int(result.get("status") or 0) == 503
+            and str(payload.get("error") or "") == "server_busy"
+        )
+        result["backpressure_attempts"] = attempt
+        if not controlled_busy or attempt >= attempts:
+            return result
+        try:
+            retry_after = float(payload.get("retry_after_seconds") or 0)
+        except (TypeError, ValueError):
+            retry_after = 0.0
+        time.sleep(min(5.0, max(0.1, retry_after)))
+    return result
 
 
 def login(page, base_url: str, username: str, password: str) -> dict[str, Any]:
@@ -1032,28 +1069,28 @@ def main() -> int:
         )
 
         orders: dict[str, Any] = {}
-        orders["spot_sl_buy"] = api(
+        orders["spot_sl_buy"] = api_with_backpressure_retry(
             pages["spot_sl"],
             "POST",
             "/trading/orders",
             {"market_symbol": "ETH/POINTS", "side": "buy", "order_type": "market", "quantity": "10", "stop_loss_percent": 5, "take_profit_percent": 20},
         )
         assert_api_ok(rec, "spot stop-loss seed buy", orders["spot_sl_buy"])
-        orders["spot_tp_buy"] = api(
+        orders["spot_tp_buy"] = api_with_backpressure_retry(
             pages["spot_tp"],
             "POST",
             "/trading/orders",
             {"market_symbol": "ETH/POINTS", "side": "buy", "order_type": "market", "quantity": "10", "stop_loss_percent": 20, "take_profit_percent": 5},
         )
         assert_api_ok(rec, "spot take-profit seed buy", orders["spot_tp_buy"])
-        orders["limit_buy"] = api(
+        orders["limit_buy"] = api_with_backpressure_retry(
             pages["limit"],
             "POST",
             "/trading/orders",
             {"market_symbol": "ETH/POINTS", "side": "buy", "order_type": "limit", "quantity": "5", "limit_price_points": 92},
         )
         assert_api_ok(rec, "limit order seed", orders["limit_buy"])
-        orders["margin_liq_open"] = api(
+        orders["margin_liq_open"] = api_with_backpressure_retry(
             pages["margin_liq"],
             "POST",
             "/trading/margin/open",
@@ -1075,14 +1112,14 @@ def main() -> int:
             f"available_before={drain.get('available_before')} drained={drain.get('drained_points')}",
             drain=drain,
         )
-        orders["margin_tp_open"] = api(
+        orders["margin_tp_open"] = api_with_backpressure_retry(
             pages["margin_tp"],
             "POST",
             "/trading/margin/open",
             {"market_symbol": "ETH/POINTS", "position_type": "margin_long", "quantity": "1", "collateral_points": 50, "take_profit_percent": 5, "idempotency_key": f"{prefix}margin_tp"},
         )
         assert_api_ok(rec, "margin take-profit seed open", orders["margin_tp_open"])
-        orders["margin_interest_open"] = api(
+        orders["margin_interest_open"] = api_with_backpressure_retry(
             pages["margin_interest"],
             "POST",
             "/trading/margin/open",
@@ -1090,13 +1127,16 @@ def main() -> int:
         )
         assert_api_ok(rec, "margin interest seed open", orders["margin_interest_open"])
         interest_uuid = (orders["margin_interest_open"]["body"].get("position") or {}).get("position_uuid")
-        opened_at = (datetime.utcnow().replace(microsecond=0) - timedelta(hours=3, minutes=2)).isoformat()
+        opened_at = (
+            datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0)
+            - timedelta(hours=3, minutes=2)
+        ).isoformat()
         db_exec(
             db_path,
             "UPDATE trading_margin_positions SET opened_at=?, interest_accrued_hours=0, interest_points=0, interest_paid_points=0, interest_carry_micropoints=0 WHERE position_uuid=?",
             (opened_at, interest_uuid),
         )
-        workflow_bot_create = api(
+        workflow_bot_create = api_with_backpressure_retry(
             pages["workflow_bot"],
             "POST",
             "/trading/bots",
@@ -1114,7 +1154,7 @@ def main() -> int:
             },
         )
         assert_api_ok(rec, "workflow/conditional bot seed", workflow_bot_create)
-        dca_bot_create = api(
+        dca_bot_create = api_with_backpressure_retry(
             pages["dca_bot"],
             "POST",
             "/trading/bots",
@@ -1129,7 +1169,7 @@ def main() -> int:
             },
         )
         assert_api_ok(rec, "DCA bot seed disabled before auto scan", dca_bot_create)
-        grid_bot_create = api(
+        grid_bot_create = api_with_backpressure_retry(
             pages["grid_bot"],
             "POST",
             "/trading/grid-bots",

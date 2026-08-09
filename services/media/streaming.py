@@ -1942,13 +1942,19 @@ def open_realtime_proxy_stream(
 def _should_use_external_hls_audio(metadata):
     if str((metadata or {}).get("media_type") or "") != "video":
         return False
-    if _ffmpeg_force_stream_copy_enabled():
-        return False
     audio_streams = _hls_audio_streams(metadata)
     if not audio_streams:
         return False
+    # A multi-track source must keep its tracks as separate HLS renditions.
+    # The low-load copy-first setting is allowed to avoid a video transcode,
+    # but it must not collapse alternate language/commentary tracks into an
+    # unselectable stream.  The background cloud-drive worker enables forced
+    # copy for ordinary uploads, so decide this before its single-track fast
+    # path.
     if len(audio_streams) > 1:
         return True
+    if _ffmpeg_force_stream_copy_enabled():
+        return False
     return not _audio_codec_browser_hls_friendly(audio_streams[0])
 
 

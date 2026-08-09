@@ -310,13 +310,16 @@ forensic bundle，再用分支、緊急治理或追加補償交易處理。
 
 先確認這台 runtime 是否已更新到最新 code，並重新整理 root 安全中心頁面。
 
-### TRB-GATE-002 production gate 被擋下，但看不懂原因
+### TRB-GATE-002 production readiness 顯示紅燈或 advisory
 
 先看：
 
 - 哪一張卡是紅燈
-- 是缺報告、報告未驗簽、還是前置條件未完成
+- 是缺報告、報告未驗簽、還是運行現況需要處理
 - 是 root 狀態問題，還是 staging/prod 設定問題
+
+這些結果是建議資訊，不會阻止 root 明確輸入 `GO_LIVE`。若切換真的失敗，請優先查看
+Integrity Guard、checkpoint、mode-switch log-chain 與回讀錯誤，而不是只看 report 卡片。
 
 ### TRB-GATE-003 安全測試卡片顯示異常
 

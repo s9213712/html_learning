@@ -100,7 +100,7 @@ class Api:
 def make_fixture(out_dir: Path) -> tuple[Path, dict[str, Any]]:
     subtitle = out_dir / "fixture.zh.srt"
     subtitle.write_text(
-        "1\n00:00:00,000 --> 00:00:04,000\n正式雲端分享串流測試\n",
+        "1\n00:00:00,000 --> 00:00:12,000\n正式雲端分享串流測試\n",
         encoding="utf-8",
     )
     media = out_dir / "formal_cloud_dual_audio_subtitle.mkv"

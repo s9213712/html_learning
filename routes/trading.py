@@ -388,6 +388,18 @@ def register_trading_routes(app, deps):
         elif lowered.startswith("interval_hours must be"):
             msg = "定投間隔小時必須是 1 到 8760 之間的整數"
             status = 400
+        elif lowered.startswith("price_upper_limit must be"):
+            msg = "定投價格上限必須是大於 0 的有效價格"
+            status = 400
+        elif lowered.startswith("price_lower_limit must be"):
+            msg = "定投價格下限必須是大於 0 的有效價格"
+            status = 400
+        elif lowered.startswith("price_lower_limit must not exceed price_upper_limit"):
+            msg = "定投價格下限不可高於價格上限"
+            status = 400
+        elif lowered.startswith("max_daily_runs must be"):
+            msg = "每日最大觸發次數必須是 1 到 100 之間的整數"
+            status = 400
         elif lowered.startswith("workflow graph"):
             msg = f"Workflow 設定錯誤：{msg}"
             status = 400

@@ -16,7 +16,7 @@
 4. 套用 repo 內 [deploy/README.md](../deploy/README.md) 的 Nginx / systemd 範本，並依主機調整 domain、憑證、路徑與 secrets。
 5. 決定是否由反向代理處理 HTTPS。
 6. 建立上線前 snapshot。
-7. 跑功能 smoke、權限 pentest、壓力測試與必要的 production gate。
+7. 跑功能 smoke、權限 pentest、壓力測試與選用的 production readiness reports；重大 finding 應先處理，即使它們不會阻止明確 `GO_LIVE`。
 8. 做文件新鮮度檢查：確認 README / API reference / Trading / Server Mode /
    QA 文件描述的是目前 code，而不是研究草案或歷史報告。
 
@@ -320,7 +320,7 @@ PYTHONPATH=. scripts/security/pentest/run_pentest.sh \
   --only whole-site-production-gate
 ```
 
-如果你要一次產出 production gate 要求的完整 required report set，可直接用：
+如果你要一次產出選用的完整 production readiness report set，可直接用：
 
 ```bash
 HACKME_RUNTIME_DIR=/var/lib/hackme_web/runtime \

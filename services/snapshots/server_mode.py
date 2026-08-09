@@ -2519,14 +2519,17 @@ class ServerModeService:
                 reason=notes or "manual incident lockdown",
                 verification={"requested_via": "switch_mode"},
             )
+        production_requirements = None
+        production_advisories = []
         if target_mode == "production":
-            requirements = self.production_requirements()
-            if not requirements.get("ok"):
-                return {
-                    "ok": False,
-                    "msg": "production gate 未通過，缺少報告或仍有 critical/high finding",
-                    "requirements": requirements,
-                }
+            # Evidence remains visible to operators, but it is deliberately not
+            # an authorization gate.  A root user still needs GO_LIVE and all
+            # runtime safety checks below must succeed.
+            production_requirements = self.production_requirements()
+            if not production_requirements.get("ok"):
+                production_advisories.append(
+                    "production 建議檢查尚未全數通過；已保留報告狀態供後續處理"
+                )
             if self.integrity_guard:
                 try:
                     allowed, high_risk_count = self.integrity_guard.can_enter_preprod()
@@ -2733,7 +2736,17 @@ class ServerModeService:
             )
             event = "SUPERWEAK_ENTER" if target_mode == "superweak" else "SERVER_MODE_CHANGE"
             self.audit(event, "-", user=self._actor_name(actor), success=True, detail=f"old_value={current},new_value={target_mode},profile={profile['name']},checkpoint={checkpoint.get('checkpoint_id')},snapshot={checkpoint.get('snapshot_id')},settings={applied_settings},production={production_result or {}},internal_test={internal_test_result or {}},reason={notes or ''}")
-            return {"ok": True, "mode": self.get_current_mode(), "profile": profile, "applied_settings": applied_settings, "production": production_result, "internal_test": internal_test_result, "checkpoint": checkpoint}
+            return {
+                "ok": True,
+                "mode": self.get_current_mode(),
+                "profile": profile,
+                "applied_settings": applied_settings,
+                "production": production_result,
+                "internal_test": internal_test_result,
+                "checkpoint": checkpoint,
+                "production_requirements": production_requirements,
+                "advisories": production_advisories,
+            }
         finally:
             conn.close()
 

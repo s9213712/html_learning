@@ -333,22 +333,28 @@ def get_storage_quota_purchase(conn, purchase_id):
     return dict(row) if row else None
 
 
-def active_storage_quota_purchases(conn, user_id, *, now=None):
-    ensure_storage_quota_purchase_schema(conn)
+def active_storage_quota_purchases(conn, user_id, *, now=None, ensure_schema=True):
+    if ensure_schema:
+        ensure_storage_quota_purchase_schema(conn)
     now_iso = _iso(now or _now())
-    rows = conn.execute(
-        """
-        SELECT * FROM storage_quota_purchases
-        WHERE user_id=? AND status='active' AND expires_at>?
-        ORDER BY expires_at ASC, created_at ASC
-        """,
-        (int(user_id), now_iso),
-    ).fetchall()
+    try:
+        rows = conn.execute(
+            """
+            SELECT * FROM storage_quota_purchases
+            WHERE user_id=? AND status='active' AND expires_at>?
+            ORDER BY expires_at ASC, created_at ASC
+            """,
+            (int(user_id), now_iso),
+        ).fetchall()
+    except Exception:
+        if ensure_schema:
+            raise
+        return []
     return [dict(row) for row in rows]
 
 
-def purchased_storage_summary(conn, user_id, *, now=None):
-    purchases = active_storage_quota_purchases(conn, user_id, now=now)
+def purchased_storage_summary(conn, user_id, *, now=None, ensure_schema=True):
+    purchases = active_storage_quota_purchases(conn, user_id, now=now, ensure_schema=ensure_schema)
     total = sum(int(row.get("purchased_bytes") or 0) for row in purchases)
     latest_expiry = max((row.get("expires_at") for row in purchases), default=None)
     return {

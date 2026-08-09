@@ -384,7 +384,18 @@ def detect_diffusers_supported_modes(*, repo_id="", pipeline_tag="", library_nam
     library = str(library_name or "").strip().lower()
     tag_set = {str(item or "").strip().lower() for item in (tags or []) if str(item or "").strip()}
     config = config if isinstance(config, dict) else {}
-    class_name = str(config.get("_class_name") or config.get("pipeline_class") or "").lower()
+    # ``HfApi.model_info(...).config`` commonly nests the actual model-index
+    # information under ``diffusers``.  Looking only at the top level made a
+    # normal StableDiffusionXLPipeline appear to be text-only even though
+    # AutoPipelineForImage2Image can select its img2img counterpart.
+    diffusers_config = config.get("diffusers") if isinstance(config.get("diffusers"), dict) else {}
+    class_name = str(
+        config.get("_class_name")
+        or config.get("pipeline_class")
+        or diffusers_config.get("_class_name")
+        or diffusers_config.get("pipeline_class")
+        or ""
+    ).lower()
     sibling_names = [_sibling_filename(item).lower() for item in (siblings or [])]
     has_regular_model_index = any(PurePosixPath(name).name == "model_index.json" for name in sibling_names)
     has_modular_model_index = any(PurePosixPath(name).name == "modular_model_index.json" for name in sibling_names)
@@ -412,6 +423,16 @@ def detect_diffusers_supported_modes(*, repo_id="", pipeline_tag="", library_nam
     if is_diffusers and any(name in class_name for name in ("text2image", "texttoimage", "text-to-image", "pipeline")):
         supported.add("txt2img")
     if is_diffusers and any(name in class_name for name in ("image2image", "imagetoimage", "img2img")):
+        supported.add("img2img")
+    # Stable Diffusion / SDXL model indexes deliberately advertise the
+    # text-to-image pipeline.  Diffusers officially converts these standard
+    # pipeline classes through AutoPipelineForImage2Image, so recognize that
+    # documented capability without guessing for unknown text-only models.
+    standard_auto_img2img_classes = {
+        "stablediffusionpipeline",
+        "stablediffusionxlpipeline",
+    }
+    if is_diffusers and has_regular_model_index and class_name in standard_auto_img2img_classes:
         supported.add("img2img")
     if is_diffusers and any(name in class_name for name in ("text2text", "texttotext")):
         supported.add("t2t")

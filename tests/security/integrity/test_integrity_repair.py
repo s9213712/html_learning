@@ -77,6 +77,57 @@ def test_repair_audit_chain_reseals_corrupted_entries(tmp_path):
     assert broken_at is None
 
 
+def test_verify_audit_integrity_range_uses_the_predecessor_chain_hash(tmp_path):
+    db_path = tmp_path / "audit.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE secure_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT NOT NULL,
+            action TEXT NOT NULL,
+            ip TEXT,
+            user TEXT,
+            success INTEGER NOT NULL DEFAULT 0,
+            ua TEXT,
+            detail TEXT,
+            prev_hash TEXT,
+            entry_hash TEXT,
+            chain_hash TEXT NOT NULL
+        );
+        """
+    )
+    conn.commit()
+    conn.close()
+    configure_audit_service(
+        get_db=_get_db_factory(str(db_path)),
+        chain_seed="range-seed",
+        integrity_key=b"range-integrity-key",
+        audit_log_path=str(tmp_path / "audit.log"),
+        audit_anchor_path=str(tmp_path / "audit_head.jsonl"),
+        audit_anchor_latest_path=str(tmp_path / "audit_head_latest.json"),
+        audit_anchor_interval_seconds=3600,
+    )
+    audit("FIRST", "127.0.0.1", success=True)
+    audit("SECOND", "127.0.0.1", success=True)
+
+    ok, broken_at, details = verify_audit_integrity(start_id=2, end_id=2)
+    assert ok is True, details
+    assert broken_at is None
+    assert "range integrity OK" in details
+    assert "starts after audit id=1" in details
+
+    conn = sqlite3.connect(db_path)
+    conn.execute("UPDATE secure_audit SET detail='tampered' WHERE id=2")
+    conn.commit()
+    conn.close()
+
+    ok, broken_at, details = verify_audit_integrity(start_id=2, end_id=2)
+    assert ok is False
+    assert broken_at == 2
+    assert "entry_hash mismatch" in details
+
+
 def test_reset_audit_chain_with_event_starts_new_chain_and_anchor(tmp_path):
     db_path = tmp_path / "audit.db"
     audit_log = tmp_path / "audit.log"

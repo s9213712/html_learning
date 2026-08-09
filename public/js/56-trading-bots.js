@@ -1711,7 +1711,6 @@ async function saveTradingBot() {
     limit_price_points: null,
     budget_points: Number($("trading-auto-bot-budget-points")?.value || 0),
     workflow_json: workflow,
-    strategy_mode: $("trading-auto-strategy-mode")?.value || "and",
     max_daily_runs: Number($("trading-auto-daily-runs")?.value || 5),
     max_runs: Number($("trading-auto-bot-max-runs")?.value || 1),
     cooldown_seconds: Number($("trading-auto-bot-cooldown")?.value || 300),

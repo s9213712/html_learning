@@ -7,7 +7,7 @@
 ![database](https://img.shields.io/badge/database-SQLite-0f6ab4)
 ![security](https://img.shields.io/badge/focus-auth%20%2B%20RBAC%20%2B%20audit-b31d28)
 
-**Current Release ID: `05_2026.07.20-001`**
+**Current Release ID: `06_2026.07.30-001`**
 
 `hackme_web` 是一個部署者優先的 Flask 單機站點，整合了帳號與權限、
 Cloud Drive、ComfyUI、PointsChain、交易實驗、Snapshot/Restore 與
@@ -31,7 +31,7 @@ QoS 分類、app-level edge burst guard、抗 DoS 最後防線與 reverse-proxy 
 [docs/For_developer.md](docs/For_developer.md#server-qos-and-edge-guard)。
 任務中心 list API 的 maintenance sweep 已節流並可觀測；帳號、會員治理、
 註冊禮補發與 auth hot-state 索引的近期調整見
-[docs/UPDATE_SUMMARY.md](docs/UPDATE_SUMMARY.md) 的 `05_2026.07.20-001`。
+[docs/UPDATE_SUMMARY.md](docs/UPDATE_SUMMARY.md) 的 `06_2026.07.30-001`。
 影音直接串流、即時轉封裝、預處理 HLS 三種客戶服務層與費率差異、X-Accel
 送檔 offload、Standard 即時轉封裝的同機併發控制，以及 Premium HLS worker sizing / profile matrix 見
 [docs/video/VIDEO_STREAMING_SERVICE_TIERS.md](docs/video/VIDEO_STREAMING_SERVICE_TIERS.md)。
@@ -49,11 +49,15 @@ ComfyUI / GGUF 的遠端/本地設定，也不會顯示 ComfyUI Account/Civitai
 
 站內 AI Agent 支援自然語言查詢、受控站內 write tools、ComfyUI 生圖/圖生圖與
 root 管理協助。所有寫入仍受角色、白名單、確認字串、audit 與站內 API 邊界約束；
-Agent 不能任意寫伺服器檔案。root 的普通「上線前檢查」只做 dry-run，只有明確要求
-切換且提供 `GO_LIVE` 才會進入 production。
+Agent 不能任意寫伺服器檔案。root 的「上線前檢查」是選用的 dry-run 建議；只有明確要求
+切換且提供 `GO_LIVE` 才會進入 production，未通過的報告不會取代這個明確確認。
 
 ComfyUI 長任務、歷史重跑、GGUF profile 與 image-edit 能力已納入 QA，但高強度
 i2i 的姿勢/背景像素級保真仍必須以實際輸出 review 判定，不可只看 queue 成功。
+目前 outpaint 的 SAM3 語意路徑會只交付經嚴格 alpha 合成的最終圖；若前景遮罩、
+畫布對齊或中間輸出不符合契約，工作會明確失敗而不交付半成品。HF/Diffusers 的
+產品 i2i 壓測與離線直接驗證流程見
+[docs/comfyui/I2I_OUTPAINT_VALIDATION.md](docs/comfyui/I2I_OUTPAINT_VALIDATION.md)。
 詳細能力邊界與測試摘要見
 [docs/AGENTS/AI_AGENT_I2I_TEST_SUMMARY.md](docs/AGENTS/AI_AGENT_I2I_TEST_SUMMARY.md)。
 
@@ -223,6 +227,7 @@ Grid Bot 與借貸交易整體封死。若你要手動啟動，
 - 使用者教學：[docs/04_USER_GUIDE.md](docs/04_USER_GUIDE.md)
 - 功能總覽：[docs/05_FEATURES_OVERVIEW.md](docs/05_FEATURES_OVERVIEW.md)
 - QA 與驗證路線：[docs/11_QA_TESTING.md](docs/11_QA_TESTING.md)
+- I2I / outpaint 視覺驗證：[docs/comfyui/I2I_OUTPAINT_VALIDATION.md](docs/comfyui/I2I_OUTPAINT_VALIDATION.md)
 - 故障排查：[docs/12_TROUBLESHOOTING.md](docs/12_TROUBLESHOOTING.md)
 - 最近更新摘要：[docs/UPDATE_SUMMARY.md](docs/UPDATE_SUMMARY.md)
 

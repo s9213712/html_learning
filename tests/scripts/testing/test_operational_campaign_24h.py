@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import hashlib
 import inspect
@@ -8,6 +9,8 @@ import signal
 import stat
 import subprocess
 import sys
+import threading
+import tarfile
 import time
 import uuid
 from pathlib import Path
@@ -183,21 +186,44 @@ def campaign_args(tmp_path: Path, *extra: str):
     ])
 
 
+def test_portable_runtime_extraction_uses_tar_data_filter(tmp_path: Path) -> None:
+    archive = tmp_path / "portable.tar.gz"
+    with tarfile.open(archive, "w:gz") as handle:
+        safe = tarfile.TarInfo("database/app.db")
+        safe.size = 2
+        handle.addfile(safe, fileobj=io.BytesIO(b"ok"))
+        unsafe_link = tarfile.TarInfo("storage/outside-link")
+        unsafe_link.type = tarfile.SYMTYPE
+        unsafe_link.linkname = "/outside-the-restore-root"
+        handle.addfile(unsafe_link)
+    restore_root = tmp_path / "restore"
+    restore_root.mkdir()
+
+    with pytest.raises(tarfile.TarError):
+        Campaign._extract_verified_runtime_archive(archive, restore_root)
+
+    assert not (restore_root / "storage" / "outside-link").exists()
+
+
 def test_formal_duration_is_24_hours() -> None:
     assert MIN_FORMAL_SECONDS == 86_400
-    assert SUPERVISED_LOAD_POLICIES["formal"]["ramp_levels"] == [4, 8, 16, 32]
+    assert SUPERVISED_LOAD_POLICIES["formal"]["ramp_levels"] == [4, 8, 16, 32, 64, 128]
     assert SUPERVISED_LOAD_POLICIES["formal"]["minimum_ramp_stage_seconds"] == {
-        "4": 600.0,
-        "8": 1_200.0,
-        "16": 1_800.0,
-        "32": 0.0,
+        "4": 360.0,
+        "8": 540.0,
+        "16": 720.0,
+        "32": 900.0,
+        "64": 1_080.0,
+        "128": 0.0,
     }
     assert sum(SUPERVISED_LOAD_POLICIES["formal"]["minimum_ramp_stage_seconds"].values()) == 3_600.0
     assert SUPERVISED_LOAD_POLICIES["rehearsal"]["minimum_ramp_stage_seconds"] == {
-        "4": 60.0,
-        "8": 120.0,
-        "16": 180.0,
-        "32": 0.0,
+        "4": 36.0,
+        "8": 54.0,
+        "16": 72.0,
+        "32": 90.0,
+        "64": 108.0,
+        "128": 0.0,
     }
     assert SUPERVISED_LOAD_POLICIES["formal"]["ramp_completion_deadline_seconds"] == 3_600.0
     assert SUPERVISED_LOAD_POLICIES["formal"]["minimum_post_ramp_seconds"] == 82_800.0
@@ -207,8 +233,8 @@ def test_formal_duration_is_24_hours() -> None:
 
 def test_reliability_soak_is_full_day_low_concurrency_without_capacity_claim() -> None:
     assert SUPERVISED_LEVEL_DURATIONS["soak"] == 86_400
-    assert SUPERVISED_RUNNER_PROFILES["soak"]["workers"] == 2
-    assert SUPERVISED_RUNNER_PROFILES["soak"]["threads"] == 2
+    assert SUPERVISED_RUNNER_PROFILES["soak"]["workers"] == 1
+    assert SUPERVISED_RUNNER_PROFILES["soak"]["threads"] == 16
     assert SUPERVISED_RUNNER_PROFILES["soak"]["concurrency"] == 4
     assert SUPERVISED_RUNNER_PROFILES["soak"]["resource_interval"] == 2.0
     assert SUPERVISED_LOAD_POLICIES["soak"]["ramp_required"] is False
@@ -354,6 +380,98 @@ def test_run_group_fails_closed_without_starting_dependent_steps(tmp_path: Path)
     assert result["terminal_state"] == "failed"
     assert calls == ["producer"]
     assert len(result["steps"]) == 1
+
+
+def test_request_hard_stop_terminates_active_scenario_steps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    campaign = Campaign(campaign_args(tmp_path))
+    stopped: list[str] = []
+    monkeypatch.setattr(campaign, "stop_managed_steps", lambda: stopped.append("stopped") or [])
+
+    result = campaign.request_hard_stop(
+        reason="LOAD_GENERATOR_EXITED_EARLY",
+        classification="FAIL_HARNESS",
+        evidence={"returncode": 1},
+    )
+
+    assert result == {"state": "STOPPING_LOAD", "reason": "LOAD_GENERATOR_EXITED_EARLY"}
+    assert campaign.stop_event.is_set()
+    assert stopped == ["stopped"]
+
+
+def test_primary_restart_requires_and_records_core_maintenance_fence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    campaign = Campaign(campaign_args(tmp_path))
+    campaign.core_root.mkdir(parents=True, exist_ok=True)
+
+    class RunningCore:
+        @staticmethod
+        def poll() -> None:
+            return None
+
+    campaign.core_process = RunningCore()  # type: ignore[assignment]
+    observed: dict[str, object] = {}
+
+    def acknowledge_fence() -> None:
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline and not campaign.core_maintenance_fence_file.exists():
+            time.sleep(0.005)
+        request = campaign_module.load_json(campaign.core_maintenance_fence_file)
+        observed["request"] = request
+        campaign_module.atomic_write_json(campaign.core_maintenance_ack_file, {
+            "schema_version": "hackme.core-maintenance-ack/v1",
+            "state": "quiescent",
+            "nonce": request["nonce"],
+            "reason": request["reason"],
+        })
+        while time.monotonic() < deadline:
+            release = campaign_module.load_json(campaign.core_maintenance_fence_file)
+            if release.get("active") is False:
+                campaign_module.atomic_write_json(campaign.core_maintenance_ack_file, {
+                    "schema_version": "hackme.core-maintenance-ack/v1",
+                    "state": "released",
+                    "nonce": release["nonce"],
+                    "reason": release["reason"],
+                })
+                observed["release"] = release
+                return
+            time.sleep(0.005)
+
+    monkeypatch.setattr(campaign.primary, "restart", lambda *, reason: {
+        "ok": True,
+        "reason": reason,
+        "stopped": {},
+        "started": {},
+    })
+    worker = threading.Thread(target=acknowledge_fence, daemon=True)
+    worker.start()
+
+    result = campaign.restart_primary_with_core_maintenance(
+        reason="test_primary_restart",
+    )
+
+    worker.join(timeout=2)
+    assert not worker.is_alive()
+    assert result["ok"] is True
+    assert result["maintenance"]["entered"]["ok"] is True
+    assert result["maintenance"]["released"]["ok"] is True
+    assert observed["request"]["active"] is True
+    assert observed["release"]["active"] is False
+    assert result["restart"]["reason"] == "test_primary_restart"
+
+
+def test_core_soak_uses_runtime_pidfile_after_primary_restart() -> None:
+    source = (campaign_module.ROOT / "scripts" / "testing" / "operational_campaign_24h.py").read_text(
+        encoding="utf-8",
+    )
+    start = source.index("    def start_core_soak(self)")
+    end = source.index("    def _enter_primary_maintenance_fence", start)
+    core_start = source[start:end]
+
+    assert '"--server-pids", str(self.primary.pid())' not in core_start
+    assert '"HACKME_SERVER_PIDS": str(self.primary.pid())' not in core_start
+    assert '"--server-runtime-root", str(self.primary.runtime_root)' in core_start
 
 
 def test_supervised_runtime_contract_rejects_duration_and_source_divergence(
@@ -959,7 +1077,7 @@ def test_supervised_runtime_contract_rejects_weakened_load_sla_and_resource_valu
     contract["runner_profile"]["concurrency"] = 1
     with pytest.raises(RuntimeError, match="contract_runner_profile:concurrency"):
         validate_supervised_runtime_contract(args, contract, source)
-    contract["runner_profile"]["concurrency"] = 32
+    contract["runner_profile"]["concurrency"] = SUPERVISED_RUNNER_PROFILES["smoke"]["concurrency"]
     contract["load_policy"]["minimum_target_load_coverage"] = 0.0
     with pytest.raises(RuntimeError, match="load_policy"):
         validate_supervised_runtime_contract(args, contract, source)
@@ -971,7 +1089,7 @@ def test_effective_load_validation_fails_closed_for_idle_workers() -> None:
         "required": True,
         "campaign_level": "rehearsal",
         "ramp": {
-            "required_levels": [4, 8, 16, 32],
+            "required_levels": SUPERVISED_LOAD_POLICIES["rehearsal"]["ramp_levels"],
             "completed_levels": [4, 8, 16],
             "ok": False,
         },
@@ -1010,10 +1128,13 @@ def test_effective_load_validation_rederives_native_worker_and_ramp_evidence() -
         }
 
     policy = SUPERVISED_LOAD_POLICIES["rehearsal"]
+    ramp_levels = list(policy["ramp_levels"])
+    target_level = int(policy["target_load_level"])
+    target_worker_floor = int(policy["minimum_active_workers_at_target"])
     stages: dict[str, dict[str, object]] = {}
     scheduled_start = 0.0
     schedule = []
-    for level in (4, 8, 16):
+    for level in ramp_levels[:-1]:
         seconds = policy["minimum_ramp_stage_seconds"][str(level)]
         scheduled_end = scheduled_start + seconds
         schedule.append({
@@ -1047,13 +1168,13 @@ def test_effective_load_validation_rederives_native_worker_and_ramp_evidence() -
             }],
         }
         scheduled_start = scheduled_end
-    stages["32"] = {"completed": True}
+    stages[str(target_level)] = {"completed": True}
     sample = EffectiveLoadWindow(
         window_started_at="2026-07-13T00:00:00Z",
         window_seconds=3_240.0,
-        scheduled_load_level=32,
-        active_workers=32,
-        inflight_requests=32,
+        scheduled_load_level=target_level,
+        active_workers=target_level,
+        inflight_requests=target_level,
         operations_completed=54_000,
         expected_operations=54_000.0,
         blocked_workers=0,
@@ -1062,6 +1183,8 @@ def test_effective_load_validation_rederives_native_worker_and_ramp_evidence() -
         retries=0,
         attempts=54_000,
         baseline_32_operations_per_minute=1_000.0,
+        target_load_level=target_level,
+        minimum_active_workers_at_target=target_worker_floor,
     ).evidence()
     sample.update({
         "round_ok": True,
@@ -1069,8 +1192,8 @@ def test_effective_load_validation_rederives_native_worker_and_ramp_evidence() -
         "window_finished_elapsed_seconds": 3_600.0,
         "worker_measurement": {
             "method": "native_inflight_operation_counter_time_samples",
-            "native": native(32, 32, 54_000),
-            "measured_active_workers": 32,
+            "native": native(target_level, target_level, 54_000),
+            "measured_active_workers": target_level,
             "configured_concurrency_not_used_as_measurement": True,
         },
     })
@@ -1079,8 +1202,8 @@ def test_effective_load_validation_rederives_native_worker_and_ramp_evidence() -
         "required": True,
         "campaign_level": "rehearsal",
         "ramp": {
-            "required_levels": [4, 8, 16, 32],
-            "completed_levels": [4, 8, 16, 32],
+            "required_levels": ramp_levels,
+            "completed_levels": ramp_levels,
             "minimum_stage_seconds": policy["minimum_ramp_stage_seconds"],
             "schedule": schedule,
             "completion_elapsed_seconds": 360.0,
@@ -1091,7 +1214,10 @@ def test_effective_load_validation_rederives_native_worker_and_ramp_evidence() -
             "ok": True,
         },
         "minimum_post_ramp_seconds": 3_240.0,
+        "target_load_level": target_level,
+        "minimum_active_workers_at_target": target_worker_floor,
         "baseline_32_operations_per_minute": 1_000.0,
+        "baseline_target_operations_per_minute": 1_000.0,
         "target_load_samples": [sample],
         "target_load_summary": {
             "ok": True,
@@ -1120,7 +1246,7 @@ def test_effective_load_validation_rederives_native_worker_and_ramp_evidence() -
     assert tampered["ok"] is False
     assert "target_sample:0:worker_measurement" in tampered["errors"]
 
-    sample["worker_measurement"]["native"]["active_worker_histogram"] = {"32": 10}
+    sample["worker_measurement"]["native"]["active_worker_histogram"] = {str(target_level): 10}
     sample["window_seconds"] = 6_480.0
     inflated = validate_effective_load_evidence(
         {"effective_load": evidence},
@@ -1144,18 +1270,21 @@ def test_effective_load_validation_rederives_native_worker_and_ramp_evidence() -
 
 def test_effective_load_validation_rejects_almost_full_campaign_ramp() -> None:
     policy = SUPERVISED_LOAD_POLICIES["formal"]
+    ramp_levels = list(policy["ramp_levels"])
     evidence = {
         "schema_version": EFFECTIVE_LOAD_EVIDENCE_SCHEMA_VERSION,
         "required": True,
         "campaign_level": "formal",
         "ramp": {
-            "required_levels": [4, 8, 16, 32],
-            "completed_levels": [4, 8, 16, 32],
+            "required_levels": ramp_levels,
+            "completed_levels": ramp_levels,
             "minimum_stage_seconds": policy["minimum_ramp_stage_seconds"],
             "schedule": [
-                {"level": 4, "start_seconds": 0.0, "end_seconds": 600.0},
-                {"level": 8, "start_seconds": 600.0, "end_seconds": 1_800.0},
-                {"level": 16, "start_seconds": 1_800.0, "end_seconds": 3_600.0},
+                {"level": 4, "start_seconds": 0.0, "end_seconds": 360.0},
+                {"level": 8, "start_seconds": 360.0, "end_seconds": 900.0},
+                {"level": 16, "start_seconds": 900.0, "end_seconds": 1_620.0},
+                {"level": 32, "start_seconds": 1_620.0, "end_seconds": 2_520.0},
+                {"level": 64, "start_seconds": 2_520.0, "end_seconds": 3_600.0},
             ],
             "completion_elapsed_seconds": 86_000.0,
             "completion_deadline_seconds": 3_600.0,
@@ -1165,7 +1294,10 @@ def test_effective_load_validation_rejects_almost_full_campaign_ramp() -> None:
             "ok": True,
         },
         "minimum_post_ramp_seconds": 82_800.0,
+        "target_load_level": policy["target_load_level"],
+        "minimum_active_workers_at_target": policy["minimum_active_workers_at_target"],
         "baseline_32_operations_per_minute": 1_000.0,
+        "baseline_target_operations_per_minute": 1_000.0,
         "target_load_samples": [],
         "target_load_summary": {
             "ok": True,
@@ -1511,6 +1643,23 @@ def test_campaign_matrix_contains_every_mandatory_operational_category(tmp_path:
     assert max(spec.fraction for spec in specs) < 1
 
 
+def test_primary_restart_scenarios_gate_dependent_primary_work(tmp_path: Path) -> None:
+    campaign = Campaign(campaign_args(tmp_path))
+    specs = {spec.scenario_id: spec for spec in campaign.scenario_specs()}
+
+    assert specs["cloud_drive_share_stream"].depends_on == ("media_long_hls_share",)
+    assert specs["comfyui_real_workflows"].depends_on == ("media_long_hls_share",)
+    assert specs["trading_background_custom_workflow"].depends_on == (
+        "media_long_hls_share",
+        "cloud_drive_share_stream",
+        "bt_download_stream_restart",
+        "comfyui_real_workflows",
+    )
+    assert specs["pointschain_hft_invariants"].depends_on == (
+        "trading_background_custom_workflow",
+    )
+
+
 def test_supervised_180_second_smoke_cannot_claim_full_feature_coverage(tmp_path: Path) -> None:
     campaign = Campaign(campaign_args(tmp_path))
     campaign.supervised = True
@@ -1799,6 +1948,22 @@ def test_ai_agent_formal_runner_keeps_credentials_out_of_argv_and_targets_recove
         }
 
     evidence_ids = set(CAMPAIGN_SCENARIO_CONTRACTS[scenario_id].required_evidence)
+    monkeypatch.setattr(
+        campaign,
+        "_provision_exact_scenario_users",
+        lambda *_args, **_kwargs: {"ok": True, "records": [{}, {}]},
+    )
+    monkeypatch.setattr(
+        campaign,
+        "_cleanup_exact_scenario_users",
+        lambda *_args, **_kwargs: {
+            "login_succeeded": True,
+            "records": [
+                {"delete_status": 200, "verify_status": 200, "residual_exact_count": 0},
+                {"delete_status": 200, "verify_status": 200, "residual_exact_count": 0},
+            ],
+        },
+    )
     monkeypatch.setattr(campaign, "run_step", fake_run_step)
     monkeypatch.setattr(campaign, "run_group", fake_run_group)
     monkeypatch.setattr(
@@ -1833,9 +1998,35 @@ def test_ai_agent_formal_runner_keeps_credentials_out_of_argv_and_targets_recove
     assert "--base-url" in command
     assert command[command.index("--base-url") + 1] == campaign.recovery.base_url
     assert captured["process_role"] == "ffmpeg"
+    assert result["recovery_campaign_account_replication"]["ok"] is True
+    assert result["recovery_campaign_account_cleanup"]["ok"] is True
     assert result["ok"] is True
     binding = campaign_module.FORMAL_SCENARIO_BINDINGS[scenario_id]
     assert binding.runner_id in campaign.native_scenario_runner_registry()
+
+
+def test_campaign_ai_agent_provider_env_prefers_explicit_campaign_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HACKME_AI_AGENT_API_BASE_URL", "http://127.0.0.1:8642/v1")
+    monkeypatch.setenv("HACKME_AI_AGENT_MODEL", "product-model")
+    monkeypatch.setenv("HACKME_CAMPAIGN_AI_AGENT_API_BASE_URL", "http://127.0.0.1:9444/v1")
+    monkeypatch.setenv("HACKME_CAMPAIGN_AI_AGENT_MODEL", "campaign-model")
+
+    assert campaign_module.campaign_ai_agent_provider_env() == {
+        "HACKME_CAMPAIGN_AI_AGENT_API_BASE_URL": "http://127.0.0.1:9444/v1",
+        "HACKME_CAMPAIGN_AI_AGENT_MODEL": "campaign-model",
+    }
+
+
+def test_campaign_ai_agent_provider_env_uses_product_provider_values() -> None:
+    assert campaign_module.campaign_ai_agent_provider_env({
+        "HACKME_AI_AGENT_API_BASE_URL": "http://127.0.0.1:8642/v1",
+        "HACKME_AI_AGENT_MODEL": "product-model",
+    }) == {
+        "HACKME_CAMPAIGN_AI_AGENT_API_BASE_URL": "http://127.0.0.1:8642/v1",
+        "HACKME_CAMPAIGN_AI_AGENT_MODEL": "product-model",
+    }
 
 
 def test_incomplete_native_scenario_cannot_execute_as_formal_pass(
@@ -2666,6 +2857,53 @@ def test_campaign_provisioning_configures_storage_for_each_account(
     assert len(accounts) == 4
     assert quota_ids == created_ids == [101, 102, 103, 104]
     assert all(row["storage_quota"]["ok"] for row in campaign.account_inventory)
+
+
+def test_scenario_account_replication_uses_target_runtime_and_never_reports_passwords(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    campaign = Campaign(campaign_args(tmp_path))
+    created_on: list[str] = []
+    configured_on: list[str] = []
+    member_logins: list[tuple[str, str]] = []
+
+    class FakeClient:
+        def __init__(self, base_url: str, username: str, _password: str, **_kwargs: object):
+            self.base_url = base_url
+            self.username = username
+
+        def login(self) -> dict[str, object]:
+            if self.username != "root":
+                member_logins.append((self.base_url, self.username))
+            return {"ok": True, "status": 200}
+
+    def fake_create(root: FakeClient, username: str, _password: str, **_kwargs: object) -> dict[str, object]:
+        created_on.append(root.base_url)
+        return {"ok": True, "create_status": 201, "user_id": len(created_on), "username": username}
+
+    def fake_quota(root: FakeClient, user_id: int) -> dict[str, object]:
+        configured_on.append(f"{root.base_url}:{user_id}")
+        return {"ok": True}
+
+    target = type("Target", (), {"base_url": "https://recovery.invalid", "name": "recovery"})()
+    monkeypatch.setattr(campaign_module, "WebClient", FakeClient)
+    monkeypatch.setattr(campaign, "_create_user", fake_create)
+    monkeypatch.setattr(campaign, "_configure_campaign_storage_quota", fake_quota)
+
+    result = campaign._provision_exact_scenario_users(
+        [("campaign-one", "NeverPersistThisPassword"), ("campaign-two", "NeitherThisOne")],
+        target=target,
+        nickname_prefix="Recovery Test",
+    )
+
+    assert result["ok"] is True
+    assert result["target"] == "recovery"
+    assert created_on == [target.base_url, target.base_url]
+    assert configured_on == [f"{target.base_url}:1", f"{target.base_url}:2"]
+    assert member_logins == [(target.base_url, "campaign-one"), (target.base_url, "campaign-two")]
+    assert "NeverPersistThisPassword" not in str(result)
+    assert "NeitherThisOne" not in str(result)
 
 
 def test_campaign_account_cleanup_deletes_and_verifies_exact_names(

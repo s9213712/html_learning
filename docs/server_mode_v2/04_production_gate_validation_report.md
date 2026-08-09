@@ -1,4 +1,6 @@
-# Production Gate 驗收紀錄（2026-05-09）
+# Production Gate 驗收紀錄（2026-05-09，歷史）
+
+> **歷史註記（2026-07-30）**：本紀錄反映當時 report gate 會阻止 production entry 的行為。現行版本保留同一份報告驗證與顯示，但改為 advisory；明確 `GO_LIVE` 不再由 report 結果阻止。
 
 這份文件不是規格書，而是一次完整 production gate 驗收的實作紀錄。目的有兩個：
 

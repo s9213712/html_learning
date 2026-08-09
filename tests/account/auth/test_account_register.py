@@ -1,4 +1,6 @@
+from concurrent.futures import ThreadPoolExecutor
 import sqlite3
+import threading
 
 import pytest
 from flask import Flask, jsonify, make_response
@@ -152,6 +154,40 @@ def test_register_can_disable_password_strength_policy(tmp_path):
 
     assert response.status_code == 200
     assert response.get_json()["ok"] is True
+
+
+def test_concurrent_registration_migrates_public_account_columns_once(tmp_path):
+    """Legacy-schema upgrades must not race under a simultaneous login burst."""
+
+    db_path = tmp_path / "concurrent_register.db"
+    _init_register_tables(db_path)
+    app = _build_app(db_path, settings={"password_strength_policy_enabled": False})
+    start = threading.Barrier(8)
+
+    def register(index):
+        with app.test_client() as client:
+            start.wait(timeout=10)
+            return client.post(
+                "/api/register",
+                json={
+                    "username": f"burst{index:02d}",
+                    "password": "x",
+                    "password_confirm": "x",
+                    "nickname": f"Burst {index}",
+                },
+            )
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        responses = list(pool.map(register, range(8)))
+
+    assert [response.status_code for response in responses] == [200] * 8
+    conn = sqlite3.connect(db_path)
+    try:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(users)")}
+        assert "signup_bonus_deferred" in columns
+        assert conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 8
+    finally:
+        conn.close()
 
 
 def test_register_awards_signup_bonus_to_official_hot_wallet(tmp_path):

@@ -4,6 +4,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 from argparse import Namespace
 from pathlib import Path
 from types import SimpleNamespace
@@ -137,6 +138,83 @@ def test_upload_phase_requires_every_parallel_upload_to_succeed(tmp_path: Path, 
     assert len(result["uploads"]) == 2
 
 
+def test_upload_phase_passes_one_shared_start_barrier_to_parallel_uploads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    video = tmp_path / "fixture.mp4"
+    video.write_bytes(b"fixture")
+    barriers: list[threading.Barrier | None] = []
+    monkeypatch.setenv("HACKME_HLS_STRESS_ACCOUNTS_JSON", '[{"username":"a","password":"x"},{"username":"b","password":"y"}]')
+
+    def fake_upload_video(**kwargs):
+        barriers.append(kwargs["start_barrier"])
+        return {"ok": True, "username": kwargs["username"]}
+
+    monkeypatch.setattr(probe, "upload_video", fake_upload_video)
+    monkeypatch.setattr(probe, "monitor_loop", lambda **_kwargs: None)
+    args = Namespace(
+        video=str(video), accounts=[], base_url="https://127.0.0.1:1", db=str(tmp_path / "database.db"),
+        runtime_marker=str(tmp_path), monitor_interval=0.01, privacy_mode="server_encrypted",
+        upload_timeout_seconds=2, post_upload_observe_seconds=0, visibility="unlisted",
+        share_password="secret", share_max_views=0,
+    )
+
+    result = probe.run_upload_phase(args)
+
+    assert result["ok"] is True
+    assert len(barriers) == 2
+    assert barriers[0] is barriers[1]
+    assert barriers[0] is not None and barriers[0].parties == 2
+    assert result["parallel_upload_start_barrier"] == {"enabled": True, "parties": 2}
+
+
+def test_upload_video_waits_at_start_barrier_before_sending_http_upload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    video = tmp_path / "fixture.mp4"
+    video.write_bytes(b"fixture")
+    post_started = threading.Event()
+
+    class FakeResponse:
+        status_code = 200
+
+        @staticmethod
+        def json() -> dict:
+            return {"ok": True, "video": {"id": 1}, "file": {"file_id": "file-1"}}
+
+    class FakeSession:
+        def post(self, _url: str, *, data, **_kwargs) -> FakeResponse:
+            post_started.set()
+            while data.read(1024):
+                pass
+            return FakeResponse()
+
+    monkeypatch.setattr(
+        probe,
+        "login",
+        lambda *_args, **_kwargs: {"ok": True, "session": FakeSession(), "token": "csrf", "csrf": {}, "login": {}},
+    )
+    barrier = threading.Barrier(2)
+    result: dict = {}
+    worker = threading.Thread(
+        target=lambda: result.update(probe.upload_video(
+            base_url="https://127.0.0.1:1", username="member", password="secret", video_path=video,
+            privacy_mode="server_encrypted", timeout_seconds=2, start_barrier=barrier,
+        )),
+    )
+
+    worker.start()
+    assert post_started.wait(0.1) is False
+    barrier.wait(timeout=2)
+    worker.join(timeout=2)
+
+    assert post_started.is_set()
+    assert result["ok"] is True
+    assert result["upload_barrier_released_at_ms"] > 0
+
+
 def test_upload_phase_records_every_account_when_parallel_wait_times_out(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -220,6 +298,70 @@ def test_hls_upload_explicitly_requests_prepared_hls(tmp_path: Path, monkeypatch
     assert result["ok"] is True
     assert b'name="streaming_modes"' in captured["body"]
     assert b'prepared_hls' in captured["body"]
+
+
+def test_hls_upload_retries_the_short_edge_rate_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    video = tmp_path / "fixture.mp4"
+    video.write_bytes(b"fixture")
+    sleeps: list[float] = []
+
+    class FakeResponse:
+        def __init__(self, status_code: int, payload: dict) -> None:
+            self.status_code = status_code
+            self._payload = payload
+            self.headers = {}
+            self.text = ""
+
+        def json(self) -> dict:
+            return self._payload
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def post(self, _url: str, *, data, **_kwargs) -> FakeResponse:
+            self.calls += 1
+            while data.read(1024):
+                pass
+            if self.calls == 1:
+                return FakeResponse(429, {"ok": False, "retry_after_seconds": 2})
+            return FakeResponse(200, {"ok": True, "video": {"id": 1}, "file": {"file_id": "file-1"}})
+
+    monkeypatch.setattr(
+        probe,
+        "login",
+        lambda *_args, **_kwargs: {
+            "ok": True,
+            "session": FakeSession(),
+            "token": "csrf",
+            "csrf": {},
+            "login": {},
+        },
+    )
+    monkeypatch.setattr(probe.time, "sleep", sleeps.append)
+
+    result = probe.upload_video(
+        base_url="https://127.0.0.1:1",
+        username="member",
+        password="secret",
+        video_path=video,
+        privacy_mode="server_encrypted",
+        timeout_seconds=2,
+    )
+
+    assert result["ok"] is True
+    assert [attempt["status"] for attempt in result["attempts"]] == [429, 200]
+    assert sleeps == [2.0]
+
+
+def test_hls_measure_uses_the_owner_credentials_for_unlisted_uploads(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HACKME_HLS_STRESS_ACCOUNTS_JSON", '[{"username":"alice","password":"a"}]')
+    args = Namespace(accounts=[], measure_username="root", measure_password="root")
+
+    assert probe.upload_owner_credentials(
+        args,
+        {"uploads": [{"ok": True, "username": "alice", "video_id": 17}]},
+    ) == {17: ("alice", "a")}
 
 
 def test_wait_for_hls_rejects_failed_terminal_jobs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

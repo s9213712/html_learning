@@ -7,7 +7,7 @@ import os
 import subprocess
 import sys
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from services.games.chess_arena import default_chess_reports_dir
@@ -73,7 +73,7 @@ def default_chess_pipeline_candidate_root() -> Path:
 
 
 def build_pipeline_run_id(prefix: str = "pipeline") -> str:
-    return f"{prefix}_{datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')}"
+    return f"{prefix}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
 
 
 def candidate_paths_for_run(run_id: str, *, include_exp2: bool = False) -> dict[str, Path]:
@@ -245,7 +245,7 @@ def pipeline_recommendation(
     if last_train_at is None and usable_replays > 0:
         ready_reasons.append("no prior pipeline run")
     elif last_train_at is not None:
-        age_hours = (datetime.utcnow() - last_train_at) / timedelta(hours=1)
+        age_hours = (datetime.now(timezone.utc).replace(tzinfo=None) - last_train_at) / timedelta(hours=1)
         if age_hours >= thresholds["max_age_hours"]:
             ready_reasons.append(f"last training older than {thresholds['max_age_hours']}h")
         if replay_last is not None and replay_last > last_train_at:
@@ -342,7 +342,7 @@ def maybe_launch_chess_train_pipeline(
         log_handle = log_path.open("w", encoding="utf-8")
         log_handle.write(f"$ {' '.join(cmd)}\n\n")
         log_handle.flush()
-        started_at = datetime.utcnow().isoformat() + "Z"
+        started_at = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
         try:
             proc = subprocess.Popen(
                 cmd,
@@ -382,7 +382,7 @@ def maybe_launch_chess_train_pipeline(
             finished.update(
                 {
                     "status": "passed" if returncode == 0 else "failed",
-                    "finished_at": datetime.utcnow().isoformat() + "Z",
+                    "finished_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
                     "returncode": int(returncode),
                     "latest_pipeline_report_path": str(latest_report.get("path") or ""),
                 }

@@ -29,6 +29,7 @@ def _make_app(
     activation_log=None,
     integrity_guard=None,
     points_service=None,
+    db_open_log=None,
 ):
     db_path = tmp_path / "health.db"
     chat_dir = tmp_path / "chats"
@@ -70,6 +71,8 @@ def _make_app(
     conn.close()
 
     def get_db():
+        if db_open_log is not None:
+            db_open_log.append("open")
         c = sqlite3.connect(db_path)
         c.row_factory = sqlite3.Row
         c.execute("PRAGMA foreign_keys = ON")
@@ -207,6 +210,38 @@ def test_security_center_reuses_audit_integrity_result(tmp_path):
     assert calls["count"] == 1
 
 
+def test_security_center_reuses_short_status_snapshot(tmp_path):
+    db_opens = []
+    app = _make_app(tmp_path, db_open_log=db_opens)
+    client = app.test_client()
+
+    first = client.get("/api/admin/security-center")
+    assert first.status_code == 200
+    first_open_count = len(db_opens)
+    assert first_open_count > 0
+
+    second = client.get("/api/admin/security-center")
+    assert second.status_code == 200
+    assert second.get_json() == first.get_json()
+    assert len(db_opens) == first_open_count
+
+
+def test_health_readiness_reuses_short_status_snapshot(tmp_path):
+    db_opens = []
+    app = _make_app(tmp_path, db_open_log=db_opens)
+    client = app.test_client()
+
+    first = client.get("/api/admin/health/readiness")
+    assert first.status_code == 200
+    first_open_count = len(db_opens)
+    assert first_open_count > 0
+
+    second = client.get("/api/admin/health/readiness")
+    assert second.status_code == 200
+    assert second.get_json() == first.get_json()
+    assert len(db_opens) == first_open_count
+
+
 def test_fast_admin_health_reuses_audit_and_skips_db_quick_check(tmp_path):
     calls = {"count": 0}
 
@@ -222,6 +257,19 @@ def test_fast_admin_health_reuses_audit_and_skips_db_quick_check(tmp_path):
     assert data["readiness"]["database"]["quick_check"] == ["skipped_fast_health"]
     assert data["readiness"]["database"]["schema_version"] == CURRENT_SCHEMA_VERSION
     assert calls["count"] == 1
+
+    cached = app.test_client().get("/api/admin/health/readiness")
+    assert cached.status_code == 200
+    verification = cached.get_json()["readiness"]["audit_integrity"]["verification"]
+    assert verification["scope"] == "full_chain_and_latest_anchor"
+    assert verification["cached"] is True
+    assert verification["cache_max_age_seconds"] == 30.0
+    assert calls["count"] == 1
+
+    deep = app.test_client().get("/api/admin/health/audit-chain")
+    assert deep.status_code == 200
+    assert deep.get_json()["audit_integrity"]["verification"]["force_refresh"] is True
+    assert calls["count"] == 2
 
 
 def test_health_audit_chain_reports_broken_chain(tmp_path):

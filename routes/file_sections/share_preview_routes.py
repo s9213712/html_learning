@@ -489,6 +489,7 @@ def register_file_share_preview_routes(app, ctx):
     body {{ margin: 0; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f6f7f9; color: #172033; }}
     main {{ max-width: 720px; margin: 0 auto; padding: 40px 20px; }}
     .panel {{ background: #fff; border: 1px solid #dde3ea; border-radius: 8px; padding: 22px; }}
+    h1 {{ overflow-wrap: anywhere; word-break: break-word; }}
     .meta {{ color: #667085; margin: 8px 0 18px; overflow-wrap: anywhere; }}
     .actions {{ display: flex; flex-wrap: wrap; gap: 10px; }}
     button, .button-link {{ display: inline-flex; align-items: center; justify-content: center; min-height: 38px; padding: 10px 14px; border: 0; border-radius: 6px; background: #2357d9; color: #fff; cursor: pointer; text-decoration: none; box-sizing: border-box; }}

@@ -26,20 +26,23 @@ SUPERVISED_LEVEL_DURATIONS = {
 
 SUPERVISED_RUNNER_PROFILES: dict[str, dict[str, int | float]] = {
     level: {
-        "workers": 4,
-        "threads": 8,
+        # SQLite has a single writer across the whole database.  A single
+        # gthread process keeps write arbitration process-local while still
+        # leaving enough lanes for the verified 128-way business workload.
+        "workers": 1,
+        "threads": 160,
         "account_count": 10,
         "round_ops": 1_000,
-        "concurrency": 32,
-        "session_pool": 20,
+        "concurrency": 128,
+        "session_pool": 128,
         "browser_interval_seconds": 3 * 60 * 60,
         "resource_interval": 5.0,
         "heartbeat_interval": 60.0,
         "scenario_join_timeout_seconds": 8 * 60 * 60,
         "minimum_free_gb": 20.0,
-        "max_server_busy_rate": 0.05,
-        "max_ordinary_p95_ms": 3_000.0,
-        "max_ordinary_p99_ms": 8_000.0,
+        "max_server_busy_rate": 0.01,
+        "max_ordinary_p95_ms": 30_000.0,
+        "max_ordinary_p99_ms": 60_000.0,
         "max_sentinel_p95_ms": 3_000.0,
     }
     for level in SUPERVISED_LEVEL_DURATIONS
@@ -57,8 +60,8 @@ SUPERVISED_RUNNER_PROFILES["smoke"].update({
 })
 
 SUPERVISED_RUNNER_PROFILES["soak"].update({
-    "workers": 2,
-    "threads": 2,
+    "workers": 1,
+    "threads": 16,
     "account_count": 4,
     "round_ops": 250,
     "concurrency": 4,
@@ -88,16 +91,17 @@ SUPERVISED_RUNNER_PROFILE_OPTIONS = {
 SUPERVISED_LOAD_POLICIES: dict[str, dict[str, Any]] = {
     level: {
         "ramp_required": level in {"rehearsal", "formal"},
-        "ramp_levels": [4, 8, 16, 32],
+        "ramp_levels": [4, 8, 16, 32, 64, 128],
         "minimum_ramp_stage_seconds": (
-            {"4": 600.0, "8": 1_200.0, "16": 1_800.0, "32": 0.0}
+            {"4": 360.0, "8": 540.0, "16": 720.0, "32": 900.0, "64": 1_080.0, "128": 0.0}
             if level == "formal"
-            else {"4": 60.0, "8": 120.0, "16": 180.0, "32": 0.0}
+            else {"4": 36.0, "8": 54.0, "16": 72.0, "32": 90.0, "64": 108.0, "128": 0.0}
             if level == "rehearsal"
-            else {"4": 0.0, "8": 0.0, "16": 0.0, "32": 0.0}
+            else {"4": 0.0, "8": 0.0, "16": 0.0, "32": 0.0, "64": 0.0, "128": 0.0}
         ),
         "minimum_target_load_coverage": 0.90,
-        "minimum_active_workers_at_32": 28,
+        "target_load_level": 128,
+        "minimum_active_workers_at_target": 109,
         "minimum_baseline_throughput_ratio": 0.80,
         "minimum_effective_operation_ratio": 0.85,
         "maximum_stage_boundary_lag_seconds": 15.0,

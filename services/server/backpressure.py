@@ -14,7 +14,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from flask import g, jsonify, request
@@ -83,6 +83,11 @@ BACKPRESSURE_FAST_LANE_PREFIXES = (
     "/api/root/backpressure",
     "/api/root/trading/background/status",
     "/api/trading/safety",
+    # These status probes establish whether optional AI backends are reachable.
+    # Letting them compete with generation and page-data fan-out can make the UI
+    # report a false backend outage while the app is merely busy.
+    "/api/comfyui/status",
+    "/api/ai-agent/status",
     "/api/comfyui/resources",
     "/api/games/multiplayer/invites/pending",
     "/api/notifications/unread-count",
@@ -300,13 +305,15 @@ def _thread_capacity(settings: dict | None = None) -> int:
         if value:
             return _cap_to_gunicorn_threads(value, gunicorn_threads)
     if gunicorn_threads:
-        # Auto-detected WSGI threads are not the same as effective app
-        # throughput. SQLite write serialization, Python scheduling, and
-        # chain/accounting critical sections mean this app often saturates
-        # before every configured thread is productive. Keep auto mode
-        # conservative; root can lower this through settings/env, but never
-        # above the live gthread count for the current worker process.
-        return max(1, min(12, gunicorn_threads))
+        # A process-local gate must describe the capacity of this Gunicorn
+        # worker, not a small fixed slice of it.  The former 12-thread ceiling
+        # left a 32-thread worker admitting only eight feature requests after
+        # fast-lane reservation, so a multi-worker high-capacity deployment
+        # returned ``server_busy`` while most configured WSGI slots were idle.
+        # Keep a finite automatic ceiling for unusually large deployments;
+        # administrators can still choose a smaller explicit setting/env value
+        # and the individual heavy/fast-lane gates remain in force.
+        return max(1, min(64, gunicorn_threads))
     cpu_count = max(1, int(os.cpu_count() or 1))
     mem_mb = _total_memory_mb()
     cpu_cap = max(4, min(8, cpu_count))
@@ -333,7 +340,13 @@ def _auto_fast_lane_reserved(thread_capacity: int, settings: dict | None = None)
         return min(2, max(1, thread_capacity - 2))
     if thread_capacity <= 8:
         return min(3, max(1, thread_capacity - 2))
-    return min(max(2, thread_capacity // 3), max(1, thread_capacity - 2))
+    # A high-capacity gthread worker already has enough room for fast health,
+    # auth and status requests with two protected slots.  Reserving a full
+    # third of a 32-thread worker capped ordinary feature traffic at 22 and
+    # caused premature ``server_busy`` responses while most of the host was
+    # still available.  Keep the small-worker safeguards above, but let a
+    # measured high-capacity worker serve the workload it was configured for.
+    return min(2, max(1, thread_capacity - 2))
 
 
 def _auto_heavy_limit(thread_capacity: int, cpu_count: int, mem_mb: int, settings: dict | None = None) -> tuple[int, str]:
@@ -813,7 +826,7 @@ def _backpressure_anomaly_log_path(app):
 def _record_backpressure_anomaly(app, payload: dict) -> None:
     now = time.time()
     event = {
-        "ts": datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+        "ts": datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0).isoformat() + "Z",
         "pid": os.getpid(),
         "event": payload.get("event") or "backpressure_anomaly",
         "method": request.method,

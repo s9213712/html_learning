@@ -42,6 +42,26 @@ def test_effective_target_load_requires_workers_ratio_and_throughput() -> None:
     assert all(result["target_conditions"].values())
 
 
+def test_policy_can_require_a_128_way_target_without_32_way_aliasing() -> None:
+    result = window(
+        scheduled_load_level=128,
+        active_workers=109,
+        inflight_requests=109,
+        operations_completed=900,
+        target_load_level=128,
+        minimum_active_workers_at_target=109,
+    )
+
+    assert result["target_load_level"] == 128
+    assert result["minimum_active_workers_at_target"] == 109
+    assert result["target_conditions"]["scheduled_load_level_128"] is True
+    assert result["target_conditions"]["active_workers_at_least_109"] is True
+    assert result["at_target_load"] is True
+    summary = summarize_target_load([result], target_load_level=128)
+    assert summary["target_load_level"] == 128
+    assert summary["ok"] is True
+
+
 def test_maintenance_exclusion_requires_explicit_allowlisted_reason() -> None:
     result = window(
         active_workers=0,

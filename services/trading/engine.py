@@ -1224,6 +1224,19 @@ def ensure_trading_schema(conn):
         conn.execute("ALTER TABLE trading_bots ADD COLUMN interval_hours INTEGER NOT NULL DEFAULT 24")
     if "budget_points" not in bot_cols:
         conn.execute("ALTER TABLE trading_bots ADD COLUMN budget_points INTEGER NOT NULL DEFAULT 0")
+    if "price_upper_limit" not in bot_cols:
+        conn.execute("ALTER TABLE trading_bots ADD COLUMN price_upper_limit REAL")
+    if "price_lower_limit" not in bot_cols:
+        conn.execute("ALTER TABLE trading_bots ADD COLUMN price_lower_limit REAL")
+    # A zero daily cap deliberately means unlimited.  That preserves the
+    # behaviour of pre-migration bots while new Workflow bots can opt into
+    # the UI's explicit 1..100 UTC-day limit.
+    if "max_daily_runs" not in bot_cols:
+        conn.execute("ALTER TABLE trading_bots ADD COLUMN max_daily_runs INTEGER NOT NULL DEFAULT 0")
+    if "daily_run_date" not in bot_cols:
+        conn.execute("ALTER TABLE trading_bots ADD COLUMN daily_run_date TEXT")
+    if "daily_run_count" not in bot_cols:
+        conn.execute("ALTER TABLE trading_bots ADD COLUMN daily_run_count INTEGER NOT NULL DEFAULT 0")
     if "workflow_json" not in bot_cols:
         conn.execute("ALTER TABLE trading_bots ADD COLUMN workflow_json TEXT")
     if "execution_state_json" not in bot_cols:

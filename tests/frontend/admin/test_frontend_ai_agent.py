@@ -429,6 +429,8 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert "function aiAgentParseComfyuiRerunRequest" in ai_agent_js
     assert "function aiAgentRememberComfyuiSubmit" in ai_agent_js
     assert "function aiAgentPlanToolAction" in ai_agent_js
+    assert "request_timeout_seconds: 80" in ai_agent_js
+    assert "timeoutMs: 85000" in ai_agent_js
     assert "function aiAgentExecuteToolPlan" in ai_agent_js
     assert "function aiAgentSelectedTextModel" in ai_agent_js
     assert "function aiAgentNormalizeReadonlyScope" in ai_agent_js
@@ -512,7 +514,7 @@ def test_ai_agent_module_frontend_is_wired_as_independent_feature():
     assert "local_safety_gate" in ai_agent_js
     assert "hybrid_arg_repaired" in ai_agent_js
     assert "hybrid_tool_corrected" in ai_agent_js
-    assert "timeoutMs: 45000" in ai_agent_js
+    assert "timeoutMs: 85000" in ai_agent_js
     assert "fallback_error" in ai_agent_js
     assert "args 對 write_tool 必須只使用 context.effective_tools 中該工具 schema 的 required/path_params/body_fields/query_fields canonical 欄位" in ai_agent_js
     assert "站內所有功能需優先從 context.effective_tools 的 domain/label/description/schema 語意選 tool" in ai_agent_js

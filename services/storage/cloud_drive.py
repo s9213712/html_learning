@@ -2,6 +2,7 @@ import json
 import os
 import uuid
 import hashlib
+import threading
 from datetime import datetime
 from pathlib import Path
 from cryptography.fernet import InvalidToken
@@ -28,6 +29,13 @@ DEFAULT_SERVER_ENCRYPTED_INLINE_MAX_BYTES = 64 * 1024 * 1024
 DEFAULT_SERVER_ENCRYPTED_CHUNK_BYTES = 4 * 1024 * 1024
 SERVER_ENCRYPTED_CHUNKED_VERSION = "server-side-chunked-v1"
 SERVER_ENCRYPTED_CHUNKED_MAGIC = b"HACKME_SERVER_ENCRYPTED_CHUNKED_V1\n"
+
+
+# Browser and API reads call this helper frequently. Cache a committed schema
+# verification so routine reads do not repeatedly run DDL and the legacy
+# avatar-repair UPDATE under mixed load.
+_CLOUD_DRIVE_SCHEMA_LOCK = threading.Lock()
+_CLOUD_DRIVE_SCHEMA_READY_PATHS = set()
 
 
 def server_encrypted_inline_max_bytes():
@@ -68,6 +76,42 @@ def _server_encrypted_size_error(size_bytes, *, operation="upload"):
 
 def ensure_cloud_drive_attachment_schema(conn):
     ensure_upload_security_schema(conn)
+    db_path = _connection_path(conn)
+    if db_path and db_path in _CLOUD_DRIVE_SCHEMA_READY_PATHS:
+        return
+    with _CLOUD_DRIVE_SCHEMA_LOCK:
+        if db_path and db_path in _CLOUD_DRIVE_SCHEMA_READY_PATHS:
+            return
+        # Do not cache while this caller could still roll back its migration.
+        if db_path and not getattr(conn, "in_transaction", False) and _cloud_drive_schema_cache_valid(conn):
+            _CLOUD_DRIVE_SCHEMA_READY_PATHS.add(db_path)
+            return
+        _ensure_cloud_drive_attachment_schema_uncached(conn)
+
+
+def _connection_path(conn):
+    try:
+        row = conn.execute("PRAGMA database_list").fetchone()
+        return str(row["file"] if hasattr(row, "keys") else row[2])
+    except Exception:
+        return ""
+
+
+def _cloud_drive_schema_cache_valid(conn):
+    try:
+        names = {
+            str(row[0])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name IN ('cloud_file_refs', 'file_access_grants', 'announcement_attachment_requests')"
+            ).fetchall()
+        }
+        return names == {"cloud_file_refs", "file_access_grants", "announcement_attachment_requests"}
+    except Exception:
+        return False
+
+
+def _ensure_cloud_drive_attachment_schema_uncached(conn):
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS cloud_file_refs (

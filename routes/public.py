@@ -4,6 +4,7 @@ import json
 import os
 import re
 import sqlite3
+import threading
 import time
 import unicodedata
 from datetime import datetime, timedelta
@@ -114,6 +115,50 @@ def register_public_routes(app, deps):
     verify_csrf_double_submit = deps["verify_csrf_double_submit"]
     verify_csrf_token = deps.get("verify_csrf_token", lambda token, username: False)
     verify_password = deps["verify_password"]
+    public_account_schema_lock = threading.Lock()
+    public_account_schema_ready = False
+    # ``/api/version`` is a health/diagnostic fast-lane endpoint.  Its two
+    # dynamic fields are informative only: the request guards enforce
+    # maintenance and security settings independently, using fresh settings on
+    # every protected request.  Do not let a status poll contend on SQLite with
+    # active exchange/chain writes, or a busy system will incorrectly look
+    # unavailable.  A short per-process snapshot also keeps the response
+    # useful after a transient database lock; the first successful read remains
+    # authoritative until the next refresh.
+    version_status_cache_lock = threading.Lock()
+    version_status_cache = (0.0, None)
+    VERSION_STATUS_CACHE_SECONDS = 60.0
+
+    def get_version_status_settings():
+        nonlocal version_status_cache
+        now = time.monotonic()
+        expires_at, cached_settings = version_status_cache
+        if cached_settings is not None and now < expires_at:
+            return cached_settings
+        with version_status_cache_lock:
+            expires_at, cached_settings = version_status_cache
+            now = time.monotonic()
+            if cached_settings is not None and now < expires_at:
+                return cached_settings
+            try:
+                # Fetch the settings snapshot once.  Calling the historical
+                # ``get_cached_system_setting`` twice would still issue two
+                # SQLite reads on a cache miss because that helper deliberately
+                # refreshes security controls eagerly.
+                source_settings = get_system_settings() if callable(get_system_settings) else {}
+                refreshed = {
+                    "maintenance_mode": bool((source_settings or {}).get("maintenance_mode", False)),
+                    "server_timezone": (source_settings or {}).get("server_timezone", "UTC"),
+                }
+            except Exception:
+                # Preserve the last known status instead of making a health
+                # endpoint fail merely because a concurrent writer owns SQLite.
+                refreshed = cached_settings or {
+                    "maintenance_mode": False,
+                    "server_timezone": "UTC",
+                }
+            version_status_cache = (now + VERSION_STATUS_CACHE_SECONDS, refreshed)
+            return refreshed
 
     def current_session_ttl_seconds():
         try:
@@ -507,30 +552,59 @@ def register_public_routes(app, deps):
         )
 
     def ensure_public_account_columns(conn):
-        cols = {row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
-        additions = (
-            ("email", "TEXT"),
-            ("email_verified", "INTEGER NOT NULL DEFAULT 0"),
-            ("birthdate", "TEXT"),
-            ("blocked_until", "TEXT"),
-            ("failed_login_count", "INTEGER NOT NULL DEFAULT 0"),
-            ("locked_until", "TEXT"),
-            ("last_login_at", "TEXT"),
-            ("password_strength_score", "INTEGER NOT NULL DEFAULT 0"),
-            ("password_changed_at", "TEXT"),
-            ("must_change_password", "INTEGER NOT NULL DEFAULT 0"),
-            ("is_default_password", "INTEGER NOT NULL DEFAULT 0"),
-            ("signup_bonus_deferred", "INTEGER NOT NULL DEFAULT 0"),
-            ("updated_at", "TEXT"),
-        )
-        for name, ddl in additions:
-            if name not in cols:
-                conn.execute(f"ALTER TABLE users ADD COLUMN {name} {ddl}")
-                cols.add(name)
-        if "username" in cols:
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_users_lower_username ON users(lower(username))")
-        if "email" in cols:
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_users_lower_email ON users(lower(email))")
+        """Perform the legacy user-table upgrade once, atomically.
+
+        A concurrent login used to inspect ``PRAGMA table_info`` before either
+        request had acquired SQLite's writer lock.  Both requests could then
+        decide that a column was missing and the loser raised ``duplicate
+        column name``.  The migration must therefore acquire ``BEGIN
+        IMMEDIATE`` *before* reading the schema, not only around ``ALTER``.
+        """
+
+        nonlocal public_account_schema_ready
+        if public_account_schema_ready:
+            return
+        with public_account_schema_lock:
+            if public_account_schema_ready:
+                return
+            owns_transaction = not bool(getattr(conn, "in_transaction", False))
+            try:
+                if owns_transaction:
+                    conn.execute("BEGIN IMMEDIATE")
+                cols = {row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
+                additions = (
+                    ("email", "TEXT"),
+                    ("email_verified", "INTEGER NOT NULL DEFAULT 0"),
+                    ("birthdate", "TEXT"),
+                    ("blocked_until", "TEXT"),
+                    ("failed_login_count", "INTEGER NOT NULL DEFAULT 0"),
+                    ("locked_until", "TEXT"),
+                    ("last_login_at", "TEXT"),
+                    ("password_strength_score", "INTEGER NOT NULL DEFAULT 0"),
+                    ("password_changed_at", "TEXT"),
+                    ("must_change_password", "INTEGER NOT NULL DEFAULT 0"),
+                    ("is_default_password", "INTEGER NOT NULL DEFAULT 0"),
+                    ("signup_bonus_deferred", "INTEGER NOT NULL DEFAULT 0"),
+                    ("updated_at", "TEXT"),
+                )
+                for name, ddl in additions:
+                    if name not in cols:
+                        conn.execute(f"ALTER TABLE users ADD COLUMN {name} {ddl}")
+                        cols.add(name)
+                if "username" in cols:
+                    conn.execute("CREATE INDEX IF NOT EXISTS idx_users_lower_username ON users(lower(username))")
+                if "email" in cols:
+                    conn.execute("CREATE INDEX IF NOT EXISTS idx_users_lower_email ON users(lower(email))")
+                if owns_transaction:
+                    conn.commit()
+                    public_account_schema_ready = True
+            except Exception:
+                if owns_transaction:
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                raise
 
     @app.route("/")
     @app.route("/videos")
@@ -647,16 +721,7 @@ def register_public_routes(app, deps):
 
     @app.route("/api/version", methods=["GET"])
     def get_version():
-        maintenance_mode = (
-            get_cached_system_setting("maintenance_mode", False)
-            if callable(get_cached_system_setting)
-            else False
-        )
-        settings = {
-            "server_timezone": get_cached_system_setting("server_timezone", "UTC")
-            if callable(get_cached_system_setting)
-            else "UTC"
-        }
+        settings = get_version_status_settings()
         return json_resp({
             "ok": True,
             "app": SERVER_APP_NAME,
@@ -664,7 +729,7 @@ def register_public_routes(app, deps):
             "version": SERVER_VERSION,
             "started_at": SERVER_STARTED_AT,
             "server_time": server_time_payload(settings),
-            "maintenance_mode": bool(maintenance_mode),
+            "maintenance_mode": bool(settings["maintenance_mode"]),
         })
 
     @app.route("/livez", methods=["GET"])

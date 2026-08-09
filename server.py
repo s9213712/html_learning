@@ -195,6 +195,7 @@ from services.server.database import (
     get_auth_db as get_auth_db_helper,
     get_control_db as get_control_db_helper,
     get_db as get_db_helper,
+    get_readonly_db as get_readonly_db_helper,
     get_readonly_auth_db as get_readonly_auth_db_helper,
     get_user_by_username as get_user_by_username_helper,
 )
@@ -768,6 +769,13 @@ def get_db():
     )
 
 
+def get_readonly_db():
+    return get_readonly_db_helper(
+        DB_PATH,
+        register_app_mode=lambda conn: smv2_register_app_mode(conn, mode_reader=get_runtime_server_mode),
+    )
+
+
 def get_audit_db():
     return get_audit_db_helper(AUDIT_DB_PATH)
 
@@ -1037,7 +1045,8 @@ def count_role(role):
 
 
 def get_user_by_username(username):
-    return get_user_by_username_helper(username, get_db=get_db)
+    # Actor lookup is SELECT-only and happens on every authenticated request.
+    return get_user_by_username_helper(username, get_db=get_readonly_db)
 
 
 def user_public_payload(row, *, include_sensitive=False):
@@ -1169,6 +1178,7 @@ _runtime_services = build_runtime_services(
     },
     deps={
         "get_db": get_db,
+        "get_readonly_db": get_readonly_db,
         "get_auth_db": get_auth_db,
         "get_readonly_auth_db": get_readonly_auth_db,
         "get_audit_db": get_audit_db,
@@ -1454,7 +1464,7 @@ def extra_security_headers(response):
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"
     elif STATIC_ASSET_CACHE_SECONDS > 0 and (
-        ((request.path == "/styles.css" or request.path.startswith("/js/")) and request.args.get("v"))
+        ((request.path in {"/styles.css", "/uiverse-galaxy.css"} or request.path.startswith("/js/")) and request.args.get("v"))
         or request.path.startswith("/assets/")
     ):
         response.headers["Cache-Control"] = f"public, max-age={STATIC_ASSET_CACHE_SECONDS}, immutable"

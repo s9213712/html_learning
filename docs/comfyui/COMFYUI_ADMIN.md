@@ -27,6 +27,21 @@
 - `ComfyUI Account API Key` 只用於官方付費 / API nodes。Key 由 root 在伺服器設定中輸入，前端 workflow JSON、匯出檔與 audit 不可保存明文 key
 - workflow preset / workflow JSON 匯入仍要通過 sanitize，不能接受本機絕對路徑、外部 URL、shell / exec 類節點
 
+## I2I、outpaint 與 Diffusers 驗收邊界
+
+- `HF / Diffusers` 與 ComfyUI API 是兩個獨立 backend family。選擇 HF/Diffusers
+  不會改寫 ComfyUI 的 host、帳號 key、Civitai key 或 workflow 設定；反之亦然。
+- 一般 i2i、upscale、blend 或 outpaint 的 job succeeded 只代表技術工作完成，
+  不代表影像可交付。操作人員必須查看產物尺寸、非空白性，以及主體、邊界與文字等
+  任務特定視覺要求。
+- `flux_fill_sam3_subject_gguf` outpaint 會建立背景與帶 alpha 的前景兩份中間產物，
+  再依可信的擴張畫布幾何做 server-side 合成。遮罩全空、缺少 alpha、尺寸/位置不合，
+  或無法寫出最終檔時會 fail closed；API 不會把中間圖當最終成功結果。
+- 不要啟用舊式「把原始不透明矩形回貼」作為 seam 修補。它可能在平坦背景留下明顯框線；
+  應使用完整融合或 semantic outpaint 工作流並做視覺 review。
+- HF/Diffusers 實際產品 i2i 與離線 cached-pipeline 的驗收命令、輸出保留位置與
+  review checklist 見 [I2I_OUTPAINT_VALIDATION.md](I2I_OUTPAINT_VALIDATION.md)。
+
 ## 本地 / 遠端功能矩陣
 
 | 功能 | local 本地 ComfyUI | remote 遠端 ComfyUI API | 備註 |

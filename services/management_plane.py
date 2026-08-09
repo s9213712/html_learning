@@ -272,7 +272,7 @@ def _job_updated_age_seconds(job: dict[str, Any]) -> float | None:
         updated = datetime.fromisoformat(str(job.get("updated_at") or ""))
         if updated.tzinfo is not None:
             updated = updated.astimezone(timezone.utc).replace(tzinfo=None)
-        return (datetime.utcnow() - updated).total_seconds()
+        return (datetime.now(timezone.utc).replace(tzinfo=None) - updated).total_seconds()
     except Exception:
         return None
 

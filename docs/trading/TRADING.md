@@ -451,6 +451,12 @@ At scan time, the bot converts budget points to quantity using the current
 backend execution price. The bot card shows whether the bot is ready, cooling
 down, disabled, exhausted, or waiting for the next run.
 
+The optional upper/lower limits gate only the regular periodic DCA buy. A
+price above the upper limit or below the lower limit produces an auditable
+`skipped` run instead of an order. Existing stop-loss/take-profit risk exits
+still take priority, so a protective close is not suppressed merely because
+the periodic-buy band is currently out of range.
+
 ### Grid Trading Bot
 
 Grid bots are spot-first range bots. They place multiple buy/sell levels inside
@@ -543,6 +549,11 @@ Current semantics note:
 - Short / futures stop-loss and take-profit rules must be implemented as a
   separate condition family; do not assume the current workflow condition types
   are symmetric for short exposure.
+- A Workflow bot may set `max_daily_runs`. The value is a UTC-day cap; `0`
+  preserves the legacy unlimited behavior. The server reserves the slot with
+  one conditional SQLite transaction before order placement, so a manual scan
+  and background scanner cannot both exceed the cap. A reservation is released
+  only when placement itself fails.
 
 Built-in reference templates:
 

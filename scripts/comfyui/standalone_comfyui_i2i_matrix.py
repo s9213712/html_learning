@@ -158,8 +158,24 @@ def apply_interactive_prompts(args):
     args.controlnet_model = _ask_text("ControlNet model override", args.controlnet_model)
     args.control_strength = _ask_float("ControlNet strength", args.control_strength)
     args.inpaint_method = _ask_choice("Inpaint method", args.inpaint_method, ("auto", "conditioning", "vae_encode"))
+    args.outpaint_method = _ask_choice(
+        "Outpaint method",
+        args.outpaint_method,
+        ("auto", "full_redraw", "conditioning", "vae_encode"),
+    )
     args.mask_shape = _ask_choice("Mask shape", args.mask_shape, ("default", "window", "background_wall", "small_wall", "kimono_clothes"))
     args.outpaint = _ask_int("Outpaint default pixels", args.outpaint)
+    args.outpaint_source_feather = _ask_int("Outpaint source preservation feather pixels", args.outpaint_source_feather)
+    args.outpaint_seam_prefill = _ask_choice(
+        "Outpaint seam prefill",
+        args.outpaint_seam_prefill,
+        ("auto", "on", "off"),
+    )
+    args.outpaint_preserve_source = _ask_choice(
+        "Preserve source interior after outpaint",
+        "yes" if args.outpaint_preserve_source else "no",
+        ("yes", "no"),
+    ) == "yes"
     args.blend_image_path = _ask_text("Blend image path", args.blend_image_path)
     args.style_image_path = _ask_text("Style/reference image path", args.style_image_path)
     args.out_dir = _ask_text("Output directory", args.out_dir)
@@ -335,11 +351,125 @@ def has_node(object_info: dict, node_class: str) -> bool:
     return isinstance(object_info, dict) and node_class in object_info
 
 
+def is_sdxl_checkpoint_name(model_name: str) -> bool:
+    """Return true only when the selected checkpoint explicitly identifies as SDXL.
+
+    IPAdapterStyleComposition is an SDXL-only node.  CheckpointLoaderSimple
+    exposes a filename rather than a model-family capability, so this is kept
+    deliberately conservative: an unknown filename is skipped instead of
+    submitting a workflow which ComfyUI will deterministically reject.
+    """
+
+    normalized = re.sub(r"[^a-z0-9]+", "", str(model_name or "").lower())
+    return "sdxl" in normalized
+
+
+def choose_sdxl_ipadapter_assets(object_info: dict) -> dict | None:
+    """Find a matching explicit SDXL IPAdapter and CLIP-Vision pair.
+
+    The Unified Loader maps presets to a hard-coded filename convention.  A
+    valid local installation may use a different convention (for example,
+    ``ip-adapter-plus_sdxl_vit-h.safetensors``), so use the instance's actual
+    option lists instead.  This keeps the matrix portable and avoids a false
+    positive capability check followed by a queue-time model-not-found error.
+    """
+
+    required_nodes = ("IPAdapterModelLoader", "CLIPVisionLoader", "IPAdapterStyleComposition")
+    if not all(has_node(object_info, node) for node in required_nodes):
+        return None
+    adapter_options = node_options(object_info, "IPAdapterModelLoader", "ipadapter_file")
+    clip_options = node_options(object_info, "CLIPVisionLoader", "clip_name")
+    sdxl_adapters = [name for name in adapter_options if "sdxl" in name.lower()]
+    vit_h_clips = [name for name in clip_options if "vit-h" in name.lower() or "vision_h" in name.lower()]
+    if not sdxl_adapters or not vit_h_clips:
+        return None
+    # Prefer the higher-fidelity plus model while retaining a valid standard
+    # SDXL adapter as a fallback.
+    adapter = next((name for name in sdxl_adapters if "plus" in name.lower()), sdxl_adapters[0])
+    return {"ipadapter_file": adapter, "clip_name": vit_h_clips[0]}
+
+
+def require_sdxl_ipadapter_assets(object_info: dict) -> dict:
+    assets = choose_sdxl_ipadapter_assets(object_info)
+    if not assets:
+        raise ProbeError(
+            "An explicit SDXL IPAdapter model, matching ViT-H CLIP Vision model, "
+            "and IPAdapterStyleComposition node are required for this workflow."
+        )
+    return assets
+
+
 def selected_inpaint_method(args, object_info: dict) -> str:
     method = str(getattr(args, "inpaint_method", "auto") or "auto").strip().lower()
     if method == "auto":
         return "conditioning" if has_node(object_info, "InpaintModelConditioning") else "vae_encode"
     return method
+
+
+def selected_outpaint_method(args, object_info: dict) -> str:
+    """Choose a sampling path that can actually replace padded pixels.
+
+    Generic checkpoints frequently leave the neutral-gray ImagePadForOutpaint
+    canvas untouched when sampling is constrained to an inpaint noise mask.
+    For those checkpoints, redraw the padded image and composite the protected
+    source interior back with a feathered mask.  Explicit method choices keep
+    the masked paths available for dedicated inpainting checkpoints.
+    """
+
+    method = str(getattr(args, "outpaint_method", "auto") or "auto").strip().lower()
+    if method != "auto":
+        return method
+
+    # Preserve the legacy explicit --inpaint-method behaviour for callers that
+    # have not yet opted into --outpaint-method.
+    legacy_method = str(getattr(args, "inpaint_method", "auto") or "auto").strip().lower()
+    if legacy_method != "auto":
+        return legacy_method
+    return "full_redraw"
+
+
+def outpaint_seam_prefill_enabled(args, object_info: dict) -> bool:
+    """Use a pixel-space inpaint pass to remove gray padding before diffusion.
+
+    ComfyUI's built-in outpaint padding starts at neutral gray.  A generic
+    diffusion checkpoint can leave that gray visible, especially when the
+    source is composited back for identity preservation.  MAT supplies a
+    deterministic context fill first, giving the latent sampler image content
+    rather than a hard gray rectangle at the transition.
+    """
+
+    # MAT prefill is useful only on models where it has been visually
+    # validated.  Keeping it opt-in prevents an installed extension from
+    # silently changing the established outpaint result.
+    requested = str(getattr(args, "outpaint_seam_prefill", "off") or "off").strip().lower()
+    available = all(
+        has_node(object_info, name)
+        for name in ("INPAINT_LoadInpaintModel", "INPAINT_InpaintWithModel")
+    )
+    if requested == "on" and not available:
+        raise ProbeError("outpaint seam prefill requires INPAINT_LoadInpaintModel and INPAINT_InpaintWithModel")
+    return requested != "off" and available
+
+
+def outpaint_padding(args) -> dict[str, int]:
+    default_expand = int(args.outpaint)
+    return {
+        "left": default_expand if args.outpaint_left is None else int(args.outpaint_left),
+        "top": default_expand if args.outpaint_top is None else int(args.outpaint_top),
+        "right": default_expand if args.outpaint_right is None else int(args.outpaint_right),
+        "bottom": default_expand if args.outpaint_bottom is None else int(args.outpaint_bottom),
+    }
+
+
+def scaled_dimensions(width: int, height: int, factor: float, *, multiple: int = 8) -> tuple[int, int]:
+    if int(width) <= 0 or int(height) <= 0:
+        raise ProbeError("source dimensions must be positive")
+    if float(factor) <= 1.0:
+        raise ProbeError("--upscale-factor must be greater than 1.0")
+    return tuple(
+        max(multiple, int(round((int(value) * float(factor)) / multiple)) * multiple)
+        for value in (width, height)
+    )
 
 
 def maybe_apply_differential_diffusion(args, object_info: dict, workflow: dict, model_ref: list) -> list:
@@ -623,15 +753,20 @@ def build_inpaint(
     return workflow
 
 
-def build_outpaint(args, object_info: dict, model_name: str, *, source_ref: dict, prompt: str, prefix: str) -> dict:
+def build_outpaint(
+    args,
+    object_info: dict,
+    model_name: str,
+    *,
+    source_ref: dict,
+    source_size: tuple[int, int],
+    prompt: str,
+    prefix: str,
+) -> dict:
     workflow = base_nodes(args, model_name)
     workflow["2"]["inputs"]["text"] = prompt
     workflow["4"] = {"class_type": "LoadImage", "inputs": {"image": file_input_name(source_ref), "upload": "image"}}
-    default_expand = int(args.outpaint)
-    left = default_expand if args.outpaint_left is None else int(args.outpaint_left)
-    top = default_expand if args.outpaint_top is None else int(args.outpaint_top)
-    right = default_expand if args.outpaint_right is None else int(args.outpaint_right)
-    bottom = default_expand if args.outpaint_bottom is None else int(args.outpaint_bottom)
+    padding = outpaint_padding(args)
     workflow["5"] = {
         "class_type": "ImagePadForOutpaint",
         "inputs": required_default_inputs(
@@ -639,19 +774,46 @@ def build_outpaint(args, object_info: dict, model_name: str, *, source_ref: dict
             "ImagePadForOutpaint",
             {
                 "image": ["4", 0],
-                "left": left,
-                "top": top,
-                "right": right,
-                "bottom": bottom,
+                **padding,
                 "feathering": int(args.outpaint_feathering),
             },
         ),
     }
-    method = selected_inpaint_method(args, object_info)
+    padded_pixels_ref = ["5", 0]
+    mask_ref = ["5", 1]
+    next_id = 6
+    if outpaint_seam_prefill_enabled(args, object_info):
+        loader_id = str(next_id)
+        prefill_id = str(next_id + 1)
+        next_id += 2
+        workflow[loader_id] = {
+            "class_type": "INPAINT_LoadInpaintModel",
+            "inputs": required_default_inputs(
+                object_info,
+                "INPAINT_LoadInpaintModel",
+                {"model_name": str(args.outpaint_prefill_model)},
+            ),
+        }
+        workflow[prefill_id] = {
+            "class_type": "INPAINT_InpaintWithModel",
+            "inputs": required_default_inputs(
+                object_info,
+                "INPAINT_InpaintWithModel",
+                {
+                    "inpaint_model": [loader_id, 0],
+                    "image": padded_pixels_ref,
+                    "mask": mask_ref,
+                    "seed": int(args.seed) + 197,
+                },
+            ),
+        }
+        padded_pixels_ref = [prefill_id, 0]
+    method = selected_outpaint_method(args, object_info)
     if method == "conditioning":
         if not has_node(object_info, "InpaintModelConditioning"):
             raise ProbeError("InpaintModelConditioning is not available on this ComfyUI instance")
-        workflow["6"] = {
+        conditioning_id = str(next_id)
+        workflow[conditioning_id] = {
             "class_type": "InpaintModelConditioning",
             "inputs": required_default_inputs(
                 object_info,
@@ -660,27 +822,34 @@ def build_outpaint(args, object_info: dict, model_name: str, *, source_ref: dict
                     "positive": ["2", 0],
                     "negative": ["3", 0],
                     "vae": ["1", 2],
-                    "pixels": ["5", 0],
-                    "mask": ["5", 1],
+                    "pixels": padded_pixels_ref,
+                    "mask": mask_ref,
                     "noise_mask": bool(args.inpaint_noise_mask),
                 },
             ),
         }
-        positive_ref = ["6", 0]
-        negative_ref = ["6", 1]
-        latent_ref = ["6", 2]
+        positive_ref = [conditioning_id, 0]
+        negative_ref = [conditioning_id, 1]
+        latent_ref = [conditioning_id, 2]
     else:
-        workflow["6"] = {
-            "class_type": "VAEEncodeForInpaint",
-            "inputs": required_default_inputs(
-                object_info,
-                "VAEEncodeForInpaint",
-                {"pixels": ["5", 0], "mask": ["5", 1], "vae": ["1", 2], "grow_mask_by": 6},
-            ),
-        }
+        encode_id = str(next_id)
+        if method == "full_redraw":
+            workflow[encode_id] = {
+                "class_type": "VAEEncode",
+                "inputs": {"pixels": padded_pixels_ref, "vae": ["1", 2]},
+            }
+        else:
+            workflow[encode_id] = {
+                "class_type": "VAEEncodeForInpaint",
+                "inputs": required_default_inputs(
+                    object_info,
+                    "VAEEncodeForInpaint",
+                    {"pixels": padded_pixels_ref, "mask": mask_ref, "vae": ["1", 2], "grow_mask_by": 6},
+                ),
+            }
         positive_ref = ["2", 0]
         negative_ref = ["3", 0]
-        latent_ref = ["6", 0]
+        latent_ref = [encode_id, 0]
     model_ref = maybe_apply_differential_diffusion(args, object_info, workflow, ["1", 0])
     sampler_id = str(max(int(item) for item in workflow) + 1)
     workflow[sampler_id] = {
@@ -701,13 +870,57 @@ def build_outpaint(args, object_info: dict, model_name: str, *, source_ref: dict
     decode_id = str(int(sampler_id) + 1)
     save_id = str(int(sampler_id) + 2)
     workflow[decode_id] = {"class_type": "VAEDecode", "inputs": {"samples": [sampler_id, 0], "vae": ["1", 2]}}
-    workflow[save_id] = {"class_type": "SaveImage", "inputs": {"images": [decode_id, 0], "filename_prefix": prefix}}
+    output_ref = [decode_id, 0]
+    if bool(args.outpaint_preserve_source):
+        mask_id = str(int(sampler_id) + 2)
+        feather_id = str(int(sampler_id) + 3)
+        composite_id = str(int(sampler_id) + 4)
+        save_id = str(int(sampler_id) + 5)
+        # Keep the original interior stable and use a soft transition into the
+        # generated outer area.  VAE decoding the entire padded latent otherwise
+        # frequently introduces a visible rectangular source boundary.
+        source_feather = max(1, min(int(args.outpaint_source_feather), min(source_size) // 3))
+        workflow[mask_id] = {
+            "class_type": "SolidMask",
+            "inputs": {"value": 1.0, "width": int(source_size[0]), "height": int(source_size[1])},
+        }
+        workflow[feather_id] = {
+            "class_type": "FeatherMask",
+            "inputs": {
+                "mask": [mask_id, 0],
+                "left": source_feather,
+                "top": source_feather,
+                "right": source_feather,
+                "bottom": source_feather,
+            },
+        }
+        workflow[composite_id] = {
+            "class_type": "ImageCompositeMasked",
+            "inputs": {
+                "destination": [decode_id, 0],
+                "source": ["4", 0],
+                "x": int(padding["left"]),
+                "y": int(padding["top"]),
+                "resize_source": False,
+                "mask": [feather_id, 0],
+            },
+        }
+        output_ref = [composite_id, 0]
+    workflow[save_id] = {"class_type": "SaveImage", "inputs": {"images": output_ref, "filename_prefix": prefix}}
     return workflow
 
 
-def build_upscale_redraw(args, object_info: dict, model_name: str, *, source_ref: dict, prompt: str, prefix: str) -> dict:
-    target_width = int(round(int(args.width) * float(args.upscale_factor)))
-    target_height = int(round(int(args.height) * float(args.upscale_factor)))
+def build_upscale_redraw(
+    args,
+    object_info: dict,
+    model_name: str,
+    *,
+    source_ref: dict,
+    source_size: tuple[int, int],
+    prompt: str,
+    prefix: str,
+) -> dict:
+    target_width, target_height = scaled_dimensions(*source_size, float(args.upscale_factor))
     workflow = base_nodes(args, model_name)
     workflow["2"]["inputs"]["text"] = prompt
     workflow["4"] = {"class_type": "LoadImage", "inputs": {"image": file_input_name(source_ref), "upload": "image"}}
@@ -747,31 +960,56 @@ def build_upscale_redraw(args, object_info: dict, model_name: str, *, source_ref
 
 
 def build_two_image_blend(args, object_info: dict, model_name: str, *, source_ref: dict, blend_ref: dict, prompt: str, prefix: str) -> dict:
+    """Semantically combine references without creating a ghosted pixel overlay."""
+
+    if not is_sdxl_checkpoint_name(model_name):
+        raise ProbeError("IPAdapter Style & Composition requires an explicitly identified SDXL checkpoint")
+    assets = require_sdxl_ipadapter_assets(object_info)
+    blend_factor = max(0.0, min(1.0, float(args.blend_factor)))
+    style_weight = 0.4 + (0.9 * blend_factor)
+    composition_weight = 0.4 + (0.9 * (1.0 - blend_factor))
     workflow = base_nodes(args, model_name)
     workflow["2"]["inputs"]["text"] = prompt
-    workflow["4"] = {"class_type": "LoadImage", "inputs": {"image": file_input_name(source_ref), "upload": "image"}}
-    workflow["5"] = {"class_type": "LoadImage", "inputs": {"image": file_input_name(blend_ref), "upload": "image"}}
-    workflow["6"] = {
-        "class_type": "ImageBlend",
+    workflow["4"] = {
+        "class_type": "IPAdapterModelLoader",
         "inputs": required_default_inputs(
             object_info,
-            "ImageBlend",
+            "IPAdapterModelLoader",
+            {"ipadapter_file": assets["ipadapter_file"]},
+        ),
+    }
+    workflow["5"] = {"class_type": "CLIPVisionLoader", "inputs": {"clip_name": assets["clip_name"]}}
+    workflow["6"] = {"class_type": "LoadImage", "inputs": {"image": file_input_name(blend_ref), "upload": "image"}}
+    workflow["7"] = {"class_type": "LoadImage", "inputs": {"image": file_input_name(source_ref), "upload": "image"}}
+    workflow["8"] = {
+        "class_type": "IPAdapterStyleComposition",
+        "inputs": required_default_inputs(
+            object_info,
+            "IPAdapterStyleComposition",
             {
-                "image1": ["4", 0],
-                "image2": ["5", 0],
-                "blend_factor": float(args.blend_factor),
-                "blend_mode": args.blend_mode,
+                "model": ["1", 0],
+                "ipadapter": ["4", 0],
+                "clip_vision": ["5", 0],
+                "image_style": ["6", 0],
+                "image_composition": ["7", 0],
+                "weight_style": style_weight,
+                "weight_composition": composition_weight,
+                "expand_style": False,
+                "combine_embeds": "average",
+                "start_at": 0.0,
+                "end_at": 1.0,
+                "embeds_scaling": "V only",
             },
         ),
     }
-    workflow["7"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["6", 0], "vae": ["1", 2]}}
-    workflow["8"] = {
+    workflow["9"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["7", 0], "vae": ["1", 2]}}
+    workflow["10"] = {
         "class_type": "KSampler",
         "inputs": {
-            "model": ["1", 0],
+            "model": ["8", 0],
             "positive": ["2", 0],
             "negative": ["3", 0],
-            "latent_image": ["7", 0],
+            "latent_image": ["9", 0],
             "seed": int(args.seed) + 409,
             "steps": int(args.steps),
             "cfg": float(args.cfg),
@@ -780,8 +1018,8 @@ def build_two_image_blend(args, object_info: dict, model_name: str, *, source_re
             "denoise": float(args.blend_denoise),
         },
     }
-    workflow["9"] = {"class_type": "VAEDecode", "inputs": {"samples": ["8", 0], "vae": ["1", 2]}}
-    workflow["10"] = {"class_type": "SaveImage", "inputs": {"images": ["9", 0], "filename_prefix": prefix}}
+    workflow["11"] = {"class_type": "VAEDecode", "inputs": {"samples": ["10", 0], "vae": ["1", 2]}}
+    workflow["12"] = {"class_type": "SaveImage", "inputs": {"images": ["11", 0], "filename_prefix": prefix}}
     return workflow
 
 
@@ -795,28 +1033,33 @@ def build_ipadapter_style_reference(
     prompt: str,
     prefix: str,
 ) -> dict:
+    if not is_sdxl_checkpoint_name(model_name):
+        raise ProbeError("IPAdapter Style & Composition requires an explicitly identified SDXL checkpoint")
+    assets = require_sdxl_ipadapter_assets(object_info)
     workflow = base_nodes(args, model_name)
     workflow["2"]["inputs"]["text"] = prompt
     workflow["4"] = {
-        "class_type": "IPAdapterUnifiedLoader",
+        "class_type": "IPAdapterModelLoader",
         "inputs": required_default_inputs(
             object_info,
-            "IPAdapterUnifiedLoader",
-            {"model": ["1", 0], "preset": args.ipadapter_preset},
+            "IPAdapterModelLoader",
+            {"ipadapter_file": assets["ipadapter_file"]},
         ),
     }
-    workflow["5"] = {"class_type": "LoadImage", "inputs": {"image": file_input_name(style_ref), "upload": "image"}}
-    workflow["6"] = {"class_type": "LoadImage", "inputs": {"image": file_input_name(source_ref), "upload": "image"}}
-    workflow["7"] = {
+    workflow["5"] = {"class_type": "CLIPVisionLoader", "inputs": {"clip_name": assets["clip_name"]}}
+    workflow["6"] = {"class_type": "LoadImage", "inputs": {"image": file_input_name(style_ref), "upload": "image"}}
+    workflow["7"] = {"class_type": "LoadImage", "inputs": {"image": file_input_name(source_ref), "upload": "image"}}
+    workflow["8"] = {
         "class_type": "IPAdapterStyleComposition",
         "inputs": required_default_inputs(
             object_info,
             "IPAdapterStyleComposition",
             {
-                "model": ["4", 0],
-                "ipadapter": ["4", 1],
-                "image_style": ["5", 0],
-                "image_composition": ["6", 0],
+                "model": ["1", 0],
+                "ipadapter": ["4", 0],
+                "clip_vision": ["5", 0],
+                "image_style": ["6", 0],
+                "image_composition": ["7", 0],
                 "weight_style": float(args.ipadapter_style_weight),
                 "weight_composition": float(args.ipadapter_composition_weight),
                 "expand_style": False,
@@ -827,14 +1070,14 @@ def build_ipadapter_style_reference(
             },
         ),
     }
-    workflow["8"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["6", 0], "vae": ["1", 2]}}
-    workflow["9"] = {
+    workflow["9"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["7", 0], "vae": ["1", 2]}}
+    workflow["10"] = {
         "class_type": "KSampler",
         "inputs": {
-            "model": ["7", 0],
+            "model": ["8", 0],
             "positive": ["2", 0],
             "negative": ["3", 0],
-            "latent_image": ["8", 0],
+            "latent_image": ["9", 0],
             "seed": int(args.seed) + 503,
             "steps": int(args.steps),
             "cfg": float(args.cfg),
@@ -843,8 +1086,8 @@ def build_ipadapter_style_reference(
             "denoise": float(args.ipadapter_denoise),
         },
     }
-    workflow["10"] = {"class_type": "VAEDecode", "inputs": {"samples": ["9", 0], "vae": ["1", 2]}}
-    workflow["11"] = {"class_type": "SaveImage", "inputs": {"images": ["10", 0], "filename_prefix": prefix}}
+    workflow["11"] = {"class_type": "VAEDecode", "inputs": {"samples": ["10", 0], "vae": ["1", 2]}}
+    workflow["12"] = {"class_type": "SaveImage", "inputs": {"images": ["11", 0], "filename_prefix": prefix}}
     return workflow
 
 
@@ -860,29 +1103,34 @@ def build_ipadapter_inpaint_reference(
     denoise: float,
     prefix: str,
 ) -> dict:
+    if not is_sdxl_checkpoint_name(model_name):
+        raise ProbeError("IPAdapter Style & Composition requires an explicitly identified SDXL checkpoint")
+    assets = require_sdxl_ipadapter_assets(object_info)
     workflow = base_nodes(args, model_name)
     workflow["2"]["inputs"]["text"] = prompt
     workflow["4"] = {
-        "class_type": "IPAdapterUnifiedLoader",
+        "class_type": "IPAdapterModelLoader",
         "inputs": required_default_inputs(
             object_info,
-            "IPAdapterUnifiedLoader",
-            {"model": ["1", 0], "preset": args.ipadapter_preset},
+            "IPAdapterModelLoader",
+            {"ipadapter_file": assets["ipadapter_file"]},
         ),
     }
-    workflow["5"] = {"class_type": "LoadImage", "inputs": {"image": file_input_name(style_ref), "upload": "image"}}
-    workflow["6"] = {"class_type": "LoadImage", "inputs": {"image": file_input_name(source_ref), "upload": "image"}}
-    workflow["7"] = {"class_type": "LoadImageMask", "inputs": {"image": file_input_name(mask_ref), "channel": "red"}}
-    workflow["8"] = {
+    workflow["5"] = {"class_type": "CLIPVisionLoader", "inputs": {"clip_name": assets["clip_name"]}}
+    workflow["6"] = {"class_type": "LoadImage", "inputs": {"image": file_input_name(style_ref), "upload": "image"}}
+    workflow["7"] = {"class_type": "LoadImage", "inputs": {"image": file_input_name(source_ref), "upload": "image"}}
+    workflow["8"] = {"class_type": "LoadImageMask", "inputs": {"image": file_input_name(mask_ref), "channel": "red"}}
+    workflow["9"] = {
         "class_type": "IPAdapterStyleComposition",
         "inputs": required_default_inputs(
             object_info,
             "IPAdapterStyleComposition",
             {
-                "model": ["4", 0],
-                "ipadapter": ["4", 1],
-                "image_style": ["5", 0],
-                "image_composition": ["6", 0],
+                "model": ["1", 0],
+                "ipadapter": ["4", 0],
+                "clip_vision": ["5", 0],
+                "image_style": ["6", 0],
+                "image_composition": ["7", 0],
                 "weight_style": float(args.ipadapter_style_weight),
                 "weight_composition": float(args.ipadapter_composition_weight),
                 "expand_style": False,
@@ -897,7 +1145,7 @@ def build_ipadapter_inpaint_reference(
     if method == "conditioning":
         if not has_node(object_info, "InpaintModelConditioning"):
             raise ProbeError("InpaintModelConditioning is not available on this ComfyUI instance")
-        workflow["9"] = {
+        workflow["10"] = {
             "class_type": "InpaintModelConditioning",
             "inputs": required_default_inputs(
                 object_info,
@@ -906,28 +1154,28 @@ def build_ipadapter_inpaint_reference(
                     "positive": ["2", 0],
                     "negative": ["3", 0],
                     "vae": ["1", 2],
-                    "pixels": ["6", 0],
-                    "mask": ["7", 0],
+                    "pixels": ["7", 0],
+                    "mask": ["8", 0],
                     "noise_mask": bool(args.inpaint_noise_mask),
                 },
             ),
         }
-        positive_ref = ["9", 0]
-        negative_ref = ["9", 1]
-        latent_ref = ["9", 2]
+        positive_ref = ["10", 0]
+        negative_ref = ["10", 1]
+        latent_ref = ["10", 2]
     else:
-        workflow["9"] = {
+        workflow["10"] = {
             "class_type": "VAEEncodeForInpaint",
             "inputs": required_default_inputs(
                 object_info,
                 "VAEEncodeForInpaint",
-                {"pixels": ["6", 0], "mask": ["7", 0], "vae": ["1", 2], "grow_mask_by": 6},
+                {"pixels": ["7", 0], "mask": ["8", 0], "vae": ["1", 2], "grow_mask_by": 6},
             ),
         }
         positive_ref = ["2", 0]
         negative_ref = ["3", 0]
-        latent_ref = ["9", 0]
-    model_ref = maybe_apply_differential_diffusion(args, object_info, workflow, ["8", 0])
+        latent_ref = ["10", 0]
+    model_ref = maybe_apply_differential_diffusion(args, object_info, workflow, ["9", 0])
     sampler_id = str(max(int(item) for item in workflow) + 1)
     workflow[sampler_id] = {
         "class_type": "KSampler",
@@ -1211,6 +1459,197 @@ def diff_metrics(source: Path, output: Path, *, mask: Path | None = None) -> dic
         return payload
 
 
+def latent_aligned_dimensions(expected: tuple[int, int], *, multiple: int = 8) -> tuple[int, int]:
+    """Return the decoded latent size that ComfyUI can actually emit.
+
+    ``ImagePadForOutpaint`` accepts source images whose dimensions are not a
+    multiple of the VAE stride.  The subsequent VAE encode/decode path crops
+    the right/bottom edge to the closest lower latent grid instead of adding
+    pixels.  Treating that documented/observed alignment as a hard failure
+    hid the useful border-quality check behind a false dimension failure.
+    """
+
+    step = max(1, int(multiple or 1))
+    width = max(1, int(expected[0]))
+    height = max(1, int(expected[1]))
+    return (
+        max(step, (width // step) * step),
+        max(step, (height // step) * step),
+    )
+
+
+def expected_dimensions_check(output: Path, expected: tuple[int, int], *, latent_alignment: bool = True) -> dict:
+    actual_stats = image_stats(output)
+    actual = (int(actual_stats["width"]), int(actual_stats["height"]))
+    requested = (int(expected[0]), int(expected[1]))
+    expected = latent_aligned_dimensions(requested) if latent_alignment else requested
+    expected_ratio = expected[0] / max(1, expected[1])
+    actual_ratio = actual[0] / max(1, actual[1])
+    ratio_error = abs(actual_ratio - expected_ratio) / max(expected_ratio, 1e-9)
+    passed = actual == expected and ratio_error <= 0.01
+    return {
+        "id": "expected_dimensions_and_aspect",
+        "passed": passed,
+        "requested": list(requested),
+        "expected": list(expected),
+        "actual": list(actual),
+        "latent_alignment": bool(latent_alignment),
+        "relative_aspect_error": round(ratio_error, 6),
+    }
+
+
+def outpaint_border_check(source: Path, output: Path, padding: dict[str, int]) -> dict:
+    """Reject the common false-green result where outpaint only adds gray canvas."""
+
+    from PIL import Image
+
+    with Image.open(source) as source_raw, Image.open(output) as output_raw:
+        source_size = source_raw.size
+        image = output_raw.convert("RGB")
+        left = max(0, int(padding.get("left", 0)))
+        top = max(0, int(padding.get("top", 0)))
+        right = max(0, int(padding.get("right", 0)))
+        bottom = max(0, int(padding.get("bottom", 0)))
+        requested_size = (source_size[0] + left + right, source_size[1] + top + bottom)
+        expected_size = latent_aligned_dimensions(requested_size)
+        if image.size != expected_size:
+            return {
+                "id": "outpaint_generated_border",
+                "passed": False,
+                "reason": "output dimensions do not match VAE-aligned source plus configured padding",
+                "source_size": list(source_size),
+                "requested_size": list(requested_size),
+                "expected_size": list(expected_size),
+                "actual_size": list(image.size),
+                "padding": {"left": left, "top": top, "right": right, "bottom": bottom},
+            }
+
+        # VAE alignment crops only the trailing edge.  Preserve the requested
+        # left/top offsets and calculate the actually decoded right/bottom
+        # band so seam probes never include source pixels by mistake.
+        effective_right = max(0, image.width - source_size[0] - left)
+        effective_bottom = max(0, image.height - source_size[1] - top)
+        if image.width < left + source_size[0] or image.height < top + source_size[1]:
+            return {
+                "id": "outpaint_generated_border",
+                "passed": False,
+                "reason": "VAE-aligned output no longer contains the requested source placement",
+                "source_size": list(source_size),
+                "requested_size": list(requested_size),
+                "expected_size": list(expected_size),
+                "actual_size": list(image.size),
+                "padding": {"left": left, "top": top, "right": right, "bottom": bottom},
+            }
+
+        # Only inspect the outer half of each newly padded band. Feathering near
+        # the original image is allowed, while untouched ImagePadForOutpaint
+        # canvas remains close to neutral 127/128 gray in these outer strips.
+        probe_boxes = []
+        if top:
+            probe_boxes.append((0, 0, image.width, max(1, top // 2)))
+        if effective_bottom:
+            probe_boxes.append((0, image.height - max(1, effective_bottom // 2), image.width, image.height))
+        middle_top = top
+        middle_bottom = image.height - effective_bottom
+        if left and middle_bottom > middle_top:
+            probe_boxes.append((0, middle_top, max(1, left // 2), middle_bottom))
+        if effective_right and middle_bottom > middle_top:
+            probe_boxes.append((image.width - max(1, effective_right // 2), middle_top, image.width, middle_bottom))
+
+        total = 0
+        gray_placeholder = 0
+        for box in probe_boxes:
+            probe = image.crop(box)
+            pixels = probe.get_flattened_data() if hasattr(probe, "get_flattened_data") else probe.getdata()
+            for red, green, blue in pixels:
+                total += 1
+                channel_spread = max(red, green, blue) - min(red, green, blue)
+                channel_mean = (red + green + blue) / 3.0
+                if channel_spread <= 6 and abs(channel_mean - 127.5) <= 8:
+                    gray_placeholder += 1
+        gray_ratio = gray_placeholder / max(1, total)
+        seam_band = max(1, min(32, min(source_size) // 8))
+        seam_deltas = {}
+
+        def color_mean(box):
+            from PIL import ImageStat
+
+            return ImageStat.Stat(image.crop(box)).mean
+
+        def mean_delta(first, second):
+            return sum(abs(a - b) for a, b in zip(first, second)) / 3.0
+
+        if left:
+            seam_deltas["left"] = mean_delta(
+                color_mean((left - seam_band, top, left, image.height - bottom)),
+                color_mean((left, top, left + seam_band, image.height - bottom)),
+            )
+        if effective_right:
+            boundary = image.width - effective_right
+            seam_deltas["right"] = mean_delta(
+                color_mean((boundary - seam_band, top, boundary, image.height - bottom)),
+                color_mean((boundary, top, boundary + seam_band, image.height - bottom)),
+            )
+        if top:
+            seam_deltas["top"] = mean_delta(
+                color_mean((left, top - seam_band, image.width - right, top)),
+                color_mean((left, top, image.width - right, top + seam_band)),
+            )
+        if effective_bottom:
+            boundary = image.height - effective_bottom
+            seam_deltas["bottom"] = mean_delta(
+                color_mean((left, boundary - seam_band, image.width - right, boundary)),
+                color_mean((left, boundary, image.width - right, boundary + seam_band)),
+            )
+        seam_threshold = 20.0
+        max_seam_delta = max(seam_deltas.values(), default=0.0)
+        return {
+            "id": "outpaint_generated_border",
+            "passed": total > 0 and gray_ratio < 0.80 and max_seam_delta <= seam_threshold,
+            "source_size": list(source_size),
+            "requested_size": list(requested_size),
+            "expected_size": list(expected_size),
+            "actual_size": list(image.size),
+            "padding": {"left": left, "top": top, "right": right, "bottom": bottom},
+            "effective_padding": {"left": left, "top": top, "right": effective_right, "bottom": effective_bottom},
+            "outer_probe_pixels": total,
+            "neutral_gray_placeholder_ratio": round(gray_ratio, 6),
+            "failure_threshold": 0.80,
+            "boundary_mean_rgb_delta": {name: round(value, 3) for name, value in seam_deltas.items()},
+            "max_boundary_mean_rgb_delta": round(max_seam_delta, 3),
+            "seam_failure_threshold": seam_threshold,
+        }
+
+
+def outpaint_center_preservation_check(source: Path, output: Path, padding: dict[str, int], feather: int) -> dict:
+    """Verify that outpaint has not redrawn the protected source interior."""
+
+    from PIL import Image, ImageChops, ImageStat
+
+    with Image.open(source) as source_raw, Image.open(output) as output_raw:
+        source_image = source_raw.convert("RGB")
+        output_image = output_raw.convert("RGB")
+        inset = max(1, min(int(feather), source_image.width // 3, source_image.height // 3))
+        source_crop = source_image.crop((inset, inset, source_image.width - inset, source_image.height - inset))
+        target_crop = output_image.crop((
+            int(padding["left"]) + inset,
+            int(padding["top"]) + inset,
+            int(padding["left"]) + source_image.width - inset,
+            int(padding["top"]) + source_image.height - inset,
+        ))
+        if target_crop.size != source_crop.size:
+            return {"id": "outpaint_source_interior_preserved", "passed": False, "reason": "protected output region has the wrong dimensions"}
+        diff = ImageChops.difference(source_crop, target_crop)
+        mean_delta = sum(ImageStat.Stat(diff).mean) / 3.0
+        return {
+            "id": "outpaint_source_interior_preserved",
+            "passed": mean_delta <= 1.0,
+            "inset": inset,
+            "mean_abs_rgb_delta": round(mean_delta, 4),
+            "failure_threshold": 1.0,
+        }
+
+
 def run_case(client: ComfyClient, args, *, case: dict, workflow: dict, source_path: Path | None, mask_path: Path | None) -> dict:
     started = time.perf_counter()
     out_png = Path(args.out_dir) / f"{case['id']}.png"
@@ -1219,6 +1658,15 @@ def run_case(client: ComfyClient, args, *, case: dict, workflow: dict, source_pa
         "label": case["label"],
         "status": "fail",
         "semantic_expectation": case.get("semantic_expectation", ""),
+        "semantic_verification": {
+            "status": "approved_by_operator" if args.approve_semantic_review else "manual_review_required",
+            "machine_verified": False,
+            "reason": (
+                "operator explicitly approved this semantic review"
+                if args.approve_semantic_review
+                else "workflow completion and numeric image invariants cannot prove prompt-level visual correctness"
+            ),
+        },
         "notes": case.get("notes", ""),
         "started_at": now_iso(),
     }
@@ -1236,13 +1684,33 @@ def run_case(client: ComfyClient, args, *, case: dict, workflow: dict, source_pa
         result["image_stats"] = image_stats(out_png)
         if source_path:
             result["diff_metrics"] = diff_metrics(source_path, out_png, mask=mask_path)
+        automated_checks = []
         if case.get("expect_larger_than_source") and source_path:
             source_stats = image_stats(source_path)
-            result["automated_size_check"] = {
+            automated_checks.append({
+                "id": "larger_than_source",
                 "passed": result["image_stats"]["width"] > source_stats["width"] or result["image_stats"]["height"] > source_stats["height"],
                 "source": {"width": source_stats["width"], "height": source_stats["height"]},
                 "output": {"width": result["image_stats"]["width"], "height": result["image_stats"]["height"]},
-            }
+            })
+        if case.get("expected_dimensions"):
+            automated_checks.append(expected_dimensions_check(out_png, tuple(case["expected_dimensions"])))
+        if case.get("outpaint_padding") and source_path:
+            automated_checks.append(outpaint_border_check(source_path, out_png, case["outpaint_padding"]))
+            if case.get("outpaint_preserve_source"):
+                automated_checks.append(outpaint_center_preservation_check(
+                    source_path,
+                    out_png,
+                    case["outpaint_padding"],
+                    int(case.get("outpaint_source_feather", 1)),
+                ))
+        result["automated_checks"] = automated_checks
+        failed_checks = [item for item in automated_checks if not item.get("passed")]
+        if failed_checks:
+            result["status"] = "fail"
+            result["validation_error"] = "machine image invariant failed: " + ", ".join(
+                str(item.get("id") or "unknown") for item in failed_checks
+            )
     except Exception as exc:
         result["status"] = "fail"
         result["error"] = sanitize_text(exc)
@@ -1270,6 +1738,8 @@ def run_matrix(args) -> dict:
     args.scheduler = scheduler
     checkpoint_options = node_options(object_info, "CheckpointLoaderSimple", "ckpt_name")
     model_name = resolve_choice(args.model, checkpoint_options, label="checkpoint", allow_fallback=True)
+    ipadapter_assets = choose_sdxl_ipadapter_assets(object_info)
+    ipadapter_style_compatible = bool(ipadapter_assets and is_sdxl_checkpoint_name(model_name))
     controlnet = choose_controlnet(object_info, args.controlnet_type, args.controlnet_model)
     summary = {
         "available_nodes": {
@@ -1280,7 +1750,14 @@ def run_matrix(args) -> dict:
                 "VAEEncode",
                 "VAEEncodeForInpaint",
                 "ImagePadForOutpaint",
+                "SolidMask",
+                "FeatherMask",
+                "ImageCompositeMasked",
                 "ImageScale",
+                "IPAdapterUnifiedLoader",
+                "IPAdapterModelLoader",
+                "CLIPVisionLoader",
+                "IPAdapterStyleComposition",
                 "ControlNetLoader",
                 "ControlNetApplyAdvanced",
                 "UpscaleModelLoader",
@@ -1289,6 +1766,14 @@ def run_matrix(args) -> dict:
         },
         "checkpoint_count": len(checkpoint_options),
         "checkpoint_resolved": model_name,
+        "ipadapter_style_composition": {
+            "compatible": ipadapter_style_compatible,
+            "assets": ipadapter_assets or {},
+            "reason": "" if ipadapter_style_compatible else (
+                "IPAdapter Style & Composition requires an explicitly identified SDXL checkpoint, "
+                "an SDXL adapter file, and a matching ViT-H CLIP Vision model."
+            ),
+        },
         "sampler": sampler,
         "scheduler": scheduler,
         "controlnet": controlnet or {},
@@ -1307,6 +1792,7 @@ def run_matrix(args) -> dict:
         "capabilities": summary,
         "cases": [],
         "skips": [],
+        "verification_scope": "workflow execution plus explicit machine image invariants; prompt-level semantics require visual review",
         "backend_generalization": {
             "diffusers": (
                 "Generic HF Diffusers can cover txt2img/img2img/inpaint when a repo exposes compatible Diffusers "
@@ -1322,19 +1808,23 @@ def run_matrix(args) -> dict:
         "unsupported_or_template_only": [
             "True separate-reference style imitation needs IPAdapter/reference/Redux-style nodes or a workflow template; shortcut img2img can only restyle the source image by prompt and denoise.",
             "True separate-reference feature imitation/faces/identity transfer needs reference/adapter nodes and is not a generic shortcut.",
-            "Prompt-guided blending of two images is not available in the current shortcut builder; it should be a workflow-template feature.",
+            "Prompt-guided multi-image blending requires IPAdapter/reference nodes or an imported workflow template; direct ImageBlend pixel overlays are rejected as semantically misleading.",
             "The project shortcut upscale path is pure model upscaling. This matrix tests redraw-upscale as a custom ComfyUI workflow via ImageScale + VAEEncode + KSampler.",
         ],
     }
     prompts = case_prompt_suite(args)
 
     source_path = out_dir / "source_t2i_reference.png"
+    imported_source = Path(str(args.source_image_path or "")).expanduser() if args.source_image_path else None
     source_case = {
         "id": "source_t2i_reference",
-        "label": "Reference txt2img source",
-        "semantic_expectation": "Generate a beach cat-girl source image with a visible editable object region.",
+        "label": "Imported existing source image" if imported_source else "Reference txt2img source",
+        "semantic_expectation": (
+            "Preserve the imported source bytes and dimensions before starting I2I operations."
+            if imported_source
+            else "Generate a beach cat-girl source image with a visible editable object region."
+        ),
     }
-    imported_source = Path(str(args.source_image_path or "")).expanduser() if args.source_image_path else None
     if imported_source:
         if not imported_source.is_file():
             raise ProbeError(f"--source-image-path does not exist: {imported_source}")
@@ -1378,6 +1868,9 @@ def run_matrix(args) -> dict:
         report["ok"] = False
         return report
 
+    source_image_stats = image_stats(source_path)
+    source_size = (int(source_image_stats["width"]), int(source_image_stats["height"]))
+    report["source_dimensions"] = {"width": source_size[0], "height": source_size[1]}
     source_ref = client.upload_image(source_path, overwrite=True)
     report["artifacts"]["uploaded_source_ref"] = source_ref
     blend_ref = None
@@ -1455,7 +1948,7 @@ def run_matrix(args) -> dict:
     mask_ref = None
     if inpaint_enabled:
         mask_path = out_dir / "inpaint_mask_alpha.png"
-        create_mask(mask_path, args.width, args.height, shape=args.mask_shape)
+        create_mask(mask_path, source_size[0], source_size[1], shape=args.mask_shape)
         report["artifacts"]["mask"] = str(mask_path)
         mask_ref = client.upload_image(mask_path, overwrite=True)
         report["artifacts"]["uploaded_mask_ref"] = mask_ref
@@ -1491,20 +1984,51 @@ def run_matrix(args) -> dict:
                 prefix="hackme_i2i_inpaint_replace",
             ),
         })
-    if case_enabled(args, "outpaint_expand_beach"):
+    outpaint_nodes = "ImagePadForOutpaint" in object_info and (
+        not args.outpaint_preserve_source
+        or all(name in object_info for name in ("SolidMask", "FeatherMask", "ImageCompositeMasked"))
+    )
+    if outpaint_nodes and case_enabled(args, "outpaint_expand_beach"):
+        padding = outpaint_padding(args)
         cases.append({
             "id": "outpaint_expand_beach",
             "label": "outpainting",
-            "semantic_expectation": "Extend the beach/ocean/sky beyond the original square without obvious borders.",
+            "semantic_expectation": "Extend the scene beyond the original image without neutral-gray padding or obvious borders.",
             "expect_larger_than_source": True,
+            "outpaint_padding": padding,
+            "outpaint_source_feather": int(args.outpaint_source_feather),
+            "outpaint_preserve_source": bool(args.outpaint_preserve_source),
+            "outpaint_method": selected_outpaint_method(args, object_info),
+            "outpaint_seam_prefill": outpaint_seam_prefill_enabled(args, object_info),
+            "expected_dimensions": (
+                source_size[0] + padding["left"] + padding["right"],
+                source_size[1] + padding["top"] + padding["bottom"],
+            ),
             "workflow": build_outpaint(
                 args,
                 object_info,
                 model_name,
                 source_ref=source_ref,
+                source_size=source_size,
                 prompt=prompts["outpaint"],
                 prefix="hackme_i2i_outpaint",
             ),
+        })
+    elif case_enabled(args, "outpaint_expand_beach"):
+        missing = [
+            name
+            for name in (
+                ("ImagePadForOutpaint", "SolidMask", "FeatherMask", "ImageCompositeMasked")
+                if args.outpaint_preserve_source
+                else ("ImagePadForOutpaint",)
+            )
+            if name not in object_info
+        ]
+        if args.only_case:
+            raise ProbeError(f"outpaint requires seam-safe masking nodes: {', '.join(missing)}")
+        report["skips"].append({
+            "id": "outpaint_expand_beach",
+            "reason": f"Seam-safe source preservation nodes are missing: {', '.join(missing)}",
         })
     if controlnet and case_enabled(args, f"controlnet_copy_composition_{safe_name(controlnet['type'])}"):
         control_case = dict(controlnet)
@@ -1527,28 +2051,31 @@ def run_matrix(args) -> dict:
     elif not args.only_case:
         report["skips"].append({"id": "controlnet_copy_composition", "reason": "No compatible ControlNet loader/model/preprocessor combination was detected."})
     if "ImageScale" in object_info and case_enabled(args, "upscale_redraw_imagescale"):
+        upscale_size = scaled_dimensions(*source_size, float(args.upscale_factor))
         cases.append({
             "id": "upscale_redraw_imagescale",
             "label": "upscale redraw",
             "semantic_expectation": "Scale up the source and run a low-denoise redraw to add detail while preserving the scene.",
             "expect_larger_than_source": True,
+            "expected_dimensions": upscale_size,
             "workflow": build_upscale_redraw(
                 args,
                 object_info,
                 model_name,
                 source_ref=source_ref,
+                source_size=source_size,
                 prompt=prompts["upscale_redraw"],
                 prefix="hackme_i2i_upscale_redraw",
             ),
         })
     elif not args.only_case:
         report["skips"].append({"id": "upscale_redraw", "reason": "ImageScale is missing, so redraw-upscale cannot be built without an upscaler model/template."})
-    if "ImageBlend" in object_info and blend_ref and case_enabled(args, "two_image_blend_mix"):
+    if ipadapter_style_compatible and blend_ref and case_enabled(args, "two_image_blend_mix"):
         cases.append({
             "id": "two_image_blend_mix",
-            "label": "two-image blend and redraw",
-            "semantic_expectation": "Blend the source image with a second reference and redraw a coherent single image.",
-            "notes": "This tests ImageBlend + low-denoise redraw. It is not a full IPAdapter/reference-image semantic blend.",
+            "label": "two-image semantic blend and redraw",
+            "semantic_expectation": "Use the second image as a semantic/style reference while preserving one coherent source composition.",
+            "notes": "Uses IPAdapter style/composition conditioning; direct pixel ImageBlend is intentionally forbidden because it produces ghosted double exposures.",
             "workflow": build_two_image_blend(
                 args,
                 object_info,
@@ -1562,10 +2089,10 @@ def run_matrix(args) -> dict:
     elif not args.only_case:
         report["skips"].append({
             "id": "two_image_blend",
-            "reason": "ImageBlend is missing or no --blend-image-path was provided. Prompt-guided multi-image semantic blend should be handled by an imported workflow template.",
+            "reason": "A compatible explicit SDXL IPAdapter/CLIP Vision pair was not available, the selected checkpoint is not explicitly SDXL, or no --blend-image-path was provided; direct pixel ImageBlend is not accepted as a semantic blend.",
         })
     if (
-        all(name in object_info for name in ("IPAdapterUnifiedLoader", "IPAdapterStyleComposition"))
+        ipadapter_style_compatible
         and style_ref
         and case_enabled(args, "ipadapter_style_reference")
     ):
@@ -1587,10 +2114,10 @@ def run_matrix(args) -> dict:
     elif not args.only_case:
         report["skips"].append({
             "id": "ipadapter_style_reference",
-            "reason": "IPAdapter style/reference nodes are missing or no --style-image-path was provided.",
+            "reason": "A compatible explicit SDXL IPAdapter/CLIP Vision pair was not available, the selected checkpoint is not explicitly SDXL, or no --style-image-path was provided.",
         })
     if (
-        all(name in object_info for name in ("IPAdapterUnifiedLoader", "IPAdapterStyleComposition"))
+        ipadapter_style_compatible
         and style_ref
         and mask_ref
         and case_enabled(args, "ipadapter_inpaint_reference")
@@ -1615,7 +2142,7 @@ def run_matrix(args) -> dict:
     elif not args.only_case:
         report["skips"].append({
             "id": "ipadapter_inpaint_reference",
-            "reason": "IPAdapter nodes, style image, or inpaint mask are missing.",
+            "reason": "A compatible explicit SDXL IPAdapter/CLIP Vision pair, style image, or inpaint mask is missing.",
         })
     if args.only_case and not cases:
         raise ProbeError(f"--only-case did not match a runnable case: {args.only_case}")
@@ -1628,7 +2155,14 @@ def run_matrix(args) -> dict:
         write_json(Path(args.out_json), report)
 
     failed = [case for case in report["cases"] if case.get("status") != "pass"]
-    report["ok"] = not failed
+    report["technical_ok"] = not failed
+    report["semantic_review_required_cases"] = [
+        case["id"]
+        for case in report["cases"]
+        if (case.get("semantic_verification") or {}).get("status") == "manual_review_required"
+    ]
+    report["semantic_ok"] = not report["semantic_review_required_cases"]
+    report["ok"] = report["technical_ok"] and report["semantic_ok"]
     report["finished_at"] = now_iso()
     return report
 
@@ -1658,9 +2192,24 @@ def parse_args(argv=None):
     parser.add_argument("--outpaint-top", type=int, default=None)
     parser.add_argument("--outpaint-right", type=int, default=None)
     parser.add_argument("--outpaint-bottom", type=int, default=None)
-    parser.add_argument("--outpaint-feathering", type=int, default=48)
-    parser.add_argument("--outpaint-denoise", type=float, default=0.90)
+    parser.add_argument("--outpaint-feathering", type=int, default=64)
+    parser.add_argument("--outpaint-source-feather", type=int, default=128, help="Legacy source-composite feather pixels; used only when --outpaint-preserve-source is explicitly enabled.")
+    parser.add_argument("--outpaint-seam-prefill", choices=("auto", "on", "off"), default="off", help="Experimental: use the installed pixel-space inpaint model to replace gray outpaint padding before latent sampling. Disabled by default until visually validated for the selected model.")
+    parser.add_argument("--outpaint-prefill-model", default="MAT_Places512_G_fp16.safetensors", help="Installed pixel-space inpaint model used by --outpaint-seam-prefill.")
+    parser.add_argument(
+        "--outpaint-preserve-source",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Legacy compatibility option: composite the opaque source rectangle back after sampling. "
+            "Disabled by default because studio/flat source backgrounds can create a visible rectangular seam; "
+            "prefer the fully blended or semantic outpaint workflow."
+        ),
+    )
+    parser.add_argument("--approve-semantic-review", action="store_true", help="Record operator approval for the visual semantics of all generated cases; without this, a technical run is not overall green.")
+    parser.add_argument("--outpaint-denoise", type=float, default=1.0, help="Denoise used for the extended canvas; full redraw uses 1.0 so neutral padding cannot survive.")
     parser.add_argument("--inpaint-method", choices=("auto", "conditioning", "vae_encode"), default="auto")
+    parser.add_argument("--outpaint-method", choices=("auto", "full_redraw", "conditioning", "vae_encode"), default="auto", help="Sampling path for outpaint. Auto uses a fully blended redraw so generic checkpoints replace gray padding; choose a masked method for a dedicated inpaint checkpoint.")
     parser.add_argument("--inpaint-noise-mask", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--differential-diffusion", action="store_true")
     parser.add_argument("--differential-strength", type=float, default=1.0)
@@ -1722,6 +2271,9 @@ def main(argv=None) -> int:
             "out_dir": str(Path(args.out_dir).expanduser().resolve()),
             "passed": sum(1 for item in report.get("cases", []) if item.get("status") == "pass"),
             "failed": sum(1 for item in report.get("cases", []) if item.get("status") == "fail"),
+            "technical_ok": report.get("technical_ok"),
+            "semantic_ok": report.get("semantic_ok"),
+            "semantic_review_required": report.get("semantic_review_required_cases", []),
             "skipped": len(report.get("skips", [])),
             "error": report.get("error"),
         }, ensure_ascii=False, indent=2))

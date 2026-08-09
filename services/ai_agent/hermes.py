@@ -3,6 +3,8 @@ import ipaddress
 import os
 import re
 import sqlite3
+import subprocess
+import tempfile
 import threading
 from collections import Counter
 from collections.abc import Mapping
@@ -73,6 +75,9 @@ AI_AGENT_AUDIT_BLOCK_MINUTES_DEFAULT = 30
 AI_AGENT_AUDIT_NOTIFY_ROOT_DEFAULT = False
 AI_AGENT_AUDIT_IP_EVENT_RATE_MAX_PER_MIN = 10000
 AI_AGENT_AUDIT_SECURITY_EVENT_RATE_MAX_PER_MIN = 10000
+WINDOWS_OLLAMA_CURL_PATH = "/mnt/c/Windows/System32/curl.exe"
+WINDOWS_OLLAMA_DIRECT_PORT = 11434
+WINDOWS_OLLAMA_WSL_BRIDGE_PORT = 11435
 KNOWN_MOCK_CHAT_REPLIES = {
     "mockhermesresponse已收到你的請求",
     "mockhermesresponse已收到你的请求",
@@ -444,7 +449,7 @@ AI_AGENT_TOOL_BLUEPRINT = {
     },
     "write_launch_preflight_execute": {
         "label": "執行上線前檢查",
-        "description": "root 專用白名單工具：執行 requirements、log chain、AI audit scan，整理阻塞原因與後續指令；預設只 dry-run，明確 GO_LIVE 時才切換 production。",
+        "description": "root 專用白名單工具：執行選用的 requirements、log chain、AI audit scan，整理建議與後續指令；預設只 dry-run，明確 GO_LIVE 時才切換 production。",
         "min_role": "super_admin",
         "data_scope": "write_tool:launch_check",
     },
@@ -1303,6 +1308,128 @@ def _backend_headers(settings, *, session_key=""):
     return headers
 
 
+def _windows_ollama_proxy_enabled():
+    """Whether the WSL-only local Ollama fallback is explicitly enabled."""
+
+    value = str(os.environ.get("HACKME_AI_AGENT_WINDOWS_OLLAMA_PROXY", "1") or "").strip().lower()
+    return value not in {"0", "false", "off", "no", "disabled"}
+
+
+def _windows_ollama_proxy_url(url, headers):
+    """Return the fixed Windows-local Ollama URL allowed for a fallback.
+
+    WSL mirrored networking can isolate Linux loopback from Windows loopback.
+    Do not turn the Windows curl executable into a generic network proxy: the
+    fallback accepts only the local OpenAI-compatible Ollama endpoint.  It
+    also accepts the fixed WSL bridge origin and maps it to the Windows direct
+    origin, so an agent request can still complete if that convenience bridge
+    has been restarted.  Credentialed requests are refused because headers
+    would otherwise be visible in the spawned process command line.
+    """
+
+    if not _windows_ollama_proxy_enabled() or os.name == "nt":
+        return None
+    if not os.path.isfile(WINDOWS_OLLAMA_CURL_PATH):
+        return None
+    parsed = urlparse(str(url or ""))
+    host = str(parsed.hostname or "").strip().lower()
+    path = str(parsed.path or "")
+    if parsed.scheme != "http" or host not in {"127.0.0.1", "localhost", "::1"}:
+        return None
+    if parsed.params or parsed.query or parsed.fragment or not path.startswith("/v1/"):
+        return None
+    if any(str(key).lower() == "authorization" for key in (headers or {})):
+        return None
+    if parsed.port in {None, WINDOWS_OLLAMA_DIRECT_PORT}:
+        return str(url)
+    if parsed.port == WINDOWS_OLLAMA_WSL_BRIDGE_PORT:
+        return f"http://127.0.0.1:{WINDOWS_OLLAMA_DIRECT_PORT}{path}"
+    return None
+
+
+def _is_windows_ollama_proxy_target(url, headers):
+    """Whether ``url`` is eligible for the tightly scoped Windows fallback."""
+
+    return _windows_ollama_proxy_url(url, headers) is not None
+
+
+def _windows_ollama_proxy_json(url, method, body, headers, *, timeout):
+    """Issue one bounded local Ollama request through Windows curl from WSL."""
+
+    proxy_url = _windows_ollama_proxy_url(url, headers)
+    if not proxy_url:
+        return None
+    effective_timeout = max(1, min(600, int(timeout or 1)))
+    command = [
+        WINDOWS_OLLAMA_CURL_PATH,
+        "--noproxy", "*",
+        "--silent",
+        "--show-error",
+        "--connect-timeout", str(min(5, effective_timeout)),
+        "--max-time", str(effective_timeout),
+        "-X", str(method or "GET").upper(),
+        proxy_url,
+    ]
+    for key, value in (headers or {}).items():
+        if str(key).lower() == "authorization":
+            continue
+        command.extend(["-H", f"{key}: {value}"])
+    payload_path = ""
+    try:
+        if body is not None:
+            # WSL stdin pipes are not reliably inherited by Windows executables
+            # in every hosting mode.  A short-lived WSL file converted to a
+            # Windows UNC path is reliable and never places request data on a
+            # command line.
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                prefix="hackme_ai_agent_ollama_",
+                suffix=".json",
+                delete=False,
+            ) as stream:
+                stream.write(body)
+                payload_path = stream.name
+            path_result = subprocess.run(
+                ["wslpath", "-w", payload_path],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=5,
+                check=False,
+            )
+            windows_payload_path = bytes(path_result.stdout or b"").decode("utf-8", "replace").strip()
+            if path_result.returncode != 0 or not windows_payload_path:
+                detail = bytes(path_result.stderr or b"").decode("utf-8", "replace").strip()
+                raise AiAgentError(f"Windows Ollama bridge 無法建立 payload 路徑：{detail or path_result.returncode}")
+            command.extend(["--data-binary", f"@{windows_payload_path}"])
+        result = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=effective_timeout + 3,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise AiAgentError(f"Windows Ollama bridge 無法連線：{exc}") from exc
+    finally:
+        if payload_path:
+            try:
+                os.unlink(payload_path)
+            except OSError:
+                pass
+    raw = bytes(result.stdout or b"")
+    if len(raw) > 10 * 1024 * 1024:
+        raise AiAgentError("Windows Ollama bridge 回應超過大小上限")
+    if result.returncode != 0:
+        detail = bytes(result.stderr or b"").decode("utf-8", "replace").strip()
+        raise AiAgentError(f"Windows Ollama bridge 請求失敗：{detail or result.returncode}")
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except json.JSONDecodeError as exc:
+        raise AiAgentError(f"Windows Ollama bridge 回傳不是有效 JSON：{exc}") from exc
+
+
 def _json_request(settings, method, path, payload=None, *, session_key="", timeout=None):
     base_url = _backend_base_url(settings)
     url = urljoin(base_url.rstrip("/") + "/", path.lstrip("/"))
@@ -1312,6 +1439,7 @@ def _json_request(settings, method, path, payload=None, *, session_key="", timeo
     body = None
     if payload is not None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    request_headers = _backend_headers(settings, session_key=session_key)
     max_attempts = 3
     last_transient_error = None
 
@@ -1322,7 +1450,7 @@ def _json_request(settings, method, path, payload=None, *, session_key="", timeo
         req = urllib_request.Request(
             url,
             data=body,
-            headers=_backend_headers(settings, session_key=session_key),
+            headers=request_headers,
             method=method.upper(),
         )
         try:
@@ -1381,6 +1509,15 @@ def _json_request(settings, method, path, payload=None, *, session_key="", timeo
         except TimeoutError as exc:
             raise AiAgentError(str(exc)) from exc
         except (urllib_error.URLError, OSError) as exc:
+            bridged_payload = _windows_ollama_proxy_json(
+                url,
+                method,
+                body,
+                request_headers,
+                timeout=max(1, min(effective_timeout, remaining)),
+            )
+            if bridged_payload is not None:
+                return bridged_payload
             retryable = attempt + 1 < max_attempts and monotonic() < deadline
             if retryable:
                 last_transient_error = exc

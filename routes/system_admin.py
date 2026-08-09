@@ -8,6 +8,7 @@ import sys
 import threading
 import time
 import uuid
+from copy import deepcopy
 from collections import deque
 from datetime import datetime
 from flask import request, send_file
@@ -83,6 +84,55 @@ from services.server.runtime import default_runtime_root
 
 SECURITY_TEST_JOBS = {}
 SECURITY_TEST_JOBS_LOCK = threading.Lock()
+
+
+class _AuditIntegritySummaryCache:
+    """Coalesce concurrent full audit checks within one Gunicorn worker.
+
+    The audit verifier intentionally scans the entire hash chain.  A bounded
+    per-worker TTL prevents a burst of readiness requests from starting the
+    same expensive scan many times.  The dedicated audit-chain endpoint can
+    still force an immediate complete verification.
+    """
+
+    def __init__(self, ttl_seconds=30.0):
+        self.ttl_seconds = max(0.0, float(ttl_seconds or 0.0))
+        self._lock = threading.Lock()
+        self._checked_at = 0.0
+        self._value = None
+
+    def get_or_compute(self, compute, *, force_refresh=False):
+        now = time.monotonic()
+        with self._lock:
+            if (
+                not force_refresh
+                and self._value is not None
+                and now - self._checked_at < self.ttl_seconds
+            ):
+                return deepcopy(self._value)
+            value = deepcopy(compute())
+            self._value = value
+            self._checked_at = time.monotonic()
+            return deepcopy(value)
+
+    def freshness(self):
+        """Return cache timing metadata without exposing the cached result."""
+
+        with self._lock:
+            if self._value is None:
+                return {
+                    "cached": False,
+                    "cache_age_seconds": None,
+                    "cache_max_age_seconds": round(self.ttl_seconds, 3),
+                }
+            return {
+                "cached": True,
+                "cache_age_seconds": round(
+                    max(0.0, time.monotonic() - self._checked_at),
+                    3,
+                ),
+                "cache_max_age_seconds": round(self.ttl_seconds, 3),
+            }
 
 
 GIT_BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,119}$")
@@ -324,6 +374,30 @@ def register_system_admin_routes(app, deps):
     snapshot_service = deps.get("snapshot_service")
     integrity_guard = deps.get("integrity_guard")
     verify_audit_integrity = deps["verify_audit_integrity"]
+    try:
+        audit_readiness_cache_seconds = float(
+            os.environ.get("HACKME_AUDIT_READINESS_CACHE_SECONDS", "30")
+        )
+    except (TypeError, ValueError):
+        audit_readiness_cache_seconds = 30.0
+    audit_readiness_cache = _AuditIntegritySummaryCache(
+        min(300.0, max(0.0, audit_readiness_cache_seconds))
+    )
+    try:
+        admin_status_cache_seconds = float(
+            os.environ.get("HACKME_ADMIN_STATUS_CACHE_SECONDS", "5")
+        )
+    except (TypeError, ValueError):
+        admin_status_cache_seconds = 5.0
+    # The readiness and security-center views fan out into multiple database,
+    # filesystem, audit, and status checks.  They are operator dashboards, not
+    # authorization controls: a short per-worker snapshot prevents a browser
+    # polling burst from repeatedly rebuilding the same expensive report and
+    # starving actual write traffic.  Security enforcement continues to use
+    # fresh settings on each protected request.
+    admin_status_cache_seconds = min(30.0, max(1.0, admin_status_cache_seconds))
+    admin_readiness_cache = _AuditIntegritySummaryCache(admin_status_cache_seconds)
+    security_center_cache = _AuditIntegritySummaryCache(admin_status_cache_seconds)
 
     def _notify_root(type, title, body, *, link="/security", once=False):
         conn = get_db()
@@ -1069,7 +1143,7 @@ def register_system_admin_routes(app, deps):
             "path": path,
         }
 
-    def audit_integrity_summary():
+    def audit_integrity_summary(*, force_refresh=False):
         audit_enabled = is_audit_chain_enabled()
         if not audit_enabled:
             return {
@@ -1080,15 +1154,28 @@ def register_system_admin_routes(app, deps):
                 "operator_action_required": False,
                 "auto_lockdown_applied": False,
             }
-        audit_ok, audit_broken, audit_details = verify_audit_integrity()
-        return {
-            "enabled": True,
-            "ok": audit_ok,
-            "broken_at": audit_broken,
-            "details": audit_details,
-            "operator_action_required": audit_ok is False,
-            "auto_lockdown_applied": False,
+
+        def verify_summary():
+            audit_ok, audit_broken, audit_details = verify_audit_integrity()
+            return {
+                "enabled": True,
+                "ok": audit_ok,
+                "broken_at": audit_broken,
+                "details": audit_details,
+                "operator_action_required": audit_ok is False,
+                "auto_lockdown_applied": False,
+            }
+
+        summary = audit_readiness_cache.get_or_compute(
+            verify_summary,
+            force_refresh=force_refresh,
+        )
+        summary["verification"] = {
+            "scope": "full_chain_and_latest_anchor",
+            "force_refresh": bool(force_refresh),
+            **audit_readiness_cache.freshness(),
         }
+        return summary
 
     def db_integrity_summary():
         conn = get_db()
@@ -1335,22 +1422,30 @@ def register_system_admin_routes(app, deps):
             conn.close()
 
     def security_center_payload():
-        settings = get_system_settings()
-        log_lines = int(settings.get("security_log_tail_lines", 200) or 200)
-        audit_state = audit_integrity_summary()
-        return {
-            "readiness": readiness_summary(db=db_schema_summary(), audit_state=audit_state),
-            "anomaly": anomaly_summary(audit_state=audit_state),
-            "audit_integrity": audit_state,
-            "audit_entries": recent_secure_audit(50),
-            "server_log": tail_file(SERVER_LOG_PATH, log_lines),
-            "server_output": get_server_output(limit=log_lines),
-            "settings": {key: settings.get(key) for key in SECURITY_SETTING_KEYS},
-            "thresholds": {key: settings.get(key) for key in SECURITY_THRESHOLD_KEYS},
-            "features": get_feature_settings(),
-            "mode": server_mode_service.get_current_mode() if server_mode_service else None,
-            "profiles": server_mode_service.list_profiles() if server_mode_service else [],
-        }
+        def build_payload():
+            settings = get_system_settings()
+            log_lines = int(settings.get("security_log_tail_lines", 200) or 200)
+            audit_state = audit_integrity_summary()
+            return {
+                "readiness": readiness_summary(db=db_schema_summary(), audit_state=audit_state),
+                "anomaly": anomaly_summary(audit_state=audit_state),
+                "audit_integrity": audit_state,
+                "audit_entries": recent_secure_audit(50),
+                "server_log": tail_file(SERVER_LOG_PATH, log_lines),
+                "server_output": get_server_output(limit=log_lines),
+                "settings": {key: settings.get(key) for key in SECURITY_SETTING_KEYS},
+                "thresholds": {key: settings.get(key) for key in SECURITY_THRESHOLD_KEYS},
+                "features": get_feature_settings(),
+                "mode": server_mode_service.get_current_mode() if server_mode_service else None,
+                "profiles": server_mode_service.list_profiles() if server_mode_service else [],
+            }
+
+        return security_center_cache.get_or_compute(build_payload)
+
+    def cached_readiness_summary():
+        return admin_readiness_cache.get_or_compute(
+            lambda: readiness_summary(db=db_schema_summary())
+        )
 
     def security_profile_payload(data):
         settings = data.get("settings") or {}
@@ -1466,6 +1561,7 @@ def register_system_admin_routes(app, deps):
         "save_feature_settings": save_feature_settings,
         "save_settings": save_settings,
         "schedule_server_restart": schedule_server_restart,
+        "cached_readiness_summary": cached_readiness_summary,
         "security_center_payload": security_center_payload,
         "security_profile_payload": security_profile_payload,
         "security_test_job_payload": _security_test_job_payload,

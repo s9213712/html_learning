@@ -121,6 +121,24 @@ def test_contaminated_after_app_limit_round_is_not_recommended():
     assert recommendation["threads"] == 6
 
 
+def test_recommendation_reserves_high_end_threads_for_fast_lane_work():
+    recommendation = probe.choose_recommendation(
+        [{
+            "profile": {"workers": 1, "threads": 160, "label": "1x160"},
+            "rounds": [{
+                "accounts": 128,
+                "contaminated_after_app_limit": False,
+                "probe": _probe_summary(),
+            }],
+        }],
+        _args(),
+    )
+
+    assert recommendation["workers"] == 1
+    assert recommendation["threads"] == 160
+    assert recommendation["suggested_env"]["HTML_LEARNING_BACKPRESSURE_THREAD_CAPACITY"] == "130"
+
+
 def test_hls_recommendation_uses_external_ffmpeg_multicore_without_expanding_web_workers(monkeypatch):
     monkeypatch.setattr(probe.os, "cpu_count", lambda: 24)
     args = _args(target_p95_ms=1500, capacity_tier="highend")
@@ -343,3 +361,5 @@ def test_capacity_server_launcher_keeps_credentials_out_of_argv(monkeypatch, tmp
     assert captured["env"]["ROOT_PASSWORD"] == "capacity-root-secret"
     assert captured["env"]["MANAGER_PASSWORD"] == "capacity-manager-secret"
     assert captured["env"]["TEST_PASSWORD"] == "capacity-test-secret"
+    assert captured["env"]["HACKME_CAPACITY_PROBE_UNLIMITED"] == "1"
+    assert captured["env"]["HACKME_EDGE_BURST_GUARD_ENABLED"] == "0"
