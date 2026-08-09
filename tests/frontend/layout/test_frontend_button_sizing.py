@@ -89,6 +89,20 @@ def test_chat_action_buttons_meet_wcag_touch_target_size():
     assert "outline: 2px solid var(--accent);" in focus
 
 
+def test_all_mobile_form_controls_meet_44px_touch_target():
+    css = (ROOT / "public" / "styles.css").read_text(encoding="utf-8")
+    mobile_targets = css.split(
+        "/* Keep every mobile control at the shared 44px accessibility target. */",
+        1,
+    )[1]
+
+    assert "@media (max-width: 768px)" in mobile_targets
+    assert "min-height: 44px !important;" in mobile_targets
+    assert "min-width: 44px !important;" in mobile_targets
+    assert 'input[type="checkbox"]' in mobile_targets
+    assert 'input[type="radio"]' in mobile_targets
+
+
 def test_root_quick_settings_button_meets_touch_target_size():
     css = (ROOT / "public" / "styles.css").read_text(encoding="utf-8")
     root_settings = _block(css, ".root-module-settings-btn {")

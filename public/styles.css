@@ -16632,3 +16632,32 @@
     max-width: 100%;
   }
 }
+
+/* Keep every mobile control at the shared 44px accessibility target. */
+@media (max-width: 768px) {
+  button,
+  a.btn,
+  input,
+  select,
+  textarea {
+    box-sizing: border-box;
+    min-height: 44px !important;
+  }
+
+  button,
+  a.btn,
+  input[type="button"],
+  input[type="submit"],
+  input[type="reset"],
+  input[type="checkbox"],
+  input[type="radio"],
+  input[type="color"] {
+    min-width: 44px !important;
+  }
+
+  input[type="checkbox"],
+  input[type="radio"] {
+    width: 44px;
+    height: 44px;
+  }
+}

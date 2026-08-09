@@ -140,7 +140,7 @@ def register_system_admin_runtime_routes(app, ctx):
             result["pre_reset_points_block"] = pre_reset_points_block
         if result.get("ok"):
             try:
-                restart = schedule_server_restart(reason="system-reset", delay_seconds=1.25)
+                restart = schedule_server_restart(reason="system-reset", delay_seconds=3.0)
             except Exception as exc:
                 result["restart_scheduled"] = False
                 result["restart_error"] = str(exc)
@@ -887,7 +887,7 @@ def register_system_admin_runtime_routes(app, ctx):
             detail=f"initiated by admin reason={reason[:200]}",
         )
         try:
-            restart = schedule_server_restart(reason=reason, delay_seconds=1.25)
+            restart = schedule_server_restart(reason=reason, delay_seconds=3.0)
         except Exception as exc:
             return json_resp({"ok":False,"msg":"重啟排程失敗","error":str(exc)}), 500
         return json_resp({"ok":True,"msg":"服務器正在重啟，請稍後重新整理頁面","restart_scheduled":True,"restart":restart})

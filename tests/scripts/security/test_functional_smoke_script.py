@@ -67,6 +67,7 @@ def test_functional_smoke_waits_for_reset_restart_reconnect():
 
     assert 'RESET_OFFLINE_TIMEOUT="${RESET_OFFLINE_TIMEOUT:-20}"' in script
     assert 'RESET_RECONNECT_TIMEOUT="${RESET_RECONNECT_TIMEOUT:-180}"' in script
+    assert 'START_TIMEOUT="${START_TIMEOUT:-180}"' in script
     assert "wait_for_restart_reconnect()" in script
     assert 'server_started_at "$RAW_DIR/reset_before_version.json"' in script
     assert 'request "server reset runtime state"' in script
@@ -83,6 +84,15 @@ def test_functional_smoke_waits_for_reset_restart_reconnect():
     assert 'HACKME_RUNTIME_DIR="$RUNTIME_ROOT"' in script
     assert "ensure_start_port || return 1" in script
     assert "refresh_base_url()" in script
+
+
+def test_functional_smoke_uses_valid_bounded_custom_profile_name():
+    script = SCRIPT.read_text(encoding="utf-8")
+
+    assert 'SMOKE_PROFILE_NAME="smoke_${BASHPID}"' in script
+    assert '\\\"name\\\":\\\"${SMOKE_PROFILE_NAME}\\\"' in script
+    assert '\\\"mode\\\":\\\"${SMOKE_PROFILE_NAME}\\\"' in script
+    assert "smoke_profile_${RUN_ID,,}" not in script
 
 
 def test_functional_smoke_has_explicit_qa_full_and_core_only_modes():

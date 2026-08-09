@@ -2690,7 +2690,7 @@ def test_daily_snapshot_and_reset_api_are_root_only():
     reset_data = reset.get_json()
     assert reset_data["pre_reset_snapshot_id"] == "snap_20260427_153000_abcdef"
     assert reset_data["restart_scheduled"] is True
-    assert restart_calls == [{"reason": "system-reset", "delay_seconds": 1.25}]
+    assert restart_calls == [{"reason": "system-reset", "delay_seconds": 3.0}]
 
     actor_box["actor"] = {"id": 2, "username": "admin", "role": "manager"}
     denied = client.post("/api/admin/system-reset", json={"confirm": "RESET_RUNTIME_STATE"})
@@ -2708,7 +2708,7 @@ def test_manual_restart_uses_restart_scheduler():
     data = res.get_json()
     assert data["ok"] is True
     assert data["restart_scheduled"] is True
-    assert restart_calls == [{"reason": "manual-restart", "delay_seconds": 1.25}]
+    assert restart_calls == [{"reason": "manual-restart", "delay_seconds": 3.0}]
 
 
 def test_restart_launcher_waits_for_parent_exit_and_port_release():
