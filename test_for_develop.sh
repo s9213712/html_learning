@@ -3690,16 +3690,53 @@ server_probe_host() {
 
 wait_for_server_url() {
   command -v curl >/dev/null 2>&1 || return 1
+  local ready_timeout="${HACKME_DEV_SERVER_READY_TIMEOUT_SECONDS:-600}"
+  [[ "$ready_timeout" =~ ^[0-9]+$ && "$ready_timeout" -ge 10 && "$ready_timeout" -le 900 ]] || ready_timeout=600
   local url
   local scheme
   local probe_host
+  local readiness_samples=1
+  local ready_deadline=$((SECONDS + ready_timeout))
   probe_host="$(server_probe_host)"
-  for _ in $(seq 1 80); do
+  if [[ "$SERVER_RUNNER" == "gunicorn" && "$GUNICORN_WORKERS" =~ ^[0-9]+$ ]]; then
+    readiness_samples="$GUNICORN_WORKERS"
+    (( readiness_samples > 8 )) && readiness_samples=8
+  fi
+  while (( SECONDS < ready_deadline )); do
     for scheme in https http; do
       url="${scheme}://${probe_host}:${PORT}/api/version"
-      if curl -k -sS "$url" >/dev/null 2>&1; then
-        printf '%s\n' "${scheme}://${probe_host}:${PORT}"
-        return 0
+      if curl -k -f -sS --connect-timeout 2 --max-time 10 "$url" >/dev/null 2>&1; then
+        if "$PYTHON_BIN" - "$url" "$readiness_samples" <<'PY'
+import concurrent.futures
+import json
+import ssl
+import sys
+import urllib.request
+
+
+url = sys.argv[1]
+samples = max(1, int(sys.argv[2]))
+context = ssl._create_unverified_context() if url.startswith("https://") else None
+
+
+def probe():
+    try:
+        request = urllib.request.Request(url, headers={"Connection": "close"})
+        with urllib.request.urlopen(request, timeout=15, context=context) as response:
+            payload = json.load(response)
+            return response.status == 200 and payload.get("ok") is True
+    except Exception:
+        return False
+
+
+with concurrent.futures.ThreadPoolExecutor(max_workers=samples) as executor:
+    results = list(executor.map(lambda _index: probe(), range(samples)))
+raise SystemExit(0 if all(results) else 1)
+PY
+        then
+          printf '%s\n' "${scheme}://${probe_host}:${PORT}"
+          return 0
+        fi
       fi
     done
     sleep 0.5

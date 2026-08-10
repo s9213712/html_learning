@@ -103,6 +103,18 @@ def test_all_mobile_form_controls_meet_44px_touch_target():
     assert 'input[type="radio"]' in mobile_targets
 
 
+def test_profile_presets_and_economy_fold_meet_mobile_touch_width():
+    css = (ROOT / "public" / "styles.css").read_text(encoding="utf-8")
+    mobile_targets = css.split(
+        "/* Keep every mobile control at the shared 44px accessibility target. */",
+        1,
+    )[1]
+
+    assert ".profile-avatar-size-presets button[data-profile-avatar-size]" in mobile_targets
+    assert '#economy-user-ledger-card button[onclick^="toggleWalletCard"]' in mobile_targets
+    assert "min-width: 44px !important;" in mobile_targets
+
+
 def test_root_quick_settings_button_meets_touch_target_size():
     css = (ROOT / "public" / "styles.css").read_text(encoding="utf-8")
     root_settings = _block(css, ".root-module-settings-btn {")

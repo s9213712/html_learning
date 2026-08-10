@@ -1,6 +1,16 @@
 # Update Summary
 
-Release ID: `05_2026.07.20-001`
+Release ID: `05_2026.08.11-001`
+
+## 05_2026.08.11-001
+
+- Removed full source-tree hashing from the fast Integrity Guard status path,
+  restoring bounded admin-health latency under concurrent browser/member QA.
+- Hardened the development launcher against false readiness by requiring a
+  bounded concurrent health batch before publishing the server URL.
+- Made deep/member QA always persist requested failure reports, rejected
+  invalid fallback MP4 fixtures, restored 44×44 mobile profile/economy touch
+  targets, and registered all live ComfyUI QA utilities in the script index.
 
 ## 05_2026.07.20-001
 

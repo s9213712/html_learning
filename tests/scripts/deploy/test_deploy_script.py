@@ -86,6 +86,10 @@ def test_dev_launcher_copies_repo_to_tmp_and_bootstraps_dev_friendly_runtime():
     assert 'HACKME_RUNTIME_OUTPUT_CAPTURE=0 timeout "${BOOTSTRAP_TIMEOUT_SECONDS}s" "$PYTHON_BIN" - <<\'PY\'' in script
     assert "print_startup_failure_context" in script
     assert "server process did not become reachable" in script
+    assert 'HACKME_DEV_SERVER_READY_TIMEOUT_SECONDS:-600' in script
+    assert 'curl -k -f -sS --connect-timeout 2 --max-time 10' in script
+    assert 'ThreadPoolExecutor(max_workers=samples)' in script
+    assert 'readiness_samples="$GUNICORN_WORKERS"' in script
     assert "port probe permission denied" in script
     assert '"audit_chain_enabled": False' in script
     assert '"integrity_guard_enabled": False' in script

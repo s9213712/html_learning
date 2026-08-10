@@ -572,8 +572,8 @@ def bytes_file(name: str, content: bytes, *, field: str = "file", mime: str = "a
 
 
 def generate_tiny_mp4() -> bytes:
-    fallback = b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isomqa"
     output = Path(tempfile.gettempdir()) / f"hackme_web_qa_video_{os.getpid()}_{int(time.time() * 1000)}.mp4"
+    failure = "ffmpeg did not produce a valid MP4 fixture"
     try:
         result = subprocess.run(
             [
@@ -603,19 +603,20 @@ def generate_tiny_mp4() -> bytes:
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=20,
+            timeout=60,
             check=False,
         )
         if result.returncode == 0 and output.exists() and output.stat().st_size > 0:
             return output.read_bytes()
-    except Exception:
-        pass
+        failure = f"ffmpeg exited {result.returncode}: {result.stderr.decode('utf-8', errors='replace')[-500:]}"
+    except Exception as exc:
+        failure = f"{type(exc).__name__}: {exc}"
     finally:
         try:
             output.unlink()
         except FileNotFoundError:
             pass
-    return fallback
+    raise RuntimeError(f"unable to generate a valid MP4 QA fixture: {failure}")
 
 
 def attach_browser_error_handlers(page, record_error, record_warning=None) -> None:
@@ -2846,6 +2847,7 @@ def main() -> int:
     browser_errors: list[dict[str, str]] = []
     browser_warnings: list[dict[str, str]] = []
     chess_summary: dict[str, Any] = {}
+    fatal_error = ""
     try:
         if server is not None:
             base_url = wait_for_server(
@@ -2978,6 +2980,9 @@ def main() -> int:
                 chess_summary = rec.guard("play_chess_exp4", lambda: play_exp4_chess(rec, api_page, args.max_chess_human_moves)) or {}
                 api_page.close()
             browser.close()
+    except Exception as exc:
+        fatal_error = f"{type(exc).__name__}: {exc}"
+        rec.add("fatal_error", False, fatal_error, traceback=traceback.format_exc())
     finally:
         if server is not None and server.poll() is None and not args.keep_server:
             server.terminate()
@@ -2990,7 +2995,7 @@ def main() -> int:
     finished_at = datetime.now(timezone.utc).isoformat()
     checks = [{"name": r.name, "ok": r.ok, "detail": r.detail, **({"data": r.data} if r.data else {})} for r in rec.results]
     summary = {
-        "ok": all(item["ok"] for item in checks),
+        "ok": not fatal_error and all(item["ok"] for item in checks),
         "started_at": started_at,
         "finished_at": finished_at,
         "runtime_root": str(runtime_root),
@@ -3000,6 +3005,7 @@ def main() -> int:
         "browser_warnings": browser_warnings,
         "chess": chess_summary,
         "optional_comfyui": optional_comfyui.safe_summary(),
+        "fatal_error": fatal_error,
     }
     json_path, md_path = write_reports(runtime_root, stamp, summary, json_out=args.json_out)
     summary["json_report"] = str(json_path)

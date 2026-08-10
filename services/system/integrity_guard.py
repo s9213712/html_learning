@@ -260,6 +260,22 @@ class IntegrityGuard:
                     records[rel] = self.file_record(path)
         return dict(sorted(records.items()))
 
+    def count_protected_files(self):
+        """Count the current protection scope without reading or hashing files."""
+        count = 0
+        for root, dirs, files in os.walk(self.base_dir):
+            root_path = Path(root)
+            dirs[:] = [d for d in dirs if d not in EXCLUDED_DIRS and not d.startswith(".cache")]
+            for name in files:
+                path = root_path / name
+                try:
+                    rel = self._rel(path)
+                except Exception:
+                    continue
+                if self.should_protect(rel):
+                    count += 1
+        return count
+
     def _manifest_body(self, entries):
         return {
             "version": MANIFEST_VERSION,
@@ -560,7 +576,10 @@ class IntegrityGuard:
             counts = conn.execute(
                 "SELECT status, risk_level, change_type, COUNT(*) AS c FROM integrity_findings GROUP BY status, risk_level, change_type"
             ).fetchall()
-            protected_count = len(self.collect_files()) if self.base_dir.exists() else 0
+            # Status is queried by the health dashboard and must stay cheap.
+            # Full content hashing belongs to scan(); counting the scope here
+            # avoids re-reading the entire source tree on every health request.
+            protected_count = self.count_protected_files() if self.base_dir.exists() else 0
             summary = {
                 "pending": 0,
                 "high_risk_pending": 0,

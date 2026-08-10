@@ -1,5 +1,8 @@
 import argparse
 import ast
+import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -9,6 +12,7 @@ from scripts.testing.playwright_deep_site_check import (
     is_recoverable_network_cascade,
     require_external_server_credentials,
 )
+from scripts.testing import playwright_deep_site_check
 from scripts.testing.playwright_platform_health_check import ignored_browser_error
 
 
@@ -59,6 +63,47 @@ def test_deep_playwright_env_int_keeps_invalid_values_optional(monkeypatch):
     assert env_int("PLAYWRIGHT_TEST_INTEGER") == 31
     monkeypatch.setenv("PLAYWRIGHT_TEST_INTEGER", "invalid")
     assert env_int("PLAYWRIGHT_TEST_INTEGER") is None
+
+
+def test_deep_playwright_never_falls_back_to_an_invalid_mp4(monkeypatch):
+    monkeypatch.setattr(
+        playwright_deep_site_check.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 1, stdout=b"", stderr=b"encoder unavailable"),
+    )
+
+    with pytest.raises(RuntimeError, match="unable to generate a valid MP4 QA fixture"):
+        playwright_deep_site_check.generate_tiny_mp4()
+
+
+def test_deep_playwright_writes_requested_json_on_external_preflight_failure(monkeypatch, tmp_path):
+    for name in (
+        "PLAYWRIGHT_ROOT_PASSWORD",
+        "PLAYWRIGHT_MANAGER_PASSWORD",
+        "PLAYWRIGHT_TEST_PASSWORD",
+    ):
+        monkeypatch.setenv(name, f"{name}-secret")
+    report = tmp_path / "deep-site.json"
+    monkeypatch.setattr(playwright_deep_site_check, "urlopen_json", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "playwright_deep_site_check.py",
+            "--base-url",
+            "https://127.0.0.1:9",
+            "--runtime-root",
+            str(tmp_path / "runtime"),
+            "--json-out",
+            str(report),
+        ],
+    )
+
+    assert playwright_deep_site_check.main() == 1
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert payload["ok"] is False
+    assert payload["fatal_error"].startswith("RuntimeError: external server is not ready")
+    assert payload["checks"][-1]["name"] == "fatal_error"
 
 
 def test_playwright_acceptance_runner_uses_isolated_runtime_and_expected_checks():

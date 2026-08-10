@@ -70,6 +70,21 @@ def test_integrity_scan_creates_initial_manifest_without_findings(tmp_path):
     assert (base / "integrity_manifest.json").exists()
 
 
+def test_integrity_status_counts_scope_without_hashing_source_files(tmp_path, monkeypatch):
+    guard, _base, _ = _guard(tmp_path)
+    guard.scan(actor="system")
+    expected = guard.count_protected_files()
+    monkeypatch.setattr(
+        guard,
+        "file_record",
+        lambda _path: (_ for _ in ()).throw(AssertionError("status must not hash source files")),
+    )
+
+    status = guard.status()
+
+    assert status["protected_files"] == expected
+
+
 def test_modified_deleted_and_added_files_create_findings(tmp_path):
     guard, base, _ = _guard(tmp_path)
     guard.scan(actor="system")

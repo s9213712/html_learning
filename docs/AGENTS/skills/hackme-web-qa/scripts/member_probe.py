@@ -11,6 +11,10 @@ from pathlib import Path
 import requests
 
 
+_ACTIVE_REPORT = None
+_ACTIVE_REPORT_PATH = None
+
+
 class Client:
     def __init__(self, base_url, username, password):
         self.base_url = base_url.rstrip("/")
@@ -66,6 +70,31 @@ def add_check(out, name, ok, detail=None, severity="medium"):
         out["findings"].append({"severity": severity, "title": name, "detail": detail or {}})
 
 
+def write_report(out, out_path):
+    out["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def cli_main():
+    try:
+        main()
+    except Exception as exc:
+        if _ACTIVE_REPORT is not None and _ACTIVE_REPORT_PATH is not None:
+            message = f"{type(exc).__name__}: {exc}"[:1000]
+            _ACTIVE_REPORT["fatal_error"] = message
+            add_check(
+                _ACTIVE_REPORT,
+                "probe preflight/runtime failure",
+                False,
+                {"error": message},
+                "critical",
+            )
+            write_report(_ACTIVE_REPORT, _ACTIVE_REPORT_PATH)
+            print(_ACTIVE_REPORT_PATH)
+        raise SystemExit(1) from exc
+
+
 def write_fixtures(root):
     root.mkdir(parents=True, exist_ok=True)
     fixtures = {}
@@ -115,6 +144,7 @@ def upload_storage(client, path, privacy_mode, virtual_path, extra_data=None):
 
 
 def main():
+    global _ACTIVE_REPORT, _ACTIVE_REPORT_PATH
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--root-password", default=os.environ.get("HACKME_QA_ROOT_PASSWORD", ""), help=argparse.SUPPRESS)
@@ -129,6 +159,8 @@ def main():
 
     out = {"base_url": args.base_url, "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "checks": [], "findings": []}
     out_path = Path(args.out)
+    _ACTIVE_REPORT = out
+    _ACTIVE_REPORT_PATH = out_path
     fixtures = write_fixtures(out_path.parent / "member_probe_artifacts")
     run_id = str(int(time.time()))
 
@@ -253,9 +285,7 @@ def main():
         verify = root.request("GET", "/api/root/trading/verify")
         add_check(out, "reserve allocation and verification with required reason", credit["ok"] and reserve["ok"] and verify["ok"] and not (((verify.get("json") or {}).get("errors"))), {"credit": credit, "reserve": reserve, "verify": verify}, "critical")
 
-    out["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_report(out, out_path)
     print(out_path)
     if out["findings"]:
         for finding in out["findings"]:
@@ -264,4 +294,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    cli_main()
