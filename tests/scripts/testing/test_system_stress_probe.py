@@ -40,6 +40,7 @@ from scripts.testing.system_stress_probe import (
     InflightWorkerTelemetry,
     OperationBudget,
     Stats,
+    build_weighted_ops,
     record_operation_result,
     resolve_server_pids,
     resolve_session_pool_size,
@@ -48,6 +49,7 @@ from scripts.testing.system_stress_probe import (
     run_in_client_slot,
     run_operation,
 )
+from scripts.testing.long_needle_simulation_probe import profile_defaults
 
 
 def test_setup_login_retries_controlled_rate_limit(monkeypatch):
@@ -404,6 +406,14 @@ def test_rotation_assigns_every_operation_to_every_account_before_repeating():
         ("trading", "alice"),
         ("trading", "bob"),
     ]
+
+
+def test_medium_long_needle_profile_completes_the_account_operation_rotation():
+    profile = profile_defaults("medium")
+    required_tasks = len(build_weighted_ops()) * profile["accounts"]
+
+    assert profile["system_ops"] >= required_tasks
+    assert profile["system_logical_users"] >= required_tasks
 
 
 def test_repeated_soak_rounds_continue_rotation_instead_of_restarting_account_one():

@@ -128,6 +128,7 @@ def test_playwright_qa_workflow_template_installs_browser_and_runs_runner():
     workflow = ROOT / "scripts" / "testing" / "playwright-qa.workflow.yml"
     text = workflow.read_text(encoding="utf-8")
 
+    assert "sudo apt-get install --no-install-recommends --yes ffmpeg" in text
     assert "python -m playwright install --with-deps chromium" in text
     assert "bash scripts/testing/run_playwright_acceptance.sh" in text
     assert "workflow_dispatch:" in text
@@ -141,6 +142,7 @@ def test_playwright_qa_workflow_is_installed_in_github_actions():
     text = workflow.read_text(encoding="utf-8")
 
     assert "name: playwright-qa" in text
+    assert "sudo apt-get install --no-install-recommends --yes ffmpeg" in text
     assert "python -m playwright install --with-deps chromium" in text
     assert "bash scripts/testing/run_playwright_acceptance.sh" in text
     assert "workflow_dispatch:" in text

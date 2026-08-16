@@ -185,8 +185,10 @@ def profile_defaults(profile: str) -> dict[str, int]:
             "direct_transfer_ops": 120,
             "trading_ops": 24,
             "points_concurrency": 8,
-            "system_ops": 320,
-            "system_logical_users": 320,
+            # Rotation assigns one operation to each account before moving to
+            # the next operation: 42 operations x 8 accounts = 336 tasks.
+            "system_ops": 336,
+            "system_logical_users": 336,
             "system_concurrency": 32,
             "session_pool": 10,
         }
